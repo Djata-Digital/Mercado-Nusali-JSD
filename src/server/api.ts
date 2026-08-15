@@ -17,6 +17,7 @@ import { getCache, setCache, delCache, getRedisHealth } from '../db/redis.js';
 import { runDatabaseInitAndSeed } from '../db/seed.js';
 import { eq, desc } from 'drizzle-orm';
 import { searchProductsIntelligent } from '../utils/searchEngine.js';
+import { uploadRouter } from './uploadRoutes.js';
 
 export const apiRouter = Router();
 
@@ -31,6 +32,7 @@ apiRouter.use('/seller', sellerRouter);
 apiRouter.use('/buyer', buyerRouter);
 apiRouter.use('/pix', pixRouter);
 apiRouter.use('/rates', ratesRouter);
+apiRouter.use('/upload', uploadRouter);
 
 // Direct top-level route proxies for buyer resources
 apiRouter.use('/orders', (req, res, next) => {
