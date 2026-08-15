@@ -1,0 +1,1053 @@
+import {
+  pgTable,
+  text,
+  timestamp,
+  integer,
+  boolean,
+  numeric,
+  varchar,
+  jsonb,
+  index,
+  uniqueIndex,
+  primaryKey,
+  type AnyPgColumn,
+} from 'drizzle-orm/pg-core';
+
+// ============================================================================
+// 1. IDENTIDADE E SEGURANÇA (RBAC, USERS, SESSIONS)
+// ============================================================================
+
+export const users = pgTable('users', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  email: varchar('email', { length: 255 }).notNull().unique(),
+  passwordHash: text('password_hash'),
+  fullName: varchar('full_name', { length: 255 }).notNull(),
+  phone: varchar('phone', { length: 50 }),
+  role: varchar('role', { length: 50 }).notNull().default('BUYER'), // BUYER, SELLER, ADMIN, COUNTRY_REPRESENTATIVE, REGIONAL_SUPERVISOR, LOGISTICS_OPERATOR, SUPPORT_AGENT, FINANCE
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  kycStatus: varchar('kyc_status', { length: 50 }).notNull().default('unverified'), // unverified, pending, under_review, verified, rejected
+  riskScore: varchar('risk_score', { length: 20 }).notNull().default('baixo'),
+  avatarUrl: text('avatar_url'),
+  isActive: boolean('is_active').notNull().default(true),
+  isEmailVerified: boolean('is_email_verified').notNull().default(false),
+  isPhoneVerified: boolean('is_phone_verified').notNull().default(false),
+  isTwoFactorEnabled: boolean('is_two_factor_enabled').notNull().default(false),
+  twoFactorSecret: text('two_factor_secret'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const userProfiles = pgTable('user_profiles', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().unique().references(() => users.id, { onDelete: 'cascade' }),
+  bio: text('bio'),
+  taxId: varchar('tax_id', { length: 100 }), // CPF, NIF, BI, CNPJ
+  dateOfBirth: varchar('date_of_birth', { length: 50 }),
+  gender: varchar('gender', { length: 20 }),
+  preferredCurrency: varchar('preferred_currency', { length: 10 }).notNull().default('XOF'),
+  preferredLanguage: varchar('preferred_language', { length: 10 }).notNull().default('pt'),
+  membershipLevel: varchar('membership_level', { length: 50 }).notNull().default('standard'), // standard, nusali_plus
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  user_profiles_user_idx: index('user_profiles_user_idx').on(table.userId),
+}));
+
+export const addresses = pgTable('addresses', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  recipientName: varchar('recipient_name', { length: 255 }).notNull(),
+  street: varchar('street', { length: 255 }).notNull(),
+  number: varchar('number', { length: 50 }).notNull(),
+  complement: varchar('complement', { length: 255 }),
+  neighborhood: varchar('neighborhood', { length: 255 }),
+  city: varchar('city', { length: 255 }).notNull(),
+  state: varchar('state', { length: 255 }).notNull(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  zipCode: varchar('zip_code', { length: 50 }),
+  phone: varchar('phone', { length: 50 }).notNull(),
+  isDefault: boolean('is_default').notNull().default(false),
+  addressType: varchar('address_type', { length: 50 }).notNull().default('shipping'), // shipping, billing
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  addresses_user_idx: index('addresses_user_idx').on(table.userId),
+}));
+
+export const sessions = pgTable('sessions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  token: text('token').notNull().unique(),
+  ipAddress: varchar('ip_address', { length: 100 }),
+  userAgent: text('user_agent'),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  sessions_user_idx: index('sessions_user_idx').on(table.userId),
+  sessions_expires_idx: index('sessions_expires_idx').on(table.expiresAt),
+}));
+
+export const refreshTokens = pgTable('refresh_tokens', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  isRevoked: boolean('is_revoked').notNull().default(false),
+  replacedByToken: text('replaced_by_token'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  refresh_tokens_user_idx: index('refresh_tokens_user_idx').on(table.userId),
+  refresh_tokens_expires_idx: index('refresh_tokens_expires_idx').on(table.expiresAt),
+}));
+
+export const roles = pgTable('roles', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 100 }).notNull().unique(),
+  description: text('description'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const permissions = pgTable('permissions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  code: varchar('code', { length: 100 }).notNull().unique(),
+  name: varchar('name', { length: 150 }).notNull(),
+  module: varchar('module', { length: 100 }).notNull(),
+  description: text('description'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const userRoles = pgTable('user_roles', {
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  roleId: varchar('role_id', { length: 255 }).notNull().references(() => roles.id, { onDelete: 'cascade' }),
+  assignedAt: timestamp('assigned_at').defaultNow().notNull(),
+}, (table) => ({
+  user_roles_pk: primaryKey({ columns: [table.userId, table.roleId], name: 'user_roles_pk' }),
+}));
+
+export const rolePermissions = pgTable('role_permissions', {
+  roleId: varchar('role_id', { length: 255 }).notNull().references(() => roles.id, { onDelete: 'cascade' }),
+  permissionId: varchar('permission_id', { length: 255 }).notNull().references(() => permissions.id, { onDelete: 'cascade' }),
+}, (table) => ({
+  role_permissions_pk: primaryKey({ columns: [table.roleId, table.permissionId], name: 'role_permissions_pk' }),
+}));
+
+export const emailVerificationTokens = pgTable('email_verification_tokens', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  token: varchar('token', { length: 255 }).notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const passwordResetTokens = pgTable('password_reset_tokens', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  token: varchar('token', { length: 255 }).notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// ============================================================================
+// 2. VENDEDORES, LOJAS E KYC
+// ============================================================================
+
+export const sellers = pgTable('sellers', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().unique().references(() => users.id, { onDelete: 'cascade' }),
+  companyName: varchar('company_name', { length: 255 }).notNull(),
+  tradingName: varchar('trading_name', { length: 255 }).notNull(),
+  taxId: varchar('tax_id', { length: 100 }).notNull(), // NIF, CNPJ, etc.
+  phone: varchar('phone', { length: 50 }).notNull(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  status: varchar('status', { length: 50 }).notNull().default('active'), // active, pending, suspended, blocked
+  commissionRate: numeric('commission_rate', { precision: 5, scale: 2 }).default('8.00'),
+  rating: numeric('rating', { precision: 3, scale: 2 }).default('5.00'),
+  totalSales: numeric('total_sales', { precision: 15, scale: 2 }).default('0.00'),
+  totalOrders: integer('total_orders').default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  sellers_country_status_idx: index('sellers_country_status_idx').on(table.countryCode, table.status),
+}));
+
+export const sellerProfiles = pgTable('seller_profiles', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().unique().references(() => sellers.id, { onDelete: 'cascade' }),
+  description: text('description'),
+  returnPolicy: text('return_policy'),
+  shippingPolicy: text('shipping_policy'),
+  bannerUrl: text('banner_url'),
+  verifiedAt: timestamp('verified_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const sellerKyc = pgTable('seller_kyc', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().unique().references(() => sellers.id, { onDelete: 'cascade' }),
+  legalName: varchar('legal_name', { length: 255 }).notNull(),
+  documentType: varchar('document_type', { length: 50 }).notNull(), // passport, id_card, driving_license, company_reg
+  documentNumber: varchar('document_number', { length: 100 }).notNull(),
+  documentFrontUrl: text('document_front_url'),
+  documentBackUrl: text('document_back_url'),
+  selfieUrl: text('selfie_url'),
+  proofOfAddressUrl: text('proof_of_address_url'),
+  status: varchar('status', { length: 50 }).notNull().default('pending'), // pending, under_review, verified, rejected
+  riskLevel: varchar('risk_level', { length: 50 }).notNull().default('baixo'),
+  rejectionReason: text('rejection_reason'),
+  submittedAt: timestamp('submitted_at').defaultNow().notNull(),
+  reviewedAt: timestamp('reviewed_at'),
+  reviewerId: varchar('reviewer_id', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+});
+
+export const sellerDocuments = pgTable('seller_documents', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().references(() => sellers.id, { onDelete: 'cascade' }),
+  documentType: varchar('document_type', { length: 100 }).notNull(),
+  fileUrl: text('file_url').notNull(),
+  objectKey: varchar('object_key', { length: 500 }),
+  mimeType: varchar('mime_type', { length: 100 }),
+  fileSize: integer('file_size'),
+  status: varchar('status', { length: 50 }).notNull().default('pending'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  seller_documents_seller_idx: index('seller_documents_seller_idx').on(table.sellerId),
+}));
+
+export const sellerBankAccounts = pgTable('seller_bank_accounts', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().references(() => sellers.id, { onDelete: 'cascade' }),
+  bankName: varchar('bank_name', { length: 255 }).notNull(),
+  accountHolder: varchar('account_holder', { length: 255 }).notNull(),
+  accountNumber: varchar('account_number', { length: 100 }).notNull(),
+  ibanOrRouting: varchar('iban_or_routing', { length: 100 }),
+  swift: varchar('swift', { length: 50 }),
+  pixKey: varchar('pix_key', { length: 150 }),
+  mobileMoneyNumber: varchar('mobile_money_number', { length: 50 }),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  isDefault: boolean('is_default').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  seller_bank_accounts_seller_idx: index('seller_bank_accounts_seller_idx').on(table.sellerId),
+}));
+
+export const stores = pgTable('stores', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().references(() => sellers.id, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  slug: varchar('slug', { length: 255 }).notNull().unique(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  description: text('description'),
+  logoUrl: text('logo_url'),
+  bannerUrl: text('banner_url'),
+  rating: numeric('rating', { precision: 3, scale: 2 }).default('5.00'),
+  followersCount: integer('followers_count').default(0),
+  status: varchar('status', { length: 50 }).notNull().default('active'), // active, paused, closed
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  stores_seller_idx: index('stores_seller_idx').on(table.sellerId),
+  stores_country_status_idx: index('stores_country_status_idx').on(table.countryCode, table.status),
+}));
+
+export const storeMembers = pgTable('store_members', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  storeId: varchar('store_id', { length: 255 }).notNull().references(() => stores.id, { onDelete: 'cascade' }),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  role: varchar('role', { length: 50 }).notNull().default('manager'), // owner, manager, operator
+  permissionsJson: jsonb('permissions_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  store_members_store_user_uq: uniqueIndex('store_members_store_user_uq').on(table.storeId, table.userId),
+}));
+
+// ============================================================================
+// 3. CATÁLOGO, PRODUTOS, VARIANTES E ATRIBUTOS
+// ============================================================================
+
+export const categories = pgTable('categories', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  slug: varchar('slug', { length: 255 }).notNull().unique(),
+  icon: varchar('icon', { length: 100 }),
+
+  parentId: varchar('parent_id', { length: 255 })
+    .references((): AnyPgColumn => categories.id, { onDelete: 'set null' }),
+
+  displayOrder: integer('display_order').default(0),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  categoriesParentIdx: index('categories_parent_idx').on(table.parentId),
+}));
+
+export const brands = pgTable('brands', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  slug: varchar('slug', { length: 255 }).notNull().unique(),
+  logoUrl: text('logo_url'),
+  countryCode: varchar('country_code', { length: 10 }).default('GW'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const products = pgTable('products', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  title: varchar('title', { length: 255 }).notNull(),
+  slug: varchar('slug', { length: 255 }),
+  description: text('description'),
+  shortDescription: text('short_description'),
+  price: numeric('price', { precision: 12, scale: 2 }).notNull(),
+  originalPrice: numeric('original_price', { precision: 12, scale: 2 }),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  categoryId: varchar('category_id', { length: 255 }).references(() => categories.id, { onDelete: 'set null' }),
+  brandId: varchar('brand_id', { length: 255 }).references(() => brands.id, { onDelete: 'set null' }),
+  brand: varchar('brand', { length: 255 }),
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'set null' }),
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'set null' }),
+  stock: integer('stock').notNull().default(10),
+  image: text('image').notNull(),
+  rating: numeric('rating', { precision: 3, scale: 2 }).default('5.00'),
+  reviewsCount: integer('reviews_count').default(0),
+  freeShipping: boolean('free_shipping').default(false),
+  full: boolean('full').default(false),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  condition: varchar('condition', { length: 50 }).default('new'), // new, refurbished, used
+  warranty: varchar('warranty', { length: 100 }),
+  status: varchar('status', { length: 50 }).notNull().default('active'), // active, draft, paused, archived
+  isActive: boolean('is_active').notNull().default(true),
+  attributesJson: jsonb('attributes_json'),
+  shippingJson: jsonb('shipping_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  products_category_status_idx: index('products_category_status_idx').on(table.categoryId, table.status),
+  products_seller_status_idx: index('products_seller_status_idx').on(table.sellerId, table.status),
+  products_store_status_idx: index('products_store_status_idx').on(table.storeId, table.status),
+  products_country_status_idx: index('products_country_status_idx').on(table.countryCode, table.status),
+  products_slug_uq: uniqueIndex('products_slug_uq').on(table.slug),
+}));
+
+export const productVariants = pgTable('product_variants', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'cascade' }),
+  title: varchar('title', { length: 255 }).notNull(),
+  sku: varchar('sku', { length: 100 }),
+  price: numeric('price', { precision: 12, scale: 2 }).notNull(),
+  originalPrice: numeric('original_price', { precision: 12, scale: 2 }),
+  stock: integer('stock').notNull().default(0),
+  size: varchar('size', { length: 50 }),
+  color: varchar('color', { length: 50 }),
+  capacity: varchar('capacity', { length: 50 }),
+  weight: numeric('weight', { precision: 8, scale: 2 }),
+  imageUrl: text('image_url'),
+  attributesJson: jsonb('attributes_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  product_variants_product_idx: index('product_variants_product_idx').on(table.productId),
+  product_variants_sku_uq: uniqueIndex('product_variants_sku_uq').on(table.sku),
+}));
+
+export const productImages = pgTable('product_images', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'cascade' }),
+  imageUrl: text('image_url').notNull(),
+  objectKey: varchar('object_key', { length: 500 }),
+  displayOrder: integer('display_order').default(0),
+  isCover: boolean('is_cover').default(false),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  product_images_product_idx: index('product_images_product_idx').on(table.productId),
+}));
+
+export const productAttributes = pgTable('product_attributes', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'cascade' }),
+  name: varchar('name', { length: 100 }).notNull(),
+  value: text('value').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  product_attributes_product_idx: index('product_attributes_product_idx').on(table.productId),
+}));
+
+// ============================================================================
+// 4. ARMAZÉNS E ESTOQUE SEGURO (INVENTORY, MOVEMENTS, RESERVATIONS)
+// ============================================================================
+
+export const warehouses = pgTable('warehouses', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  code: varchar('code', { length: 50 }).notNull().unique(),
+  name: varchar('name', { length: 255 }).notNull(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  city: varchar('city', { length: 255 }).notNull(),
+  address: text('address').notNull(),
+  managerName: varchar('manager_name', { length: 255 }),
+  staffCount: integer('staff_count').default(1),
+  status: varchar('status', { length: 50 }).notNull().default('active'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const inventory = pgTable('inventory', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  warehouseId: varchar('warehouse_id', { length: 255 }).notNull().references(() => warehouses.id, { onDelete: 'restrict' }),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'restrict' }),
+  variantId: varchar('variant_id', { length: 255 }).references(() => productVariants.id, { onDelete: 'set null' }),
+  quantityOnHand: integer('quantity_on_hand').notNull().default(0),
+  quantityReserved: integer('quantity_reserved').notNull().default(0),
+  minimumStockLevel: integer('minimum_stock_level').default(5),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  inventory_product_idx: index('inventory_product_idx').on(table.productId),
+  inventory_warehouse_idx: index('inventory_warehouse_idx').on(table.warehouseId),
+  inventory_location_product_variant_uq: uniqueIndex('inventory_location_product_variant_uq').on(table.warehouseId, table.productId, table.variantId),
+}));
+
+export const inventoryMovements = pgTable('inventory_movements', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  warehouseId: varchar('warehouse_id', { length: 255 }).notNull().references(() => warehouses.id, { onDelete: 'restrict' }),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'restrict' }),
+  variantId: varchar('variant_id', { length: 255 }).references(() => productVariants.id, { onDelete: 'set null' }),
+  type: varchar('type', { length: 50 }).notNull(), // IN, OUT, ADJUSTMENT, RESERVATION, RELEASE
+  quantity: integer('quantity').notNull(),
+  reason: varchar('reason', { length: 255 }),
+  referenceId: varchar('reference_id', { length: 255 }),
+  performedBy: varchar('performed_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  inventory_movements_product_created_idx: index('inventory_movements_product_created_idx').on(table.productId, table.createdAt),
+  inventory_movements_warehouse_created_idx: index('inventory_movements_warehouse_created_idx').on(table.warehouseId, table.createdAt),
+}));
+
+export const stockReservations = pgTable('stock_reservations', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'cascade' }),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'restrict' }),
+  variantId: varchar('variant_id', { length: 255 }).references(() => productVariants.id, { onDelete: 'set null' }),
+  quantity: integer('quantity').notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  status: varchar('status', { length: 50 }).notNull().default('active'), // active, confirmed, released, expired
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  stock_reservations_order_idx: index('stock_reservations_order_idx').on(table.orderId),
+  stock_reservations_expiry_status_idx: index('stock_reservations_expiry_status_idx').on(table.expiresAt, table.status),
+}));
+
+// ============================================================================
+// 5. CARRINHO E CHECKOUT
+// ============================================================================
+
+export const carts = pgTable('carts', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).references(() => users.id, { onDelete: 'cascade' }),
+  sessionId: varchar('session_id', { length: 255 }),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  carts_user_idx: index('carts_user_idx').on(table.userId),
+  carts_session_idx: index('carts_session_idx').on(table.sessionId),
+}));
+
+export const cartItems = pgTable('cart_items', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  cartId: varchar('cart_id', { length: 255 }).notNull().references(() => carts.id, { onDelete: 'cascade' }),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'cascade' }),
+  variantId: varchar('variant_id', { length: 255 }).references(() => productVariants.id, { onDelete: 'set null' }),
+  quantity: integer('quantity').notNull().default(1),
+  unitPrice: numeric('unit_price', { precision: 12, scale: 2 }).notNull(),
+  selectedAttributesJson: jsonb('selected_attributes_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  cart_items_cart_idx: index('cart_items_cart_idx').on(table.cartId),
+  cart_items_cart_product_variant_uq: uniqueIndex('cart_items_cart_product_variant_uq').on(table.cartId, table.productId, table.variantId),
+}));
+
+// ============================================================================
+// 6. PEDIDOS (SNAPSHOT COMPLETO, HISTÓRICO DE STATUS)
+// ============================================================================
+
+export const orders = pgTable('orders', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderNumber: varchar('order_number', { length: 100 }).notNull().unique(),
+  buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'set null' }),
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'set null' }),
+  subtotal: numeric('subtotal', { precision: 12, scale: 2 }).notNull(),
+  shippingFee: numeric('shipping_fee', { precision: 12, scale: 2 }).notNull().default('0.00'),
+  customsDuty: numeric('customs_duty', { precision: 12, scale: 2 }).default('0.00'),
+  discountAmount: numeric('discount_amount', { precision: 12, scale: 2 }).default('0.00'),
+  totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  status: varchar('status', { length: 50 }).notNull().default('pending_payment'), // pending_payment, paid, processing, ready_to_ship, shipped, in_transit, delivered, cancelled, refund_requested, refunded, disputed
+  paymentMethod: varchar('payment_method', { length: 100 }).notNull(), // pix, orange_money, mtn_money, card, nusali_wallet
+  paymentStatus: varchar('payment_status', { length: 50 }).notNull().default('pending'), // pending, paid, failed, refunded
+  escrowStatus: varchar('escrow_status', { length: 50 }).notNull().default('held'), // held, releasing, released, disputed, refunded
+  shippingAddressJson: jsonb('shipping_address_json').notNull(),
+  billingAddressJson: jsonb('billing_address_json'),
+  paymentDetailsJson: jsonb('payment_details_json'),
+  trackingCode: varchar('tracking_code', { length: 100 }),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  notes: text('notes'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  orders_buyer_created_idx: index('orders_buyer_created_idx').on(table.buyerId, table.createdAt),
+  orders_seller_status_idx: index('orders_seller_status_idx').on(table.sellerId, table.status),
+  orders_store_status_idx: index('orders_store_status_idx').on(table.storeId, table.status),
+  orders_status_created_idx: index('orders_status_created_idx').on(table.status, table.createdAt),
+}));
+
+export const orderItems = pgTable('order_items', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'cascade' }),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'restrict' }),
+  variantId: varchar('variant_id', { length: 255 }).references(() => productVariants.id, { onDelete: 'set null' }),
+  productTitle: varchar('product_title', { length: 255 }).notNull(),
+  productSku: varchar('product_sku', { length: 100 }),
+  variantTitle: varchar('variant_title', { length: 255 }),
+  quantity: integer('quantity').notNull().default(1),
+  unitPrice: numeric('unit_price', { precision: 12, scale: 2 }).notNull(),
+  subtotal: numeric('subtotal', { precision: 12, scale: 2 }).notNull(),
+  discount: numeric('discount', { precision: 12, scale: 2 }).default('0.00'),
+  tax: numeric('tax', { precision: 12, scale: 2 }).default('0.00'),
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'set null' }),
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'set null' }),
+  productImage: text('product_image'),
+  attributesJson: jsonb('attributes_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  order_items_order_idx: index('order_items_order_idx').on(table.orderId),
+  order_items_product_idx: index('order_items_product_idx').on(table.productId),
+}));
+
+export const orderStatusHistory = pgTable('order_status_history', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'cascade' }),
+  previousStatus: varchar('previous_status', { length: 50 }),
+  newStatus: varchar('new_status', { length: 50 }).notNull(),
+  reason: text('reason'),
+  changedBy: varchar('changed_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  order_status_history_order_created_idx: index('order_status_history_order_created_idx').on(table.orderId, table.createdAt),
+}));
+
+// ============================================================================
+// 7. PAGAMENTOS, ATTEMPTS, REFUNDS E WEBHOOKS
+// ============================================================================
+
+export const payments = pgTable('payments', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  provider: varchar('provider', { length: 50 }).notNull(), // pix_engine, orange_money, mtn, stripe, nusali_pay
+  method: varchar('method', { length: 50 }).notNull(),
+  status: varchar('status', { length: 50 }).notNull().default('pending'), // pending, authorized, paid, failed, refunded, cancelled
+  transactionRef: varchar('transaction_ref', { length: 255 }),
+  idempotencyKey: varchar('idempotency_key', { length: 255 }).unique(),
+  qrCode: text('qr_code'),
+  qrCodeBase64: text('qr_code_base64'),
+  paymentUrl: text('payment_url'),
+  rawResponseJson: jsonb('raw_response_json'),
+  expiresAt: timestamp('expires_at'),
+  paidAt: timestamp('paid_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  payments_order_idx: index('payments_order_idx').on(table.orderId),
+  payments_buyer_created_idx: index('payments_buyer_created_idx').on(table.buyerId, table.createdAt),
+  payments_status_created_idx: index('payments_status_created_idx').on(table.status, table.createdAt),
+  payments_transaction_ref_uq: uniqueIndex('payments_transaction_ref_uq').on(table.transactionRef),
+}));
+
+export const paymentAttempts = pgTable('payment_attempts', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'cascade' }),
+  attemptNumber: integer('attempt_number').notNull().default(1),
+  provider: varchar('provider', { length: 50 }).notNull(),
+  status: varchar('status', { length: 50 }).notNull(),
+  errorMessage: text('error_message'),
+  rawPayloadJson: jsonb('raw_payload_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  payment_attempts_payment_idx: index('payment_attempts_payment_idx').on(table.paymentId),
+}));
+
+export const refunds = pgTable('refunds', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  reason: text('reason'),
+  status: varchar('status', { length: 50 }).notNull().default('pending'), // pending, processed, failed
+  approvedBy: varchar('approved_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  refunds_payment_idx: index('refunds_payment_idx').on(table.paymentId),
+  refunds_order_idx: index('refunds_order_idx').on(table.orderId),
+}));
+
+export const paymentWebhookEvents = pgTable('payment_webhook_events', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  provider: varchar('provider', { length: 50 }).notNull(),
+  eventType: varchar('event_type', { length: 100 }).notNull(),
+  eventId: varchar('event_id', { length: 255 }),
+  payloadJson: jsonb('payload_json').notNull(),
+  signature: varchar('signature', { length: 500 }),
+  processed: boolean('processed').notNull().default(false),
+  processedAt: timestamp('processed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  payment_webhook_provider_event_uq: uniqueIndex('payment_webhook_provider_event_uq').on(table.provider, table.eventId),
+  payment_webhook_processed_idx: index('payment_webhook_processed_idx').on(table.processed, table.createdAt),
+}));
+
+// ============================================================================
+// 8. CARTEIRA E ESCROW LEDGER
+// ============================================================================
+
+export const wallets = pgTable('wallets', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().unique().references(() => users.id, { onDelete: 'restrict' }),
+  balance: numeric('balance', { precision: 15, scale: 2 }).notNull().default('0.00'),
+  cashbackBalance: numeric('cashback_balance', { precision: 15, scale: 2 }).notNull().default('0.00'),
+  pendingBalance: numeric('pending_balance', { precision: 15, scale: 2 }).notNull().default('0.00'),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  status: varchar('status', { length: 50 }).notNull().default('active'), // active, locked, frozen
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const walletTransactions = pgTable('wallet_transactions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  walletId: varchar('wallet_id', { length: 255 }).notNull().references(() => wallets.id, { onDelete: 'restrict' }),
+  type: varchar('type', { length: 50 }).notNull(), // deposit, purchase, cashback, refund, payout, transfer
+  amount: numeric('amount', { precision: 15, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  title: varchar('title', { length: 255 }).notNull(),
+  referenceId: varchar('reference_id', { length: 255 }),
+  referenceType: varchar('reference_type', { length: 100 }), // order, refund, withdrawal
+  status: varchar('status', { length: 50 }).notNull().default('completed'), // completed, pending, cancelled
+  balanceAfter: numeric('balance_after', { precision: 15, scale: 2 }).notNull(),
+  idempotencyKey: varchar('idempotency_key', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  wallet_transactions_wallet_created_idx: index('wallet_transactions_wallet_created_idx').on(table.walletId, table.createdAt),
+  wallet_transactions_idempotency_uq: uniqueIndex('wallet_transactions_idempotency_uq').on(table.idempotencyKey),
+}));
+
+export const escrowAccounts = pgTable('escrow_accounts', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().unique().references(() => orders.id, { onDelete: 'restrict' }),
+  buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().references(() => sellers.id, { onDelete: 'restrict' }),
+  amount: numeric('amount', { precision: 15, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  status: varchar('status', { length: 50 }).notNull().default('held'), // held, eligible, released, disputed, refunded
+  releaseEligibleAt: timestamp('release_eligible_at'),
+  releasedAt: timestamp('released_at'),
+  disputedAt: timestamp('disputed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const escrowTransactions = pgTable('escrow_transactions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  escrowAccountId: varchar('escrow_account_id', { length: 255 }).notNull().references(() => escrowAccounts.id, { onDelete: 'restrict' }),
+  type: varchar('type', { length: 50 }).notNull(), // HOLD, RELEASE_SELLER, REFUND_BUYER, DISPUTE_LOCK
+  amount: numeric('amount', { precision: 15, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  reason: text('reason'),
+  performedBy: varchar('performed_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  reference: varchar('reference', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  escrow_transactions_account_created_idx: index('escrow_transactions_account_created_idx').on(table.escrowAccountId, table.createdAt),
+}));
+
+export const sellerPayouts = pgTable('seller_payouts', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().references(() => sellers.id, { onDelete: 'restrict' }),
+  amount: numeric('amount', { precision: 15, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  method: varchar('method', { length: 50 }).notNull(), // bank_transfer, pix, orange_money, mtn
+  bankAccountId: varchar('bank_account_id', { length: 255 }).references(() => sellerBankAccounts.id, { onDelete: 'set null' }),
+  status: varchar('status', { length: 50 }).notNull().default('pending'), // pending, processing, completed, failed
+  processedAt: timestamp('processed_at'),
+  transactionRef: varchar('transaction_ref', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  seller_payouts_seller_status_idx: index('seller_payouts_seller_status_idx').on(table.sellerId, table.status),
+}));
+
+// ============================================================================
+// 9. LOGÍSTICA, ENVIOS E RASTREAMENTO
+// ============================================================================
+
+export const shipments = pgTable('shipments', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  carrier: varchar('carrier', { length: 100 }).notNull().default('Nusali Express Logística'),
+  trackingNumber: varchar('tracking_number', { length: 100 }).notNull().unique(),
+  serviceType: varchar('service_type', { length: 50 }).default('standard'), // standard, express, full
+  status: varchar('status', { length: 50 }).notNull().default('ready_for_pickup'), // ready_for_pickup, in_transit, out_for_delivery, delivered, failed_attempt, returned
+  originWarehouseId: varchar('origin_warehouse_id', { length: 255 }).references(() => warehouses.id, { onDelete: 'set null' }),
+  originCountry: varchar('origin_country', { length: 10 }).notNull().default('GW'),
+  destinationCountry: varchar('destination_country', { length: 10 }).notNull().default('GW'),
+  shippingLabelUrl: text('shipping_label_url'),
+  estimatedDeliveryDate: varchar('estimated_delivery_date', { length: 100 }),
+  deliveredAt: timestamp('delivered_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipments_order_idx: index('shipments_order_idx').on(table.orderId),
+  shipments_status_idx: index('shipments_status_idx').on(table.status),
+}));
+
+export const shippingLabels = pgTable('shipping_labels', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  shipmentId: varchar('shipment_id', { length: 255 }).notNull().references(() => shipments.id, { onDelete: 'cascade' }),
+  trackingCode: varchar('tracking_code', { length: 100 }).notNull(),
+  labelDataUrl: text('label_data_url'),
+  qrCodeData: text('qr_code_data'),
+  format: varchar('format', { length: 20 }).default('pdf'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_labels_shipment_idx: index('shipping_labels_shipment_idx').on(table.shipmentId),
+}));
+
+export const trackingEvents = pgTable('tracking_events', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  shipmentId: varchar('shipment_id', { length: 255 }).notNull().references(() => shipments.id, { onDelete: 'cascade' }),
+  status: varchar('status', { length: 100 }).notNull(),
+  description: text('description').notNull(),
+  location: varchar('location', { length: 255 }).notNull(),
+  eventTime: timestamp('event_time').defaultNow().notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  tracking_events_shipment_time_idx: index('tracking_events_shipment_time_idx').on(table.shipmentId, table.eventTime),
+}));
+
+// ============================================================================
+// 10. PROMOÇÕES, CUPONS E CAMPANHAS
+// ============================================================================
+
+export const coupons = pgTable('coupons', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  code: varchar('code', { length: 50 }).notNull().unique(),
+  title: varchar('title', { length: 255 }).notNull(),
+  discountType: varchar('discount_type', { length: 20 }).notNull(), // percentage, fixed
+  discountValue: numeric('discount_value', { precision: 10, scale: 2 }).notNull(),
+  minimumSpend: numeric('minimum_spend', { precision: 10, scale: 2 }).default('0.00'),
+  maxDiscount: numeric('max_discount', { precision: 10, scale: 2 }),
+  usageLimit: integer('usage_limit').default(1000),
+  usageCount: integer('usage_count').default(0),
+  startDate: timestamp('start_date'),
+  endDate: timestamp('end_date'),
+  countryCode: varchar('country_code', { length: 10 }).default('GW'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const couponUsages = pgTable('coupon_usages', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  couponId: varchar('coupon_id', { length: 255 }).notNull().references(() => coupons.id, { onDelete: 'restrict' }),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  discountApplied: numeric('discount_applied', { precision: 10, scale: 2 }).notNull(),
+  usedAt: timestamp('used_at').defaultNow().notNull(),
+}, (table) => ({
+  coupon_usages_coupon_idx: index('coupon_usages_coupon_idx').on(table.couponId),
+  coupon_usages_user_idx: index('coupon_usages_user_idx').on(table.userId),
+  coupon_usages_coupon_user_order_uq: uniqueIndex('coupon_usages_coupon_user_order_uq').on(table.couponId, table.userId, table.orderId),
+}));
+
+export const campaigns = pgTable('campaigns', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  title: varchar('title', { length: 255 }).notNull(),
+  bannerUrl: text('banner_url'),
+  discountPercentage: integer('discount_percentage').default(10),
+  startDate: timestamp('start_date'),
+  endDate: timestamp('end_date'),
+  countryCode: varchar('country_code', { length: 10 }).default('GW'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+// ============================================================================
+// 11. AVALIAÇÕES, PERGUNTAS E FAVORITOS
+// ============================================================================
+
+export const reviews = pgTable('reviews', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'set null' }),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  rating: integer('rating').notNull(),
+  title: varchar('title', { length: 255 }),
+  comment: text('comment').notNull(),
+  authorName: varchar('author_name', { length: 255 }).notNull(),
+  authorCountry: varchar('author_country', { length: 10 }).default('GW'),
+  isVerifiedPurchase: boolean('is_verified_purchase').default(true),
+  helpfulCount: integer('helpful_count').default(0),
+  status: varchar('status', { length: 50 }).notNull().default('approved'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  reviews_product_status_idx: index('reviews_product_status_idx').on(table.productId, table.status),
+  reviews_user_product_order_uq: uniqueIndex('reviews_user_product_order_uq').on(table.userId, table.productId, table.orderId),
+}));
+
+export const reviewImages = pgTable('review_images', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  reviewId: varchar('review_id', { length: 255 }).notNull().references(() => reviews.id, { onDelete: 'cascade' }),
+  imageUrl: text('image_url').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  review_images_review_idx: index('review_images_review_idx').on(table.reviewId),
+}));
+
+export const productQuestions = pgTable('product_questions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'cascade' }),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  question: text('question').notNull(),
+  status: varchar('status', { length: 50 }).notNull().default('published'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  product_questions_product_idx: index('product_questions_product_idx').on(table.productId),
+}));
+
+export const productAnswers = pgTable('product_answers', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  questionId: varchar('question_id', { length: 255 }).notNull().references(() => productQuestions.id, { onDelete: 'cascade' }),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  answer: text('answer').notNull(),
+  isSeller: boolean('is_seller').default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  product_answers_question_idx: index('product_answers_question_idx').on(table.questionId),
+}));
+
+export const favorites = pgTable('favorites', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  favorites_user_product_uq: uniqueIndex('favorites_user_product_uq').on(table.userId, table.productId),
+  favorites_user_idx: index('favorites_user_idx').on(table.userId),
+}));
+
+// ============================================================================
+// 12. DEVOLUÇÕES E DISPUTAS
+// ============================================================================
+
+export const returns = pgTable('returns', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'set null' }),
+  reason: text('reason').notNull(),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  status: varchar('status', { length: 50 }).notNull().default('pending_approval'), // pending_approval, label_generated, item_shipped, received_inspected, refunded, rejected
+  trackingCode: varchar('tracking_code', { length: 100 }),
+  resolution: text('resolution'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  returns_order_idx: index('returns_order_idx').on(table.orderId),
+  returns_buyer_status_idx: index('returns_buyer_status_idx').on(table.buyerId, table.status),
+}));
+
+export const disputes = pgTable('disputes', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().references(() => sellers.id, { onDelete: 'restrict' }),
+  reason: text('reason').notNull(),
+  description: text('description').notNull(),
+  status: varchar('status', { length: 50 }).notNull().default('open'), // open, in_mediation, resolved_buyer, resolved_seller, cancelled
+  claimAmount: numeric('claim_amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  resolution: text('resolution'),
+  refundAmount: numeric('refund_amount', { precision: 12, scale: 2 }),
+  arbitratorId: varchar('arbitrator_id', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  disputes_order_idx: index('disputes_order_idx').on(table.orderId),
+  disputes_status_idx: index('disputes_status_idx').on(table.status),
+}));
+
+export const disputeMessages = pgTable('dispute_messages', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  disputeId: varchar('dispute_id', { length: 255 }).notNull().references(() => disputes.id, { onDelete: 'cascade' }),
+  senderId: varchar('sender_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  senderRole: varchar('sender_role', { length: 50 }).notNull(), // buyer, seller, admin, mediator
+  message: text('message').notNull(),
+  attachmentsJson: jsonb('attachments_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  dispute_messages_dispute_created_idx: index('dispute_messages_dispute_created_idx').on(table.disputeId, table.createdAt),
+}));
+
+// ============================================================================
+// 13. NOTIFICAÇÕES, MENSAGENS E ATENDIMENTO
+// ============================================================================
+
+export const notifications = pgTable('notifications', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  title: varchar('title', { length: 255 }).notNull(),
+  message: text('message').notNull(),
+  type: varchar('type', { length: 50 }).notNull().default('system'), // order, payment, escrow, promotion, security, system
+  link: varchar('link', { length: 500 }),
+  isRead: boolean('is_read').notNull().default(false),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  notifications_user_read_created_idx: index('notifications_user_read_created_idx').on(table.userId, table.isRead, table.createdAt),
+}));
+
+export const conversations = pgTable('conversations', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'set null' }),
+  buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().references(() => sellers.id, { onDelete: 'restrict' }),
+  subject: varchar('subject', { length: 255 }),
+  status: varchar('status', { length: 50 }).notNull().default('open'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  conversations_buyer_idx: index('conversations_buyer_idx').on(table.buyerId),
+  conversations_seller_idx: index('conversations_seller_idx').on(table.sellerId),
+}));
+
+export const messages = pgTable('messages', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  conversationId: varchar('conversation_id', { length: 255 }).notNull().references(() => conversations.id, { onDelete: 'cascade' }),
+  senderId: varchar('sender_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  senderRole: varchar('sender_role', { length: 50 }).notNull(),
+  message: text('message').notNull(),
+  attachmentsJson: jsonb('attachments_json'),
+  isRead: boolean('is_read').notNull().default(false),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  messages_conversation_created_idx: index('messages_conversation_created_idx').on(table.conversationId, table.createdAt),
+}));
+
+export const supportTickets = pgTable('support_tickets', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  ticketNumber: varchar('ticket_number', { length: 50 }).notNull().unique(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  subject: varchar('subject', { length: 255 }).notNull(),
+  category: varchar('category', { length: 100 }).notNull(),
+  priority: varchar('priority', { length: 50 }).notNull().default('medium'), // low, medium, high, urgent
+  status: varchar('status', { length: 50 }).notNull().default('open'), // open, pending_user, in_progress, resolved, closed
+  assignedTo: varchar('assigned_to', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  support_tickets_user_status_idx: index('support_tickets_user_status_idx').on(table.userId, table.status),
+  support_tickets_assigned_status_idx: index('support_tickets_assigned_status_idx').on(table.assignedTo, table.status),
+}));
+
+export const supportTicketMessages = pgTable('support_ticket_messages', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  ticketId: varchar('ticket_id', { length: 255 }).notNull().references(() => supportTickets.id, { onDelete: 'cascade' }),
+  senderId: varchar('sender_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  senderRole: varchar('sender_role', { length: 50 }).notNull(),
+  message: text('message').notNull(),
+  attachmentsJson: jsonb('attachments_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  support_ticket_messages_ticket_created_idx: index('support_ticket_messages_ticket_created_idx').on(table.ticketId, table.createdAt),
+}));
+
+// ============================================================================
+// 14. ESTRUTURA INTERNACIONAL, ADMINISTRAÇÃO E AUDITORIA
+// ============================================================================
+
+export const countries = pgTable('countries', {
+  id: varchar('id', { length: 10 }).primaryKey(), // GW, BR, PT, AO, US, MZ, CV, ST
+  code: varchar('code', { length: 10 }).notNull().unique(),
+  name: varchar('name', { length: 150 }).notNull(),
+  flag: varchar('flag', { length: 20 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull(),
+  currencySymbol: varchar('currency_symbol', { length: 20 }).notNull(),
+  phonePrefix: varchar('phone_prefix', { length: 20 }).notNull(),
+  exchangeRateToUSD: numeric('exchange_rate_to_usd', { precision: 12, scale: 4 }).notNull().default('1.0000'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const regions = pgTable('regions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW').references(() => countries.code, { onDelete: 'restrict' }),
+  supervisorName: varchar('supervisor_name', { length: 255 }),
+  supervisorEmail: varchar('supervisor_email', { length: 255 }),
+  deliveryCoverageDays: varchar('delivery_coverage_days', { length: 100 }),
+  freightBaseRate: varchar('freight_base_rate', { length: 100 }),
+  status: varchar('status', { length: 50 }).notNull().default('active'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  regions_country_idx: index('regions_country_idx').on(table.countryCode),
+}));
+
+export const countryRepresentatives = pgTable('country_representatives', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  email: varchar('email', { length: 255 }).notNull(),
+  phone: varchar('phone', { length: 50 }).notNull(),
+  status: varchar('status', { length: 50 }).notNull().default('active'),
+  joinedAt: timestamp('joined_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  country_representatives_country_idx: index('country_representatives_country_idx').on(table.countryCode),
+}));
+
+export const platformSettings = pgTable('platform_settings', {
+  key: varchar('key', { length: 255 }).primaryKey(),
+  valueJson: jsonb('value_json').notNull(),
+  description: text('description'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+export const auditLogs = pgTable('audit_logs', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  actorUserId: varchar('actor_user_id', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  action: varchar('action', { length: 150 }).notNull(),
+  resource: varchar('resource', { length: 150 }).notNull(),
+  resourceId: varchar('resource_id', { length: 255 }),
+  detailsJson: jsonb('details_json'),
+  ipAddress: varchar('ip_address', { length: 100 }),
+  userAgent: text('user_agent'),
+  countryCode: varchar('country_code', { length: 10 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  audit_logs_actor_created_idx: index('audit_logs_actor_created_idx').on(table.actorUserId, table.createdAt),
+  audit_logs_resource_idx: index('audit_logs_resource_idx').on(table.resource, table.resourceId),
+  audit_logs_created_idx: index('audit_logs_created_idx').on(table.createdAt),
+}));
+
+export const riskEvents = pgTable('risk_events', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  entityType: varchar('entity_type', { length: 100 }).notNull(), // user, order, payment, seller
+  entityId: varchar('entity_id', { length: 255 }).notNull(),
+  riskScore: varchar('risk_score', { length: 50 }).notNull(),
+  triggerReason: text('trigger_reason').notNull(),
+  actionTaken: varchar('action_taken', { length: 100 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  risk_events_entity_idx: index('risk_events_entity_idx').on(table.entityType, table.entityId),
+  risk_events_created_idx: index('risk_events_created_idx').on(table.createdAt),
+}));
