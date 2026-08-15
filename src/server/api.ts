@@ -118,7 +118,7 @@ apiRouter.get('/health', async (req: Request, res: Response) => {
   }
 
   const redisHealth = await getRedisHealth();
-  const queuesHealth = getQueuesHealth();
+  const queuesHealth = await getQueuesHealth();
   const storageHealth = getStorageHealth();
 
   return res.json({
