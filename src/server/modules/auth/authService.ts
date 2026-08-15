@@ -1,9 +1,10 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getDb } from '../../../db/index.js';
-import { users, userProfiles, refreshTokens, wallets } from '../../../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens } from '../../../db/schema.js';
+import { eq, and, gt } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
+import { generateEmailVerificationCode, hashEmailVerificationCode, sendVerificationEmail } from './emailService.js';
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || 'nusali_jwt_secret_default_change_in_prod';
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'nusali_jwt_refresh_secret_default';
@@ -90,21 +91,113 @@ export class AuthService {
       });
     }
 
+    // O cadastro só é concluído para o cliente depois que o código foi realmente enviado.
+    // Se o provedor de e-mail falhar, o usuário permanece criado e poderá usar "Reenviar código".
+    let emailVerificationSent = true;
+    try {
+      await this.issueEmailVerificationCode({ id: newUser.id, email: newUser.email, fullName: newUser.fullName });
+    } catch (error: any) {
+      emailVerificationSent = false;
+      logger.error({ userId: newUser.id, error: error?.message }, 'User created but verification email could not be sent');
+    }
+
     const tokens = await this.generateTokens(newUser);
 
     logger.info({ userId: newUser.id, email: newUser.email, role: newUser.role }, 'User registered successfully');
 
     return {
-      user: {
-        id: newUser.id,
-        email: newUser.email,
-        fullName: newUser.fullName,
-        phone: newUser.phone,
-        role: newUser.role,
-        countryCode: newUser.countryCode,
-        kycStatus: newUser.kycStatus,
-      },
+      user: this.toPublicUser(newUser),
+      emailVerificationSent,
       ...tokens,
+    };
+  }
+
+  static async issueEmailVerificationCode(user: { id: string; email: string; fullName: string }) {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível para verificação de e-mail.');
+
+    const code = generateEmailVerificationCode();
+    const tokenHash = hashEmailVerificationCode(code);
+    const expiresMinutes = Math.max(1, Number(process.env.EMAIL_VERIFICATION_EXPIRES_MINUTES || 10));
+    const expiresAt = new Date(Date.now() + expiresMinutes * 60_000);
+
+    // Apenas um código ativo por usuário.
+    await db.delete(emailVerificationTokens).where(eq(emailVerificationTokens.userId, user.id));
+    await db.insert(emailVerificationTokens).values({
+      id: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      userId: user.id,
+      token: tokenHash,
+      expiresAt,
+      createdAt: new Date(),
+    });
+
+    try {
+      await sendVerificationEmail({ to: user.email, name: user.fullName, code });
+    } catch (error) {
+      // Não deixe um código que nunca foi entregue como ativo.
+      await db.delete(emailVerificationTokens).where(eq(emailVerificationTokens.userId, user.id));
+      throw error;
+    }
+
+    return { expiresAt };
+  }
+
+  static async verifyEmail(email: string, code: string) {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível para verificação de e-mail.');
+
+    const cleanEmail = email.trim().toLowerCase();
+    const found = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
+    if (!found.length) throw new Error('Código inválido ou expirado.');
+
+    const user = found[0];
+    if (user.isEmailVerified) return { user: this.toPublicUser(user), message: 'E-mail já estava verificado.' };
+
+    const tokenHash = hashEmailVerificationCode(code);
+    const tokens = await db.select().from(emailVerificationTokens).where(and(
+      eq(emailVerificationTokens.userId, user.id),
+      eq(emailVerificationTokens.token, tokenHash),
+      gt(emailVerificationTokens.expiresAt, new Date()),
+    )).limit(1);
+
+    if (!tokens.length) throw new Error('Código inválido ou expirado. Solicite um novo código.');
+
+    const updated = await db.update(users).set({ isEmailVerified: true, updatedAt: new Date() }).where(eq(users.id, user.id)).returning();
+    await db.delete(emailVerificationTokens).where(eq(emailVerificationTokens.userId, user.id));
+
+    logger.info({ userId: user.id }, 'Email verified successfully');
+    return { user: this.toPublicUser(updated[0] || { ...user, isEmailVerified: true }), message: 'E-mail verificado com sucesso!' };
+  }
+
+  static async resendEmailVerification(email: string) {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível para verificação de e-mail.');
+    const cleanEmail = email.trim().toLowerCase();
+    const found = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
+    if (!found.length) throw new Error('Usuário não encontrado.');
+    const user = found[0];
+    if (user.isEmailVerified) return { message: 'Este e-mail já está verificado.' };
+    await this.issueEmailVerificationCode({ id: user.id, email: user.email, fullName: user.fullName });
+    return { message: 'Novo código enviado para seu e-mail.' };
+  }
+
+  static toPublicUser(user: any) {
+    return {
+      id: user.id,
+      name: user.fullName,
+      fullName: user.fullName,
+      email: user.email,
+      phone: user.phone || '',
+      role: user.role,
+      country: user.countryCode,
+      countryCode: user.countryCode,
+      kycStatus: user.kycStatus,
+      avatar: user.avatarUrl || '',
+      avatarUrl: user.avatarUrl || '',
+      isEmailVerified: user.isEmailVerified ?? false,
+      isPhoneVerified: user.isPhoneVerified ?? false,
+      status: user.isActive === false ? 'suspended' : 'active',
+      createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : (user.createdAt || new Date().toISOString()),
     };
   }
 
@@ -159,16 +252,7 @@ export class AuthService {
     logger.info({ userId: userRecord.id, email: userRecord.email, role: userRecord.role }, 'User logged in successfully');
 
     return {
-      user: {
-        id: userRecord.id,
-        email: userRecord.email,
-        fullName: userRecord.fullName,
-        phone: userRecord.phone || '',
-        role: userRecord.role,
-        countryCode: userRecord.countryCode,
-        kycStatus: userRecord.kycStatus,
-        avatarUrl: userRecord.avatarUrl,
-      },
+      user: this.toPublicUser(userRecord),
       ...tokens,
     };
   }
@@ -208,6 +292,7 @@ export class AuthService {
     }
 
     return {
+      token: accessToken,
       accessToken,
       refreshToken: refreshTokenRaw,
       expiresIn: 7200, // 2 hours in seconds

@@ -19,46 +19,51 @@ import { storageService } from './storage/storageService';
 
 export const AuthService = {
   async login(credentials: LoginRequest): Promise<ApiResponse<LoginResponse>> {
-    let res: ApiResponse<LoginResponse>;
-    try {
-      if (API_CONFIG.USE_FAKE_API) {
-        res = await fakeApi.login(credentials.identifier, credentials.role || 'BUYER', credentials.password);
-      } else {
-        res = await AuthApi.login(credentials);
-        if (!res.success) {
-          res = await fakeApi.login(credentials.identifier, credentials.role || 'BUYER', credentials.password);
-        }
-      }
-    } catch {
-      res = await fakeApi.login(credentials.identifier, credentials.role || 'BUYER', credentials.password);
-    }
+    const res = await AuthApi.login({
+      ...credentials,
+      email: credentials.identifier?.trim().toLowerCase(),
+    } as any);
 
     if (res.success && res.data?.token) {
       storageService.setToken(res.data.token);
       storageService.setUser(res.data.user);
+
+      if (res.data.refreshToken) {
+        storageService.setRefreshToken(res.data.refreshToken);
+      }
     }
+
     return res as ApiResponse<LoginResponse>;
   },
 
   async register(data: RegisterRequest): Promise<ApiResponse<RegisterResponse>> {
-    let res: ApiResponse<RegisterResponse>;
-    try {
-      if (API_CONFIG.USE_FAKE_API) {
-        res = await fakeApi.register(data);
-      } else {
-        res = await AuthApi.register(data);
-        if (!res.success) {
-          res = await fakeApi.register(data);
-        }
-      }
-    } catch {
-      res = await fakeApi.register(data);
-    }
+    const fullName = `${data.firstName || ''} ${data.lastName || ''}`.trim();
+
+    const phone =
+      data.phoneCode && data.phone
+        ? `${data.phoneCode}${data.phone}`.replace(/\s+/g, '')
+        : data.phone || '';
+
+    const payload = {
+      email: data.email.trim().toLowerCase(),
+      password: data.password,
+      fullName,
+      phone,
+      countryCode: data.country || 'GW',
+      role: data.role || 'BUYER',
+    };
+
+    const res = await AuthApi.register(payload as any);
 
     if (res.success && res.data?.token) {
       storageService.setToken(res.data.token);
       storageService.setUser(res.data.user);
+
+      if (res.data.refreshToken) {
+        storageService.setRefreshToken(res.data.refreshToken);
+      }
     }
+
     return res as ApiResponse<RegisterResponse>;
   },
 
@@ -105,11 +110,11 @@ export const AuthService = {
     return res;
   },
 
-  async resendVerification(type: 'email' | 'phone'): Promise<ApiResponse<{ message: string }>> {
+  async resendVerification(type: 'email' | 'phone', email?: string): Promise<ApiResponse<{ message: string }>> {
     if (API_CONFIG.USE_FAKE_API) {
       return fakeApi.resendVerification(type);
     }
-    return AuthApi.resendVerification(type);
+    return AuthApi.resendVerification(type, email);
   },
 
   async changePassword(data: ChangePasswordRequest): Promise<ApiResponse<{ message: string }>> {

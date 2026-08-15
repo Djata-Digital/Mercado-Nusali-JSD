@@ -29,6 +29,16 @@ const loginSchema = z.object({
   email: z.string().email('E-mail inválido'),
   password: z.string().min(1, 'Senha obrigatória'),
 });
+const verifyEmailSchema = z.object({
+  email: z.string().email('E-mail inválido'),
+  code: z.string().regex(/^\d{6}$/, 'O código deve conter 6 dígitos'),
+});
+
+const resendEmailSchema = z.object({
+  type: z.literal('email'),
+  email: z.string().email('E-mail inválido'),
+});
+
 
 // POST /api/v1/auth/register
 authRouter.post('/register', async (req: Request, res: Response) => {
@@ -96,6 +106,34 @@ authRouter.post('/login', loginLimiter, async (req: Request, res: Response) => {
         message: err.message || 'Falha na autenticação.',
       },
     });
+  }
+});
+
+// POST /api/v1/auth/verify-email
+authRouter.post('/verify-email', async (req: Request, res: Response) => {
+  try {
+    const validated = verifyEmailSchema.parse(req.body);
+    const result = await AuthService.verifyEmail(validated.email, validated.code);
+    return res.json({ success: true, data: result });
+  } catch (err: any) {
+    const message = err instanceof z.ZodError
+      ? ((err as any).issues?.[0]?.message || 'Dados de verificação inválidos.')
+      : (err.message || 'Código inválido ou expirado.');
+    return res.status(400).json({ success: false, error: { code: 'EMAIL_VERIFICATION_FAILED', message } });
+  }
+});
+
+// POST /api/v1/auth/resend-verification
+authRouter.post('/resend-verification', async (req: Request, res: Response) => {
+  try {
+    const validated = resendEmailSchema.parse(req.body);
+    const result = await AuthService.resendEmailVerification(validated.email);
+    return res.json({ success: true, data: result });
+  } catch (err: any) {
+    const message = err instanceof z.ZodError
+      ? ((err as any).issues?.[0]?.message || 'Dados inválidos.')
+      : (err.message || 'Não foi possível reenviar o código.');
+    return res.status(400).json({ success: false, error: { code: 'RESEND_VERIFICATION_FAILED', message } });
   }
 });
 

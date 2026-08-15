@@ -132,7 +132,7 @@ export const VerifyEmailPage: React.FC = () => {
     setSuccessMessage(null);
 
     try {
-      const res = await AuthService.resendVerification('email');
+      const res = await AuthService.resendVerification('email', targetEmail);
       setSuccessMessage(res.data?.message || 'Novo código enviado com sucesso!');
       setTimer(60);
       setCanResend(false);
