@@ -217,6 +217,24 @@ uploadRouter.post(
     }
 
     try {
+      // Foto de perfil é um recurso único por usuário. Usamos uma chave
+      // estável para que cada novo upload sobrescreva o avatar anterior
+      // em vez de criar arquivos duplicados no bucket público.
+      const profileObjectKey =
+        folder === 'profiles' && req.user?.id
+          ? `profiles/${encodeURIComponent(req.user.id)}/avatar`
+          : undefined;
+
+      if (folder === 'profiles' && !profileObjectKey) {
+        return res.status(401).json({
+          success: false,
+          error: {
+            code: 'AUTH_USER_REQUIRED',
+            message: 'Usuário autenticado não identificado.',
+          },
+        });
+      }
+
       const result = await storageService.uploadFile(
         {
           buffer: req.file.buffer,
@@ -225,6 +243,12 @@ uploadRouter.post(
           size: req.file.size,
         },
         folder,
+        profileObjectKey
+          ? {
+              objectKey: profileObjectKey,
+              cacheBustPublicUrl: true,
+            }
+          : undefined,
       );
 
       return res.status(201).json({

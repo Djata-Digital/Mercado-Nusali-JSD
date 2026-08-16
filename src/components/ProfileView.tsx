@@ -29,6 +29,7 @@ import { useAuth } from '../context/AuthContext';
 import { BuyerNavHeader } from './BuyerNavHeader';
 import { formatCurrency, countriesConfig } from '../utils/currencyUtils';
 import { BuyerService, BuyerProfile, BuyerOverviewData } from '../services/buyerService';
+import { uploadService } from '../services/uploadService';
 
 const PRESET_AVATARS = [
   { label: 'Profissional', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250' },
@@ -85,17 +86,42 @@ export const ProfileView: React.FC = () => {
     loadData();
   }, []);
 
-  const handleAvatarFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (reader.result) {
-        setEditAvatar(reader.result as string);
-        showToast('Foto selecionada! Clique em "Salvar Alterações" para confirmar.');
-      }
-    };
-    reader.readAsDataURL(file);
+
+    try {
+      setIsSaving(true);
+      const uploaded = await uploadService.uploadProfile(file);
+
+      // A URL retornada contém uma versão (?v=...) para evitar que o
+      // navegador reutilize a foto anterior que estava em cache.
+      setEditAvatar(uploaded.url);
+
+      // Atualiza imediatamente a prévia principal e o contexto de autenticação.
+      // A persistência definitiva em users.avatar_url continua ocorrendo ao
+      // clicar em "Salvar Alterações".
+      setProfile((current) =>
+        current
+          ? {
+              ...current,
+              avatar: uploaded.url,
+            }
+          : current,
+      );
+
+      updateUser({
+        avatar: uploaded.url,
+      });
+
+      showToast('Nova foto carregada. Clique em "Salvar Alterações" para confirmar no perfil.');
+    } catch (error) {
+      console.error('Profile avatar upload failed:', error);
+      showToast('Não foi possível enviar a foto.');
+    } finally {
+      setIsSaving(false);
+      e.target.value = '';
+    }
   };
 
   const handleSaveProfile = async (e: React.FormEvent) => {
@@ -141,14 +167,14 @@ export const ProfileView: React.FC = () => {
             {/* Avatar with Camera Overlay */}
             <div className="relative group shrink-0">
               <div className="w-20 h-20 rounded-2xl bg-yellow-400 text-blue-950 font-black text-2xl flex items-center justify-center border-4 border-white/20 shadow-lg overflow-hidden">
-                {profile?.avatar || user?.avatar ? (
+                {editAvatar || profile?.avatar || user?.avatar ? (
                   <img
-                    src={profile?.avatar || user?.avatar}
-                    alt=""
+                    src={editAvatar || profile?.avatar || user?.avatar}
+                    alt="Foto de perfil"
                     className="w-full h-full object-cover"
                   />
                 ) : (
-                  (profile?.fullName || 'AS').substring(0, 2).toUpperCase()
+                  (profile?.fullName || user?.name || 'US').substring(0, 2).toUpperCase()
                 )}
               </div>
               <button
@@ -166,7 +192,7 @@ export const ProfileView: React.FC = () => {
 
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-2xl font-black">{profile?.fullName || 'Alex Silva'}</h1>
+                <h1 className="text-2xl font-black">{profile?.fullName || user?.name || 'Usuário'}</h1>
                 <span className="bg-emerald-500 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full flex items-center gap-1 border border-emerald-400">
                   <BadgeCheck className="w-3.5 h-3.5" /> COMPRADOR VERIFICADO
                 </span>
@@ -177,7 +203,7 @@ export const ProfileView: React.FC = () => {
                 )}
               </div>
 
-              <p className="text-xs text-gray-200 mt-1 font-mono">{profile?.email || 'djatadigital7@gmail.com'} • NIF {profile?.taxId || 'NIF-8941203'}</p>
+              <p className="text-xs text-gray-200 mt-1 font-mono">{profile?.email || user?.email || 'E-mail não informado'}{profile?.taxId ? ` • NIF ${profile.taxId}` : ''}</p>
 
               <div className="flex items-center gap-3 mt-3 text-xs text-yellow-300 font-semibold">
                 <span className="flex items-center gap-1">

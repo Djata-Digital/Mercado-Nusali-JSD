@@ -6,14 +6,23 @@ export interface UploadResult {
   filename: string;
   size: number;
   mimeType: string;
+  objectKey?: string;
+  bucket?: string;
+  access?: 'public' | 'private';
 }
 
 export class UploadService {
-  private async processUpload(file: File, folder: string): Promise<UploadResult> {
+  private async processUpload(
+    file: File,
+    folder: string
+  ): Promise<UploadResult> {
     if (API_CONFIG.USE_FAKE_API) {
-      // Simulate fake upload response
       await new Promise((res) => setTimeout(res, 500));
-      const mockUrl = URL.createObjectURL(file) || `https://images.unsplash.com/photo-fake-${Date.now()}`;
+
+      const mockUrl =
+        URL.createObjectURL(file) ||
+        `https://images.unsplash.com/photo-fake-${Date.now()}`;
+
       return {
         url: mockUrl,
         filename: file.name,
@@ -23,14 +32,19 @@ export class UploadService {
     }
 
     const formData = new FormData();
-    formData.append('file', file);
-    formData.append('folder', folder);
 
-    const response = await apiClient.post<UploadResult>(`${API_CONFIG.UPLOAD_URL}/${folder}`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
+    formData.append('file', file);
+
+    const response = await apiClient.post<UploadResult>(
+      `/upload/${folder}`,
+      formData
+    );
+
+    if (!response.data) {
+      throw new Error(
+        `O servidor não retornou os dados do upload para "${folder}".`
+      );
+    }
 
     return response.data;
   }

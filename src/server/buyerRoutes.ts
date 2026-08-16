@@ -1,8 +1,9 @@
 import { Router, Request, Response } from 'express';
+import { requireAuth, AuthRequest } from './modules/auth/authMiddleware.js';
 import { getDb, checkDbConnection } from '../db/index.js';
-import { products, orders, users, orderItems } from '../db/schema.js';
+import { products, orders, users, userProfiles, addresses, orderItems } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, and } from 'drizzle-orm';
 
 export const buyerRouter = Router();
 
@@ -640,76 +641,115 @@ export const buyerDataStore = {
 // 1. BUYER PROFILE & OVERVIEW STATS
 // ==========================================
 
-buyerRouter.get('/profile', async (req: Request, res: Response) => {
-  try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        const dbUsers = await db.select().from(users).where(eq(users.id, buyerDataStore.profile.id));
-        if (dbUsers.length > 0) {
-          const u = dbUsers[0];
-          buyerDataStore.profile.fullName = u.fullName;
-          buyerDataStore.profile.email = u.email;
-          buyerDataStore.profile.country = u.countryCode;
-          if (u.phone) buyerDataStore.profile.phone = u.phone;
-          if (u.avatarUrl) buyerDataStore.profile.avatar = u.avatarUrl;
-        }
-      }
-    }
-  } catch {
-    // fallback
+async function loadRealBuyerProfile(userId: string): Promise<BuyerProfileData | null> {
+  const db = getDb();
+  if (!db) return null;
+
+  const userRows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  const u = userRows[0];
+  if (!u) return null;
+
+  const profileRows = await db.select().from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1);
+  const p = profileRows[0];
+
+  let addressRows = await db.select().from(addresses)
+    .where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true)))
+    .limit(1);
+  if (addressRows.length === 0) {
+    addressRows = await db.select().from(addresses).where(eq(addresses.userId, userId)).limit(1);
   }
+  const a = addressRows[0];
+  const address = a
+    ? [a.street, a.number, a.complement, a.neighborhood, a.city, a.state].filter(Boolean).join(', ')
+    : '';
 
-  return res.json({
-    success: true,
-    data: buyerDataStore.profile,
-  });
-});
-
-buyerRouter.put('/profile', async (req: Request, res: Response) => {
-  const updates = req.body;
-  buyerDataStore.profile = {
-    ...buyerDataStore.profile,
-    ...updates,
+  return {
+    id: u.id,
+    fullName: u.fullName || '',
+    email: u.email || '',
+    phone: u.phone || '',
+    taxId: p?.taxId || '',
+    country: u.countryCode || '',
+    city: a?.city || '',
+    address,
+    avatar: u.avatarUrl || '',
+    isEmailVerified: Boolean(u.isEmailVerified),
+    isPhoneVerified: Boolean(u.isPhoneVerified),
+    is2FAEnabled: Boolean(u.isTwoFactorEnabled),
+    kycStatus: (u.kycStatus || 'unverified') as BuyerProfileData['kycStatus'],
+    preferredCurrency: p?.preferredCurrency || 'XOF',
+    membership: (p?.membershipLevel || 'standard') as BuyerProfileData['membership'],
+    createdAt: u.createdAt?.toISOString?.() || String(u.createdAt || ''),
   };
+}
 
+buyerRouter.get('/profile', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        await db.update(users)
-          .set({
-            fullName: buyerDataStore.profile.fullName,
-            phone: buyerDataStore.profile.phone,
-            countryCode: buyerDataStore.profile.country,
-            updatedAt: new Date(),
-          })
-          .where(eq(users.id, buyerDataStore.profile.id));
-      }
+    const profile = await loadRealBuyerProfile(req.user!.id);
+    if (!profile) {
+      return res.status(404).json({ success: false, error: { code: 'PROFILE_NOT_FOUND', message: 'Usuário não encontrado.' } });
     }
-  } catch {
-    // fallback
+    return res.json({ success: true, data: profile });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: { code: 'PROFILE_LOAD_FAILED', message: 'Não foi possível carregar o perfil.' } });
   }
-
-  return res.json({
-    success: true,
-    message: 'Perfil do comprador atualizado com sucesso no banco de dados!',
-    data: buyerDataStore.profile,
-  });
 });
 
-buyerRouter.get('/overview', async (req: Request, res: Response) => {
+buyerRouter.put('/profile', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) {
+      return res.status(503).json({ success: false, error: { code: 'DATABASE_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
+    }
+
+    const userId = req.user!.id;
+    const { fullName, phone, country, avatar, city } = req.body ?? {};
+    const userUpdates: Record<string, unknown> = { updatedAt: new Date() };
+    if (typeof fullName === 'string') userUpdates.fullName = fullName.trim();
+    if (typeof phone === 'string') userUpdates.phone = phone.trim() || null;
+    if (typeof country === 'string' && country.trim()) userUpdates.countryCode = country.trim().toUpperCase();
+    if (typeof avatar === 'string') userUpdates.avatarUrl = avatar.trim() || null;
+
+    await db.update(users).set(userUpdates).where(eq(users.id, userId));
+
+    // City belongs to addresses. Update it only when the user already has an address;
+    // never create a fabricated address just to persist a city.
+    if (typeof city === 'string' && city.trim()) {
+      let addressRows = await db.select().from(addresses)
+        .where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true)))
+        .limit(1);
+      if (addressRows.length === 0) {
+        addressRows = await db.select().from(addresses).where(eq(addresses.userId, userId)).limit(1);
+      }
+      if (addressRows[0]) {
+        await db.update(addresses)
+          .set({ city: city.trim(), updatedAt: new Date() })
+          .where(eq(addresses.id, addressRows[0].id));
+      }
+    }
+
+    const profile = await loadRealBuyerProfile(userId);
+    return res.json({ success: true, message: 'Perfil atualizado com sucesso.', data: profile });
+  } catch (error) {
+    return res.status(500).json({ success: false, error: { code: 'PROFILE_UPDATE_FAILED', message: 'Não foi possível atualizar o perfil.' } });
+  }
+});
+
+buyerRouter.get('/overview', requireAuth, async (req: AuthRequest, res: Response) => {
   const activeOrdersCount = buyerDataStore.orders.filter(o => o.status !== 'delivered' && o.status !== 'cancelled').length;
   const totalOrdersCount = buyerDataStore.orders.length;
   const claimedCouponsCount = buyerDataStore.coupons.filter(c => c.isClaimed).length;
   const unreadNotificationsCount = buyerDataStore.notifications.filter(n => !n.isRead).length;
 
+  const realProfile = await loadRealBuyerProfile(req.user!.id);
+  if (!realProfile) {
+    return res.status(404).json({ success: false, error: { code: 'PROFILE_NOT_FOUND', message: 'Usuário não encontrado.' } });
+  }
+
   return res.json({
     success: true,
     data: {
-      profile: buyerDataStore.profile,
+      profile: realProfile,
       metrics: {
         activeOrdersCount,
         totalOrdersCount,

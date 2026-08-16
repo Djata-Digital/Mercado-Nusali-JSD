@@ -28,8 +28,26 @@ export interface StorageUploadResult {
   fileSize: number;
 }
 
+export interface StorageUploadOptions {
+  /**
+   * Chave exata do objeto. Quando informada, o PutObject sobrescreve
+   * o objeto existente em vez de criar um novo arquivo.
+   */
+  objectKey?: string;
+
+  /**
+   * Adiciona um parâmetro de versão à URL pública para evitar que o
+   * navegador continue exibindo uma versão antiga em cache.
+   */
+  cacheBustPublicUrl?: boolean;
+}
+
 export interface StorageProvider {
-  uploadFile(file: StorageFile, folder: string): Promise<StorageUploadResult>;
+  uploadFile(
+    file: StorageFile,
+    folder: string,
+    options?: StorageUploadOptions,
+  ): Promise<StorageUploadResult>;
   getSignedUrl(
     objectKey: string,
     expiresInSeconds?: number,
@@ -138,6 +156,7 @@ class R2StorageProvider implements StorageProvider {
   async uploadFile(
     file: StorageFile,
     folder: string,
+    options: StorageUploadOptions = {},
   ): Promise<StorageUploadResult> {
     const access = getAccessForFolder(folder);
     const bucket = this.getBucket(access);
@@ -146,8 +165,15 @@ class R2StorageProvider implements StorageProvider {
     const year = String(date.getUTCFullYear());
     const month = String(date.getUTCMonth() + 1).padStart(2, '0');
 
+    // Para uploads normais continuamos gerando uma chave única.
+    // Para avatar de perfil, a rota fornece uma chave fixa por usuário
+    // (profiles/<userId>/avatar), fazendo o R2 sobrescrever o objeto anterior.
     const objectKey =
+      options.objectKey ||
       `${folder}/${year}/${month}/${randomUUID()}-${cleanName}`;
+
+    const isProfileAvatar =
+      folder === 'profiles' && Boolean(options.objectKey);
 
     await this.client.send(
       new PutObjectCommand({
@@ -157,19 +183,27 @@ class R2StorageProvider implements StorageProvider {
         ContentType: file.mimetype || 'application/octet-stream',
         ContentLength: file.size,
         CacheControl:
-          access === 'public'
-            ? 'public, max-age=31536000, immutable'
-            : 'private, no-store',
+          access === 'private'
+            ? 'private, no-store'
+            : isProfileAvatar
+              ? 'public, no-cache, max-age=0, must-revalidate'
+              : 'public, max-age=31536000, immutable',
         Metadata: {
           originalName: encodeURIComponent(file.originalname),
         },
       }),
     );
 
-    const url =
+    const publicObjectUrl =
       access === 'public' && this.publicUrl
         ? `${this.publicUrl}/${objectKey}`
-        : `r2://${bucket}/${objectKey}`;
+        : '';
+
+    const url = publicObjectUrl
+      ? options.cacheBustPublicUrl
+        ? `${publicObjectUrl}?v=${Date.now()}`
+        : publicObjectUrl
+      : `r2://${bucket}/${objectKey}`;
 
     logger.info(
       {
@@ -282,8 +316,8 @@ function getProvider(): R2StorageProvider {
 }
 
 export const storageService: StorageProvider = {
-  uploadFile(file, folder) {
-    return getProvider().uploadFile(file, folder);
+  uploadFile(file, folder, options) {
+    return getProvider().uploadFile(file, folder, options);
   },
 
   getSignedUrl(objectKey, expiresInSeconds, access) {
