@@ -18,6 +18,7 @@
     "asaas:test-connection": "tsx scripts/test-asaas-connection.ts",
     "asaas:test-pix": "tsx scripts/test-asaas-pix.ts",
     "asaas:test-webhook": "tsx scripts/test-asaas-webhook.ts",
+    "asaas:test-e2e-public": "tsx scripts/test-asaas-e2e-public.ts",
     "test:redis": "tsx scripts/test-redis-optimization.ts"
   },
   "dependencies": {

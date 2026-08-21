@@ -11,7 +11,10 @@ import { setupWebSocketServer } from './src/server/infra/websocket.js';
 import { initializeQueues } from './src/server/infra/queues.js';
 import { logger } from './src/server/infra/logger.js';
 
+import { validateJwtConfigInProduction } from './src/server/modules/auth/jwtConfig.js';
+
 dotenv.config();
+validateJwtConfigInProduction();
 
 async function startServer() {
   const app = express();

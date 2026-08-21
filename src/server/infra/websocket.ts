@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { Server as HttpServer } from 'http';
 import jwt from 'jsonwebtoken';
 import { logger } from './logger.js';
+import { getJwtAccessSecret } from '../modules/auth/jwtConfig.js';
 
 interface AuthenticatedClient {
   ws: WebSocket;
@@ -24,7 +25,7 @@ export function setupWebSocketServer(server: HttpServer) {
 
     if (token) {
       try {
-        const secret = process.env.JWT_ACCESS_SECRET || 'nusali_jwt_secret_default_change_in_prod';
+        const secret = getJwtAccessSecret();
         const decoded = jwt.verify(token, secret) as { userId: string; role: string };
         userId = decoded.userId;
         role = decoded.role;

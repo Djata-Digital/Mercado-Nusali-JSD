@@ -5,9 +5,8 @@ import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens, s
 import { eq, and, gt } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { generateEmailVerificationCode, hashEmailVerificationCode, sendVerificationEmail } from './emailService.js';
+import { getJwtAccessSecret, getJwtRefreshSecret } from './jwtConfig.js';
 
-const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || 'nusali_jwt_secret_default_change_in_prod';
-const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'nusali_jwt_refresh_secret_default';
 const ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '2h';
 const REFRESH_EXPIRES_IN_DAYS = 30;
 
@@ -301,7 +300,7 @@ export class AuthService {
         countryCode: user.countryCode,
         kycStatus: user.kycStatus,
       },
-      ACCESS_SECRET,
+      getJwtAccessSecret(),
       { expiresIn: 7200 }
     );
 

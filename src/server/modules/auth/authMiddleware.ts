@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { getDb } from '../../../db/index.js';
 import { users } from '../../../db/schema.js';
 import { eq } from 'drizzle-orm';
+import { getJwtAccessSecret } from './jwtConfig.js';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -28,7 +29,7 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
   }
 
   const token = authHeader.split(' ')[1];
-  const secret = process.env.JWT_ACCESS_SECRET || 'nusali_jwt_secret_default_change_in_prod';
+  const secret = getJwtAccessSecret();
 
   try {
     const decoded = jwt.verify(token, secret) as {
