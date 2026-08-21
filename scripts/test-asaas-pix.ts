@@ -2,13 +2,37 @@ import 'dotenv/config';
 import { getDb, getDbPool } from '../src/db/index.js';
 import { users, userProfiles, orders, payments, paymentAttempts, paymentCustomers } from '../src/db/schema.js';
 import { getAsaasConfig } from '../src/server/modules/payments/config/asaasConfig.js';
-import { AsaasPaymentProvider } from '../src/server/modules/payments/providers/asaasPaymentProvider.js';
+import { AsaasPaymentProvider, normalizeAsaasBrazilianMobilePhone } from '../src/server/modules/payments/providers/asaasPaymentProvider.js';
 import { eq, and } from 'drizzle-orm';
 
 async function runAsaasPixTests() {
   console.log('====================================================');
   console.log('ASAAS SANDBOX PIX REAL INTEGRATION SUITE [SANDBOX ONLY]');
   console.log('====================================================\n');
+
+  // ----------------------------------------------------
+  // UNIT TEST: PHONE NORMALIZATION FOR ASAAS
+  // ----------------------------------------------------
+  console.log('🧪 TESTE 0: Validação do Normalizador de Telefone Celular Brasileiro Asaas...');
+  const t1 = normalizeAsaasBrazilianMobilePhone('+55 (47) 99376-637');
+  if (t1 !== '4799376637') throw new Error(`TESTE 0 FALHOU: esperado '4799376637', obtido '${t1}'`);
+
+  const t2 = normalizeAsaasBrazilianMobilePhone('4799376637');
+  if (t2 !== '4799376637') throw new Error(`TESTE 0 FALHOU: esperado '4799376637', obtido '${t2}'`);
+
+  const t3 = normalizeAsaasBrazilianMobilePhone('+5511999999999');
+  if (t3 !== '11999999999') throw new Error(`TESTE 0 FALHOU: esperado '11999999999', obtido '${t3}'`);
+
+  const t4 = normalizeAsaasBrazilianMobilePhone('');
+  if (t4 !== null) throw new Error(`TESTE 0 FALHOU: esperado null, obtido '${t4}'`);
+
+  const t5 = normalizeAsaasBrazilianMobilePhone(null);
+  if (t5 !== null) throw new Error(`TESTE 0 FALHOU: esperado null, obtido '${t5}'`);
+
+  const t6 = normalizeAsaasBrazilianMobilePhone('123');
+  if (t6 !== null) throw new Error(`TESTE 0 FALHOU: esperado null para telefone inválido, obtido '${t6}'`);
+
+  console.log('✅ TESTE 0: Normalização de telefone celular aprovada em todos os cenários.\n');
 
   const config = getAsaasConfig();
   if (!config.apiKey || !config.apiKey.trim()) {

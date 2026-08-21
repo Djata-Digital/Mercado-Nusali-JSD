@@ -85,7 +85,7 @@ async function runAsaasE2EPublicTest() {
       passwordHash,
       role: 'BUYER',
       fullName: 'Comprador E2E Sandbox',
-      phone: '+5511999999999',
+      phone: '11999999999',
       countryCode: 'BR',
       isEmailVerified: true,
       isActive: true,
@@ -101,8 +101,8 @@ async function runAsaasE2EPublicTest() {
       updatedAt: new Date(),
     });
   } else {
-    // Update password hash for existing buyer user
-    await db.update(users).set({ passwordHash }).where(eq(users.id, testBuyerId));
+    // Update password hash and phone for existing buyer user
+    await db.update(users).set({ passwordHash, phone: '11999999999' }).where(eq(users.id, testBuyerId));
 
     // Hardened profile check: create profile if missing, otherwise update taxId
     const existingProfile = await db.select().from(userProfiles).where(eq(userProfiles.userId, testBuyerId)).limit(1);

@@ -5,6 +5,22 @@ import { logger } from '../../../infra/logger.js';
 import { getDb } from '../../../../db/index.js';
 import { orders, users, userProfiles, payments, paymentAttempts, paymentCustomers } from '../../../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
+export function normalizeAsaasBrazilianMobilePhone(phone?: string | null): string | null {
+  if (!phone) return null;
+  let digits = String(phone).replace(/\D/g, '');
+  if (!digits) return null;
+
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
+    digits = digits.substring(2);
+  }
+
+  if (digits.length === 10 || digits.length === 11) {
+    return digits;
+  }
+
+  return null;
+}
+
 function isValidCpf(cpf: string): boolean {
   if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
   let sum = 0;
@@ -91,10 +107,12 @@ export class AsaasPaymentProvider implements PaymentProvider {
     const userCountry = (userRecord.countryCode || 'GW').toUpperCase();
     const isBrazilian = userCountry === 'BR';
 
+    const normalizedMobilePhone = normalizeAsaasBrazilianMobilePhone(userRecord.phone);
+
     const customerPayload: any = {
       name: fullName,
       email: userRecord.email || undefined,
-      mobilePhone: userRecord.phone || undefined,
+      mobilePhone: normalizedMobilePhone || undefined,
       externalReference: userId,
     };
 
