@@ -2,35 +2,29 @@ import { Queue, Worker, QueueEvents } from 'bullmq';
 import { logger } from './logger.js';
 
 interface QueueInstance {
-  queue: Queue | null;
+  queue?: Queue | null;
   worker?: Worker | null;
   events?: QueueEvents | null;
 }
 
 const queues: Record<string, QueueInstance> = {};
 
-const QUEUE_NAMES = [
-  'notifications',
-  'email',
-  'payments',
-  'webhooks',
-  'images',
-  'shipping',
-  'reports',
-] as const;
-
 let globalQuotaExceeded = false;
+let lastQueuesHealthTime = 0;
+let cachedQueuesHealth: any = null;
+
+export function isBullMQEnabled(): boolean {
+  if (globalQuotaExceeded) return false;
+  return process.env.ENABLE_BULLMQ === 'true';
+}
+
+export function getBullMQRole(): string {
+  if (!isBullMQEnabled()) return 'disabled';
+  return (process.env.BULLMQ_ROLE || 'producer').toLowerCase();
+}
 
 function getBullMQConnection() {
-  if (globalQuotaExceeded) {
-    return null;
-  }
-
-  const isDev = (process.env.NODE_ENV || 'development') === 'development';
-  const enableBullMQ = process.env.ENABLE_BULLMQ === 'true';
-
-  // Em desenvolvimento, desabilitar BullMQ remoto por padrao (ENABLE_BULLMQ!=true)
-  if (isDev && !enableBullMQ) {
+  if (!isBullMQEnabled()) {
     return null;
   }
 
@@ -43,15 +37,8 @@ function getBullMQConnection() {
   try {
     const url = new URL(redisUrl);
 
-    if (
-      url.protocol !== 'redis:' &&
-      url.protocol !== 'rediss:'
-    ) {
-      logger.error(
-        { protocol: url.protocol },
-        'Unsupported Redis protocol for BullMQ',
-      );
-
+    if (url.protocol !== 'redis:' && url.protocol !== 'rediss:') {
+      logger.error({ protocol: url.protocol }, 'Unsupported Redis protocol for BullMQ');
       return null;
     }
 
@@ -60,75 +47,29 @@ function getBullMQConnection() {
     return {
       host: url.hostname,
       port: Number(url.port) || 6379,
-
-      username: url.username
-        ? decodeURIComponent(url.username)
-        : undefined,
-
-      password: url.password
-        ? decodeURIComponent(url.password)
-        : undefined,
-
-      /**
-       * BullMQ workers require this to avoid command failures
-       * during temporary Redis reconnects.
-       */
+      username: url.username ? decodeURIComponent(url.username) : undefined,
+      password: url.password ? decodeURIComponent(url.password) : undefined,
       maxRetriesPerRequest: null,
-
-      /**
-       * Upstash can require a few seconds on cold connection.
-       */
       connectTimeout: 10_000,
-
-      /**
-       * Keep TCP connection alive.
-       */
       keepAlive: 10_000,
-
-      /**
-       * BullMQ/ioredis Redis compatibility.
-       */
       enableReadyCheck: true,
-
-      /**
-       * Required for Upstash when using rediss://.
-       */
-      ...(isTls
-        ? {
-            tls: {
-              servername: url.hostname,
-            },
-          }
-        : {}),
-
+      ...(isTls ? { tls: { servername: url.hostname } } : {}),
       retryStrategy(times: number) {
-        if (globalQuotaExceeded) {
+        if (globalQuotaExceeded || !isBullMQEnabled()) {
           return null;
         }
-
         if (times > 5) {
-          logger.error(
-            { attempts: times },
-            'BullMQ Redis reconnection limit reached',
-          );
-
+          logger.error({ attempts: times }, 'BullMQ Redis reconnection limit reached');
           return null;
         }
-
         return Math.min(times * 500, 3_000);
       },
     };
   } catch (error) {
     logger.error(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : error,
-      },
-      'Invalid REDIS_URL for BullMQ',
+      { error: error instanceof Error ? error.message : error },
+      'Invalid REDIS_URL for BullMQ'
     );
-
     return null;
   }
 }
@@ -139,7 +80,7 @@ function handleQuotaError(error: any) {
     if (!globalQuotaExceeded) {
       globalQuotaExceeded = true;
       logger.warn(
-        'Upstash Redis: Limite diario de requisicoes atingido (500.000). Filas BullMQ desativadas (Modo local em memoria ativo).',
+        'Upstash Redis: Limite diário de requisições atingido. Filas BullMQ desativadas.'
       );
       closeQueues().catch(() => {});
     }
@@ -149,283 +90,192 @@ function handleQuotaError(error: any) {
 }
 
 export function initializeQueues() {
-  if (globalQuotaExceeded) {
+  if (!isBullMQEnabled()) {
+    logger.info(
+      'BullMQ: Running in disabled mode (ENABLE_BULLMQ!=true). No queues or workers active.'
+    );
     return;
+  }
+
+  const role = getBullMQRole();
+  logger.info({ role }, 'BullMQ: Initialized in on-demand mode.');
+}
+
+/**
+ * Lazy Queue Creation (Only created when addJob is called)
+ */
+function getOrCreateQueue(queueName: string): Queue | null {
+  if (!isBullMQEnabled()) return null;
+
+  if (queues[queueName]?.queue) {
+    return queues[queueName].queue!;
   }
 
   const connection = getBullMQConnection();
+  if (!connection) return null;
 
-  if (!connection) {
-    logger.info(
-      'BullMQ: Running in local memory dispatch mode (No remote REDIS_URL provided or ENABLE_BULLMQ!=true).',
-    );
+  try {
+    const queue = new Queue(queueName, {
+      connection,
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2_000 },
+        removeOnComplete: { count: 100 },
+        removeOnFail: { count: 500 },
+      },
+    });
 
-    return;
-  }
+    queue.on('error', (error) => {
+      if (handleQuotaError(error)) return;
+      logger.error({ queue: queueName, error: error.message }, 'BullMQ queue error');
+    });
 
-  for (const name of QUEUE_NAMES) {
-    /**
-     * Prevent duplicate initialization during hot reload.
-     */
-    if (queues[name]?.queue) {
-      continue;
+    if (!queues[queueName]) {
+      queues[queueName] = {};
+    }
+    queues[queueName].queue = queue;
+
+    const role = getBullMQRole();
+    if (role === 'worker' || role === 'full' || role === 'all') {
+      getOrCreateWorker(queueName, connection);
     }
 
-    try {
-      const queue = new Queue(name, {
-        connection,
-
-        defaultJobOptions: {
-          attempts: 3,
-
-          backoff: {
-            type: 'exponential',
-            delay: 2_000,
-          },
-
-          /**
-           * Keep recent jobs for debugging without
-           * allowing Redis to grow indefinitely.
-           */
-          removeOnComplete: {
-            count: 100,
-          },
-
-          removeOnFail: {
-            count: 500,
-          },
-        },
-      });
-
-      const events = new QueueEvents(name, {
-        connection,
-      });
-
-      const worker = new Worker(
-        name,
-
-        async (job) => {
-          logger.info(
-            {
-              queue: name,
-              jobId: job.id,
-              jobName: job.name,
-            },
-            'Processing background queue job',
-          );
-
-          /**
-           * At this stage these workers provide the
-           * infrastructure layer.
-           *
-           * Later each queue will delegate to its real
-           * service:
-           *
-           * email         -> Resend
-           * notifications -> realtime/push
-           * payments      -> payment providers
-           * webhooks      -> webhook handlers
-           * images        -> image processing
-           * shipping      -> logistics
-           * reports       -> report generation
-           */
-          return {
-            success: true,
-            processedAt: new Date().toISOString(),
-          };
-        },
-
-        {
-          connection,
-
-          /**
-           * Start conservatively while the marketplace
-           * infrastructure is being validated.
-           */
-          concurrency: 2,
-        },
-      );
-
-
-
-      queue.on('error', (error) => {
-        if (handleQuotaError(error)) return;
-        logger.error(
-          {
-            queue: name,
-            error: error.message,
-          },
-          'BullMQ queue error',
-        );
-      });
-
-      worker.on('error', (error) => {
-        if (handleQuotaError(error)) return;
-        logger.error(
-          {
-            queue: name,
-            error: error.message,
-          },
-          'BullMQ worker error',
-        );
-      });
-
-      worker.on('failed', (job, error) => {
-        if (handleQuotaError(error)) return;
-        logger.error(
-          {
-            queue: name,
-            jobId: job?.id,
-            jobName: job?.name,
-            error: error.message,
-          },
-          'Queue job failed',
-        );
-      });
-
-      worker.on('completed', (job) => {
-        logger.debug(
-          {
-            queue: name,
-            jobId: job.id,
-            jobName: job.name,
-          },
-          'Queue job completed',
-        );
-      });
-
-      events.on('error', (error) => {
-        if (handleQuotaError(error)) return;
-        logger.error(
-          {
-            queue: name,
-            error: error.message,
-          },
-          'BullMQ QueueEvents error',
-        );
-      });
-
-      queues[name] = {
-        queue,
-        worker,
-        events,
-      };
-
-      logger.info(
-        { queue: name },
-        'BullMQ queue initialized',
-      );
-    } catch (error) {
-      logger.warn(
-        {
-          queue: name,
-          error:
-            error instanceof Error
-              ? error.message
-              : error,
-        },
-        'Failed to initialize BullMQ queue',
-      );
-    }
+    logger.info({ queue: queueName }, 'BullMQ queue lazily created');
+    return queue;
+  } catch (error) {
+    logger.warn({ queue: queueName, error }, 'Failed to lazily create BullMQ queue');
+    return null;
   }
 }
 
-export async function addJob(
-  queueName: string,
-  jobName: string,
-  data: any,
-) {
-  const instance = queues[queueName];
-  const queue = instance?.queue;
+/**
+ * Lazy Worker Creation
+ */
+function getOrCreateWorker(queueName: string, connection: any): Worker | null {
+  if (queues[queueName]?.worker) {
+    return queues[queueName].worker!;
+  }
 
+  try {
+    const worker = new Worker(
+      queueName,
+      async (job) => {
+        logger.info({ queue: queueName, jobId: job.id, jobName: job.name }, 'Processing background queue job');
+        return { success: true, processedAt: new Date().toISOString() };
+      },
+      { connection, concurrency: 2 }
+    );
+
+    worker.on('error', (error) => {
+      if (handleQuotaError(error)) return;
+      logger.error({ queue: queueName, error: error.message }, 'BullMQ worker error');
+    });
+
+    if (!queues[queueName]) {
+      queues[queueName] = {};
+    }
+    queues[queueName].worker = worker;
+    return worker;
+  } catch (error) {
+    logger.warn({ queue: queueName, error }, 'Failed to create BullMQ worker');
+    return null;
+  }
+}
+
+/**
+ * On-demand QueueEvents Creation
+ */
+export function getOrCreateQueueEvents(queueName: string): QueueEvents | null {
+  if (!isBullMQEnabled()) return null;
+  if (queues[queueName]?.events) return queues[queueName].events!;
+
+  const connection = getBullMQConnection();
+  if (!connection) return null;
+
+  try {
+    const events = new QueueEvents(queueName, { connection });
+    events.on('error', (error) => {
+      if (handleQuotaError(error)) return;
+      logger.error({ queue: queueName, error: error.message }, 'BullMQ QueueEvents error');
+    });
+
+    if (!queues[queueName]) queues[queueName] = {};
+    queues[queueName].events = events;
+    return events;
+  } catch {
+    return null;
+  }
+}
+
+export async function addJob(queueName: string, jobName: string, data: any) {
+  if (!isBullMQEnabled()) {
+    logger.debug({ queueName, jobName }, 'BullMQ disabled: job not queued.');
+    return {
+      id: 'disabled',
+      name: jobName,
+      data,
+      status: 'disabled',
+    };
+  }
+
+  const queue = getOrCreateQueue(queueName);
   if (queue) {
     try {
-      return await queue.add(jobName, data, {
-        /**
-         * Optional deterministic ID can later be supplied
-         * for idempotent jobs such as payments/webhooks.
-         */
-      });
+      return await queue.add(jobName, data);
     } catch (error) {
-      logger.warn(
-        {
-          queueName,
-          jobName,
-          error:
-            error instanceof Error
-              ? error.message
-              : error,
-        },
-        'BullMQ add job failed, using synchronous fallback',
-      );
+      if (handleQuotaError(error)) {
+        return { id: 'disabled', name: jobName, data, status: 'disabled' };
+      }
+      logger.warn({ queueName, jobName, error }, 'BullMQ add job failed');
     }
   }
 
-  /**
-   * Development fallback.
-   *
-   * Critical production jobs such as payment settlement
-   * should NOT silently use this fallback later.
-   */
-  logger.debug(
-    {
-      queueName,
-      jobName,
-    },
-    'BullMQ fallback: synchronous job handling',
-  );
-
   return {
-    id: `sync_${Date.now()}`,
+    id: `noop_${Date.now()}`,
     name: jobName,
     data,
-    fallback: true,
+    status: 'disabled',
   };
 }
 
 export async function getQueuesHealth() {
-  const queueNames = Object.keys(queues);
-
-  if (queueNames.length === 0) {
+  if (!isBullMQEnabled()) {
     return {
-      status: 'in-memory fallback',
+      status: 'disabled',
       queuesCount: 0,
       queues: [],
     };
   }
 
-  const details: Record<
-    string,
-    {
-      status: string;
-      waiting?: number;
-      active?: number;
-      completed?: number;
-      failed?: number;
-    }
-  > = {};
+  const now = Date.now();
+  if (cachedQueuesHealth && now - lastQueuesHealthTime < 30_000) {
+    return cachedQueuesHealth;
+  }
 
+  const activeQueueNames = Object.keys(queues);
+  if (activeQueueNames.length === 0) {
+    const res = {
+      status: 'disabled',
+      queuesCount: 0,
+      queues: [],
+    };
+    cachedQueuesHealth = res;
+    lastQueuesHealthTime = now;
+    return res;
+  }
+
+  const details: Record<string, any> = {};
   let healthyQueues = 0;
 
-  for (const name of queueNames) {
+  for (const name of activeQueueNames) {
     const queue = queues[name]?.queue;
-
     if (!queue) {
-      details[name] = {
-        status: 'offline',
-      };
-
+      details[name] = { status: 'offline' };
       continue;
     }
 
     try {
-      const counts = await queue.getJobCounts(
-        'waiting',
-        'active',
-        'completed',
-        'failed',
-      );
-
+      const counts = await queue.getJobCounts('waiting', 'active', 'completed', 'failed');
       details[name] = {
         status: 'online',
         waiting: counts.waiting ?? 0,
@@ -433,78 +283,36 @@ export async function getQueuesHealth() {
         completed: counts.completed ?? 0,
         failed: counts.failed ?? 0,
       };
-
       healthyQueues++;
-    } catch (error) {
-      details[name] = {
-        status: 'degraded',
-      };
-
-      logger.warn(
-        {
-          queue: name,
-          error:
-            error instanceof Error
-              ? error.message
-              : error,
-        },
-        'BullMQ health check failed',
-      );
+    } catch {
+      details[name] = { status: 'degraded' };
     }
   }
 
-  return {
-    status:
-      healthyQueues === queueNames.length
-        ? 'online'
-        : healthyQueues > 0
-          ? 'degraded'
-          : 'offline',
-
-    queuesCount: queueNames.length,
-
+  const result = {
+    status: healthyQueues === activeQueueNames.length ? 'online' : healthyQueues > 0 ? 'degraded' : 'offline',
+    queuesCount: activeQueueNames.length,
     healthyQueues,
-
-    queues: queueNames,
-
+    queues: activeQueueNames,
     details,
   };
+
+  cachedQueuesHealth = result;
+  lastQueuesHealthTime = now;
+  return result;
 }
 
 export async function closeQueues(): Promise<void> {
   const entries = Object.entries(queues);
-
   for (const [name, instance] of entries) {
     try {
-      if (instance.worker) {
-        await instance.worker.close();
-      }
-
-      if (instance.events) {
-        await instance.events.close();
-      }
-
-      if (instance.queue) {
-        await instance.queue.close();
-      }
-
-      logger.info(
-        { queue: name },
-        'BullMQ queue closed',
-      );
+      if (instance.worker) await instance.worker.close();
+      if (instance.events) await instance.events.close();
+      if (instance.queue) await instance.queue.close();
+      logger.info({ queue: name }, 'BullMQ queue closed');
     } catch (error) {
-      logger.warn(
-        {
-          queue: name,
-          error:
-            error instanceof Error
-              ? error.message
-              : error,
-        },
-        'Error while closing BullMQ queue',
-      );
+      logger.warn({ queue: name, error }, 'Error closing BullMQ queue');
     }
-
     delete queues[name];
   }
 }

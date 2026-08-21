@@ -101,7 +101,7 @@ export function getRedisClient(): Redis | null {
       /**
        * Do not enable offline queue for endless writes while disconnected.
        */
-      enableOfflineQueue: true,
+      enableOfflineQueue: false,
     });
 
     redisClient.on('connect', () => {
@@ -491,6 +491,9 @@ export async function hasCache(
   return true;
 }
 
+let cachedDbsize: number | null = null;
+let lastDbsizeTime = 0;
+
 /**
  * Redis health check.
  */
@@ -503,21 +506,24 @@ export async function getRedisHealth(): Promise<{
     const client = getRedisClient();
 
     if (client) {
-      const ready = await waitForRedisReady(
-        client,
-        3_000,
-      );
-
-      if (ready) {
+      if (client.status === 'ready') {
         const pong = await client.ping();
 
         if (pong === 'PONG') {
-          const dbsize = await client.dbsize();
+          const now = Date.now();
+          if (cachedDbsize === null || now - lastDbsizeTime > 60_000) {
+            try {
+              cachedDbsize = await client.dbsize();
+              lastDbsizeTime = now;
+            } catch {
+              cachedDbsize = cachedDbsize ?? memoryCache.size;
+            }
+          }
 
           return {
             status: 'online',
             type: 'Redis / Upstash',
-            cachedKeysCount: dbsize,
+            cachedKeysCount: cachedDbsize ?? 0,
           };
         }
       }
@@ -542,7 +548,7 @@ export async function getRedisHealth(): Promise<{
   }
 
   return {
-    status: 'online (in-memory fallback)',
+    status: 'disabled',
     type: 'In-Memory Cache Engine',
     cachedKeysCount: memoryCache.size,
   };
