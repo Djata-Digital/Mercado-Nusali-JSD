@@ -3,7 +3,6 @@ import http from 'http';
 import path from 'path';
 import cors from 'cors';
 import helmet from 'helmet';
-import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
@@ -14,13 +13,10 @@ import { logger } from './src/server/infra/logger.js';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   // Initialize BullMQ background queues
   initializeQueues();
