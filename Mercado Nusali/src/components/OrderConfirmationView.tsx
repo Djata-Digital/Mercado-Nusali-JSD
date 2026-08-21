@@ -5,6 +5,8 @@ import { useOrder } from '../hooks/useOrders';
 import { OrderService } from '../services/orderService';
 import { usePreferences } from '../context/PreferencesContext';
 import { formatCurrency } from '../utils/currencyUtils';
+import { PixPaymentModal } from './PixPaymentModal';
+import { PaymentsApi } from '../api/clients/PaymentsApi';
 import {
   CheckCircle2,
   Clock,
@@ -16,6 +18,7 @@ import {
   ShoppingBag,
   RefreshCw,
   AlertCircle,
+  QrCode,
 } from 'lucide-react';
 
 export const OrderConfirmationView: React.FC = () => {
@@ -25,6 +28,11 @@ export const OrderConfirmationView: React.FC = () => {
   const queryClient = useQueryClient();
   const { showToast } = usePreferences();
   const [isConfirming, setIsConfirming] = React.useState(false);
+
+  // PIX Modal state for pending orders
+  const [isPixModalOpen, setIsPixModalOpen] = React.useState(false);
+  const [pixData, setPixData] = React.useState<any>(null);
+  const [isInitiatingPix, setIsInitiatingPix] = React.useState(false);
 
   // Fetch real order from API
   const { data: fetchedOrder, isLoading, error } = useOrder(id || '');
@@ -36,6 +44,35 @@ export const OrderConfirmationView: React.FC = () => {
     (navStateOrder && (navStateOrder.id === id || navStateOrder.orderNumber === id)
       ? navStateOrder
       : null);
+
+  const handleOpenPixModal = async () => {
+    if (!activeOrder?.id) return;
+    setIsInitiatingPix(true);
+    try {
+      const res = await PaymentsApi.initiate({
+        orderId: activeOrder.id,
+        method: 'pix',
+        provider: 'asaas',
+      });
+      if (res.success && res.data) {
+        setPixData(res.data);
+        setIsPixModalOpen(true);
+      } else {
+        showToast(res.error?.message || res.message || 'Falha ao buscar QR Code PIX.');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao carregar PIX.');
+    } finally {
+      setIsInitiatingPix(false);
+    }
+  };
+
+  const handlePixSuccess = () => {
+    setIsPixModalOpen(false);
+    showToast('Pagamento confirmado com sucesso!');
+    queryClient.invalidateQueries({ queryKey: ['order', activeOrder?.id] });
+    queryClient.invalidateQueries({ queryKey: ['orders'] });
+  };
 
   const handleConfirmDelivery = async () => {
     if (!activeOrder?.id) return;
@@ -93,7 +130,7 @@ export const OrderConfirmationView: React.FC = () => {
   const totalAmount = Number(activeOrder.totalAmount || activeOrder.total || 0);
 
   // Status flags
-  const isPaid = activeOrder.paymentStatus === 'paid' || activeOrder.paymentStatus === 'approved';
+  const isPaid = activeOrder.paymentStatus === 'paid';
   const isCancelled = activeOrder.status === 'cancelled' || activeOrder.paymentStatus === 'failed';
 
   // Address Snapshot
@@ -197,6 +234,15 @@ export const OrderConfirmationView: React.FC = () => {
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8 space-y-6">
+      {/* Pix Modal for Pending Payment */}
+      <PixPaymentModal
+        isOpen={isPixModalOpen}
+        onClose={() => setIsPixModalOpen(false)}
+        orderId={activeOrder?.id || ''}
+        paymentData={pixData}
+        onPaymentSuccess={handlePixSuccess}
+      />
+
       {/* Banner Component (State Dependent) */}
       {isCancelled ? (
         <div className="bg-red-600 text-white rounded-2xl p-6 sm:p-8 shadow-md text-center space-y-3">
@@ -223,7 +269,7 @@ export const OrderConfirmationView: React.FC = () => {
           </div>
         </div>
       ) : (
-        <div className="bg-slate-800 text-white rounded-2xl p-6 sm:p-8 shadow-md text-center space-y-3 animate-fadeIn">
+        <div className="bg-slate-800 text-white rounded-2xl p-6 sm:p-8 shadow-md text-center space-y-4 animate-fadeIn">
           <div className="w-14 h-14 bg-amber-500/20 rounded-full flex items-center justify-center mx-auto ring-8 ring-amber-500/10">
             <Clock className="w-8 h-8 text-amber-400" />
           </div>
@@ -235,6 +281,21 @@ export const OrderConfirmationView: React.FC = () => {
             <Clock className="w-3.5 h-3.5" />
             <span>Status: Pagamento Pendente ({formattedPaymentMethod})</span>
           </div>
+
+          {/* Pending PIX button if order uses PIX */}
+          {rawPaymentMethod === 'pix' && (
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={handleOpenPixModal}
+                disabled={isInitiatingPix}
+                className="bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold px-6 py-3 rounded-xl text-sm shadow-md transition inline-flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <QrCode className="w-5 h-5" />
+                <span>{isInitiatingPix ? 'Carregando PIX...' : 'PAGAR COM PIX / VER QR CODE'}</span>
+              </button>
+            </div>
+          )}
         </div>
       )}
 

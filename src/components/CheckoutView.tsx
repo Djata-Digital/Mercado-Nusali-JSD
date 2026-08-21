@@ -25,6 +25,7 @@ import { PixService } from '../services/pixService';
 import { convertToBRL, PixTransaction } from '../utils/pixEngine';
 
 import { OrdersApi } from '../api/clients/OrdersApi';
+import { PaymentsApi } from '../api/clients/PaymentsApi';
 import { BuyerService } from '../services/buyerService';
 
 export const CheckoutView: React.FC = () => {
@@ -72,11 +73,22 @@ export const CheckoutView: React.FC = () => {
     }).catch(() => {});
   }, [selectedCountry]);
 
+  const orderCurrency: CurrencyCode = cart[0]?.product?.currency || (cart[0] as any)?.currency || countriesConfig[country]?.currency || 'XOF';
+  const isBrlCurrency = orderCurrency === 'BRL';
+
   // Payment State
   const countryPayments = countriesConfig[country]?.paymentMethods || ['orange_money', 'credit_card'];
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethodType>(
-    country === 'BR' ? 'pix' : (countryPayments[0] as PaymentMethodType)
+    isBrlCurrency ? 'pix' : (countryPayments[0] as PaymentMethodType)
   );
+
+  // Ensure payment method falls back if PIX is selected for non-BRL currency
+  React.useEffect(() => {
+    if (!isBrlCurrency && paymentMethod === 'pix') {
+      const fallback = countryPayments.find((m) => m !== 'pix') || 'orange_money';
+      setPaymentMethod(fallback as PaymentMethodType);
+    }
+  }, [isBrlCurrency, paymentMethod, countryPayments]);
 
   const [phoneNumber, setPhoneNumber] = useState('');
   const [cardNumber, setCardNumber] = useState('');
@@ -85,15 +97,14 @@ export const CheckoutView: React.FC = () => {
   const [cardCvc, setCardCvc] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // Pix Modal state
+  // Real Pix Modal state
   const [isPixModalOpen, setIsPixModalOpen] = useState(false);
-  const [pixTransaction, setPixTransaction] = useState<PixTransaction | null>(null);
+  const [activeOrderId, setActiveOrderId] = useState<string>('');
+  const [pixInitiateData, setPixInitiateData] = useState<any>(null);
 
   const isInternational = cart.some(
     (i) => i.product.shipping?.isInternational || i.product.shipping?.originCountry !== country
   );
-
-  const orderCurrency: CurrencyCode = cart[0]?.product?.currency || (cart[0] as any)?.currency || countriesConfig[country]?.currency || 'XOF';
 
   const customsDuty = isInternational ? cartTotal * 0.08 : 0;
   const shippingFee = cart.every((i) => i.product.shipping?.freeShipping) ? 0 : (orderCurrency === 'XOF' ? 2500 : 25);
@@ -102,10 +113,12 @@ export const CheckoutView: React.FC = () => {
 
   const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isProcessing) return; // Prevent double clicks
     setIsProcessing(true);
     setErrorMessage(null);
 
     try {
+      // 1. Create Order in PostgreSQL
       const res = await OrdersApi.create({
         shippingAddress: address,
         paymentMethod: paymentMethod,
@@ -113,16 +126,58 @@ export const CheckoutView: React.FC = () => {
         countryCode: country,
       });
 
-      if (res.success && res.data) {
-        clearCart();
-        setIsProcessing(false);
-        const createdOrder = res.data;
-        navigate(`/orders/${createdOrder.id}/confirmation`, { state: { order: createdOrder } });
-      } else {
-        const msg = res.error?.message || 'Erro ao processar checkout.';
+      if (!res.success || !res.data) {
+        const msg = res.error?.message || res.message || 'Erro ao processar checkout.';
         setErrorMessage(msg);
         setIsProcessing(false);
+        return;
       }
+
+      const createdOrder = res.data;
+
+      // 2. Non-PIX payment: navigate directly to confirmation
+      if (paymentMethod !== 'pix') {
+        clearCart();
+        setIsProcessing(false);
+        navigate(`/orders/${createdOrder.id}/confirmation`, { state: { order: createdOrder } });
+        return;
+      }
+
+      // 3. PIX payment: Initiate Asaas Payment via POST /api/v1/payments/initiate
+      const payRes = await PaymentsApi.initiate({
+        orderId: createdOrder.id,
+        method: 'pix',
+        provider: 'asaas',
+      });
+
+      if (!payRes.success || !payRes.data) {
+        const errCode = payRes.error?.code || '';
+        let msg = payRes.error?.message || payRes.message || 'Falha ao iniciar pagamento PIX Asaas.';
+
+        if (errCode === 'ASAAS_NOT_CONFIGURED') {
+          msg = 'Serviço de pagamento PIX temporariamente indisponível. Entre em contato com o suporte.';
+        } else if (errCode === 'ASAAS_AUTHENTICATION_ERROR') {
+          msg = 'Erro de autenticação no gateway. Tente novamente mais tarde.';
+        } else if (errCode === 'ASAAS_VALIDATION_ERROR') {
+          msg = 'Dados inválidos para geração do Pix. Verifique seu cadastro.';
+        } else if (errCode === 'ASAAS_PROVIDER_UNAVAILABLE' || errCode === 'ASAAS_NETWORK_ERROR') {
+          msg = 'O serviço PIX do Asaas está indisponível no momento. Tente novamente em alguns instantes.';
+        } else if (errCode === 'ASAAS_CURRENCY_NOT_SUPPORTED') {
+          msg = 'Pagamento via PIX Asaas é suportado apenas para pedidos em Reais (BRL).';
+        } else if (errCode === 'ASAAS_RATE_LIMITED') {
+          msg = 'Serviço PIX temporariamente ocupado. Aguarde alguns instantes e tente novamente.';
+        }
+
+        setErrorMessage(msg);
+        setIsProcessing(false);
+        return;
+      }
+
+      // 4. Open Real Asaas Pix Modal
+      setActiveOrderId(createdOrder.id);
+      setPixInitiateData(payRes.data);
+      setIsPixModalOpen(true);
+      setIsProcessing(false);
     } catch (err: any) {
       console.error('Checkout failed:', err);
       const msg = err?.response?.data?.error?.message || err?.message || 'Erro ao finalizar pedido.';
@@ -131,29 +186,10 @@ export const CheckoutView: React.FC = () => {
     }
   };
 
-  const handlePixPaymentSuccess = async (tx: PixTransaction) => {
-    setIsProcessing(true);
+  const handlePixPaymentSuccess = (updatedOrder: any) => {
     setIsPixModalOpen(false);
-    try {
-      const res = await OrdersApi.create({
-        shippingAddress: address,
-        paymentMethod: 'pix',
-        currency: 'BRL',
-        countryCode: country,
-      });
-
-      if (res.success && res.data) {
-        clearCart();
-        setIsProcessing(false);
-        navigate(`/orders/${res.data.id}/confirmation`, { state: { order: res.data } });
-      } else {
-        setErrorMessage(res.error?.message || 'Erro ao finalizar pedido via Pix.');
-        setIsProcessing(false);
-      }
-    } catch (err: any) {
-      console.error('Error completing order after Pix:', err);
-      setIsProcessing(false);
-    }
+    clearCart();
+    navigate(`/orders/${updatedOrder.id || activeOrderId}/confirmation`, { state: { order: updatedOrder } });
   };
 
   if (cart.length === 0) {
@@ -176,7 +212,8 @@ export const CheckoutView: React.FC = () => {
       <PixPaymentModal
         isOpen={isPixModalOpen}
         onClose={() => setIsPixModalOpen(false)}
-        transaction={pixTransaction}
+        orderId={activeOrderId}
+        paymentData={pixInitiateData}
         onPaymentSuccess={handlePixPaymentSuccess}
       />
 
@@ -294,25 +331,27 @@ export const CheckoutView: React.FC = () => {
 
             {/* Payment Method Selector Grid */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {/* PIX is always available for instant cross-border or Brazil */}
-              <button
-                type="button"
-                onClick={() => setPaymentMethod('pix')}
-                className={`p-3 rounded-xl border flex flex-col items-center justify-center text-center gap-1 transition cursor-pointer ${
-                  paymentMethod === 'pix'
-                    ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20'
-                    : 'border-gray-200 hover:border-gray-300 bg-white'
-                }`}
-              >
-                <div className="relative">
-                  <QrCode className="w-6 h-6 text-emerald-600" />
-                  <span className="absolute -top-1.5 -right-2 bg-emerald-600 text-white font-black text-[9px] px-1 rounded-full">
-                    ⚡
-                  </span>
-                </div>
-                <span className="text-xs font-bold text-gray-900">PIX Brasil</span>
-                <span className="text-[10px] text-emerald-700 font-semibold">Aprovação imediata</span>
-              </button>
+              {/* PIX is displayed ONLY when orderCurrency === 'BRL' */}
+              {isBrlCurrency && (
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('pix')}
+                  className={`p-3 rounded-xl border flex flex-col items-center justify-center text-center gap-1 transition cursor-pointer ${
+                    paymentMethod === 'pix'
+                      ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20'
+                      : 'border-gray-200 hover:border-gray-300 bg-white'
+                  }`}
+                >
+                  <div className="relative">
+                    <QrCode className="w-6 h-6 text-emerald-600" />
+                    <span className="absolute -top-1.5 -right-2 bg-emerald-600 text-white font-black text-[9px] px-1 rounded-full">
+                      ⚡
+                    </span>
+                  </div>
+                  <span className="text-xs font-bold text-gray-900">PIX</span>
+                  <span className="text-[10px] text-emerald-700 font-semibold">Pagamento Instantâneo</span>
+                </button>
+              )}
 
               {countryPayments.includes('orange_money') && (
                 <button
@@ -375,18 +414,14 @@ export const CheckoutView: React.FC = () => {
                           Pagamento Instantâneo via PIX
                         </span>
                         <span className="bg-emerald-200 text-emerald-900 text-[10px] font-black px-2 py-0.5 rounded-full">
-                          Sem taxas
+                          Pagamento instantâneo
                         </span>
                       </div>
                       <p className="text-[11px] text-emerald-800 font-medium leading-relaxed">
                         Ao clicar no botão abaixo, geramos o <strong>QR Code oficial</strong> e o código <strong>Pix Copia e Cola</strong> (padrão BACEN). Você poderá pagar pelo app do Nubank, Itaú, Bradesco, Inter, Santander, Mercado Pago, Caixa ou qualquer outro banco.
                       </p>
                       <div className="pt-1.5 flex flex-wrap items-center gap-2 text-xs font-bold text-emerald-900">
-                        <span>Valor em Reais: R$ {grandTotalBrl.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
-                        <span>•</span>
-                        <span className="text-[11px] text-emerald-700 bg-white/80 px-2 py-0.5 rounded-md border border-emerald-300">
-                          🌐 Câmbio do Dia: 1 {countriesConfig[country].currency} = R$ {(grandTotalBrl / grandTotal).toLocaleString('pt-BR', { maximumFractionDigits: 4 })}
-                        </span>
+                        <span>Total a pagar: R$ {grandTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                       </div>
                     </div>
                   </div>
@@ -510,12 +545,6 @@ export const CheckoutView: React.FC = () => {
                     {grandTotalInfo.isConverted && (
                       <div className="text-[10px] text-gray-500 font-medium text-right">
                         Moeda do pedido: {grandTotalInfo.originalFormatted}
-                      </div>
-                    )}
-                    {paymentMethod === 'pix' && orderCurrency !== 'BRL' && (
-                      <div className="flex justify-between text-[11px] text-emerald-700 font-bold bg-emerald-50 px-2.5 py-1 rounded-lg">
-                        <span>Valor a pagar no Pix:</span>
-                        <span>R$ {grandTotalBrl.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</span>
                       </div>
                     )}
                   </div>

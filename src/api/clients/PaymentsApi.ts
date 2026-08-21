@@ -14,7 +14,7 @@ export class PaymentsApi {
     return apiClient.post('/payments/process', data);
   }
 
-  static async initiate(data: { orderId: string; amount: number; currency?: string; method: string; provider?: string; idempotencyKey?: string }): Promise<ApiResponse<any>> {
+  static async initiate(data: { orderId: string; amount?: number; currency?: string; method: string; provider?: string; idempotencyKey?: string }): Promise<ApiResponse<any>> {
     return apiClient.post('/payments/initiate', data);
   }
 
