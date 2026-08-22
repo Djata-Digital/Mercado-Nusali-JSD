@@ -1,0 +1,138 @@
+import { Product } from '../types';
+
+export function normalizeProduct(p: any): Product {
+  if (!p) {
+    return {
+      id: '',
+      title: 'Produto não encontrado',
+      price: 0,
+      currency: 'XOF',
+      installmentsMax: 1,
+      installmentsInterestFree: false,
+      image: '',
+      galleryImages: [],
+      category: 'Geral',
+      categorySlug: 'geral',
+      condition: 'novo',
+      brand: '',
+      model: '',
+      rating: 0,
+      reviewsCount: 0,
+      seller: {
+        id: '',
+        name: 'Vendedor',
+        reputationLevel: 'silver' as any,
+        reputationScore: 0,
+        salesCount: 0,
+        location: { city: '', state: '' },
+        goodService: false,
+        onTimeDelivery: false,
+      },
+      shipping: {
+        freeShipping: false,
+        arrivesTomorrow: false,
+        shippingPrice: 0,
+        fullFulfilled: false,
+        originCountry: 'GW' as any,
+      },
+      stock: 0,
+      salesCount: 0,
+      description: '',
+      specs: {},
+      questions: [],
+      reviews: [],
+    };
+  }
+
+  const rawPrice = typeof p.price === 'number' ? p.price : parseFloat(p.price) || 0;
+
+  // Extract images
+  let galleryImages: string[] = [];
+  if (Array.isArray(p.galleryImages) && p.galleryImages.length > 0) {
+    galleryImages = p.galleryImages.map((img: any) => typeof img === 'string' ? img : (img?.imageUrl || ''));
+  } else if (Array.isArray(p.images) && p.images.length > 0) {
+    galleryImages = p.images.map((img: any) => typeof img === 'string' ? img : (img?.imageUrl || ''));
+  } else if (p.image || p.imageUrl) {
+    galleryImages = [p.image || p.imageUrl];
+  }
+  galleryImages = galleryImages.filter(Boolean);
+
+  const mainImage = p.image || p.imageUrl || (galleryImages.length > 0 ? galleryImages[0] : '');
+
+  // Normalize condition
+  const rawCond = String(p.condition || '').toLowerCase().trim();
+  const normalizedCondition = rawCond === 'used' || rawCond === 'usado' ? 'usado' : 'novo';
+
+  // Normalize origin country
+  const resolvedOriginCountry = (p.originCountry || p.shipping?.originCountry || p.seller?.country || p.countryCode || (p.currency === 'BRL' ? 'BR' : '')) as any;
+
+  return {
+    id: String(p.id || ''),
+    title: String(p.title || p.name || ''),
+    price: rawPrice,
+    currency: p.currency || (resolvedOriginCountry === 'BR' ? 'BRL' : 'XOF'),
+    originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
+    discountPercentage: p.discountPercentage ? Number(p.discountPercentage) : undefined,
+    installmentsMax: p.installmentsMax ? Number(p.installmentsMax) : 1,
+    installmentsInterestFree: Boolean(p.installmentsInterestFree),
+    image: mainImage,
+    galleryImages: galleryImages.length > 0 ? galleryImages : (mainImage ? [mainImage] : []),
+    videos: Array.isArray(p.videos) ? p.videos : (p.videoUrl ? [{ url: p.videoUrl, title: 'Vídeo Demonstrativo', duration: '', type: 'mp4' }] : []),
+    videoUrl: p.videoUrl || (Array.isArray(p.videos) && p.videos[0] ? (typeof p.videos[0] === 'string' ? p.videos[0] : p.videos[0].url) : undefined),
+    shortVideo: p.shortVideo || (p.videoUrl ? { url: p.videoUrl, title: 'Vídeo Demonstrativo', duration: '' } : undefined),
+    category: p.category || 'Geral',
+    categorySlug: p.categorySlug || 'geral',
+    condition: normalizedCondition,
+    brand: p.brand || '',
+    model: p.model || '',
+    rating: typeof p.rating === 'number' ? p.rating : 0,
+    reviewsCount: typeof p.reviewsCount === 'number' ? p.reviewsCount : 0,
+    seller: {
+      id: p.seller?.id || p.sellerId || '',
+      name: p.seller?.name || p.sellerName || p.storeName || 'Vendedor',
+      reputationLevel: (p.seller?.reputationLevel || 'silver') as any,
+      reputationScore: typeof p.seller?.reputationScore === 'number' ? p.seller.reputationScore : 0,
+      salesCount: typeof p.seller?.salesCount === 'number' ? p.seller.salesCount : 0,
+      isOfficialStore: Boolean(p.seller?.isOfficialStore),
+      location: p.seller?.location || { city: p.seller?.city || '', state: p.seller?.state || '' },
+      goodService: Boolean(p.seller?.goodService),
+      onTimeDelivery: Boolean(p.seller?.onTimeDelivery),
+      country: (p.seller?.country || resolvedOriginCountry) as any,
+      kycStatus: p.seller?.kycStatus || '',
+    },
+    storeId: p.storeId || p.seller?.storeId || '',
+    storeName: p.storeName || p.seller?.name || '',
+    isDigitalProduct: Boolean(p.isDigitalProduct),
+    weightKg: typeof p.weightKg === 'number' ? p.weightKg : (p.specs?.Peso ? parseFloat(p.specs.Peso.replace(/[^\d.]/g, '')) || 0 : 0),
+    dimensionsCm: p.dimensionsCm || undefined,
+    publishingScope: p.publishingScope || (p.shipping?.isInternational ? 'international' : 'national'),
+    targetCountries: Array.isArray(p.targetCountries) ? p.targetCountries : (p.shipping?.targetCountries || []),
+    originCountry: resolvedOriginCountry,
+    productKits: Array.isArray(p.productKits) ? p.productKits : [],
+    availableColors: Array.isArray(p.availableColors) ? p.availableColors : [],
+    availableSizes: Array.isArray(p.availableSizes) ? p.availableSizes : [],
+    variants: Array.isArray(p.variants) ? p.variants : [],
+    shipping: {
+      freeShipping: Boolean(p.shipping?.freeShipping ?? p.freeShipping),
+      arrivesTomorrow: Boolean(p.shipping?.arrivesTomorrow ?? p.arrivesTomorrow),
+      shippingPrice: typeof p.shipping?.shippingPrice === 'number' ? p.shipping.shippingPrice : (p.freeShipping ? 0 : 0),
+      fullFulfilled: Boolean(p.shipping?.fullFulfilled ?? p.full),
+      isInternational: Boolean(p.shipping?.isInternational ?? (p.publishingScope === 'international')),
+      originCountry: p.shipping?.originCountry || resolvedOriginCountry,
+      originCity: p.shipping?.originCity || p.seller?.location?.city || '',
+      targetCountries: p.shipping?.targetCountries || p.targetCountries || [],
+      warehouseName: p.shipping?.warehouseName || '',
+      estimatedDays: typeof p.shipping?.estimatedDays === 'number' ? p.shipping.estimatedDays : undefined,
+      customsDutyEstimate: typeof p.shipping?.customsDutyEstimate === 'number' ? p.shipping.customsDutyEstimate : 0,
+    },
+    stock: typeof p.stock === 'number' ? p.stock : 0,
+    salesCount: typeof p.salesCount === 'number' ? p.salesCount : 0,
+    description: p.description || '',
+    specs: p.specs || {},
+    questions: Array.isArray(p.questions) ? p.questions : [],
+    reviews: Array.isArray(p.reviews) ? p.reviews : [],
+    featured: Boolean(p.featured),
+    offerOfDay: Boolean(p.offerOfDay),
+    createdAt: p.createdAt || new Date().toISOString(),
+  };
+}
