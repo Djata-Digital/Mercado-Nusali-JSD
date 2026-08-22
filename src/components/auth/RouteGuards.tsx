@@ -23,9 +23,10 @@ export const ProtectedRoute: React.FC<{ children?: React.ReactNode }> = ({ child
 };
 
 export const GuestRoute: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, user } = useAuth();
   const location = useLocation();
-  const from = location.state?.from?.pathname || '/';
+  const rawFrom = location.state?.from?.pathname;
+  const from = rawFrom && rawFrom !== '/login' ? rawFrom : null;
 
   if (isLoading) {
     return (
@@ -35,8 +36,15 @@ export const GuestRoute: React.FC<{ children?: React.ReactNode }> = ({ children 
     );
   }
 
-  if (isAuthenticated) {
-    return <Navigate to={from} replace />;
+  if (isAuthenticated && user) {
+    const role = String(user.role || '').toUpperCase();
+    const defaultDest =
+      role === 'SELLER'
+        ? '/seller/dashboard'
+        : role === 'ADMIN' || role === 'GLOBAL_ADMIN' || role === 'COUNTRY_REPRESENTATIVE' || role === 'REGIONAL_SUPERVISOR'
+        ? '/admin/dashboard'
+        : '/';
+    return <Navigate to={from || defaultDest} replace />;
   }
 
   return children ? <>{children}</> : <Outlet />;

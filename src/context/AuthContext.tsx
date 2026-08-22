@@ -41,28 +41,37 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
 
           // Live session verification against GET /api/v1/auth/me
-          const meRes = await AuthService.me();
-          if (meRes.success && meRes.data) {
-            const liveUser = (meRes.data as any).user || meRes.data;
-            if (liveUser && liveUser.id) {
-              setUser(liveUser);
-              setActiveRole(liveUser.role || 'BUYER');
-              storageService.setUser(liveUser);
+          try {
+            const meRes = await AuthService.me();
+            if (meRes.success && meRes.data) {
+              const rawUser = (meRes.data as any).user || meRes.data;
+              if (rawUser && rawUser.id) {
+                const normalizedUser: User = {
+                  ...rawUser,
+                  name: rawUser.fullName || rawUser.name || '',
+                  fullName: rawUser.fullName || rawUser.name || '',
+                };
+                setUser(normalizedUser);
+                setActiveRole(normalizedUser.role || 'BUYER');
+                storageService.setUser(normalizedUser);
+              }
+            } else if ((meRes as any)?.status === 401 || meRes?.error?.code === 'UNAUTHORIZED' || meRes?.error?.code === 'TOKEN_EXPIRED_OR_INVALID') {
+              storageService.removeToken();
+              storageService.removeUser();
+              setUser(null);
+              setToken(null);
             }
-          } else {
-            // Token is invalid/expired
-            storageService.removeToken();
-            storageService.removeUser();
-            setUser(null);
-            setToken(null);
+          } catch (meErr: any) {
+            if (meErr?.response?.status === 401) {
+              storageService.removeToken();
+              storageService.removeUser();
+              setUser(null);
+              setToken(null);
+            }
           }
         }
       } catch (err) {
         console.error('Failed to restore auth session:', err);
-        storageService.removeToken();
-        storageService.removeUser();
-        setUser(null);
-        setToken(null);
       } finally {
         setIsLoading(false);
       }

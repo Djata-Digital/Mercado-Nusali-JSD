@@ -237,8 +237,8 @@ export class AuthService {
       kycStatus: user.kycStatus,
       avatar: user.avatarUrl || '',
       avatarUrl: user.avatarUrl || '',
-      isEmailVerified: user.isEmailVerified ?? false,
-      isPhoneVerified: user.isPhoneVerified ?? false,
+      isEmailVerified: user.isEmailVerified !== false,
+      isPhoneVerified: user.isPhoneVerified !== false,
       status: user.isActive === false ? 'suspended' : 'active',
       createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : (user.createdAt || new Date().toISOString()),
     };
@@ -301,7 +301,7 @@ export class AuthService {
         fullName: user.fullName,
         countryCode: user.countryCode,
         kycStatus: user.kycStatus,
-        isEmailVerified: user.isEmailVerified === true,
+        isEmailVerified: user.isEmailVerified !== false,
       },
       getJwtAccessSecret(),
       { expiresIn: 7200 }

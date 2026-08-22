@@ -134,42 +134,40 @@ class ApiClient {
           originalRequest._retry = true;
 
           try {
-            const refreshToken =
-              storageService.getRefreshToken();
+            const refreshToken = storageService.getRefreshToken();
 
             if (refreshToken) {
               const res = await axios.post(
                 `${CONFIG.API_URL}/auth/refresh`,
-                {
-                  refreshToken,
-                }
+                { refreshToken }
               );
 
-              const newToken =
-                res.data?.data?.token;
+              const newToken = res.data?.data?.token;
 
-              if (!newToken) {
-                throw new Error(
-                  'Refresh token não retornou novo access token.'
-                );
+              if (newToken) {
+                storageService.setToken(newToken);
+                originalRequest.headers = originalRequest.headers || {};
+                originalRequest.headers.Authorization = `Bearer ${newToken}`;
+                return this.instance(originalRequest);
               }
+            }
 
-              storageService.setToken(newToken);
-
-              originalRequest.headers =
-                originalRequest.headers || {};
-
-              originalRequest.headers.Authorization =
-                `Bearer ${newToken}`;
-
-              return this.instance(originalRequest);
+            if (storageService.getToken()) {
+              storageService.removeToken();
+              storageService.removeUser();
+              storageService.removeRefreshToken();
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('nusali:auth_expired'));
+              }
             }
           } catch (refreshErr) {
-            storageService.removeToken();
-            storageService.removeUser();
-            storageService.removeRefreshToken();
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('nusali:auth_expired'));
+            if (storageService.getToken()) {
+              storageService.removeToken();
+              storageService.removeUser();
+              storageService.removeRefreshToken();
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('nusali:auth_expired'));
+              }
             }
           }
         }

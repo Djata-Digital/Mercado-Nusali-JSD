@@ -85,14 +85,22 @@ export const LoginPage: React.FC = () => {
 
       setSuccessMessage('Autenticado com sucesso no Mercado Nusali!');
       setTimeout(() => {
-        if (loggedUser.role === 'SELLER') {
-          navigate(from !== '/' ? from : '/seller/dashboard');
-        } else if (loggedUser.role === 'ADMIN' || loggedUser.role === 'GLOBAL_ADMIN') {
-          navigate(from !== '/' ? from : '/admin/dashboard');
+        const userRole = String(loggedUser.role || '').toUpperCase();
+        const targetPath = from && from !== '/login' && from !== '/' ? from : null;
+
+        if (userRole === 'SELLER') {
+          navigate(targetPath || '/seller/dashboard', { replace: true });
+        } else if (
+          userRole === 'ADMIN' ||
+          userRole === 'GLOBAL_ADMIN' ||
+          userRole === 'COUNTRY_REPRESENTATIVE' ||
+          userRole === 'REGIONAL_SUPERVISOR'
+        ) {
+          navigate(targetPath || '/admin/dashboard', { replace: true });
         } else {
-          navigate(from);
+          navigate(targetPath || '/', { replace: true });
         }
-      }, 800);
+      }, 400);
     } catch (err: any) {
       const msg = err.message || 'Erro ao realizar login. Tente novamente.';
       if (msg.includes('EMAIL_VERIFICATION_REQUIRED') || msg.includes('E-mail não verificado')) {
