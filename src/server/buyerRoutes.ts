@@ -45,6 +45,7 @@ import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, and, or, isNull } from 'drizzle-orm';
 
 export const buyerRouter = Router();
+buyerRouter.use(requireAuth);
 
 // ==========================================
 // UNIFIED REAL STATE ENGINE FOR BUYER PANEL
@@ -1530,7 +1531,7 @@ buyerRouter.post('/returns', async (req: AuthRequest, res: Response) => {
 // 9. DISPUTES & ESCROW MEDIATION
 // ==========================================
 
-buyerRouter.get('/disputes', async (req: AuthRequest, res: Response) => {
+buyerRouter.get('/disputes', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
@@ -1551,7 +1552,7 @@ buyerRouter.get('/disputes', async (req: AuthRequest, res: Response) => {
   }
 });
 
-buyerRouter.post('/disputes', async (req: AuthRequest, res: Response) => {
+buyerRouter.post('/disputes', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });

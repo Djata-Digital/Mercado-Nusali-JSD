@@ -1,13 +1,16 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { DisputeService } from '../services/disputeService';
+import { useAuth } from '../context/AuthContext';
 
 export const useDisputes = () => {
+  const { isAuthenticated } = useAuth();
   return useQuery({
     queryKey: ['disputes'],
     queryFn: async () => {
       const res = await DisputeService.getDisputes();
-      return res.data;
+      return res.data || [];
     },
+    enabled: Boolean(isAuthenticated),
   });
 };
 

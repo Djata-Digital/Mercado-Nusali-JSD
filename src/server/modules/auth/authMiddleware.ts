@@ -4,6 +4,7 @@ import { getDb } from '../../../db/index.js';
 import { users } from '../../../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { getJwtAccessSecret } from './jwtConfig.js';
+import { logger } from '../../infra/logger.js';
 
 export interface AuthRequest extends Request {
   user?: {
@@ -19,7 +20,12 @@ export interface AuthRequest extends Request {
 
 export function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
+  const routePath = req.originalUrl || req.url || '';
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (process.env.NODE_ENV !== 'production') {
+      logger.warn({ route: routePath, bearerPresent: false, jwtVerified: false, reqUserPresent: false }, '[AUTH] Missing Bearer header');
+    }
     return res.status(401).json({
       success: false,
       error: {
@@ -53,12 +59,25 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
       isEmailVerified: decoded.isEmailVerified !== false,
     };
 
-    const allowedPath = req.originalUrl || req.url || '';
+    if (process.env.NODE_ENV !== 'production') {
+      logger.info(
+        {
+          route: routePath,
+          bearerPresent: true,
+          jwtVerified: true,
+          userId: req.user.id,
+          role: req.user.role,
+          reqUserPresent: true,
+        },
+        '[AUTH] Request authenticated'
+      );
+    }
+
     const isUnverifiedAllowed =
-      allowedPath.includes('/auth/verify-email') ||
-      allowedPath.includes('/auth/resend-verification') ||
-      allowedPath.includes('/auth/logout') ||
-      allowedPath.includes('/auth/me');
+      routePath.includes('/auth/verify-email') ||
+      routePath.includes('/auth/resend-verification') ||
+      routePath.includes('/auth/logout') ||
+      routePath.includes('/auth/me');
 
     if (req.user.isEmailVerified === false && !isUnverifiedAllowed) {
       return res.status(403).json({
@@ -72,6 +91,18 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
 
     return next();
   } catch (err: any) {
+    if (process.env.NODE_ENV !== 'production') {
+      logger.warn(
+        {
+          route: routePath,
+          bearerPresent: true,
+          jwtVerified: false,
+          errorType: err?.name || 'UnknownAuthError',
+          reqUserPresent: false,
+        },
+        '[AUTH] JWT Verification Failed'
+      );
+    }
     return res.status(401).json({
       success: false,
       error: {
