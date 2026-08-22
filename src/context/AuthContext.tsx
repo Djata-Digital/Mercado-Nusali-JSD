@@ -123,8 +123,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const registeredUser = res.data.user;
       setUser(registeredUser);
-      setToken(res.data.token);
-      setActiveRole(registeredUser.role || 'BUYER');
+      if (res.data.token) {
+        setToken(res.data.token);
+      } else {
+        setToken(null);
+      }
+      setActiveRole(registeredUser?.role || 'BUYER');
       return registeredUser;
     } finally {
       setIsLoading(false);

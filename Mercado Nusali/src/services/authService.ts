@@ -77,11 +77,15 @@ export const AuthService = {
     return AuthApi.resetPassword(data);
   },
 
-  async verifyEmail(data: VerifyEmailRequest): Promise<ApiResponse<{ user: User; message: string }>> {
+  async verifyEmail(data: VerifyEmailRequest): Promise<ApiResponse<{ user: User; token?: string; refreshToken?: string; message: string }>> {
     const res = await AuthApi.verifyEmail(data);
 
     if (res.success && res.data?.user) {
       storageService.setUser(res.data.user);
+      const token = (res.data as any)?.token;
+      if (token) {
+        storageService.setToken(token);
+      }
     }
     return res;
   },

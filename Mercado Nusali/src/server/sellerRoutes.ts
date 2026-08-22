@@ -31,6 +31,7 @@ import {
   couponUsages,
   campaigns,
   users,
+  userProfiles,
   sellers,
   sellerProfiles,
   sellerKyc,
@@ -362,6 +363,14 @@ sellerRouter.get('/analytics', async (req: Request, res: Response) => {
   });
 });
 
+function canSellerOperate(seller: any): boolean {
+  if (!seller) return false;
+  if (seller.isEmailVerified === false) return false;
+  if (seller.status === 'blocked' || seller.status === 'suspended') return false;
+  const kyc = seller.kycStatus;
+  return kyc === 'verified' || kyc === 'approved';
+}
+
 // ==========================================
 // HELPER FOR RESOLVING SELLER RECORD
 // ==========================================
@@ -376,13 +385,26 @@ async function resolveSeller(req: AuthRequest) {
 
   const targetSeller = s[0];
   const userRows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  const userProfileRows = await db.select().from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1);
   const kycRows = await db.select().from(sellerKyc).where(eq(sellerKyc.sellerId, targetSeller.id)).limit(1);
-  const userStatus = userRows[0]?.kycStatus;
-  const kycStatus = kycRows[0]?.status || userStatus || 'pending';
+
+  const user = userRows[0];
+  const userProf = userProfileRows[0];
+  const kycRow = kycRows[0];
+
+  const rawKycStatus = kycRow?.status || user?.kycStatus || 'pending';
+  const isApproved = rawKycStatus === 'verified' || rawKycStatus === 'approved';
+  const canonicalKycStatus = isApproved ? 'verified' : (rawKycStatus === 'under_review' ? 'under_review' : rawKycStatus === 'rejected' ? 'rejected' : 'pending');
+
+  // Fix Requirement 9: NEVER return phone number as taxId!
+  const cleanTaxId = (targetSeller.taxId && targetSeller.taxId !== targetSeller.phone) ? targetSeller.taxId : (userProf?.taxId || '');
 
   return {
     ...targetSeller,
-    kycStatus: kycStatus === 'verified' || userStatus === 'verified' || targetSeller.status === 'active' ? 'verified' : kycStatus,
+    taxId: cleanTaxId,
+    dateOfBirth: userProf?.dateOfBirth || '',
+    kycStatus: canonicalKycStatus,
+    isEmailVerified: user?.isEmailVerified === true,
   };
 }
 
@@ -420,7 +442,7 @@ sellerRouter.post('/onboard', async (req: AuthRequest, res: Response) => {
     const { companyName, tradingName, taxId, phone, countryCode } = req.body;
     const finalCompanyName = (companyName || user.fullName || 'Vendedor').trim();
     const finalTradingName = (tradingName || companyName || user.fullName || 'Vendedor').trim();
-    const finalTaxId = (taxId || user.phone || '').trim();
+    const finalTaxId = (taxId && taxId.trim() !== phone) ? taxId.trim() : '';
     const finalPhone = (phone || user.phone || '').trim();
     const finalCountryCode = (countryCode || user.countryCode || 'GW').trim().toUpperCase();
 
@@ -568,7 +590,20 @@ sellerRouter.get('/stores', async (req: AuthRequest, res: Response) => {
     if (!seller) return res.json({ success: true, data: [] });
 
     const storeRows = await db.select().from(storesTable).where(eq(storesTable.sellerId, seller.id));
-    return res.json({ success: true, data: storeRows });
+    const categoriesRows = await db.select().from(categories).catch(() => []);
+    const categoriesMap = new Map<string, string>(categoriesRows.map((c: any) => [c.id, c.name] as [string, string]));
+
+    const formattedStores = storeRows.map((s) => ({
+      ...s,
+      logo: s.logoUrl || '',
+      banner: s.bannerUrl || '',
+      category: s.categoryId ? (categoriesMap.get(s.categoryId) || '') : '',
+      country: s.countryCode || 'GW',
+      city: s.addressJson && typeof s.addressJson === 'object' ? (s.addressJson as any).city || '' : '',
+      address: s.addressJson && typeof s.addressJson === 'object' ? (s.addressJson as any).address || '' : '',
+    }));
+
+    return res.json({ success: true, data: formattedStores });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar lojas.' });
   }
@@ -580,26 +615,57 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
     if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
     const seller = await resolveSeller(req);
     if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não cadastrado.' });
-    if ((seller as any).kycStatus !== 'verified' && seller.status !== 'active') {
+    if (!canSellerOperate(seller)) {
       return res.status(403).json({
         success: false,
-        message: '🔒 Recurso Bloqueado: Sua conta de vendedor precisa ter a verificação KYC aprovada pelo administrador para criar lojas.',
+        error: {
+          code: 'SELLER_KYC_REQUIRED',
+          message: '🔒 Recurso Bloqueado: Sua conta de vendedor precisa ter a verificação KYC aprovada pelo administrador para criar lojas.',
+        },
       });
     }
 
-    const { name, slug, description, countryCode, logoUrl, bannerUrl } = req.body;
+    const { name, slug, description, countryCode, logoUrl, bannerUrl, categoryId, addressJson, businessHoursJson } = req.body;
+
+    // Rule 9: Remove name fallback - name is REQUIRED
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'STORE_NAME_REQUIRED', message: 'O nome da loja é obrigatório.' },
+      });
+    }
+
+    // Rule 10: Backend Category Validation
+    if (!categoryId || typeof categoryId !== 'string' || !categoryId.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_STORE_CATEGORY', message: 'Selecione uma categoria válida para a loja.' },
+      });
+    }
+
+    const catRows = await db.select().from(categories).where(eq(categories.id, categoryId.trim())).limit(1);
+    if (catRows.length === 0 || catRows[0].isActive === false) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_STORE_CATEGORY', message: 'Categoria inválida ou inativa.' },
+      });
+    }
+
     const storeId = `store_${Date.now()}`;
-    const storeSlug = slug || (name || 'loja').toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const storeSlug = slug || name.trim().toLowerCase().replace(/[^a-z0-9]/g, '-');
 
     const newStore = {
       id: storeId,
       sellerId: seller.id,
-      name: name || 'Nova Loja Oficial',
+      name: name.trim(),
       slug: storeSlug,
       countryCode: countryCode || seller.countryCode || 'GW',
       description: description || '',
       logoUrl: logoUrl || null,
       bannerUrl: bannerUrl || null,
+      categoryId: categoryId.trim(),
+      addressJson: addressJson || null,
+      businessHoursJson: businessHoursJson || null,
       status: 'active',
     };
 
@@ -618,18 +684,56 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller || !canSellerOperate(seller)) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'SELLER_KYC_REQUIRED',
+          message: '🔒 Recurso Bloqueado: Verificação KYC necessária para atualizar dados da loja.',
+        },
+      });
+    }
 
-    const { name, description, status, logoUrl, bannerUrl } = req.body;
+    // Rule 5: Ownership Validation
+    const storeRows = await db.select().from(storesTable).where(and(eq(storesTable.id, req.params.id), eq(storesTable.sellerId, seller.id))).limit(1);
+    if (storeRows.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'STORE_NOT_OWNED', message: 'Você não tem permissão para alterar esta loja ou ela não foi encontrada.' },
+      });
+    }
+
+    const { name, description, status, logoUrl, bannerUrl, categoryId, addressJson, businessHoursJson } = req.body;
+
+    // Rule 10: Category validation if provided
+    if (categoryId) {
+      const catRows = await db.select().from(categories).where(eq(categories.id, String(categoryId).trim())).limit(1);
+      if (catRows.length === 0 || catRows[0].isActive === false) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_STORE_CATEGORY', message: 'Categoria inválida ou inativa.' },
+        });
+      }
+    }
+
+    // Rule 8: Allowed operational statuses only (never administrative)
+    const allowedStatuses = ['active', 'paused', 'closed'];
+    const updatedStatus = status && allowedStatuses.includes(status) ? status : storeRows[0].status;
+
     await db.update(storesTable)
       .set({
-        name,
-        description,
-        status,
-        logoUrl,
-        bannerUrl,
+        name: name ? String(name).trim() : storeRows[0].name,
+        description: description !== undefined ? description : storeRows[0].description,
+        status: updatedStatus,
+        logoUrl: logoUrl !== undefined ? logoUrl : storeRows[0].logoUrl,
+        bannerUrl: bannerUrl !== undefined ? bannerUrl : storeRows[0].bannerUrl,
+        categoryId: categoryId ? String(categoryId).trim() : storeRows[0].categoryId,
+        addressJson: addressJson !== undefined ? addressJson : storeRows[0].addressJson,
+        businessHoursJson: businessHoursJson !== undefined ? businessHoursJson : storeRows[0].businessHoursJson,
         updatedAt: new Date(),
       })
-      .where(eq(storesTable.id, req.params.id));
+      .where(and(eq(storesTable.id, req.params.id), eq(storesTable.sellerId, seller.id)));
 
     return res.json({
       success: true,
@@ -683,15 +787,30 @@ sellerRouter.post('/team', async (req: AuthRequest, res: Response) => {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
     const seller = await resolveSeller(req);
-    if (!seller || ((seller as any).kycStatus !== 'verified' && seller.status !== 'active')) {
+    if (!seller || !canSellerOperate(seller)) {
       return res.status(403).json({
         success: false,
-        message: '🔒 Recurso Bloqueado: Sua conta de vendedor precisa ter a verificação KYC aprovada pelo administrador para convidar membros para a equipe.',
+        error: {
+          code: 'SELLER_KYC_REQUIRED',
+          message: '🔒 Recurso Bloqueado: Sua conta de vendedor precisa ter a verificação KYC aprovada pelo administrador para convidar membros para a equipe.',
+        },
       });
     }
 
     const { email, role, storeId } = req.body;
     if (!email) return res.status(400).json({ success: false, message: 'E-mail do membro é obrigatório.' });
+
+    // Rule 6: Validate Store Ownership for Team Invites
+    if (!storeId) {
+      return res.status(400).json({ success: false, message: 'ID da loja é obrigatório.' });
+    }
+    const targetStore = await db.select().from(storesTable).where(and(eq(storesTable.id, storeId), eq(storesTable.sellerId, seller.id))).limit(1);
+    if (targetStore.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'STORE_NOT_OWNED', message: 'Você não tem permissão para gerenciar a equipe desta loja ou ela não existe.' },
+      });
+    }
 
     const userRows = await db.select().from(users).where(eq(users.email, email.trim().toLowerCase())).limit(1);
     if (userRows.length === 0) {
@@ -720,6 +839,28 @@ sellerRouter.delete('/team/:id', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller || !canSellerOperate(seller)) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'SELLER_KYC_REQUIRED', message: '🔒 Recurso Bloqueado: Verificação KYC necessária.' },
+      });
+    }
+
+    // Rule 7: Delete Team Member Ownership Validation
+    const memberRows = await db.select().from(storeMembers).where(eq(storeMembers.id, req.params.id)).limit(1);
+    if (memberRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Membro da equipe não encontrado.' });
+    }
+
+    const member = memberRows[0];
+    const storeRows = await db.select().from(storesTable).where(and(eq(storesTable.id, member.storeId), eq(storesTable.sellerId, seller.id))).limit(1);
+    if (storeRows.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: { code: 'TEAM_MEMBER_NOT_OWNED', message: 'Você não tem permissão para remover este membro da equipe.' },
+      });
+    }
 
     await db.delete(storeMembers).where(eq(storeMembers.id, req.params.id));
     return res.json({ success: true, message: 'Membro removido da equipe com sucesso.' });
@@ -806,6 +947,17 @@ sellerRouter.post('/products', async (req: AuthRequest, res: Response) => {
       });
     }
 
+    const seller = await resolveSeller(req);
+    if (!seller || !canSellerOperate(seller)) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'SELLER_KYC_REQUIRED',
+          message: '🔒 Recurso Bloqueado: Sua conta de vendedor precisa ter a verificação KYC aprovada pelo administrador para cadastrar produtos.',
+        },
+      });
+    }
+
     const createdProduct = await ProductCreationService.createProduct(req.user.id, req.body);
     return res.status(201).json({
       success: true,
@@ -822,18 +974,18 @@ sellerRouter.post('/products', async (req: AuthRequest, res: Response) => {
 });
 
 async function checkSellerProductOwnership(db: any, userId: string, productId: string) {
-  const [seller] = await db.select().from(sellers).where(eq(sellers.userId, userId)).limit(1);
-  if (!seller) {
-    return { authorized: false, error: 'Conta de vendedor não encontrada.', code: 'FORBIDDEN', status: 403 };
+  const resolvedSeller = await resolveSeller({ user: { id: userId } } as any);
+  if (!resolvedSeller || !canSellerOperate(resolvedSeller)) {
+    return { authorized: false, error: '🔒 Recurso Bloqueado: Sua conta de vendedor precisa ter a verificação KYC aprovada pelo administrador para alterar produtos.', code: 'SELLER_KYC_REQUIRED', status: 403 };
   }
   const [prod] = await db.select().from(products).where(eq(products.id, productId)).limit(1);
   if (!prod) {
     return { authorized: false, error: 'Produto não encontrado.', code: 'PRODUCT_NOT_FOUND', status: 404 };
   }
-  if (prod.sellerId !== seller.id) {
+  if (prod.sellerId !== resolvedSeller.id) {
     return { authorized: false, error: 'Você não tem permissão para alterar este produto.', code: 'PRODUCT_NOT_OWNED', status: 403 };
   }
-  return { authorized: true, seller, product: prod };
+  return { authorized: true, seller: resolvedSeller, product: prod };
 }
 
 sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {

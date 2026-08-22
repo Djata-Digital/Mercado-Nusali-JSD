@@ -138,14 +138,15 @@ export const SellerHubView: React.FC = () => {
 
   useEffect(() => {
     loadRealSellerData();
-  }, []);
+  }, [activeSection]);
 
   const handleStartOnboarding = async () => {
     setIsOnboardingLoading(true);
     try {
       const res = await SellerService.onboard();
       if (res.success) {
-        showToast('Cadastro de vendedor ativado com sucesso!');
+        setNeedsOnboarding(false);
+        showToast('Cadastro de vendedor ativado com sucesso! Agora conclua a verificação KYC.');
         await loadRealSellerData();
       } else {
         showToast(res.message || 'Erro ao realizar onboarding.');
@@ -159,34 +160,44 @@ export const SellerHubView: React.FC = () => {
 
   const selectedStore = stores.find((s) => s.id === selectedStoreId) || stores[0] || null;
 
-  // Store Management Handlers
+  // Store Management Handlers (NO FAKE FALLBACK IF API FAILS)
   const handleAddStore = async (newStore: SellerStoreData) => {
     try {
       const res = await SellerService.createStore(newStore);
       if (res.success && res.data) {
-        setStores([...stores, res.data]);
+        setStores((prev) => [...prev, res.data]);
         setSelectedStoreId(res.data.id);
-        showToast('Nova loja cadastrada com sucesso no servidor!');
+        showToast(`Loja "${res.data.name}" cadastrada com sucesso!`);
       } else {
-        setStores([...stores, newStore]);
-        setSelectedStoreId(newStore.id);
-        showToast('Loja adicionada!');
+        const errMsg = res.error?.message || res.message || 'Erro ao cadastrar loja.';
+        if (errMsg.includes('KYC') || res.error?.code === 'SELLER_KYC_REQUIRED') {
+          showToast('Você precisa concluir e ter o KYC aprovado para criar uma loja.');
+        } else {
+          showToast(errMsg);
+        }
       }
-    } catch (err) {
-      setStores([...stores, newStore]);
-      setSelectedStoreId(newStore.id);
-      showToast('Loja adicionada localmente.');
+    } catch (err: any) {
+      const errMsg = err?.message || 'Erro ao comunicar com o servidor para criar loja.';
+      if (errMsg.includes('KYC') || err?.code === 'SELLER_KYC_REQUIRED') {
+        showToast('Você precisa concluir e ter o KYC aprovado para criar uma loja.');
+      } else {
+        showToast(errMsg);
+      }
     }
   };
 
   const handleUpdateStore = async (updated: SellerStoreData) => {
     try {
-      await SellerService.updateStore(updated.id, updated);
-      setStores(stores.map((s) => (s.id === updated.id ? updated : s)));
-      showToast('Dados da loja atualizados no banco de dados!');
-    } catch (err) {
-      setStores(stores.map((s) => (s.id === updated.id ? updated : s)));
-      showToast('Dados da loja atualizados!');
+      const res = await SellerService.updateStore(updated.id, updated);
+      if (res.success) {
+        setStores((prev) => prev.map((s) => (s.id === updated.id ? { ...s, ...updated } : s)));
+        showToast('Dados da loja atualizados com sucesso!');
+      } else {
+        const errMsg = res.error?.message || res.message || 'Erro ao atualizar loja.';
+        showToast(errMsg);
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao comunicar com o servidor para atualizar loja.');
     }
   };
 
@@ -198,28 +209,26 @@ export const SellerHubView: React.FC = () => {
         setProfile(updatedProfile);
         showToast('Perfil do vendedor salvo com sucesso no banco de dados!');
       } else {
-        setProfile(updatedProfile);
-        showToast(res.message || 'Perfil atualizado!');
+        showToast(res.message || 'Erro ao atualizar perfil.');
       }
-    } catch (err) {
-      setProfile(updatedProfile);
-      showToast('Perfil atualizado com sucesso!');
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao atualizar perfil.');
     }
   };
 
-  // Team Handlers
+  // Team Handlers (NO FAKE FALLBACK IF API FAILS)
   const handleAddTeamMember = async (member: SellerTeamMember) => {
     try {
       const res = await SellerService.addTeamMember(member);
       if (res.success && res.data) {
-        setTeam([...team, res.data]);
+        setTeam((prev) => [...prev, res.data]);
+        showToast('Membro da equipe adicionado com sucesso!');
       } else {
-        setTeam([...team, member]);
+        const errMsg = res.error?.message || res.message || 'Erro ao adicionar membro à equipe.';
+        showToast(errMsg);
       }
-      showToast('Membro da equipe adicionado com sucesso!');
-    } catch (err) {
-      setTeam([...team, member]);
-      showToast('Membro da equipe adicionado!');
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao adicionar membro da equipe.');
     }
   };
 
@@ -366,7 +375,7 @@ export const SellerHubView: React.FC = () => {
         )}
 
         {/* Unverified Seller Lock Banner for Restricted Features */}
-        {profile?.kycStatus !== 'verified' && ['stores', 'team', 'product_create'].includes(activeSection) && (
+        {profile?.kycStatus !== 'verified' && profile?.kycStatus !== 'approved' && ['stores', 'team', 'product_create'].includes(activeSection) && (
           <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-6 shadow-xs mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="p-3 bg-amber-100 text-amber-800 rounded-2xl shrink-0">

@@ -92,6 +92,17 @@ export const SellerKyc: React.FC<SellerKycProps> = ({ profile, showToast, onNavi
           setSubmittedStatus('pending');
         }
 
+        if (res.data.birthDate) setBirthDate(res.data.birthDate);
+        else if ((profile as any)?.dateOfBirth) setBirthDate((profile as any).dateOfBirth);
+
+        if (res.data.taxId && res.data.taxId !== res.data.phone && res.data.taxId !== profile?.phone) {
+          setTaxId(res.data.taxId);
+        } else if (profile?.taxId && profile.taxId !== profile.phone) {
+          setTaxId(profile.taxId);
+        } else {
+          setTaxId('');
+        }
+
         if (res.data.legalName) setFullName(res.data.legalName);
         if (res.data.documentNumber) setDocNumber(res.data.documentNumber);
         if (res.data.documentType) setDocType(res.data.documentType);
@@ -439,7 +450,13 @@ export const SellerKyc: React.FC<SellerKycProps> = ({ profile, showToast, onNavi
               </div>
               <div>
                 <label className="block text-gray-700 font-bold mb-1">
-                  {accountType === 'empresa' ? 'NIF Comercial / CNPJ' : 'NIF Pessoal / NIF/CPF'}
+                  {profile?.country === 'BR'
+                    ? (accountType === 'empresa' ? 'CNPJ Comercial' : 'CPF Pessoal')
+                    : profile?.country === 'GW'
+                    ? (accountType === 'empresa' ? 'NIF Comercial' : 'NIF / BI Pessoal')
+                    : profile?.country === 'PT'
+                    ? (accountType === 'empresa' ? 'NIPC / NIF Comercial' : 'NIF Pessoal')
+                    : (accountType === 'empresa' ? 'NIF Comercial / Tax ID' : 'NIF Pessoal / Tax ID')}
                 </label>
                 <input
                   type="text"

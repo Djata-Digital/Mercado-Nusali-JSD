@@ -244,6 +244,9 @@ export const stores = pgTable('stores', {
   rating: numeric('rating', { precision: 3, scale: 2 }).default('5.00'),
   followersCount: integer('followers_count').default(0),
   status: varchar('status', { length: 50 }).notNull().default('active'), // active, paused, closed
+  categoryId: varchar('category_id', { length: 255 }),
+  addressJson: jsonb('address_json'),
+  businessHoursJson: jsonb('business_hours_json'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({

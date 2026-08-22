@@ -13,6 +13,7 @@ export interface AuthRequest extends Request {
     fullName: string;
     countryCode: string;
     kycStatus: string;
+    isEmailVerified?: boolean;
   };
 }
 
@@ -39,6 +40,7 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
       fullName: string;
       countryCode: string;
       kycStatus: string;
+      isEmailVerified?: boolean;
     };
 
     req.user = {
@@ -48,7 +50,25 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
       fullName: decoded.fullName,
       countryCode: decoded.countryCode,
       kycStatus: decoded.kycStatus,
+      isEmailVerified: decoded.isEmailVerified === true,
     };
+
+    const allowedPath = req.originalUrl || req.url || '';
+    const isUnverifiedAllowed =
+      allowedPath.includes('/auth/verify-email') ||
+      allowedPath.includes('/auth/resend-verification') ||
+      allowedPath.includes('/auth/logout') ||
+      allowedPath.includes('/auth/me');
+
+    if (req.user.isEmailVerified === false && !isUnverifiedAllowed) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'EMAIL_VERIFICATION_REQUIRED',
+          message: 'Verificação de e-mail pendente. Confirme seu e-mail para acessar esta funcionalidade.',
+        },
+      });
+    }
 
     return next();
   } catch (err: any) {

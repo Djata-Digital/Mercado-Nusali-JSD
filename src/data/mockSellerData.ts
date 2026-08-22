@@ -54,6 +54,9 @@ export interface SellerStoreData {
   acceptedCurrencies: CurrencyCode[];
   acceptedPayments: string[];
   shippingMethods: string[];
+  categoryId?: string;
+  businessHoursJson?: any;
+  addressJson?: any;
 }
 
 export interface SellerTeamMember {

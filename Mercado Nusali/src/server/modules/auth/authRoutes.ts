@@ -99,6 +99,18 @@ authRouter.post('/login', loginLimiter, async (req: Request, res: Response) => {
       });
     }
 
+    if (err.message === 'EMAIL_VERIFICATION_REQUIRED') {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: 'EMAIL_VERIFICATION_REQUIRED',
+          message: 'E-mail não verificado. Digite o código enviado para seu e-mail para confirmar a conta.',
+        },
+        requiresEmailVerification: true,
+        email: req.body.email,
+      });
+    }
+
     return res.status(401).json({
       success: false,
       error: {

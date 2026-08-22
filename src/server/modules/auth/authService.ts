@@ -97,7 +97,7 @@ export class AuthService {
           userId,
           companyName: data.fullName.trim(),
           tradingName: data.fullName.trim(),
-          taxId: data.phone || '',
+          taxId: '', // Never use phone as fallback for taxId!
           phone: data.phone || '',
           countryCode,
           status: 'pending',
@@ -128,14 +128,14 @@ export class AuthService {
       logger.error({ userId: newUser.id, error: error?.message }, 'User created but verification email could not be sent');
     }
 
-    const tokens = await this.generateTokens(newUser);
+    logger.info({ userId: newUser.id, email: newUser.email, role: newUser.role }, 'User registered successfully. Email verification code issued.');
 
-    logger.info({ userId: newUser.id, email: newUser.email, role: newUser.role }, 'User registered successfully');
-
+    // DO NOT issue an active authenticated session token until email is verified!
     return {
       user: this.toPublicUser(newUser),
       emailVerificationSent,
-      ...tokens,
+      requiresEmailVerification: true,
+      email: newUser.email,
     };
   }
 
@@ -178,7 +178,15 @@ export class AuthService {
     if (!found.length) throw new Error('Código inválido ou expirado.');
 
     const user = found[0];
-    if (user.isEmailVerified) return { user: this.toPublicUser(user), message: 'E-mail já estava verificado.' };
+    if (user.isEmailVerified) {
+      const sessionTokens = await this.generateTokens(user);
+      return {
+        user: this.toPublicUser(user),
+        token: sessionTokens.token,
+        refreshToken: sessionTokens.refreshToken,
+        message: 'E-mail já estava verificado.',
+      };
+    }
 
     const tokenHash = hashEmailVerificationCode(code);
     const tokens = await db.select().from(emailVerificationTokens).where(and(
@@ -192,8 +200,16 @@ export class AuthService {
     const updated = await db.update(users).set({ isEmailVerified: true, updatedAt: new Date() }).where(eq(users.id, user.id)).returning();
     await db.delete(emailVerificationTokens).where(eq(emailVerificationTokens.userId, user.id));
 
+    const verifiedUser = updated[0] || { ...user, isEmailVerified: true };
+    const sessionTokens = await this.generateTokens(verifiedUser);
+
     logger.info({ userId: user.id }, 'Email verified successfully');
-    return { user: this.toPublicUser(updated[0] || { ...user, isEmailVerified: true }), message: 'E-mail verificado com sucesso!' };
+    return {
+      user: this.toPublicUser(verifiedUser),
+      token: sessionTokens.token,
+      refreshToken: sessionTokens.refreshToken,
+      message: 'E-mail verificado com sucesso!',
+    };
   }
 
   static async resendEmailVerification(email: string) {
@@ -274,6 +290,10 @@ export class AuthService {
       throw new Error('Esta conta está desativada ou suspensa. Contate o suporte.');
     }
 
+    if (userRecord.isEmailVerified === false) {
+      throw new Error('EMAIL_VERIFICATION_REQUIRED');
+    }
+
     const tokens = await this.generateTokens(userRecord, {
       ipAddress: data.ipAddress,
       userAgent: data.userAgent,
@@ -288,7 +308,7 @@ export class AuthService {
   }
 
   static async generateTokens(
-    user: { id: string; email: string; role: string; fullName: string; countryCode: string; kycStatus: string },
+    user: { id: string; email: string; role: string; fullName: string; countryCode: string; kycStatus: string; isEmailVerified?: boolean },
     meta?: { ipAddress?: string; userAgent?: string }
   ) {
     const accessToken = jwt.sign(
@@ -299,6 +319,7 @@ export class AuthService {
         fullName: user.fullName,
         countryCode: user.countryCode,
         kycStatus: user.kycStatus,
+        isEmailVerified: user.isEmailVerified === true,
       },
       getJwtAccessSecret(),
       { expiresIn: 7200 }

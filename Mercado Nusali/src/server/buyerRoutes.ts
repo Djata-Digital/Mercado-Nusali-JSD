@@ -1213,7 +1213,8 @@ buyerRouter.get('/orders/:id/track', requireAuth, async (req: AuthRequest, res: 
 buyerRouter.get('/wallet', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
-    const userId = req.user?.id || 'usr_buyer_001';
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const userId = req.user.id;
     if (db) {
       const walletRows = await db.select().from(wallets).where(eq(wallets.userId, userId)).limit(1);
       const w = walletRows[0];
@@ -1371,7 +1372,8 @@ buyerRouter.post('/coupons/validate', (req: Request, res: Response) => {
 buyerRouter.get('/favorites', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
-    const userId = req.user?.id || 'usr_buyer_001';
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const userId = req.user.id;
     if (db) {
       const favRows = await db
         .select({
@@ -1408,7 +1410,8 @@ buyerRouter.get('/favorites', async (req: AuthRequest, res: Response) => {
 buyerRouter.post('/favorites', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
-    const userId = req.user?.id || 'usr_buyer_001';
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const userId = req.user.id;
     const { productId, id } = req.body;
     const targetProductId = productId || id;
     if (!targetProductId) {
@@ -1439,7 +1442,8 @@ buyerRouter.post('/favorites', async (req: AuthRequest, res: Response) => {
 buyerRouter.delete('/favorites/:productId', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
-    const userId = req.user?.id || 'usr_buyer_001';
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const userId = req.user.id;
     const { productId } = req.params;
 
     if (db) {
@@ -1462,7 +1466,8 @@ buyerRouter.delete('/favorites/:productId', async (req: AuthRequest, res: Respon
 buyerRouter.get('/returns', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
-    const userId = req.user?.id || 'usr_buyer_001';
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const userId = req.user.id;
     if (db) {
       const returnRows = await db.select().from(returns).where(eq(returns.buyerId, userId)).orderBy(desc(returns.createdAt));
       return res.json({
@@ -1482,7 +1487,8 @@ buyerRouter.get('/returns', async (req: AuthRequest, res: Response) => {
 buyerRouter.post('/returns', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
-    const userId = req.user?.id || 'usr_buyer_001';
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const userId = req.user.id;
     const { orderId, reason, description, amount } = req.body;
 
     if (!orderId || !reason) {
@@ -1527,7 +1533,8 @@ buyerRouter.post('/returns', async (req: AuthRequest, res: Response) => {
 buyerRouter.get('/disputes', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
-    const userId = req.user?.id || 'usr_buyer_001';
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const userId = req.user.id;
     if (db) {
       const disputeRows = await db.select().from(disputes).where(eq(disputes.buyerId, userId)).orderBy(desc(disputes.createdAt));
       return res.json({
@@ -1547,7 +1554,8 @@ buyerRouter.get('/disputes', async (req: AuthRequest, res: Response) => {
 buyerRouter.post('/disputes', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
-    const userId = req.user?.id || 'usr_buyer_001';
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const userId = req.user.id;
     const { orderId, reason, description, claimAmount } = req.body;
 
     if (!orderId || !description) {

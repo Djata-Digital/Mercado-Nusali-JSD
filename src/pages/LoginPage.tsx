@@ -78,14 +78,8 @@ export const LoginPage: React.FC = () => {
       });
 
       if (!loggedUser.isEmailVerified) {
-        setSuccessMessage('Login bem-sucedido. Redirecionando para verificação de e-mail...');
+        setSuccessMessage('Redirecionando para confirmação de e-mail...');
         setTimeout(() => navigate('/verify-email'), 1200);
-        return;
-      }
-
-      if (!loggedUser.isPhoneVerified) {
-        setSuccessMessage('Login bem-sucedido. Redirecionando para verificação de telefone...');
-        setTimeout(() => navigate('/verify-phone'), 1200);
         return;
       }
 
@@ -101,6 +95,11 @@ export const LoginPage: React.FC = () => {
       }, 800);
     } catch (err: any) {
       const msg = err.message || 'Erro ao realizar login. Tente novamente.';
+      if (msg.includes('EMAIL_VERIFICATION_REQUIRED') || msg.includes('E-mail não verificado')) {
+        setErrorMessage('Confirmação de e-mail pendente. Redirecionando...');
+        setTimeout(() => navigate('/verify-email'), 1200);
+        return;
+      }
       setErrorMessage(msg);
       if (msg.includes('suspensa')) setErrorCode('SUSPENDED');
       else if (msg.includes('bloqueada')) setErrorCode('BLOCKED');

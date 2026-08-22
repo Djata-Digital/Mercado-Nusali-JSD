@@ -1,24 +1,25 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Store,
   PlusCircle,
   Edit2,
-  ExternalLink,
   MapPin,
-  Globe,
   Phone,
-  Mail,
   CheckCircle2,
-  AlertTriangle,
   Clock,
   Shield,
-  CreditCard,
   X,
   Save,
+  Upload,
+  Loader2,
+  Image as ImageIcon,
+  AlertTriangle,
 } from 'lucide-react';
 import { SellerStoreData } from '../../data/mockSellerData';
-import { CountryCode, CurrencyCode } from '../../types';
+import { CountryCode } from '../../types';
 import { countriesConfig } from '../../utils/currencyUtils';
+import { uploadService } from '../../services/uploadService';
+import { apiClient } from '../../api/apiClient';
 
 interface SellerMultiStoreProps {
   stores: SellerStoreData[];
@@ -29,6 +30,38 @@ interface SellerMultiStoreProps {
   showToast: (msg: string) => void;
   openPublicStoreView?: (slug: string) => void;
 }
+
+interface CategoryItem {
+  id: string;
+  name: string;
+  isActive?: boolean;
+}
+
+interface DaySchedule {
+  isOpen: boolean;
+  openTime: string;
+  closeTime: string;
+}
+
+interface BusinessHoursState {
+  monday: DaySchedule;
+  tuesday: DaySchedule;
+  wednesday: DaySchedule;
+  thursday: DaySchedule;
+  friday: DaySchedule;
+  saturday: DaySchedule;
+  sunday: DaySchedule;
+}
+
+const initialBusinessHours = (): BusinessHoursState => ({
+  monday: { isOpen: false, openTime: '', closeTime: '' },
+  tuesday: { isOpen: false, openTime: '', closeTime: '' },
+  wednesday: { isOpen: false, openTime: '', closeTime: '' },
+  thursday: { isOpen: false, openTime: '', closeTime: '' },
+  friday: { isOpen: false, openTime: '', closeTime: '' },
+  saturday: { isOpen: false, openTime: '', closeTime: '' },
+  sunday: { isOpen: false, openTime: '', closeTime: '' },
+});
 
 export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
   stores,
@@ -42,95 +75,246 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingStore, setEditingStore] = useState<SellerStoreData | null>(null);
 
-  // Form State
+  // Dynamic Categories from Backend
+  const [categoriesList, setCategoriesList] = useState<CategoryItem[]>([]);
+  const [isLoadingCategories, setIsLoadingCategories] = useState(true);
+
+  useEffect(() => {
+    const loadCategories = async () => {
+      try {
+        setIsLoadingCategories(true);
+        let res = await apiClient.get<any>('/categories');
+        if (!res.data?.data || !Array.isArray(res.data.data) || res.data.data.length === 0) {
+          res = await apiClient.get<any>('/catalog/categories');
+        }
+        if (res.data?.data && Array.isArray(res.data.data)) {
+          const active = res.data.data.filter((c: any) => c.isActive !== false);
+          setCategoriesList(active);
+        } else {
+          setCategoriesList([]);
+        }
+      } catch (err) {
+        console.warn('Could not fetch catalog categories:', err);
+        setCategoriesList([]);
+      } finally {
+        setIsLoadingCategories(false);
+      }
+    };
+    loadCategories();
+  }, []);
+
+  // Form State (Defaulting cleanly to EMPTY - no fake/demo fallbacks)
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [category, setCategory] = useState('Eletrônicos e Tecnologia');
+  const [selectedCategoryId, setSelectedCategoryId] = useState('');
   const [country, setCountry] = useState<CountryCode>('GW');
-  const [city, setCity] = useState('Bissau');
-  const [address, setAddress] = useState('Avenida Amílcar Cabral, 140');
-  const [phone, setPhone] = useState('+245 955123456');
-  const [email, setEmail] = useState('loja@nusali.gw');
-  const [logo, setLogo] = useState('https://images.unsplash.com/photo-1531297484001-80022131f5a1?auto=format&fit=crop&w=300&q=80');
-  const [banner, setBanner] = useState('https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=1200&q=80');
-  const [openingHours, setOpeningHours] = useState('Seg - Sáb: 08:00 - 19:00');
+  const [city, setCity] = useState('');
+  const [address, setAddress] = useState('');
+  const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
+  const [logo, setLogo] = useState('');
+  const [banner, setBanner] = useState('');
+  const [businessHours, setBusinessHours] = useState<BusinessHoursState>(initialBusinessHours());
+
+  // Uploading state
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const [isUploadingBanner, setIsUploadingBanner] = useState(false);
 
   const handleOpenCreateModal = () => {
     setEditingStore(null);
     setName('');
     setDescription('');
-    setCategory('Eletrônicos e Tecnologia');
+    setSelectedCategoryId(categoriesList.length > 0 ? categoriesList[0].id : '');
     setCountry('GW');
-    setCity('Bissau');
+    setCity('');
+    setAddress('');
+    setPhone('');
+    setEmail('');
+    setLogo('');
+    setBanner('');
+    setBusinessHours(initialBusinessHours());
     setIsModalOpen(true);
   };
 
   const handleOpenEditModal = (store: SellerStoreData) => {
     setEditingStore(store);
-    setName(store.name);
-    setDescription(store.description);
-    setCategory(store.category);
-    setCountry(store.country);
-    setCity(store.city);
-    setAddress(store.address);
-    setPhone(store.phone);
-    setEmail(store.email);
-    setLogo(store.logo);
-    setBanner(store.banner);
-    setOpeningHours(store.openingHours);
+    setName(store.name || '');
+    setDescription(store.description || '');
+    setSelectedCategoryId(store.categoryId || (categoriesList.length > 0 ? categoriesList[0].id : ''));
+    setCountry(store.country || 'GW');
+    setCity(store.city || '');
+    setAddress(store.address || '');
+    setPhone(store.phone || '');
+    setEmail(store.email || '');
+    setLogo(store.logo || '');
+    setBanner(store.banner || '');
+    if (store.businessHoursJson && typeof store.businessHoursJson === 'object') {
+      setBusinessHours(store.businessHoursJson);
+    } else {
+      setBusinessHours(initialBusinessHours());
+    }
     setIsModalOpen(true);
+  };
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      showToast('Formato de imagem inválido. Use JPG, PNG ou WEBP.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      showToast('O logo deve ter no máximo 5 MB.');
+      return;
+    }
+
+    setIsUploadingLogo(true);
+    try {
+      const res = await uploadService.uploadStore(file);
+      setLogo(res.url);
+      showToast('Logo da loja enviado com sucesso!');
+    } catch (err: any) {
+      showToast(err.message || 'Erro ao enviar logo.');
+    } finally {
+      setIsUploadingLogo(false);
+    }
+  };
+
+  const handleBannerUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      showToast('Formato de imagem inválido. Use JPG, PNG ou WEBP.');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      showToast('O banner deve ter no máximo 10 MB.');
+      return;
+    }
+
+    setIsUploadingBanner(true);
+    try {
+      const res = await uploadService.uploadStore(file);
+      setBanner(res.url);
+      showToast('Banner da loja enviado com sucesso!');
+    } catch (err: any) {
+      showToast(err.message || 'Erro ao enviar banner.');
+    } finally {
+      setIsUploadingBanner(false);
+    }
+  };
+
+  const updateDaySchedule = (dayKey: keyof BusinessHoursState, field: keyof DaySchedule, value: any) => {
+    setBusinessHours((prev) => {
+      const currentDay = prev[dayKey];
+      const isOpening = field === 'isOpen' && value === true;
+      return {
+        ...prev,
+        [dayKey]: {
+          ...currentDay,
+          [field]: value,
+          openTime: isOpening && !currentDay.openTime ? '08:00' : (field === 'isOpen' && !value ? '' : (field === 'openTime' ? value : currentDay.openTime)),
+          closeTime: isOpening && !currentDay.closeTime ? '18:00' : (field === 'isOpen' && !value ? '' : (field === 'closeTime' ? value : currentDay.closeTime)),
+        },
+      };
+    });
+  };
+
+  const handleFillWeekdays = () => {
+    setBusinessHours((prev) => ({
+      ...prev,
+      monday: { isOpen: true, openTime: '08:00', closeTime: '18:00' },
+      tuesday: { isOpen: true, openTime: '08:00', closeTime: '18:00' },
+      wednesday: { isOpen: true, openTime: '08:00', closeTime: '18:00' },
+      thursday: { isOpen: true, openTime: '08:00', closeTime: '18:00' },
+      friday: { isOpen: true, openTime: '08:00', closeTime: '18:00' },
+    }));
+    showToast('Horário comercial aplicado de Segunda a Sexta!');
+  };
+
+  const formatSummaryHours = (bh: BusinessHoursState): string => {
+    const dayLabels: { key: keyof BusinessHoursState; label: string }[] = [
+      { key: 'monday', label: 'Seg' },
+      { key: 'tuesday', label: 'Ter' },
+      { key: 'wednesday', label: 'Qua' },
+      { key: 'thursday', label: 'Qui' },
+      { key: 'friday', label: 'Sex' },
+      { key: 'saturday', label: 'Sáb' },
+      { key: 'sunday', label: 'Dom' },
+    ];
+    const openDays = dayLabels.filter((d) => bh[d.key]?.isOpen && bh[d.key]?.openTime && bh[d.key]?.closeTime);
+    if (openDays.length === 0) return '';
+    return dayLabels
+      .map((d) => (bh[d.key]?.isOpen && bh[d.key]?.openTime ? `${d.label}: ${bh[d.key].openTime}-${bh[d.key].closeTime}` : `${d.label}: Fechado`))
+      .join(' | ');
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
+    if (!selectedCategoryId) {
+      showToast('Selecione uma categoria válida para a loja.');
+      return;
+    }
+
+    const selectedCategoryObj = categoriesList.find((c) => c.id === selectedCategoryId);
+    const categoryName = selectedCategoryObj?.name || '';
+
+    const hasAnyOpenDay = (Object.values(businessHours) as DaySchedule[]).some((d) => d.isOpen && Boolean(d.openTime) && Boolean(d.closeTime));
+    const finalBusinessHoursJson = hasAnyOpenDay ? businessHours : null;
+    const hoursSummary = hasAnyOpenDay ? formatSummaryHours(businessHours) : '';
 
     if (editingStore) {
       const updated: SellerStoreData = {
         ...editingStore,
-        name,
-        description,
-        category,
+        name: name.trim(),
+        description: description.trim(),
+        categoryId: selectedCategoryId,
+        category: categoryName,
         country,
-        city,
-        address,
-        phone,
-        email,
+        city: city.trim(),
+        address: address.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
         logo,
         banner,
-        openingHours,
+        openingHours: hoursSummary,
+        businessHoursJson: finalBusinessHoursJson,
+        addressJson: { city: city.trim(), address: address.trim() },
       };
       onUpdateStore(updated);
-      showToast(`Loja "${name}" atualizada com sucesso!`);
     } else {
+      // Create New Store Payload - Strict Rule: DO NOT INVENT FAKE DEFAULTS
       const newStore: SellerStoreData = {
         id: `store-${Date.now()}`,
-        name,
-        slug: name.toLowerCase().replace(/\s+/g, '-'),
+        name: name.trim(),
+        slug: name.trim().toLowerCase().replace(/[^a-z0-9]/g, '-'),
         logo,
         banner,
-        description,
-        category,
+        description: description.trim(),
+        categoryId: selectedCategoryId,
+        category: categoryName,
         country,
-        city,
-        address,
-        phone,
-        email,
-        openingHours,
-        exchangePolicy: 'Troca garantida em até 14 dias.',
-        warrantyPolicy: '12 Meses de garantia legal.',
-        returnPolicy: 'Devolução sem custos em até 7 dias.',
+        city: city.trim(),
+        address: address.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
+        openingHours: hoursSummary,
+        businessHoursJson: finalBusinessHoursJson,
+        addressJson: { city: city.trim(), address: address.trim() },
+        exchangePolicy: '',
+        warrantyPolicy: '',
+        returnPolicy: '',
         status: 'active',
-        isOfficial: true,
-        rating: 5.0,
-        followersCount: 1,
+        isOfficial: false, // Rule 8: NEVER default to true!
+        rating: 0, // Rule 8: NO fake 5.0 rating!
+        followersCount: 0,
         salesCount: 0,
-        acceptedCurrencies: ['XOF', 'EUR', 'USD'],
-        acceptedPayments: ['Orange Money', 'MTN Money', 'Nusali Pay'],
-        shippingMethods: ['Nusali Express Local'],
+        acceptedCurrencies: [], // Rule 8: NO fake arrays!
+        acceptedPayments: [],
+        shippingMethods: [],
       };
       onAddStore(newStore);
-      showToast(`Nova loja "${name}" criada e ativada!`);
     }
 
     setIsModalOpen(false);
@@ -145,119 +329,144 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
             <Store className="w-6 h-6 text-emerald-700" /> Gerenciamento de Lojas (Multiloja)
           </h1>
           <p className="text-xs text-gray-500 mt-1">
-            Crie e gerencie múltiplas lojas físicas e virtuais com estoques, moedas e políticas independentes.
+            Crie e gerencie suas lojas comerciais com dados reais, banners, logotipos e horários independentes.
           </p>
         </div>
 
         <button
           onClick={handleOpenCreateModal}
-          className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2.5 rounded-xl text-xs transition flex items-center gap-2 shadow-xs shrink-0"
+          disabled={categoriesList.length === 0}
+          className={`font-bold px-4 py-2.5 rounded-xl text-xs transition flex items-center gap-2 shadow-xs shrink-0 ${
+            categoriesList.length === 0
+              ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+          }`}
+          title={categoriesList.length === 0 ? 'Nenhuma categoria disponível' : 'Cadastrar Nova Loja'}
         >
           <PlusCircle className="w-4 h-4" /> Cadastrar Nova Loja
         </button>
       </div>
 
+      {categoriesList.length === 0 && !isLoadingCategories && (
+        <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-center gap-3 text-amber-900 text-xs font-bold">
+          <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+          <span>Nenhuma categoria disponível. Aguarde o administrador cadastrar categorias para criar lojas.</span>
+        </div>
+      )}
+
       {/* Stores Grid */}
       {stores.length === 0 ? (
         <div className="p-12 text-center text-gray-500 font-bold bg-white rounded-2xl border border-gray-200">
-          Nenhuma loja cadastrada
+          Nenhuma loja cadastrada até o momento.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {stores.map((s) => {
-          const isSelected = s.id === selectedStoreId;
-          const countryConf = countriesConfig[s.country] || countriesConfig.GW;
+          {stores.map((s) => {
+            const isSelected = s.id === selectedStoreId;
+            const countryConf = countriesConfig[s.country] || countriesConfig.GW;
+            const locationText = [s.city, s.address].filter(Boolean).join(' - ') || s.city || 'Localização não informada';
+            const hoursText = s.openingHours ? s.openingHours : 'Horário não informado';
 
-          return (
-            <div
-              key={s.id}
-              className={`bg-white rounded-2xl border overflow-hidden transition shadow-2xs ${
-                isSelected ? 'border-2 border-emerald-600 ring-2 ring-emerald-500/20' : 'border-gray-200 hover:border-gray-300'
-              }`}
-            >
-              {/* Store Banner */}
-              <div className="h-28 bg-gray-100 relative">
-                <img src={s.banner} alt="" className="w-full h-full object-cover" />
-                <div className="absolute top-3 right-3 bg-black/60 backdrop-blur-xs text-white text-[11px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1">
-                  <span>{countryConf.flag}</span> {countryConf.name}
-                </div>
-                {isSelected && (
-                  <div className="absolute top-3 left-3 bg-emerald-600 text-white text-[10px] font-black px-2.5 py-1 rounded-full shadow-md">
-                    LOJA ATIVA NO PAINEL
-                  </div>
-                )}
-              </div>
-
-              {/* Store Content */}
-              <div className="p-5 space-y-4">
-                <div className="flex items-start gap-3 -mt-10">
-                  <img
-                    src={s.logo}
-                    alt=""
-                    className="w-16 h-16 rounded-2xl object-cover border-2 border-white shadow-md bg-white shrink-0"
-                  />
-                  <div className="mt-8">
-                    <h3 className="font-bold text-sm text-gray-900">{s.name}</h3>
-                    <p className="text-[11px] text-gray-500 font-medium">{s.category}</p>
-                  </div>
-                </div>
-
-                <p className="text-xs text-gray-600 line-clamp-2">{s.description}</p>
-
-                <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-100 font-medium">
-                  <div className="flex items-center gap-1.5 truncate">
-                    <MapPin className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                    <span className="truncate">{s.city}, {s.address}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 truncate">
-                    <Phone className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                    <span className="truncate">{s.phone}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 truncate">
-                    <Clock className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                    <span className="truncate">{s.openingHours}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 truncate">
-                    <Shield className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                    <span className="truncate font-bold text-emerald-800">
-                      {s.salesCount} vendas • Nota {s.rating}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Actions Bar */}
-                <div className="flex items-center justify-between gap-2 pt-2 border-t border-gray-100">
-                  {!isSelected ? (
-                    <button
-                      onClick={() => {
-                        onSelectStore(s.id);
-                        showToast(`Loja alternada para: ${s.name}`);
-                      }}
-                      className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold px-3 py-2 rounded-xl text-xs transition"
-                    >
-                      Selecionar esta Loja
-                    </button>
+            return (
+              <div
+                key={s.id}
+                className={`bg-white rounded-2xl border overflow-hidden transition shadow-2xs ${
+                  isSelected ? 'border-2 border-emerald-600 ring-2 ring-emerald-500/20' : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                {/* Store Banner */}
+                <div className="h-28 bg-slate-100 relative overflow-hidden flex items-center justify-center">
+                  {s.banner ? (
+                    <img src={s.banner} alt="" className="w-full h-full object-cover" />
                   ) : (
-                    <span className="text-xs font-bold text-emerald-700 flex items-center gap-1">
-                      <CheckCircle2 className="w-4 h-4" /> Loja em Uso
-                    </span>
+                    <div className="text-slate-400 flex items-center gap-2 text-xs font-bold">
+                      <ImageIcon className="w-5 h-5" /> Sem Banner
+                    </div>
+                  )}
+                  <div className="absolute top-3 right-3 bg-black/60 backdrop-blur-xs text-white text-[11px] font-bold px-2.5 py-1 rounded-full flex items-center gap-1">
+                    <span>{countryConf.flag}</span> {countryConf.name}
+                  </div>
+                  {isSelected && (
+                    <div className="absolute top-3 left-3 bg-emerald-600 text-white text-[10px] font-black px-2.5 py-1 rounded-full shadow-md">
+                      LOJA ATIVA NO PAINEL
+                    </div>
+                  )}
+                </div>
+
+                {/* Store Content */}
+                <div className="p-5 space-y-4">
+                  <div className="flex items-start gap-3 -mt-10">
+                    <div className="w-16 h-16 rounded-2xl border-2 border-white shadow-md bg-slate-100 shrink-0 overflow-hidden flex items-center justify-center">
+                      {s.logo ? (
+                        <img src={s.logo} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <Store className="w-7 h-7 text-slate-400" />
+                      )}
+                    </div>
+                    <div className="mt-8">
+                      <h3 className="font-bold text-sm text-gray-900">{s.name}</h3>
+                      <p className="text-[11px] text-gray-500 font-medium">{s.category || 'Categoria não especificada'}</p>
+                    </div>
+                  </div>
+
+                  {s.description && (
+                    <p className="text-xs text-gray-600 line-clamp-2">{s.description}</p>
                   )}
 
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => handleOpenEditModal(s)}
-                      className="p-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl transition text-xs font-bold flex items-center gap-1"
-                      title="Editar Loja"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" /> Editar
-                    </button>
+                  <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-600 bg-gray-50 p-3 rounded-xl border border-gray-100 font-medium">
+                    <div className="flex items-center gap-1.5 truncate" title={locationText}>
+                      <MapPin className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                      <span className="truncate">{locationText}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 truncate" title={s.phone || 'Sem telefone'}>
+                      <Phone className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                      <span className="truncate">{s.phone || 'Sem telefone'}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 truncate" title={hoursText}>
+                      <Clock className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                      <span className="truncate">{hoursText}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 truncate">
+                      <Shield className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span className="truncate font-bold text-emerald-800">
+                        {s.salesCount || 0} vendas • Nota {s.rating || '0.0'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Actions Bar */}
+                  <div className="flex items-center justify-between gap-2 pt-2 border-t border-gray-100">
+                    {!isSelected ? (
+                      <button
+                        onClick={() => {
+                          onSelectStore(s.id);
+                          showToast(`Loja alternada para: ${s.name}`);
+                        }}
+                        className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold px-3 py-2 rounded-xl text-xs transition cursor-pointer"
+                      >
+                        Selecionar esta Loja
+                      </button>
+                    ) : (
+                      <span className="text-xs font-bold text-emerald-700 flex items-center gap-1">
+                        <CheckCircle2 className="w-4 h-4" /> Loja em Uso
+                      </span>
+                    )}
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleOpenEditModal(s)}
+                        className="p-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl transition text-xs font-bold flex items-center gap-1 cursor-pointer"
+                        title="Editar Loja"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" /> Editar
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
       )}
 
       {/* Modal Form for Create / Edit Store */}
@@ -271,7 +480,7 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
               </h3>
               <button
                 onClick={() => setIsModalOpen(false)}
-                className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg"
+                className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -284,26 +493,33 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Ex: AgroNusali Export Bissau"
+                  placeholder="Nome comercial da loja"
                   required
-                  className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden"
+                  className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden font-bold"
                 />
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-gray-700 font-bold mb-1">Categoria Principal *</label>
-                  <select
-                    value={category}
-                    onChange={(e) => setCategory(e.target.value)}
-                    className="w-full p-2.5 border border-gray-300 rounded-xl bg-white"
-                  >
-                    <option value="Eletrônicos e Tecnologia">Eletrônicos e Tecnologia</option>
-                    <option value="Agronegócio & Exportação">Agronegócio & Exportação</option>
-                    <option value="Moda & Calçados">Moda & Calçados</option>
-                    <option value="Supermercado & Alimentos">Supermercado & Alimentos</option>
-                    <option value="Casa & Decoração">Casa & Decoração</option>
-                  </select>
+                  {categoriesList.length > 0 ? (
+                    <select
+                      value={selectedCategoryId}
+                      onChange={(e) => setSelectedCategoryId(e.target.value)}
+                      required
+                      className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-bold text-gray-900"
+                    >
+                      {categoriesList.map((cat) => (
+                        <option key={cat.id} value={cat.id}>
+                          {cat.name}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="p-2.5 border border-amber-300 bg-amber-50 text-amber-900 rounded-xl font-bold text-[11px]">
+                      Nenhuma categoria disponível. Aguarde o administrador cadastrar categorias.
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -311,7 +527,7 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
                   <select
                     value={country}
                     onChange={(e) => setCountry(e.target.value as CountryCode)}
-                    className="w-full p-2.5 border border-gray-300 rounded-xl bg-white"
+                    className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-bold"
                   >
                     {(Object.keys(countriesConfig) as CountryCode[]).map((c) => (
                       <option key={c} value={c}>
@@ -324,55 +540,177 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-gray-700 font-bold mb-1">Cidade *</label>
+                  <label className="block text-gray-700 font-bold mb-1">Cidade Sede</label>
                   <input
                     type="text"
                     value={city}
                     onChange={(e) => setCity(e.target.value)}
-                    required
-                    className="w-full p-2.5 border border-gray-300 rounded-xl"
+                    placeholder="Ex: São Carlos, Bissau, Lisboa"
+                    className="w-full p-2.5 border border-gray-300 rounded-xl font-medium"
                   />
                 </div>
                 <div>
-                  <label className="block text-gray-700 font-bold mb-1">Telefone da Loja *</label>
+                  <label className="block text-gray-700 font-bold mb-1">Telefone da Loja</label>
                   <input
                     type="text"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
-                    required
-                    className="w-full p-2.5 border border-gray-300 rounded-xl"
+                    placeholder="Telefone comercial de contato"
+                    className="w-full p-2.5 border border-gray-300 rounded-xl font-medium"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-gray-700 font-bold mb-1">Descrição Comercial</label>
-                <textarea
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  rows={3}
-                  className="w-full p-2.5 border border-gray-300 rounded-xl"
+                <label className="block text-gray-700 font-bold mb-1">Endereço Físico (Rua, Número, Bairro)</label>
+                <input
+                  type="text"
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  placeholder="Informar apenas se houver loja/ponto físico"
+                  className="w-full p-2.5 border border-gray-300 rounded-xl font-medium"
                 />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-gray-700 font-bold mb-1">Descrição Comercial da Loja</label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={2}
+                  placeholder="Descreva os produtos e diferenciais da sua loja..."
+                  className="w-full p-2.5 border border-gray-300 rounded-xl font-medium"
+                />
+              </div>
+
+              {/* Uploads Section (R2) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 bg-slate-50 border border-slate-200 rounded-2xl">
+                {/* Logo Upload */}
                 <div>
-                  <label className="block text-gray-700 font-bold mb-1">URL da Logo</label>
-                  <input
-                    type="text"
-                    value={logo}
-                    onChange={(e) => setLogo(e.target.value)}
-                    className="w-full p-2.5 border border-gray-300 rounded-xl text-slate-600 font-mono"
-                  />
+                  <label className="block text-gray-800 font-bold mb-1">Logotipo da Loja (R2 Storage)</label>
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-xl bg-white border border-gray-200 overflow-hidden flex items-center justify-center shrink-0">
+                      {logo ? (
+                        <img src={logo} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <Store className="w-5 h-5 text-gray-400" />
+                      )}
+                    </div>
+                    <label className="flex-1 bg-white hover:bg-gray-100 text-gray-700 border border-gray-300 font-bold px-3 py-2 rounded-xl text-xs transition cursor-pointer flex items-center justify-center gap-2">
+                      {isUploadingLogo ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin text-emerald-600" /> Enviando...
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-4 h-4 text-emerald-600" /> Selecionar Logo
+                        </>
+                      )}
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={handleLogoUpload}
+                        className="hidden"
+                        disabled={isUploadingLogo}
+                      />
+                    </label>
+                  </div>
                 </div>
+
+                {/* Banner Upload */}
                 <div>
-                  <label className="block text-gray-700 font-bold mb-1">URL do Banner</label>
-                  <input
-                    type="text"
-                    value={banner}
-                    onChange={(e) => setBanner(e.target.value)}
-                    className="w-full p-2.5 border border-gray-300 rounded-xl text-slate-600 font-mono"
-                  />
+                  <label className="block text-gray-800 font-bold mb-1">Banner da Loja (R2 Storage)</label>
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-xl bg-white border border-gray-200 overflow-hidden flex items-center justify-center shrink-0">
+                      {banner ? (
+                        <img src={banner} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        <ImageIcon className="w-5 h-5 text-gray-400" />
+                      )}
+                    </div>
+                    <label className="flex-1 bg-white hover:bg-gray-100 text-gray-700 border border-gray-300 font-bold px-3 py-2 rounded-xl text-xs transition cursor-pointer flex items-center justify-center gap-2">
+                      {isUploadingBanner ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin text-emerald-600" /> Enviando...
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-4 h-4 text-emerald-600" /> Selecionar Banner
+                        </>
+                      )}
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={handleBannerUpload}
+                        className="hidden"
+                        disabled={isUploadingBanner}
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              {/* Day-by-Day Business Hours Configurator */}
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="block text-gray-900 font-bold flex items-center gap-1.5">
+                    <Clock className="w-4 h-4 text-emerald-600" /> Configuração de Horário por Dia
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleFillWeekdays}
+                    className="text-[11px] font-bold text-emerald-700 bg-white border border-emerald-300 hover:bg-emerald-50 px-2.5 py-1 rounded-lg transition cursor-pointer"
+                  >
+                    ⚡ Preencher Segunda a Sexta (08h-18h)
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {[
+                    { key: 'monday', label: 'Segunda-feira' },
+                    { key: 'tuesday', label: 'Terça-feira' },
+                    { key: 'wednesday', label: 'Quarta-feira' },
+                    { key: 'thursday', label: 'Quinta-feira' },
+                    { key: 'friday', label: 'Sexta-feira' },
+                    { key: 'saturday', label: 'Sábado' },
+                    { key: 'sunday', label: 'Domingo' },
+                  ].map(({ key, label }) => {
+                    const dayKey = key as keyof BusinessHoursState;
+                    const sched = businessHours[dayKey];
+                    return (
+                      <div key={key} className="flex items-center justify-between gap-2 p-2 bg-white rounded-xl border border-gray-200 text-xs">
+                        <label className="flex items-center gap-2 font-bold text-gray-800 min-w-[110px] cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={sched.isOpen}
+                            onChange={(e) => updateDaySchedule(dayKey, 'isOpen', e.target.checked)}
+                            className="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+                          />
+                          {label}
+                        </label>
+
+                        {sched.isOpen ? (
+                          <div className="flex items-center gap-1 text-[11px]">
+                            <input
+                              type="time"
+                              value={sched.openTime}
+                              onChange={(e) => updateDaySchedule(dayKey, 'openTime', e.target.value)}
+                              className="p-1 border border-gray-300 rounded-lg bg-gray-50 font-mono font-bold"
+                            />
+                            <span className="text-gray-400">até</span>
+                            <input
+                              type="time"
+                              value={sched.closeTime}
+                              onChange={(e) => updateDaySchedule(dayKey, 'closeTime', e.target.value)}
+                              className="p-1 border border-gray-300 rounded-lg bg-gray-50 font-mono font-bold"
+                            />
+                          </div>
+                        ) : (
+                          <span className="text-[11px] font-bold text-gray-400 italic">Fechado</span>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -380,13 +718,18 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 border border-gray-300 rounded-xl text-gray-700 font-bold hover:bg-gray-50"
+                  className="px-4 py-2.5 text-gray-600 hover:bg-gray-100 rounded-xl font-bold transition cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-2 shadow-xs"
+                  disabled={!selectedCategoryId || categoriesList.length === 0}
+                  className={`font-bold px-5 py-2.5 rounded-xl transition flex items-center gap-2 shadow-xs ${
+                    !selectedCategoryId || categoriesList.length === 0
+                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                      : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                  }`}
                 >
                   <Save className="w-4 h-4" /> {editingStore ? 'Salvar Alterações' : 'Criar Loja Agora'}
                 </button>

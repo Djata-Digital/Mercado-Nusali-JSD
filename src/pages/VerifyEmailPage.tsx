@@ -12,6 +12,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { AuthService } from '../services/authService';
 import { NusaliLogo } from '../components/NusaliLogo';
+import { PHONE_VERIFICATION_ENABLED } from '../config/constants';
 
 export const VerifyEmailPage: React.FC = () => {
   const navigate = useNavigate();
@@ -113,11 +114,27 @@ export const VerifyEmailPage: React.FC = () => {
       }
 
       setIsVerified(true);
-      if (user) {
-        updateUser({ isEmailVerified: true });
+      const verifiedUser = res.data?.user || user;
+      if (verifiedUser) {
+        updateUser({ ...verifiedUser, isEmailVerified: true });
       }
-      setSuccessMessage('E-mail verificado com sucesso!');
-      setTimeout(() => navigate('/verify-phone'), 1500);
+      setSuccessMessage('E-mail verificado com sucesso! Redirecionando...');
+
+      setTimeout(() => {
+        if (PHONE_VERIFICATION_ENABLED) {
+          navigate('/verify-phone');
+          return;
+        }
+
+        const userRole = (verifiedUser?.role || user?.role || 'BUYER').toUpperCase();
+        if (userRole === 'SELLER') {
+          navigate('/seller/dashboard');
+        } else if (userRole === 'ADMIN' || userRole === 'GLOBAL_ADMIN') {
+          navigate('/admin/dashboard');
+        } else {
+          navigate('/');
+        }
+      }, 1200);
     } catch (err: any) {
       setErrorMessage(err.message || 'Código inválido ou expirado.');
     } finally {
@@ -305,10 +322,23 @@ export const VerifyEmailPage: React.FC = () => {
               </p>
               <button
                 type="button"
-                onClick={() => navigate('/verify-phone')}
+                onClick={() => {
+                  if (PHONE_VERIFICATION_ENABLED) {
+                    navigate('/verify-phone');
+                  } else {
+                    const userRole = (user?.role || 'BUYER').toUpperCase();
+                    if (userRole === 'SELLER') {
+                      navigate('/seller/dashboard');
+                    } else if (userRole === 'ADMIN' || userRole === 'GLOBAL_ADMIN') {
+                      navigate('/admin/dashboard');
+                    } else {
+                      navigate('/');
+                    }
+                  }
+                }}
                 className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-3 rounded-xl text-xs transition cursor-pointer"
               >
-                Avançar para Verificação de Telefone
+                {PHONE_VERIFICATION_ENABLED ? 'Avançar para Verificação de Telefone' : 'Continuar para o Mercado Nusali'}
               </button>
             </div>
           )}
