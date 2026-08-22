@@ -246,43 +246,25 @@ export class AuthService {
 
   static async login(data: LoginDTO) {
     const db = getDb();
+    if (!db) {
+      throw new Error('Banco de dados indisponível para autenticação.');
+    }
+
     const cleanEmail = data.email.trim().toLowerCase();
+    const found = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
 
-    let userRecord: any = null;
-
-    if (db) {
-      const found = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
-      if (found.length > 0) {
-        userRecord = found[0];
-      }
+    if (found.length === 0) {
+      throw new Error('E-mail ou senha incorretos.');
     }
 
-    if (!userRecord) {
-      // Default demo bootstrap user validation for seamless testing
-      if (cleanEmail === 'admin@nusali.com' || cleanEmail === 'vendedor@nusali.com' || cleanEmail === 'cliente@nusali.com') {
-        const isMatch = data.password === '123456' || data.password === 'admin123';
-        if (isMatch) {
-          userRecord = {
-            id: `usr_${cleanEmail.split('@')[0]}`,
-            email: cleanEmail,
-            fullName: cleanEmail.startsWith('admin') ? 'Super Admin Nusali' : cleanEmail.startsWith('vendedor') ? 'Vendedor Oficial Nusali' : 'Cliente Nusali',
-            role: cleanEmail.startsWith('admin') ? 'ADMIN' : cleanEmail.startsWith('vendedor') ? 'SELLER' : 'BUYER',
-            countryCode: 'GW',
-            kycStatus: 'verified',
-            isActive: true,
-          };
-        }
-      }
-    } else {
-      if (userRecord.passwordHash) {
-        const isMatch = await bcrypt.compare(data.password, userRecord.passwordHash);
-        if (!isMatch) {
-          throw new Error('E-mail ou senha incorretos.');
-        }
-      }
+    const userRecord = found[0];
+
+    if (!userRecord.passwordHash) {
+      throw new Error('E-mail ou senha incorretos.');
     }
 
-    if (!userRecord) {
+    const isMatch = await bcrypt.compare(data.password, userRecord.passwordHash);
+    if (!isMatch) {
       throw new Error('E-mail ou senha incorretos.');
     }
 

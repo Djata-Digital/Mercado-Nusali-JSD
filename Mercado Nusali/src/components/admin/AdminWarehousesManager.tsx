@@ -93,9 +93,17 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
       const res = await AdminService.getWarehousesList();
       if (res.success && Array.isArray(res.data)) {
         setWarehouses(res.data);
+      } else if (res.message) {
+        showToast(res.message);
       }
     } catch (err: any) {
-      showToast('Erro ao carregar lista de HUBs logísticos.');
+      if (err?.response?.status === 401) {
+        showToast('Sua sessão expirou. Entre novamente.');
+      } else if (err?.response?.status === 403) {
+        showToast('Você não possui permissão para acessar esta área.');
+      } else {
+        showToast(err?.response?.data?.message || err?.message || 'Erro ao carregar lista de HUBs logísticos.');
+      }
     } finally {
       setIsLoadingWarehouses(false);
     }
@@ -109,9 +117,17 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
       const res = await AdminService.getInventoryTransfers();
       if (res.success && Array.isArray(res.data)) {
         setTransfers(res.data);
+      } else if (res.message) {
+        showToast(res.message);
       }
     } catch (err: any) {
-      showToast('Erro ao carregar lista de transferências de estoque.');
+      if (err?.response?.status === 401) {
+        showToast('Sua sessão expirou. Entre novamente.');
+      } else if (err?.response?.status === 403) {
+        showToast('Você não possui permissão para acessar esta área.');
+      } else {
+        showToast(err?.response?.data?.message || err?.message || 'Erro ao carregar lista de transferências de estoque.');
+      }
     } finally {
       setIsLoadingTransfers(false);
       setIsRefreshing(false);

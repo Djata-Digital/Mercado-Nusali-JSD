@@ -46,7 +46,13 @@ export const AdminLogisticsDashboard: React.FC<AdminLogisticsDashboardProps> = (
         showToast(res.message || 'Erro ao carregar expedições.');
       }
     } catch (err: any) {
-      showToast(err?.message || 'Erro ao consultar central de expedição.');
+      if (err?.response?.status === 401) {
+        showToast('Sua sessão expirou. Entre novamente.');
+      } else if (err?.response?.status === 403) {
+        showToast('Você não possui permissão para acessar esta área.');
+      } else {
+        showToast(err?.response?.data?.message || err?.message || 'Erro ao consultar central de expedição.');
+      }
     } finally {
       setIsLoading(false);
     }

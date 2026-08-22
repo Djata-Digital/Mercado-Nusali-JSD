@@ -18,9 +18,17 @@ export const AdminSellersManager: React.FC<AdminSellersManagerProps> = ({ showTo
       const res = await AdminService.getSellers();
       if (res.success && res.data) {
         setSellers(res.data);
+      } else if (res.message) {
+        showToast(res.message);
       }
-    } catch {
-      showToast('Erro ao carregar lista de vendedores.');
+    } catch (err: any) {
+      if (err?.response?.status === 401) {
+        showToast('Sua sessão expirou. Entre novamente.');
+      } else if (err?.response?.status === 403) {
+        showToast('Você não possui permissão para acessar esta área.');
+      } else {
+        showToast(err?.response?.data?.message || err?.message || 'Erro ao carregar lista de vendedores.');
+      }
     } finally {
       setIsLoading(false);
     }
@@ -124,18 +132,22 @@ export const AdminSellersManager: React.FC<AdminSellersManagerProps> = ({ showTo
                     <tr key={s.id} className="hover:bg-gray-50/50">
                       <td className="p-3">
                         <div className="font-extrabold text-gray-900">{s.sellerName}</div>
-                        <div className="text-[10px] text-gray-400">{s.tradingName || s.email}</div>
+                        <div className="text-[10px] text-gray-400">{s.tradingName ? `${s.tradingName} • ${s.email}` : s.email}</div>
                       </td>
                       <td className="p-3 font-bold text-gray-800">
-                        {s.countryCode === 'GW' ? '🇬🇼 GW' : s.countryCode === 'BR' ? '🇧🇷 BR' : s.countryCode}
+                        {s.countryCode === 'GW' ? '🇬🇼 GW' : s.countryCode === 'BR' ? '🇧🇷 BR' : (s.countryCode || 'Não informado')}
                       </td>
-                      <td className="p-3 font-mono text-[11px] text-gray-600">{s.taxId || 'N/A'}</td>
-                      <td className="p-3 font-bold text-gray-700">{s.phone}</td>
-                      <td className="p-3 font-black text-emerald-700">{s.totalSales || '0.00'} XOF</td>
+                      <td className="p-3 font-mono text-[11px] text-gray-600">{s.taxId || 'Não informado'}</td>
+                      <td className="p-3 font-bold text-gray-700">{s.phone || 'Não informado'}</td>
+                      <td className="p-3 font-black text-emerald-700">{s.totalSales ? `${s.totalSales} XOF` : '0.00 XOF'}</td>
                       <td className="p-3">
-                        <span className="font-bold text-purple-700 flex items-center gap-1">
-                          <Award className="w-3.5 h-3.5 text-amber-500" /> {s.rating || '5.0'}★
-                        </span>
+                        {s.rating && Number(s.rating) > 0 && s.totalOrders > 0 ? (
+                          <span className="font-bold text-purple-700 flex items-center gap-1">
+                            <Award className="w-3.5 h-3.5 text-amber-500" /> {Number(s.rating).toFixed(1)}★
+                          </span>
+                        ) : (
+                          <span className="text-gray-400 font-medium text-[11px]">Sem avaliações</span>
+                        )}
                       </td>
                       <td className="p-3">
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${

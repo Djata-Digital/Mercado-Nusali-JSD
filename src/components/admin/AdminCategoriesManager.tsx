@@ -85,10 +85,17 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
         setCategories(res.data);
       } else {
         setCategories([]);
+        if (res.message) showToast(res.message);
       }
     } catch (err: any) {
       console.error('Error fetching admin categories:', err);
-      showToast('Erro ao carregar categorias do banco de dados.');
+      if (err?.response?.status === 401) {
+        showToast('Sua sessão expirou. Entre novamente.');
+      } else if (err?.response?.status === 403) {
+        showToast('Você não possui permissão para acessar esta área.');
+      } else {
+        showToast(err?.response?.data?.message || err?.message || 'Erro ao carregar categorias do banco de dados.');
+      }
     } finally {
       setIsLoading(false);
     }

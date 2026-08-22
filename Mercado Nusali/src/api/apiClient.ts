@@ -167,6 +167,10 @@ class ApiClient {
           } catch (refreshErr) {
             storageService.removeToken();
             storageService.removeUser();
+            storageService.removeRefreshToken();
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('nusali:auth_expired'));
+            }
           }
         }
 

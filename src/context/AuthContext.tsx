@@ -33,13 +33,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const storedToken = storageService.getToken();
         const storedUser = storageService.getUser() as User | null;
 
-        if (storedToken && storedUser) {
+        if (storedToken) {
           setToken(storedToken);
-          setUser(storedUser);
-          setActiveRole(storedUser.role || 'BUYER');
+          if (storedUser) {
+            setUser(storedUser);
+            setActiveRole(storedUser.role || 'BUYER');
+          }
+
+          // Live session verification against GET /api/v1/auth/me
+          const meRes = await AuthService.me();
+          if (meRes.success && meRes.data) {
+            const liveUser = (meRes.data as any).user || meRes.data;
+            if (liveUser && liveUser.id) {
+              setUser(liveUser);
+              setActiveRole(liveUser.role || 'BUYER');
+              storageService.setUser(liveUser);
+            }
+          } else {
+            // Token is invalid/expired
+            storageService.removeToken();
+            storageService.removeUser();
+            setUser(null);
+            setToken(null);
+          }
         }
       } catch (err) {
         console.error('Failed to restore auth session:', err);
+        storageService.removeToken();
+        storageService.removeUser();
+        setUser(null);
+        setToken(null);
       } finally {
         setIsLoading(false);
       }
@@ -48,7 +71,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initAuth();
   }, []);
 
-  // Sync logout across browser tabs
+  // Sync logout across browser tabs & respond to 401 auth_expired events
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'nusali_auth_token' && !e.newValue) {
@@ -56,8 +79,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setToken(null);
       }
     };
+    const handleAuthExpired = () => {
+      setUser(null);
+      setToken(null);
+      storageService.removeToken();
+      storageService.removeUser();
+    };
+
     window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
+    window.addEventListener('nusali:auth_expired', handleAuthExpired);
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('nusali:auth_expired', handleAuthExpired);
+    };
   }, []);
 
   const login = useCallback(async (

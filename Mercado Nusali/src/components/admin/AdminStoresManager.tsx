@@ -16,9 +16,17 @@ export const AdminStoresManager: React.FC<AdminStoresManagerProps> = ({ showToas
       const res = await AdminService.getStores();
       if (res.success && res.data) {
         setStores(res.data);
+      } else if (res.message) {
+        showToast(res.message);
       }
-    } catch {
-      showToast('Erro ao carregar lojas.');
+    } catch (err: any) {
+      if (err?.response?.status === 401) {
+        showToast('Sua sessão expirou. Entre novamente.');
+      } else if (err?.response?.status === 403) {
+        showToast('Você não possui permissão para acessar esta área.');
+      } else {
+        showToast(err?.response?.data?.message || err?.message || 'Erro ao carregar lojas.');
+      }
     } finally {
       setIsLoading(false);
     }

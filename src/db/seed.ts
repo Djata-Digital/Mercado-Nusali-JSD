@@ -34,9 +34,32 @@ export async function runDatabaseInitAndSeed() {
   try {
     console.log('Connecting to PostgreSQL to run demo seeds...');
 
-    // IMPORTANT:
-    // Schema creation is handled exclusively by Drizzle migrations.
-    // This seed file only inserts development/demo data.
+    // Ensure seed admin user exists in DB with hashed password (bcrypt of 'password123')
+    await pool.query(`
+      INSERT INTO users (
+        id,
+        email,
+        password_hash,
+        full_name,
+        role,
+        country_code,
+        is_email_verified,
+        is_phone_verified,
+        is_active
+      )
+      VALUES (
+        'usr_admin_001',
+        'admin@nusali.com',
+        '$2b$10$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeg6Lruj3vjPGga31lW',
+        'Super Administrador Nusali',
+        'GLOBAL_ADMIN',
+        'GW',
+        true,
+        true,
+        true
+      )
+      ON CONFLICT (email) DO NOTHING;
+    `);
 
     const productCountResult = await pool.query(
       'SELECT COUNT(*)::int AS count FROM products',
