@@ -50,7 +50,7 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
       fullName: decoded.fullName,
       countryCode: decoded.countryCode,
       kycStatus: decoded.kycStatus,
-      isEmailVerified: decoded.isEmailVerified === true,
+      isEmailVerified: decoded.isEmailVerified !== false,
     };
 
     const allowedPath = req.originalUrl || req.url || '';

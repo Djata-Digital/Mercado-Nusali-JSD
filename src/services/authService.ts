@@ -125,8 +125,7 @@ export const AuthService = {
     } catch (e) {
       // Ignore network errors on logout to ensure client side cleanup occurs
     } finally {
-      storageService.removeToken();
-      storageService.removeUser();
+      storageService.clearAll();
     }
   },
 

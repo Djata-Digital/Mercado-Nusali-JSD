@@ -112,10 +112,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       let req: LoginRequest;
       if (typeof credentialsOrIdentifier === 'string') {
+        if (!password) {
+          throw new Error('Senha não fornecida para autenticação.');
+        }
         req = {
           identifier: credentialsOrIdentifier,
           role: role || 'BUYER',
-          password: password || 'password123',
+          password,
         };
       } else {
         req = credentialsOrIdentifier;

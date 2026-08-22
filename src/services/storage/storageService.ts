@@ -18,13 +18,7 @@ export interface StorageUser {
 export const storageService = {
   getToken(): string | null {
     try {
-      return (
-        localStorage.getItem(TOKEN_KEY) ||
-        localStorage.getItem('token') ||
-        localStorage.getItem('auth_token') ||
-        localStorage.getItem('access_token') ||
-        null
-      );
+      return localStorage.getItem(TOKEN_KEY);
     } catch {
       return null;
     }
@@ -33,6 +27,9 @@ export const storageService = {
   setToken(token: string): void {
     try {
       localStorage.setItem(TOKEN_KEY, token);
+      localStorage.removeItem('token');
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('access_token');
     } catch (e) {
       console.error('Failed to set token in storage', e);
     }
@@ -42,6 +39,9 @@ export const storageService = {
     try {
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(REFRESH_TOKEN_KEY);
+      localStorage.removeItem('token');
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('access_token');
     } catch (e) {
       console.error('Failed to remove token from storage', e);
     }
@@ -152,6 +152,9 @@ export const storageService = {
       localStorage.removeItem(REFRESH_TOKEN_KEY);
       localStorage.removeItem(USER_KEY);
       localStorage.removeItem(CART_KEY);
+      localStorage.removeItem('token');
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('access_token');
     } catch (e) {
       console.error('Failed to clear storage', e);
     }

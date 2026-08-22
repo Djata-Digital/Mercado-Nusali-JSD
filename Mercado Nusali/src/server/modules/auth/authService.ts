@@ -237,8 +237,8 @@ export class AuthService {
       kycStatus: user.kycStatus,
       avatar: user.avatarUrl || '',
       avatarUrl: user.avatarUrl || '',
-      isEmailVerified: user.isEmailVerified ?? false,
-      isPhoneVerified: user.isPhoneVerified ?? false,
+      isEmailVerified: user.isEmailVerified === true,
+      isPhoneVerified: user.isPhoneVerified === true,
       status: user.isActive === false ? 'suspended' : 'active',
       createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : (user.createdAt || new Date().toISOString()),
     };

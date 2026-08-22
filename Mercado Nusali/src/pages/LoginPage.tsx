@@ -85,14 +85,22 @@ export const LoginPage: React.FC = () => {
 
       setSuccessMessage('Autenticado com sucesso no Mercado Nusali!');
       setTimeout(() => {
-        if (loggedUser.role === 'SELLER') {
-          navigate(from !== '/' ? from : '/seller/dashboard');
-        } else if (loggedUser.role === 'ADMIN' || loggedUser.role === 'GLOBAL_ADMIN') {
-          navigate(from !== '/' ? from : '/admin/dashboard');
+        const userRole = String(loggedUser.role || '').toUpperCase();
+        const targetPath = from && from !== '/login' && from !== '/' ? from : null;
+
+        if (userRole === 'SELLER') {
+          navigate(targetPath || '/seller/dashboard', { replace: true });
+        } else if (
+          userRole === 'ADMIN' ||
+          userRole === 'GLOBAL_ADMIN' ||
+          userRole === 'COUNTRY_REPRESENTATIVE' ||
+          userRole === 'REGIONAL_SUPERVISOR'
+        ) {
+          navigate(targetPath || '/admin/dashboard', { replace: true });
         } else {
-          navigate(from);
+          navigate(targetPath || '/', { replace: true });
         }
-      }, 800);
+      }, 400);
     } catch (err: any) {
       const msg = err.message || 'Erro ao realizar login. Tente novamente.';
       if (msg.includes('EMAIL_VERIFICATION_REQUIRED') || msg.includes('E-mail não verificado')) {
@@ -109,37 +117,24 @@ export const LoginPage: React.FC = () => {
     }
   };
 
-  // Quick fill helper for demonstration
+  // Quick fill helper for demonstration (DEV mode only)
   const handleQuickFill = (type: string) => {
+    const isDev = Boolean((import.meta as any).env?.DEV);
+    if (!isDev) return;
     setErrorMessage(null);
     setErrorCode(null);
     if (type === 'buyer' || type === 'user') {
       setInputMode('email');
       setIdentifier('djatadigital7@gmail.com');
-      setPassword('password123');
       setRole('BUYER');
     } else if (type === 'seller') {
       setInputMode('email');
       setIdentifier('vendedor@nusali.com');
-      setPassword('password123');
       setRole('SELLER');
     } else if (type === 'admin') {
       setInputMode('email');
       setIdentifier('admin@nusali.com');
-      setPassword('password123');
       setRole('ADMIN');
-    } else if (type === 'suspended') {
-      setInputMode('email');
-      setIdentifier('conta.suspended@nusali.cplp');
-      setPassword('password123');
-    } else if (type === 'blocked') {
-      setInputMode('email');
-      setIdentifier('conta.blocked@nusali.cplp');
-      setPassword('password123');
-    } else if (type === 'unverified') {
-      setInputMode('email');
-      setIdentifier('novo.unverified@nusali.cplp');
-      setPassword('password123');
     }
   };
 
@@ -364,43 +359,42 @@ export const LoginPage: React.FC = () => {
             </p>
           </div>
 
-          {/* Quick Fill Simulation bar */}
-          <div className="mt-6 p-3.5 bg-slate-50 rounded-xl border border-slate-200">
-            <span className="text-[11px] font-extrabold uppercase tracking-wider text-slate-700 block mb-2 text-center">
-              🔑 Credenciais dos Primeiros Usuários (Clique para preencher):
-            </span>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={() => handleQuickFill('buyer')}
-                className="p-2 bg-white border border-blue-200 rounded-lg text-left hover:border-blue-500 hover:bg-blue-50/50 transition cursor-pointer shadow-2xs"
-              >
-                <div className="text-[10px] font-black text-blue-900 uppercase">Comprador</div>
-                <div className="text-[11px] font-bold text-gray-800 truncate">djatadigital7@gmail.com</div>
-                <div className="text-[10px] text-gray-500">Senha: password123</div>
-              </button>
+          {/* Quick Fill Simulation bar (rendered ONLY in development mode) */}
+          {Boolean((import.meta as any).env?.DEV) && (
+            <div className="mt-6 p-3.5 bg-slate-50 rounded-xl border border-slate-200">
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-slate-700 block mb-2 text-center">
+                🔑 Credenciais dos Primeiros Usuários (Modo DEV):
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleQuickFill('buyer')}
+                  className="p-2 bg-white border border-blue-200 rounded-lg text-left hover:border-blue-500 hover:bg-blue-50/50 transition cursor-pointer shadow-2xs"
+                >
+                  <div className="text-[10px] font-black text-blue-900 uppercase">Comprador</div>
+                  <div className="text-[11px] font-bold text-gray-800 truncate">djatadigital7@gmail.com</div>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => handleQuickFill('seller')}
-                className="p-2 bg-white border border-emerald-200 rounded-lg text-left hover:border-emerald-500 hover:bg-emerald-50/50 transition cursor-pointer shadow-2xs"
-              >
-                <div className="text-[10px] font-black text-emerald-800 uppercase">Vendedor</div>
-                <div className="text-[11px] font-bold text-gray-800 truncate">vendedor@nusali.com</div>
-                <div className="text-[10px] text-gray-500">Senha: password123</div>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickFill('seller')}
+                  className="p-2 bg-white border border-emerald-200 rounded-lg text-left hover:border-emerald-500 hover:bg-emerald-50/50 transition cursor-pointer shadow-2xs"
+                >
+                  <div className="text-[10px] font-black text-emerald-800 uppercase">Vendedor</div>
+                  <div className="text-[11px] font-bold text-gray-800 truncate">vendedor@nusali.com</div>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => handleQuickFill('admin')}
-                className="p-2 bg-white border border-purple-200 rounded-lg text-left hover:border-purple-500 hover:bg-purple-50/50 transition cursor-pointer shadow-2xs"
-              >
-                <div className="text-[10px] font-black text-purple-800 uppercase">Admin</div>
-                <div className="text-[11px] font-bold text-gray-800 truncate">admin@nusali.com</div>
-                <div className="text-[10px] text-gray-500">Senha: password123</div>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickFill('admin')}
+                  className="p-2 bg-white border border-purple-200 rounded-lg text-left hover:border-purple-500 hover:bg-purple-50/50 transition cursor-pointer shadow-2xs"
+                >
+                  <div className="text-[10px] font-black text-purple-800 uppercase">Admin</div>
+                  <div className="text-[11px] font-bold text-gray-800 truncate">admin@nusali.com</div>
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         {/* Security assurance footer */}

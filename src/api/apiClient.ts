@@ -29,6 +29,61 @@ export interface ApiResponse<T = any> {
   };
 }
 
+let refreshPromise: Promise<string> | null = null;
+
+async function executeSingleFlightRefresh(): Promise<string> {
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        const refreshToken = storageService.getRefreshToken();
+        if (!refreshToken) {
+          throw new Error('NO_REFRESH_TOKEN');
+        }
+
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[Auth] Starting token refresh single-flight');
+        }
+
+        const res = await axios.post(`${CONFIG.API_URL}/auth/refresh`, {
+          refreshToken,
+        });
+
+        const newToken = res.data?.data?.token || res.data?.data?.accessToken;
+        const newRefreshToken = res.data?.data?.refreshToken;
+
+        if (!newToken) {
+          throw new Error('REFRESH_FAILED');
+        }
+
+        // Save new access token & new refresh token (rotation) BEFORE retrying
+        storageService.setToken(newToken);
+        if (newRefreshToken) {
+          storageService.setRefreshToken(newRefreshToken);
+        }
+
+        if (process.env.NODE_ENV !== 'production') {
+          console.log('[Auth] Token refresh success');
+        }
+
+        return newToken;
+      } catch (err) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn('[Auth] Refresh token failed or expired');
+        }
+        throw err;
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+  } else {
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[Auth] Token refresh reused by concurrent request');
+    }
+  }
+
+  return refreshPromise;
+}
+
 class ApiClient {
   private instance: AxiosInstance;
 
@@ -134,34 +189,19 @@ class ApiClient {
           originalRequest._retry = true;
 
           try {
-            const refreshToken = storageService.getRefreshToken();
-
-            if (refreshToken) {
-              const res = await axios.post(
-                `${CONFIG.API_URL}/auth/refresh`,
-                { refreshToken }
-              );
-
-              const newToken = res.data?.data?.token;
-
-              if (newToken) {
-                storageService.setToken(newToken);
-                originalRequest.headers = originalRequest.headers || {};
-                originalRequest.headers.Authorization = `Bearer ${newToken}`;
-                return this.instance(originalRequest);
-              }
+            const newToken = await executeSingleFlightRefresh();
+            originalRequest.headers = originalRequest.headers || {};
+            if (typeof originalRequest.headers.set === 'function') {
+              originalRequest.headers.set('Authorization', `Bearer ${newToken}`);
+            } else {
+              (originalRequest.headers as any)['Authorization'] = `Bearer ${newToken}`;
             }
-
-            if (storageService.getToken()) {
-              storageService.removeToken();
-              storageService.removeUser();
-              storageService.removeRefreshToken();
-              if (typeof window !== 'undefined') {
-                window.dispatchEvent(new CustomEvent('nusali:auth_expired'));
-              }
-            }
+            return this.instance(originalRequest);
           } catch (refreshErr) {
-            if (storageService.getToken()) {
+            if (storageService.getToken() || storageService.getRefreshToken()) {
+              if (process.env.NODE_ENV !== 'production') {
+                console.warn('[Auth] Auth expired: purging session');
+              }
               storageService.removeToken();
               storageService.removeUser();
               storageService.removeRefreshToken();
