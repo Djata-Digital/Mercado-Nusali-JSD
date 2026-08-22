@@ -456,10 +456,25 @@ function sendAdminError(res: Response, error: unknown) {
     });
   }
 
+  if (process.env.NODE_ENV !== 'production') {
+    console.error('[ADMIN_INTERNAL_ERROR]', error);
+  }
+
+  const isDbError = typeof message === 'string' && (
+    message.includes('Failed query') ||
+    message.includes('select ') ||
+    message.includes('SELECT ') ||
+    message.includes('column ') ||
+    message.includes('relation ') ||
+    message.includes('PostgreSQL')
+  );
+
+  const userSafeMessage = isDbError ? 'Não foi possível concluir a operação. Tente novamente.' : message;
+
   return res.status(500).json({
     success: false,
-    error: { code: 'ADMIN_INTERNAL_ERROR', message },
-    message,
+    error: { code: 'ADMIN_INTERNAL_ERROR', message: userSafeMessage },
+    message: userSafeMessage,
   });
 }
 
@@ -2136,7 +2151,7 @@ adminRouter.get('/inventory/transfers', async (req: Request, res: Response) => {
     const [allSellers, allUsers, allStores, allAddresses, allProducts, allWarehouses] = await Promise.all([
       db.select().from(sellers),
       db.select().from(users),
-      db.select().from(stores),
+      db.select({ id: stores.id, sellerId: stores.sellerId, name: stores.name, slug: stores.slug, countryCode: stores.countryCode, logoUrl: stores.logoUrl }).from(stores),
       db.select().from(addresses),
       db.select().from(products),
       db.select().from(warehouses),

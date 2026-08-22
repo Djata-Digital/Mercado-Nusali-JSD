@@ -69,6 +69,11 @@ export async function runRuntimeSchemaAlign() {
         ALTER TABLE "orders" ALTER COLUMN "escrow_status" SET DEFAULT 'pending';
         ALTER TABLE "shipments" ALTER COLUMN "carrier" DROP NOT NULL;
 
+        -- ADD MISSING COLUMNS FOR STORES TABLE
+        ALTER TABLE "stores" ADD COLUMN IF NOT EXISTS "category_id" varchar(255);
+        ALTER TABLE "stores" ADD COLUMN IF NOT EXISTS "address_json" jsonb;
+        ALTER TABLE "stores" ADD COLUMN IF NOT EXISTS "business_hours_json" jsonb;
+
         CREATE TABLE IF NOT EXISTS "payment_customers" (
           "id" varchar(255) PRIMARY KEY NOT NULL,
           "user_id" varchar(255) NOT NULL REFERENCES "users"("id") ON DELETE CASCADE,
