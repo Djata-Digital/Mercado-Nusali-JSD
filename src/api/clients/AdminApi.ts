@@ -228,4 +228,17 @@ export class AdminApi {
   static async deleteCategoryAttribute(attributeId: string): Promise<ApiResponse<any>> {
     return apiClient.delete(`/admin/category-attributes/${attributeId}`);
   }
+
+  // Shipping Rates (Requirement 8)
+  static async getShippingRates(): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/shipping-rates');
+  }
+
+  static async createShippingRate(data: any): Promise<ApiResponse<any>> {
+    return apiClient.post('/admin/shipping-rates', data);
+  }
+
+  static async deleteShippingRate(id: string): Promise<ApiResponse<any>> {
+    return apiClient.delete(`/admin/shipping-rates/${id}`);
+  }
 }

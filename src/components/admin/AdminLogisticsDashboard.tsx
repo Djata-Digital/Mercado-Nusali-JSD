@@ -26,7 +26,7 @@ export const AdminLogisticsDashboard: React.FC<AdminLogisticsDashboardProps> = (
   const [receivedByName, setReceivedByName] = useState<string>('');
   const [isUpdatingStatus, setIsUpdatingStatus] = useState<boolean>(false);
 
-  // Details Modal
+  // Details & History Modal
   const [historyTarget, setHistoryTarget] = useState<any | null>(null);
   const [shipmentEvents, setShipmentEvents] = useState<any[]>([]);
   const [isLoadingEvents, setIsLoadingEvents] = useState<boolean>(false);
@@ -58,9 +58,90 @@ export const AdminLogisticsDashboard: React.FC<AdminLogisticsDashboardProps> = (
     }
   };
 
+  const handleOpenDetailsModal = async (shp: any) => {
+    setHistoryTarget(shp);
+    setIsLoadingEvents(true);
+    try {
+      const res = await AdminApi.getShipmentDetails(shp.id);
+      if (res.success && res.data?.events) {
+        setShipmentEvents(res.data.events);
+      } else {
+        setShipmentEvents([]);
+      }
+    } catch (err) {
+      setShipmentEvents([]);
+    } finally {
+      setIsLoadingEvents(false);
+    }
+  };
+
+  // Admin Shipping Rates Management (Requirement 8)
+  const [activeMainModule, setActiveMainModule] = useState<'shipments' | 'rates'>('shipments');
+  const [shippingRatesList, setShippingRatesList] = useState<any[]>([]);
+  const [isLoadingRates, setIsLoadingRates] = useState<boolean>(false);
+  const [isRateModalOpen, setIsRateModalOpen] = useState<boolean>(false);
+  const [newRateForm, setNewRateForm] = useState({
+    originCountry: 'BR',
+    destinationCountry: 'BR',
+    minWeightKg: '0.000',
+    maxWeightKg: '999.000',
+    price: '18.00',
+    currency: 'BRL',
+    estimatedMinDays: 1,
+    estimatedMaxDays: 5,
+    serviceType: 'standard',
+  });
+
+  const fetchRates = async () => {
+    setIsLoadingRates(true);
+    try {
+      const res = await AdminApi.getShippingRates();
+      if (res.success && Array.isArray(res.data)) {
+        setShippingRatesList(res.data);
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao carregar tarifas de frete.');
+    } finally {
+      setIsLoadingRates(false);
+    }
+  };
+
+  const handleCreateRate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await AdminApi.createShippingRate(newRateForm);
+      if (res.success) {
+        showToast('Tarifa de frete cadastrada com sucesso!');
+        setIsRateModalOpen(false);
+        fetchRates();
+      } else {
+        showToast(res.message || 'Erro ao cadastrar tarifa.');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao cadastrar tarifa.');
+    }
+  };
+
+  const handleDeleteRate = async (id: string) => {
+    if (!window.confirm('Excluir esta tarifa de frete do sistema?')) return;
+    try {
+      const res = await AdminApi.deleteShippingRate(id);
+      if (res.success) {
+        showToast('Tarifa de frete removida!');
+        fetchRates();
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao remover tarifa.');
+    }
+  };
+
   useEffect(() => {
-    fetchShipments();
-  }, [activeTabStatus, fulfillmentFilter, countryFilter]);
+    if (activeMainModule === 'rates') {
+      fetchRates();
+    } else {
+      fetchShipments();
+    }
+  }, [activeMainModule, activeTabStatus, fulfillmentFilter, countryFilter]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -187,15 +268,240 @@ export const AdminLogisticsDashboard: React.FC<AdminLogisticsDashboardProps> = (
           </p>
         </div>
 
-        <button
-          onClick={fetchShipments}
-          className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-extrabold rounded-xl transition flex items-center gap-2 cursor-pointer self-start md:self-auto"
-        >
-          <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} /> Atualizar
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setActiveMainModule('shipments')}
+            className={`px-4 py-2 text-xs font-extrabold rounded-xl transition flex items-center gap-1.5 cursor-pointer ${
+              activeMainModule === 'shipments'
+                ? 'bg-emerald-700 text-white shadow-xs'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            <Truck className="w-4 h-4" /> Central de Envios
+          </button>
+          <button
+            onClick={() => setActiveMainModule('rates')}
+            className={`px-4 py-2 text-xs font-extrabold rounded-xl transition flex items-center gap-1.5 cursor-pointer ${
+              activeMainModule === 'rates'
+                ? 'bg-emerald-700 text-white shadow-xs'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            <Box className="w-4 h-4" /> Tarifas de Frete (DB)
+          </button>
+          <button
+            onClick={activeMainModule === 'rates' ? fetchRates : fetchShipments}
+            className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-extrabold rounded-xl transition flex items-center gap-1.5 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading || isLoadingRates ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </div>
 
-      {/* Tabs & Filters Bar */}
+      {activeMainModule === 'rates' ? (
+        <div className="bg-white rounded-2xl p-6 border border-gray-200 shadow-xs space-y-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-base font-extrabold text-gray-900 flex items-center gap-2">
+                <Box className="w-5 h-5 text-emerald-600" /> Tarifas de Frete Cadastradas no PostgreSQL (shipping_rates)
+              </h3>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Defina os valores reais cobrados por rota e faixa de peso para cálculo automático no checkout.
+              </p>
+            </div>
+            <button
+              onClick={() => setIsRateModalOpen(true)}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold px-4 py-2.5 rounded-xl transition shadow-xs cursor-pointer flex items-center gap-1.5"
+            >
+              + Nova Tarifa de Frete
+            </button>
+          </div>
+
+          {isLoadingRates ? (
+            <div className="text-center py-12 text-gray-500 text-xs font-semibold">Carregando tarifas...</div>
+          ) : shippingRatesList.length === 0 ? (
+            <div className="text-center py-12 text-gray-500 text-xs font-semibold bg-gray-50 rounded-2xl border border-gray-200">
+              Nenhuma tarifa de frete cadastrada. Clique em "+ Nova Tarifa de Frete" para cadastrar.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-gray-50 text-gray-500 font-extrabold uppercase border-b border-gray-200">
+                  <tr>
+                    <th className="px-4 py-3">Origem &rarr; Destino</th>
+                    <th className="px-4 py-3">Faixa de Peso</th>
+                    <th className="px-4 py-3">Preço / Moeda</th>
+                    <th className="px-4 py-3">Prazo Estimado</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-right">Ação</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 font-medium text-gray-900">
+                  {shippingRatesList.map((r) => (
+                    <tr key={r.id} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 font-bold">
+                        {r.originCountry} &rarr; {r.destinationCountry}
+                      </td>
+                      <td className="px-4 py-3 font-mono">
+                        {r.minWeightKg} kg &ndash; {r.maxWeightKg} kg
+                      </td>
+                      <td className="px-4 py-3 font-extrabold text-emerald-800">
+                        {r.currency} {Number(r.price).toFixed(2)}
+                      </td>
+                      <td className="px-4 py-3 text-gray-600">
+                        {r.estimatedMinDays} a {r.estimatedMaxDays} dias
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${r.isActive ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-200 text-gray-600'}`}>
+                          {r.isActive ? 'Ativa' : 'Inativa'}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => handleDeleteRate(r.id)}
+                          className="text-red-600 hover:text-red-800 font-bold hover:underline cursor-pointer"
+                        >
+                          Excluir
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Create Rate Modal */}
+          {isRateModalOpen && (
+            <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-xl">
+                <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                  <h3 className="font-extrabold text-gray-900 text-sm">Nova Tarifa de Frete (PostgreSQL)</h3>
+                  <button onClick={() => setIsRateModalOpen(false)} className="text-gray-400 hover:text-gray-600">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <form onSubmit={handleCreateRate} className="space-y-3 text-xs">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">País Origem</label>
+                      <input
+                        type="text"
+                        value={newRateForm.originCountry}
+                        onChange={(e) => setNewRateForm({ ...newRateForm, originCountry: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg uppercase font-bold"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">País Destino</label>
+                      <input
+                        type="text"
+                        value={newRateForm.destinationCountry}
+                        onChange={(e) => setNewRateForm({ ...newRateForm, destinationCountry: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg uppercase font-bold"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">Peso Mínimo (kg)</label>
+                      <input
+                        type="number"
+                        step="0.001"
+                        value={newRateForm.minWeightKg}
+                        onChange={(e) => setNewRateForm({ ...newRateForm, minWeightKg: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg font-mono"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">Peso Máximo (kg)</label>
+                      <input
+                        type="number"
+                        step="0.001"
+                        value={newRateForm.maxWeightKg}
+                        onChange={(e) => setNewRateForm({ ...newRateForm, maxWeightKg: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg font-mono"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">Preço do Frete</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={newRateForm.price}
+                        onChange={(e) => setNewRateForm({ ...newRateForm, price: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg font-bold"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">Moeda</label>
+                      <select
+                        value={newRateForm.currency}
+                        onChange={(e) => setNewRateForm({ ...newRateForm, currency: e.target.value })}
+                        className="w-full p-2 border border-gray-300 rounded-lg font-bold"
+                      >
+                        <option value="BRL">BRL (R$)</option>
+                        <option value="XOF">XOF (FCFA)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">Prazo Mínimo (dias)</label>
+                      <input
+                        type="number"
+                        value={newRateForm.estimatedMinDays}
+                        onChange={(e) => setNewRateForm({ ...newRateForm, estimatedMinDays: Number(e.target.value) })}
+                        className="w-full p-2 border border-gray-300 rounded-lg"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">Prazo Máximo (dias)</label>
+                      <input
+                        type="number"
+                        value={newRateForm.estimatedMaxDays}
+                        onChange={(e) => setNewRateForm({ ...newRateForm, estimatedMaxDays: Number(e.target.value) })}
+                        className="w-full p-2 border border-gray-300 rounded-lg"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-3 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsRateModalOpen(false)}
+                      className="px-4 py-2 border border-gray-300 rounded-xl font-bold text-gray-600 hover:bg-gray-50"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      className="px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold hover:bg-emerald-700"
+                    >
+                      Salvar Tarifa
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          {/* Tabs & Filters Bar */}
       <div className="bg-white rounded-2xl p-4 border border-gray-200 shadow-xs space-y-4">
         {/* Status Tabs */}
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none border-b border-gray-100">
@@ -593,6 +899,8 @@ export const AdminLogisticsDashboard: React.FC<AdminLogisticsDashboardProps> = (
         </div>
       );
     })()}
+        </>
+      )}
 
       {/* MODAL: HISTÓRICO DE RASTREAMENTO */}
       {historyTarget && (

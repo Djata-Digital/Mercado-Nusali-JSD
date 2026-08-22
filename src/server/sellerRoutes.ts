@@ -40,6 +40,9 @@ import {
   addresses,
   stores as storesTable,
   storeMembers,
+  storeShippingPolicies,
+  shippingRates,
+  shippingZones,
   payments,
   paymentAttempts,
   refunds,
@@ -592,6 +595,178 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
   }
 });
 
+sellerRouter.get('/shipping-policy', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não encontrado.' });
+
+    // Requirement 4: Explicitly require storeId query parameter (NO storeRows[0] fallback)
+    const targetStoreId = req.query.storeId as string;
+    if (!targetStoreId || !targetStoreId.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'STORE_ID_REQUIRED', message: 'O parâmetro storeId é obrigatório para obter a política de frete.' },
+      });
+    }
+
+    // Verify store ownership
+    const validStore = await db
+      .select()
+      .from(storesTable)
+      .where(and(eq(storesTable.id, targetStoreId), eq(storesTable.sellerId, seller.id)))
+      .limit(1);
+
+    if (validStore.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'STORE_REQUIRED_FOR_SHIPPING_POLICY', message: 'A loja informada não pertence ao vendedor autenticado.' },
+      });
+    }
+
+    const policyRows = await db
+      .select()
+      .from(storeShippingPolicies)
+      .where(and(eq(storeShippingPolicies.storeId, targetStoreId), eq(storeShippingPolicies.sellerId, seller.id)))
+      .limit(1);
+
+    if (policyRows.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          storeId: targetStoreId,
+          mode: 'CUSTOMER_PAYS',
+          sellerSubsidyMaxAmount: 0,
+          sellerSubsidyPercent: 0,
+          subsidyType: 'MAX_AMOUNT',
+        },
+      });
+    }
+
+    const pol = policyRows[0];
+    const maxAmt = pol.sellerSubsidyMaxAmount ? Number(pol.sellerSubsidyMaxAmount) : 0;
+    const pct = pol.sellerSubsidyPercent ? Number(pol.sellerSubsidyPercent) : 0;
+
+    return res.json({
+      success: true,
+      data: {
+        storeId: pol.storeId,
+        mode: pol.mode || 'CUSTOMER_PAYS',
+        sellerSubsidyMaxAmount: maxAmt,
+        sellerSubsidyPercent: pct,
+        subsidyType: maxAmt > 0 ? 'MAX_AMOUNT' : (pct > 0 ? 'PERCENT' : 'MAX_AMOUNT'),
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao obter política de frete.' });
+  }
+});
+
+sellerRouter.post('/shipping-policy', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não encontrado.' });
+
+    // Requirement 5: Explicitly require storeId in body (NO storeRows[0] fallback)
+    const { storeId: bodyStoreId, mode, sellerSubsidyMaxAmount, sellerSubsidyPercent, subsidyType } = req.body;
+    const targetStoreId = bodyStoreId;
+
+    if (!targetStoreId || !String(targetStoreId).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'STORE_ID_REQUIRED',
+          message: 'O campo storeId é obrigatório para atualizar a política de frete.',
+        },
+      });
+    }
+
+    // Verify store ownership
+    const validStore = await db
+      .select()
+      .from(storesTable)
+      .where(and(eq(storesTable.id, targetStoreId), eq(storesTable.sellerId, seller.id)))
+      .limit(1);
+
+    if (validStore.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'STORE_REQUIRED_FOR_SHIPPING_POLICY',
+          message: 'A loja selecionada não pertence ao vendedor autenticado.',
+        },
+      });
+    }
+
+    const finalMode = mode || 'CUSTOMER_PAYS';
+
+    // Requirement 12: Protect MARKETPLACE_FREE_SHIPPING from being selected by sellers
+    const ALLOWED_SELLER_MODES = ['CUSTOMER_PAYS', 'SELLER_FREE_SHIPPING', 'SELLER_SUBSIDIZED', 'PICKUP'];
+    if (!ALLOWED_SELLER_MODES.includes(finalMode)) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'INVALID_SELLER_SHIPPING_MODE',
+          message: 'Modo de frete não permitido para vendedor. Frete Grátis Marketplace é reservado para campanhas administrativas.',
+        },
+      });
+    }
+
+    let finalMaxAmt: number | null = null;
+    let finalPct: number | null = null;
+
+    if (finalMode === 'SELLER_SUBSIDIZED') {
+      if (subsidyType === 'PERCENT') {
+        finalPct = Number(sellerSubsidyPercent) || 0;
+        finalMaxAmt = null;
+      } else {
+        finalMaxAmt = Number(sellerSubsidyMaxAmount) || 0;
+        finalPct = null;
+      }
+    }
+
+    const storeId = targetStoreId;
+
+    const existingPolicy = await db.select().from(storeShippingPolicies).where(and(eq(storeShippingPolicies.storeId, storeId), eq(storeShippingPolicies.sellerId, seller.id))).limit(1);
+
+    if (existingPolicy.length > 0) {
+      await db.update(storeShippingPolicies)
+        .set({
+          mode: finalMode,
+          sellerSubsidyMaxAmount: finalMaxAmt !== null ? String(finalMaxAmt) : null,
+          sellerSubsidyPercent: finalPct !== null ? String(finalPct) : null,
+          updatedAt: new Date(),
+        })
+        .where(eq(storeShippingPolicies.id, existingPolicy[0].id));
+    } else {
+      await db.insert(storeShippingPolicies).values({
+        id: `pol_${Date.now()}`,
+        storeId,
+        sellerId: seller.id,
+        mode: finalMode,
+        sellerSubsidyMaxAmount: finalMaxAmt !== null ? String(finalMaxAmt) : null,
+        sellerSubsidyPercent: finalPct !== null ? String(finalPct) : null,
+        isActive: true,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Política de frete da loja salva com sucesso!',
+      data: {
+        mode: finalMode,
+        sellerSubsidyMaxAmount: finalMaxAmt || 0,
+        sellerSubsidyPercent: finalPct || 0,
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao salvar política de frete.' });
+  }
+});
+
 sellerRouter.get('/stores', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -603,15 +778,26 @@ sellerRouter.get('/stores', async (req: AuthRequest, res: Response) => {
     const categoriesRows = await db.select().from(categories).catch(() => []);
     const categoriesMap = new Map<string, string>(categoriesRows.map((c: any) => [c.id, c.name] as [string, string]));
 
-    const formattedStores = storeRows.map((s) => ({
-      ...s,
-      logo: s.logoUrl || '',
-      banner: s.bannerUrl || '',
-      category: s.categoryId ? (categoriesMap.get(s.categoryId) || '') : '',
-      country: s.countryCode || 'GW',
-      city: s.addressJson && typeof s.addressJson === 'object' ? (s.addressJson as any).city || '' : '',
-      address: s.addressJson && typeof s.addressJson === 'object' ? (s.addressJson as any).address || '' : '',
-    }));
+    const formattedStores = storeRows.map((s) => {
+      const addr = s.addressJson && typeof s.addressJson === 'object' ? (s.addressJson as any) : {};
+      return {
+        ...s,
+        logo: s.logoUrl || '',
+        logoUrl: s.logoUrl || '',
+        banner: s.bannerUrl || '',
+        bannerUrl: s.bannerUrl || '',
+        category: s.categoryId ? (categoriesMap.get(s.categoryId) || '') : '',
+        country: s.countryCode || 'GW',
+        countryCode: s.countryCode || 'GW',
+        phone: addr.phone || '',
+        city: addr.city || '',
+        address: addr.address || '',
+        email: addr.email || '',
+        addressJson: addr,
+        businessHours: s.businessHoursJson || null,
+        businessHoursJson: s.businessHoursJson || null,
+      };
+    });
 
     return res.json({ success: true, data: formattedStores });
   } catch (error: any) {
@@ -635,7 +821,41 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { name, slug, description, countryCode, logoUrl, bannerUrl, categoryId, addressJson, businessHoursJson } = req.body;
+    const {
+      name,
+      slug,
+      description,
+      countryCode: rawCountryCode,
+      country: rawCountry,
+      logoUrl: rawLogoUrl,
+      logo: rawLogo,
+      bannerUrl: rawBannerUrl,
+      banner: rawBanner,
+      categoryId,
+      addressJson: rawAddressJson,
+      phone: rawPhone,
+      city: rawCity,
+      address: rawAddress,
+      email: rawEmail,
+      businessHoursJson: rawBusinessHoursJson,
+      businessHours: rawBusinessHours,
+    } = req.body;
+
+    const logoUrl = rawLogoUrl || rawLogo || null;
+    const bannerUrl = rawBannerUrl || rawBanner || null;
+    const countryCode = rawCountryCode || rawCountry || seller.countryCode || 'GW';
+
+    let addressJson = rawAddressJson;
+    if (!addressJson && (rawPhone || rawCity || rawAddress || rawEmail)) {
+      addressJson = {
+        phone: rawPhone || '',
+        city: rawCity || '',
+        address: rawAddress || '',
+        email: rawEmail || '',
+      };
+    }
+
+    const businessHoursJson = rawBusinessHoursJson || rawBusinessHours || null;
 
     // Rule 9: Remove name fallback - name is REQUIRED
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -669,21 +889,40 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       sellerId: seller.id,
       name: name.trim(),
       slug: storeSlug,
-      countryCode: countryCode || seller.countryCode || 'GW',
+      countryCode,
       description: description || '',
-      logoUrl: logoUrl || null,
-      bannerUrl: bannerUrl || null,
+      logoUrl,
+      bannerUrl,
       categoryId: categoryId.trim(),
-      addressJson: addressJson || null,
-      businessHoursJson: businessHoursJson || null,
+      addressJson,
+      businessHoursJson,
       status: 'active',
     };
 
     await db.insert(storesTable).values(newStore);
+
+    const addr = addressJson && typeof addressJson === 'object' ? (addressJson as any) : {};
+    const formattedStoreData = {
+      ...newStore,
+      logo: logoUrl || '',
+      logoUrl: logoUrl || '',
+      banner: bannerUrl || '',
+      bannerUrl: bannerUrl || '',
+      country: countryCode,
+      countryCode: countryCode,
+      phone: addr.phone || '',
+      city: addr.city || '',
+      address: addr.address || '',
+      email: addr.email || '',
+      addressJson,
+      businessHours: businessHoursJson,
+      businessHoursJson,
+    };
+
     return res.json({
       success: true,
       message: `Loja "${newStore.name}" criada com sucesso!`,
-      data: newStore,
+      data: formattedStoreData,
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao criar loja.' });
@@ -714,7 +953,43 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { name, description, status, logoUrl, bannerUrl, categoryId, addressJson, businessHoursJson } = req.body;
+    const {
+      name,
+      description,
+      status,
+      logoUrl: rawLogoUrl,
+      logo: rawLogo,
+      bannerUrl: rawBannerUrl,
+      banner: rawBanner,
+      countryCode: rawCountryCode,
+      country: rawCountry,
+      categoryId,
+      addressJson: rawAddressJson,
+      phone: rawPhone,
+      city: rawCity,
+      address: rawAddress,
+      email: rawEmail,
+      businessHoursJson: rawBusinessHoursJson,
+      businessHours: rawBusinessHours,
+    } = req.body;
+
+    const logoUrl = rawLogoUrl !== undefined ? rawLogoUrl : (rawLogo !== undefined ? rawLogo : storeRows[0].logoUrl);
+    const bannerUrl = rawBannerUrl !== undefined ? rawBannerUrl : (rawBanner !== undefined ? rawBanner : storeRows[0].bannerUrl);
+    const countryCode = rawCountryCode || rawCountry || storeRows[0].countryCode;
+
+    let addressJson = rawAddressJson !== undefined ? rawAddressJson : storeRows[0].addressJson;
+    if (rawPhone !== undefined || rawCity !== undefined || rawAddress !== undefined || rawEmail !== undefined) {
+      const prevAddr = (typeof storeRows[0].addressJson === 'object' && storeRows[0].addressJson) ? storeRows[0].addressJson : {};
+      addressJson = {
+        ...prevAddr,
+        phone: rawPhone !== undefined ? rawPhone : (prevAddr as any).phone,
+        city: rawCity !== undefined ? rawCity : (prevAddr as any).city,
+        address: rawAddress !== undefined ? rawAddress : (prevAddr as any).address,
+        email: rawEmail !== undefined ? rawEmail : (prevAddr as any).email,
+      };
+    }
+
+    const businessHoursJson = rawBusinessHoursJson !== undefined ? rawBusinessHoursJson : (rawBusinessHours !== undefined ? rawBusinessHours : storeRows[0].businessHoursJson);
 
     // Rule 10: Category validation if provided
     if (categoryId) {
@@ -735,12 +1010,13 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
       .set({
         name: name ? String(name).trim() : storeRows[0].name,
         description: description !== undefined ? description : storeRows[0].description,
+        countryCode,
         status: updatedStatus,
-        logoUrl: logoUrl !== undefined ? logoUrl : storeRows[0].logoUrl,
-        bannerUrl: bannerUrl !== undefined ? bannerUrl : storeRows[0].bannerUrl,
+        logoUrl,
+        bannerUrl,
         categoryId: categoryId ? String(categoryId).trim() : storeRows[0].categoryId,
-        addressJson: addressJson !== undefined ? addressJson : storeRows[0].addressJson,
-        businessHoursJson: businessHoursJson !== undefined ? businessHoursJson : storeRows[0].businessHoursJson,
+        addressJson,
+        businessHoursJson,
         updatedAt: new Date(),
       })
       .where(and(eq(storesTable.id, req.params.id), eq(storesTable.sellerId, seller.id)));
@@ -899,7 +1175,7 @@ sellerRouter.get('/products', async (req: AuthRequest, res: Response) => {
         ...p,
         price: Number(p.price),
         originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
-        rating: Number(p.rating || 5.0),
+        rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
         stock: Number(p.stock),
       }));
       if (q && typeof q === 'string') {
@@ -926,16 +1202,22 @@ sellerRouter.get('/products/:id', async (req: Request, res: Response) => {
         const variants = await db.select().from(productVariants).where(eq(productVariants.productId, id));
         const images = await db.select().from(productImages).where(eq(productImages.productId, id));
         const attrs = await db.select().from(productAttributes).where(eq(productAttributes.productId, id));
+        const imageUrls = images.map(img => img.imageUrl).filter(Boolean);
+        const coverImg = images.find(img => img.isCover)?.imageUrl || (imageUrls.length > 0 ? imageUrls[0] : p.image);
+
         return res.json({
           success: true,
           data: {
             ...p,
+            image: coverImg,
             price: Number(p.price),
             originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
-            rating: Number(p.rating || 5.0),
+            rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
             stock: Number(p.stock),
             variants,
-            images,
+            images: imageUrls.length > 0 ? imageUrls : (p.image ? [p.image] : []),
+            galleryImages: imageUrls.length > 0 ? imageUrls : (p.image ? [p.image] : []),
+            productImages: images,
             attributes: attrs,
           },
         });

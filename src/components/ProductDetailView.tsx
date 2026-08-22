@@ -379,7 +379,7 @@ export const ProductDetailView: React.FC = () => {
 
   // International Check
   const isInternational = !!(product.shipping?.isInternational || product.publishingScope === 'international');
-  const originCountry = product.originCountry || product.shipping?.originCountry || 'GW';
+  const originCountry = product.originCountry || product.shipping?.originCountry || product.seller?.country || '';
 
   const [isAnsweringQuestion, setIsAnsweringQuestion] = useState(false);
 
@@ -472,18 +472,14 @@ export const ProductDetailView: React.FC = () => {
         </div>
 
         {/* Origin / Scope Badge */}
-        {isInternational ? (
-          <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 text-indigo-900 font-bold px-3 py-1 rounded-full shadow-2xs">
-            <Globe className="w-3.5 h-3.5 text-indigo-600" />
-            <span>
-              Produto Internacional &bull; Enviado de {getCountryFlag(originCountry)}{' '}
-              {getCountryName(originCountry)}
-            </span>
-          </div>
-        ) : (
+        {originCountry ? (
           <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold px-3 py-1 rounded-full shadow-2xs">
             <span>{getCountryFlag(originCountry)}</span>
-            <span>Venda Nacional ({getCountryName(originCountry)})</span>
+            <span>Vendido a partir de {getCountryName(originCountry)}</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 bg-gray-50 border border-gray-200 text-gray-700 font-medium px-3 py-1 rounded-full shadow-2xs">
+            <span>Origem não informada</span>
           </div>
         )}
       </div>
@@ -608,7 +604,7 @@ export const ProductDetailView: React.FC = () => {
           {/* Condition, Rating & Share */}
           <div className="flex items-center justify-between text-xs text-gray-500">
             <span>
-              {product.condition === 'novo' ? 'Novo' : 'Usado'} | {product.salesCount}+ vendidos
+              {['novo', 'new'].includes(String(product.condition).toLowerCase()) ? 'Novo' : 'Usado'} | {product.salesCount || 0} vendidos
             </span>
             <div className="flex items-center gap-1.5">
               <button
@@ -649,13 +645,17 @@ export const ProductDetailView: React.FC = () => {
           <h1 className="text-xl font-bold text-gray-900 leading-snug">{product.title}</h1>
 
           {/* Rating */}
-          <div className="flex items-center gap-2 text-xs">
-            <div className="flex items-center text-amber-400">
-              <Star className="w-4 h-4 fill-amber-400" />
-              <span className="ml-1 font-bold text-gray-900 text-sm">{product.rating}</span>
+          {product.reviewsCount && product.reviewsCount > 0 ? (
+            <div className="flex items-center gap-2 text-xs">
+              <div className="flex items-center text-amber-400">
+                <Star className="w-4 h-4 fill-amber-400" />
+                <span className="ml-1 font-bold text-gray-900 text-sm">{product.rating}</span>
+              </div>
+              <span className="text-gray-400">({product.reviewsCount} avaliações)</span>
             </div>
-            <span className="text-gray-400">({product.reviewsCount} avaliações)</span>
-          </div>
+          ) : (
+            <div className="text-xs text-gray-400 font-medium">Sem avaliações até o momento</div>
+          )}
 
           {/* Price Block */}
           <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 space-y-2">
@@ -699,7 +699,7 @@ export const ProductDetailView: React.FC = () => {
               )}
             </div>
 
-            {instMax > 1 && (
+            {instMax > 1 && product.installmentsMax && product.installmentsMax > 1 && (
               <p className="text-xs font-bold text-green-700">
                 em {product.installmentsMax}x de {installmentAmountStr}{' '}
                 {product.installmentsInterestFree && 'sem juros no cartão'}
@@ -952,28 +952,21 @@ export const ProductDetailView: React.FC = () => {
         <div className="lg:col-span-3 space-y-4">
           {/* Buy Box Card */}
           <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-xs space-y-4">
-            {/* Shipping Calculator */}
+            {/* Shipping Info */}
             <div className="space-y-1">
-              <div className="flex items-center gap-2 text-green-700 font-bold text-sm">
-                <Truck className="w-5 h-5 text-green-600" />
+              <div className="flex items-center gap-2 font-bold text-sm text-gray-800">
+                <Truck className="w-5 h-5 text-gray-600" />
                 <span>
-                  {isInternational
-                    ? 'Frete Internacional Nusali Global'
-                    : 'Frete GRÁTIS Nusali Logística'}
+                  {product.shipping?.freeShipping
+                    ? 'Frete GRÁTIS'
+                    : 'Frete calculado no checkout'}
                 </span>
               </div>
-              <p className="text-xs text-gray-600 pl-7">
-                {isInternational ? (
-                  <>
-                    Envio de {getCountryFlag(originCountry)} {getCountryName(originCountry)}. Chega em{' '}
-                    <strong className="text-indigo-700">8 a 14 dias</strong> em {userLocation.city}
-                  </>
-                ) : (
-                  <>
-                    Chega <strong className="text-green-700">Amanhã</strong> em {userLocation.city}
-                  </>
-                )}
-              </p>
+              {product.shipping?.arrivesTomorrow && (
+                <p className="text-xs text-green-700 font-semibold pl-7">
+                  Chega amanhã em {userLocation.city}
+                </p>
+              )}
             </div>
 
             {/* Stock status indicator based on variation */}
@@ -1102,7 +1095,7 @@ export const ProductDetailView: React.FC = () => {
               <Building2 className="w-5 h-5 text-gray-700" />
               <div>
                 <p className="text-xs font-bold text-gray-900">
-                  {product.seller?.name || 'Loja Oficial Nusali'}
+                  {product.seller?.name || product.storeName || 'Vendedor'}
                 </p>
                 {product.seller?.isOfficialStore && (
                   <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.2 rounded-xs">
@@ -1135,17 +1128,21 @@ export const ProductDetailView: React.FC = () => {
             <div className="grid grid-cols-3 gap-2 text-center text-[10px] text-gray-600 pt-2 border-t border-gray-100">
               <div>
                 <p className="font-extrabold text-gray-900 text-xs">
-                  {product.seller?.salesCount || 100}+
+                  {product.seller?.salesCount ?? product.salesCount ?? 0}
                 </p>
-                <p>Vendas concretizadas</p>
+                <p>Vendas nos últimos 60 dias</p>
               </div>
               <div>
-                <p className="font-extrabold text-green-700 text-xs">Excelente</p>
+                <p className="font-extrabold text-gray-900 text-xs">
+                  {product.seller?.goodService ? 'Sim' : 'Em avaliação'}
+                </p>
                 <p>Bom atendimento</p>
               </div>
               <div>
-                <p className="font-extrabold text-green-700 text-xs">No prazo</p>
-                <p>Envio imediato</p>
+                <p className="font-extrabold text-gray-900 text-xs">
+                  {product.seller?.onTimeDelivery ? 'No prazo' : 'Em avaliação'}
+                </p>
+                <p>Entrega no prazo</p>
               </div>
             </div>
           </div>

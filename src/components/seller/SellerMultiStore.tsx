@@ -278,52 +278,58 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
     const hoursSummary = hasAnyOpenDay ? formatSummaryHours(businessHours) : '';
 
     if (editingStore) {
-      const updated: SellerStoreData = {
+      const updated: SellerStoreData & Record<string, any> = {
         ...editingStore,
         name: name.trim(),
         description: description.trim(),
         categoryId: selectedCategoryId,
         category: categoryName,
         country,
+        countryCode: country,
         city: city.trim(),
         address: address.trim(),
         phone: phone.trim(),
         email: email.trim(),
         logo,
+        logoUrl: logo,
         banner,
+        bannerUrl: banner,
         openingHours: hoursSummary,
         businessHoursJson: finalBusinessHoursJson,
-        addressJson: { city: city.trim(), address: address.trim() },
+        addressJson: { phone: phone.trim(), city: city.trim(), address: address.trim(), email: email.trim() },
       };
       onUpdateStore(updated);
     } else {
       // Create New Store Payload - Strict Rule: DO NOT INVENT FAKE DEFAULTS
-      const newStore: SellerStoreData = {
+      const newStore: SellerStoreData & Record<string, any> = {
         id: `store-${Date.now()}`,
         name: name.trim(),
         slug: name.trim().toLowerCase().replace(/[^a-z0-9]/g, '-'),
         logo,
+        logoUrl: logo,
         banner,
+        bannerUrl: banner,
         description: description.trim(),
         categoryId: selectedCategoryId,
         category: categoryName,
         country,
+        countryCode: country,
         city: city.trim(),
         address: address.trim(),
         phone: phone.trim(),
         email: email.trim(),
         openingHours: hoursSummary,
         businessHoursJson: finalBusinessHoursJson,
-        addressJson: { city: city.trim(), address: address.trim() },
+        addressJson: { phone: phone.trim(), city: city.trim(), address: address.trim(), email: email.trim() },
         exchangePolicy: '',
         warrantyPolicy: '',
         returnPolicy: '',
         status: 'active',
-        isOfficial: false, // Rule 8: NEVER default to true!
-        rating: 0, // Rule 8: NO fake 5.0 rating!
+        isOfficial: false,
+        rating: 0,
         followersCount: 0,
         salesCount: 0,
-        acceptedCurrencies: [], // Rule 8: NO fake arrays!
+        acceptedCurrencies: [],
         acceptedPayments: [],
         shippingMethods: [],
       };

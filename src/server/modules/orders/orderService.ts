@@ -14,11 +14,14 @@ import {
   carts,
   cartItems,
   addresses,
+  sellers,
+  stores,
 } from '../../../db/schema.js';
 import { eq, and, desc, asc, sql, inArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
+import { ShippingCalculatorService } from '../shipping/shippingCalculatorService.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -125,10 +128,15 @@ export class OrderService {
         inventoryId: string;
         warehouseId: string | null;
         fulfillmentMode: string;
+        weightKg: number;
+        originCountry?: string;
       }> = [];
 
       let primarySellerId: string | null = null;
       let primaryStoreId: string | null = null;
+
+      const whRows = await tx.select().from(warehouses);
+      const whMap = new Map(whRows.map((w) => [w.id, w]));
 
       // Validate products, DB unit prices, and INVENTORY table stock
       for (const ci of itemsInCart) {
@@ -141,15 +149,28 @@ export class OrderService {
         let unitPrice = Number(prod.price);
         let variantTitle: string | null = null;
         let variantSku: string | null = null;
+        let itemWeightKg = 0;
+
+        if ((prod as any).weight) {
+          itemWeightKg = Number((prod as any).weight);
+        } else if (prod.shippingJson && typeof prod.shippingJson === 'object' && (prod.shippingJson as any).weightKg) {
+          itemWeightKg = Number((prod.shippingJson as any).weightKg);
+        }
 
         if (ci.variantId) {
           const varRows = await tx.select().from(productVariants).where(eq(productVariants.id, ci.variantId)).limit(1);
           if (varRows.length > 0) {
             const v = varRows[0];
             if (v.price) unitPrice = Number(v.price);
+            if (v.weight) itemWeightKg = Number(v.weight);
             variantTitle = v.title || null;
             variantSku = v.sku || null;
           }
+        }
+
+        // Requirement 1: Mandatory product weight check (NO 0.5kg fallback)
+        if (!itemWeightKg || itemWeightKg <= 0) {
+          throw new Error(`PRODUCT_WEIGHT_REQUIRED: O peso do produto "${prod.title}" não foi cadastrado e é obrigatório para cálculo de frete.`);
         }
 
         const reqQty = Number(ci.quantity) || 1;
@@ -182,9 +203,6 @@ export class OrderService {
 
         // Filter candidate rows that have available stock > 0
         const candidateRows = inventoryRows.filter((inv) => inv.quantityOnHand - inv.quantityReserved > 0);
-
-        const whRows = await tx.select().from(warehouses);
-        const whMap = new Map(whRows.map((w) => [w.id, w]));
 
         // Sort candidates: NUSALI_HUB first (same country preference), then SELLER_LOCATION
         candidateRows.sort((a, b) => {
@@ -244,6 +262,7 @@ export class OrderService {
             inventoryId: inv.id,
             warehouseId: inv.warehouseId || null,
             fulfillmentMode,
+            weightKg: itemWeightKg,
           });
 
           remQty -= taken;
@@ -251,10 +270,93 @@ export class OrderService {
         }
       }
 
-      const shippingFee = 0.0;
-      const totalAmount = realSubtotal + shippingFee;
-      const currency = data.currency || userCart.currency || 'XOF';
-      const countryCode = targetAddress.countryCode || targetAddress.country || data.countryCode || userCart.countryCode || 'GW';
+      let sellerCommissionRate = 10.0;
+      if (primarySellerId) {
+        const sellerRows = await tx.select().from(sellers).where(eq(sellers.id, primarySellerId)).limit(1);
+        if (sellerRows.length > 0 && sellerRows[0].commissionRate) {
+          sellerCommissionRate = Number(sellerRows[0].commissionRate);
+        }
+      }
+
+      // Requirement 4: Currency is strictly required
+      const currency = userCart.currency || data.currency;
+      if (!currency || !currency.trim()) {
+        throw new Error('SHIPPING_CURRENCY_REQUIRED: A moeda do pedido é obrigatória para o cálculo de frete.');
+      }
+
+      // Requirement 2: Determine origin from actual inventory allocation (Warehouse/Store) and detect multi-origin
+      const itemOrigins = new Set<string>();
+      for (const item of verifiedItems) {
+        let itemOrigin: string | null = null;
+        if (item.warehouseId) {
+          const wh = whMap.get(item.warehouseId);
+          if (wh?.countryCode) itemOrigin = wh.countryCode.toUpperCase();
+        }
+        if (!itemOrigin && item.storeId) {
+          const stRows = await tx.select().from(stores).where(eq(stores.id, item.storeId)).limit(1);
+          if (stRows.length > 0 && stRows[0].countryCode) {
+            itemOrigin = stRows[0].countryCode.toUpperCase();
+          }
+        }
+        if (!itemOrigin && item.sellerId) {
+          const selRows = await tx.select().from(sellers).where(eq(sellers.id, item.sellerId)).limit(1);
+          if (selRows.length > 0 && selRows[0].countryCode) {
+            itemOrigin = selRows[0].countryCode.toUpperCase();
+          }
+        }
+
+        if (!itemOrigin) {
+          throw new Error('SHIPPING_ORIGIN_REQUIRED: Não foi possível determinar o país de origem real da mercadoria.');
+        }
+
+        item.originCountry = itemOrigin;
+        itemOrigins.add(itemOrigin);
+      }
+
+      if (itemOrigins.size > 1) {
+        throw new Error(
+          'MULTI_ORIGIN_SHIPPING_NOT_SUPPORTED: O pedido contém produtos com expedição de múltiplos locais/países de origem diferentes.'
+        );
+      }
+
+      const originCountry = Array.from(itemOrigins)[0];
+
+      // Requirement 3: Destination Country is strictly required
+      const destinationCountry = (targetAddress?.countryCode || targetAddress?.country || data.countryCode || '').trim().toUpperCase();
+      if (!destinationCountry) {
+        throw new Error('SHIPPING_DESTINATION_REQUIRED: O endereço de entrega não possui país de destino.');
+      }
+
+      // Requirement 6: Calculate real total weight from product/variant weight (NO 0.5kg fallback)
+      const totalWeightKg = verifiedItems.reduce((acc, i) => acc + (i.weightKg * i.quantity), 0);
+
+      // Requirement 2 & 3: Calculate freight via service & BLOCK order if freight rate unavailable
+      const freightRes = await ShippingCalculatorService.calculateFreight({
+        storeId: primaryStoreId || undefined,
+        sellerId: primarySellerId || undefined,
+        originCountry,
+        destinationCountry,
+        weightKg: totalWeightKg,
+        currency,
+        productSubtotal: realSubtotal,
+      });
+
+      if (!freightRes.available) {
+        throw new Error(
+          `SHIPPING_RATE_NOT_AVAILABLE: ${freightRes.errorMessage || 'Frete indisponível para esta localização. Pedido cancelado.'}`
+        );
+      }
+
+      const financials = ShippingCalculatorService.calculateOrderFinancials({
+        productSubtotal: realSubtotal,
+        shippingCost: freightRes.shippingCost,
+        shippingChargedToBuyer: freightRes.shippingChargedToBuyer,
+        shippingSellerSubsidy: freightRes.shippingSellerSubsidy,
+        shippingMarketplaceSubsidy: freightRes.shippingMarketplaceSubsidy,
+        commissionRatePercent: sellerCommissionRate,
+        customsDuty: 0,
+        buyerDiscounts: 0,
+      });
 
       // Generate Order Identifiers
       const orderId = `ord_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -267,11 +369,22 @@ export class OrderService {
         buyerId: userId,
         sellerId: primarySellerId,
         storeId: primaryStoreId,
-        subtotal: String(realSubtotal),
-        shippingFee: String(shippingFee),
+        subtotal: String(financials.productSubtotal),
+        shippingFee: String(financials.shippingChargedToBuyer),
+        shippingCost: String(financials.shippingCost),
+        shippingChargedToBuyer: String(financials.shippingChargedToBuyer),
+        shippingSellerSubsidy: String(financials.shippingSellerSubsidy),
+        shippingMarketplaceSubsidy: String(financials.shippingMarketplaceSubsidy),
+        shippingPayer: freightRes.shippingPayer,
+        shippingRateSource: freightRes.rateSource,
+        shippingRateId: freightRes.rateId || null,
+        commissionRateSnapshot: String(financials.commissionRateSnapshot),
+        commissionBase: String(financials.commissionBase),
+        marketplaceCommission: String(financials.marketplaceCommission),
+        sellerNetAmount: String(financials.sellerNetAmount),
         discountAmount: '0.00',
         customsDuty: '0.00',
-        totalAmount: String(totalAmount),
+        totalAmount: String(financials.buyerPaidTotal),
         currency,
         status: 'pending_payment',
         paymentMethod: paymentMethod || null,
@@ -279,7 +392,7 @@ export class OrderService {
         escrowStatus: 'pending',
         shippingAddressJson: targetAddress,
         billingAddressJson: targetAddress,
-        countryCode,
+        countryCode: destinationCountry,
         notes: notes || null,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -376,15 +489,20 @@ export class OrderService {
       // Clear cart items AFTER successful commit
       await tx.delete(cartItems).where(eq(cartItems.cartId, userCart.id));
 
-      logger.info({ orderId, orderNumber, total: totalAmount }, 'Order created successfully in PostgreSQL');
+      logger.info({ orderId, orderNumber, total: financials.buyerPaidTotal }, 'Order created successfully in PostgreSQL');
 
       return {
         id: orderId,
         orderNumber,
         buyerId: userId,
-        subtotal: realSubtotal,
-        shippingFee,
-        totalAmount,
+        subtotal: financials.productSubtotal,
+        shippingFee: financials.shippingChargedToBuyer,
+        shippingCost: financials.shippingCost,
+        shippingSellerSubsidy: financials.shippingSellerSubsidy,
+        shippingMarketplaceSubsidy: financials.shippingMarketplaceSubsidy,
+        marketplaceCommission: financials.marketplaceCommission,
+        sellerNetAmount: financials.sellerNetAmount,
+        totalAmount: financials.buyerPaidTotal,
         currency,
         status: 'pending_payment',
         paymentMethod: paymentMethod || null,

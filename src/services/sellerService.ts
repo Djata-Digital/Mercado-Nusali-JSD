@@ -204,12 +204,20 @@ export const SellerService = {
     return SellerApi.createAd(data);
   },
 
-  // Settings
+  // Settings & Shipping Policy
   async getSettings(): Promise<ApiResponse<any>> {
     return SellerApi.getSettings();
   },
 
   async updateSettings(data: any): Promise<ApiResponse<any>> {
     return SellerApi.updateSettings(data);
+  },
+
+  async getShippingPolicy(storeId: string): Promise<ApiResponse<any>> {
+    return SellerApi.getShippingPolicy(storeId);
+  },
+
+  async updateShippingPolicy(data: { storeId: string; [key: string]: any }): Promise<ApiResponse<any>> {
+    return SellerApi.updateShippingPolicy(data);
   },
 };

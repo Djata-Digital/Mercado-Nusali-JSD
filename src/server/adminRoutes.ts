@@ -40,6 +40,8 @@ import {
   inventory,
   inventoryMovements,
   stockReservations,
+  shippingRates,
+  shippingZones,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull } from 'drizzle-orm';
@@ -3477,6 +3479,102 @@ adminRouter.get('/logistics/shipments/:shipmentId/details', requireLogisticsStaf
     const { shipmentId } = req.params;
     const details = await ShipmentService.getShipmentWithEvents(shipmentId);
     return res.json({ success: true, data: details });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// GET /admin/shipping-rates
+adminRouter.get('/shipping-rates', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const rates = await db.select().from(shippingRates).orderBy(desc(shippingRates.createdAt));
+    return res.json({ success: true, data: rates });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// POST /admin/shipping-rates
+adminRouter.post('/shipping-rates', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const {
+      originCountry,
+      destinationCountry,
+      minWeightKg,
+      maxWeightKg,
+      price,
+      currency,
+      estimatedMinDays,
+      estimatedMaxDays,
+      isActive,
+      carrierId,
+      serviceType,
+    } = req.body;
+
+    if (!originCountry || !String(originCountry).trim()) {
+      return res.status(400).json({ success: false, message: 'País de origem é obrigatório.' });
+    }
+    if (!destinationCountry || !String(destinationCountry).trim()) {
+      return res.status(400).json({ success: false, message: 'País de destino é obrigatório.' });
+    }
+    if (!currency || !String(currency).trim()) {
+      return res.status(400).json({ success: false, message: 'Moeda é obrigatória (ex: BRL ou XOF).' });
+    }
+    const numPrice = Number(price);
+    if (isNaN(numPrice) || numPrice <= 0) {
+      return res.status(400).json({ success: false, message: 'O preço do frete deve ser maior que zero.' });
+    }
+    const numMinWeight = Number(minWeightKg || 0);
+    const numMaxWeight = Number(maxWeightKg || 0);
+    if (isNaN(numMinWeight) || numMinWeight < 0) {
+      return res.status(400).json({ success: false, message: 'O peso mínimo não pode ser negativo.' });
+    }
+    if (isNaN(numMaxWeight) || numMaxWeight <= numMinWeight) {
+      return res.status(400).json({ success: false, message: 'O peso máximo deve ser estritamente maior que o peso mínimo.' });
+    }
+    const numMinDays = Number(estimatedMinDays || 0);
+    const numMaxDays = Number(estimatedMaxDays || 0);
+    if (numMinDays < 0 || numMaxDays < numMinDays) {
+      return res.status(400).json({ success: false, message: 'Prazo estimado de entrega inválido.' });
+    }
+
+    const newRate = {
+      id: `rate_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      originCountry: String(originCountry).trim().toUpperCase(),
+      destinationCountry: String(destinationCountry).trim().toUpperCase(),
+      minWeightKg: String(numMinWeight.toFixed(3)),
+      maxWeightKg: String(numMaxWeight.toFixed(3)),
+      price: String(numPrice.toFixed(2)),
+      currency: String(currency).trim().toUpperCase(),
+      estimatedMinDays: numMinDays,
+      estimatedMaxDays: numMaxDays,
+      carrierId: carrierId || null,
+      serviceType: serviceType || 'standard',
+      isActive: isActive !== undefined ? Boolean(isActive) : true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    await db.insert(shippingRates).values(newRate);
+    return res.json({ success: true, message: 'Tarifa de frete cadastrada com sucesso!', data: newRate });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// DELETE /admin/shipping-rates/:id
+adminRouter.delete('/shipping-rates/:id', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const { id } = req.params;
+    await db.delete(shippingRates).where(eq(shippingRates.id, id));
+    return res.json({ success: true, message: 'Tarifa de frete removida.' });
   } catch (error: any) {
     return sendAdminError(res, error);
   }

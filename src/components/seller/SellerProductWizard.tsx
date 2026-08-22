@@ -61,6 +61,9 @@ interface SellerProductWizardProps {
   onOpenProductDetail: (id: string) => void;
   showToast: (msg: string) => void;
   selectedStoreName: string;
+  selectedStore?: any;
+  stores?: any[];
+  onSelectStore?: (storeId: string) => void;
 }
 
 const ALL_COUNTRY_CODES: CountryCode[] = ['GW', 'BR', 'PT', 'AO', 'US', 'MZ', 'CV', 'ST'];
@@ -84,6 +87,9 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   onOpenProductDetail,
   showToast,
   selectedStoreName,
+  selectedStore,
+  stores = [],
+  onSelectStore,
 }) => {
   const isEditing = !!initialProduct;
   const [wizardStep, setWizardStep] = useState(1);
@@ -152,9 +158,14 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     initialProduct?.publishingScope ||
       (initialProduct?.shipping?.isInternational ? 'international' : 'national')
   );
-  const [originCountry, setOriginCountry] = useState<CountryCode>(
-    initialProduct?.originCountry || initialProduct?.shipping?.originCountry || 'GW'
-  );
+  
+  const [originCountry, setOriginCountry] = useState<CountryCode>(() => {
+    if (initialProduct?.originCountry) return initialProduct.originCountry as CountryCode;
+    if (initialProduct?.shipping?.originCountry) return initialProduct.shipping.originCountry as CountryCode;
+    if (selectedStore?.countryCode) return selectedStore.countryCode as CountryCode;
+    return '' as CountryCode;
+  });
+
   const [targetCountries, setTargetCountries] = useState<CountryCode[]>(
     initialProduct?.targetCountries && initialProduct.targetCountries.length > 0
       ? initialProduct.targetCountries
@@ -162,6 +173,31 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       ? initialProduct.shipping.targetCountries
       : ALL_COUNTRY_CODES
   );
+
+  // Requirements 1 & 2: NO 'XOF' fallback. Derive from store's countryCode or initialProduct
+  const [currency, setCurrency] = useState<CurrencyCode>(() => {
+    if (initialProduct?.currency) return initialProduct.currency as CurrencyCode;
+    const effCountry = initialProduct?.originCountry || initialProduct?.shipping?.originCountry || selectedStore?.countryCode;
+    if (effCountry && countriesConfig[effCountry as CountryCode]?.currency) {
+      return countriesConfig[effCountry as CountryCode].currency as CurrencyCode;
+    }
+    return '' as CurrencyCode;
+  });
+
+  useEffect(() => {
+    if (!isEditing) {
+      if (selectedStore?.countryCode) {
+        const storeCountry = selectedStore.countryCode as CountryCode;
+        setOriginCountry(storeCountry);
+        if (countriesConfig[storeCountry]?.currency) {
+          setCurrency(countriesConfig[storeCountry].currency as CurrencyCode);
+        }
+      } else {
+        setOriginCountry('' as CountryCode);
+        setCurrency('' as CurrencyCode);
+      }
+    }
+  }, [selectedStore, isEditing]);
 
   // Step 3: Variations (Colors, Sizes & Stock Matrix) and Product Kits (Bundles)
   const [colors, setColors] = useState<ProductColor[]>(() => {
@@ -205,19 +241,11 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   const [newKitBadge, setNewKitBadge] = useState('Economize 10%');
 
   // Step 4: Price, Stock & Logistics
-  const [currency, setCurrency] = useState<CurrencyCode>(
-    initialProduct?.currency || (countriesConfig[originCountry]?.currency as CurrencyCode) || 'XOF'
-  );
   const [price, setPrice] = useState(initialProduct?.price ? String(initialProduct.price) : '');
   const [originalPrice, setOriginalPrice] = useState(
     initialProduct?.originalPrice ? String(initialProduct.originalPrice) : ''
   );
 
-  useEffect(() => {
-    if (!isEditing && originCountry && countriesConfig[originCountry]?.currency) {
-      setCurrency(countriesConfig[originCountry].currency as CurrencyCode);
-    }
-  }, [originCountry, isEditing]);
   const [stock, setStock] = useState(
     initialProduct?.stock !== undefined && initialProduct?.stock !== null ? String(initialProduct.stock) : ''
   );
@@ -299,7 +327,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
           (initialProduct.shipping?.isInternational ? 'international' : 'national')
       );
       setOriginCountry(
-        initialProduct.originCountry || initialProduct.shipping?.originCountry || 'GW'
+        (initialProduct.originCountry || initialProduct.shipping?.originCountry || selectedStore?.countryCode || '') as CountryCode
       );
       setTargetCountries(
         initialProduct.targetCountries && initialProduct.targetCountries.length > 0
@@ -365,8 +393,8 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       const initWeight = initialProduct.weightKg
         ? String(initialProduct.weightKg)
         : initialProduct.specs?.Peso
-        ? initialProduct.specs.Peso.replace(/[^\d.]/g, '') || '0.50'
-        : '0.50';
+        ? initialProduct.specs.Peso.replace(/[^\d.]/g, '') || ''
+        : '';
       setWeightKg(initWeight);
 
       const initLength = initialProduct.dimensionsCm?.length
@@ -2111,7 +2139,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                   </span>
                 </div>
                 <span className="text-gray-500 font-medium">
-                  Peso Declarado na Etiqueta: <strong className="text-gray-900 font-mono">{weightKg || '0.50'} kg</strong>
+                  Peso Declarado na Etiqueta: <strong className="text-gray-900 font-mono">{weightKg ? `${weightKg} kg` : 'Peso não informado'}</strong>
                 </span>
               </div>
             </div>

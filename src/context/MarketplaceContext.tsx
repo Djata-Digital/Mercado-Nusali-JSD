@@ -417,61 +417,8 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   const isFavorite = (productId: string) => favorites.includes(productId);
 
-  const placeOrder = (deliveryAddress: DeliveryAddress, paymentDetails: PaymentDetails): Order => {
-    const subtotal = cartTotal;
-    const isInternationalOrder = cart.some(
-      item => item.product.shipping?.isInternational || item.product.shipping?.originCountry !== deliveryAddress.country
-    );
-
-    const shippingFee = cart.every(item => item.product.shipping?.freeShipping) ? 0 : 2500;
-    const customsDuty = isInternationalOrder ? subtotal * 0.08 : 0;
-    const total = subtotal + shippingFee + customsDuty;
-
-    const escrowDetails: EscrowDetails = {
-      status: 'retained',
-      amountRetained: total,
-      currency: paymentDetails.currency,
-      retainedAt: new Date().toISOString().slice(0, 10),
-      releaseEligibleAt: new Date(Date.now() + 86400000 * 7).toISOString().slice(0, 10),
-      notes: 'Valor mantido no sistema de Proteção Escrow Mercado Nusali. Liberação após recebimento.',
-    };
-
-    const newOrder: Order = {
-      id: `NSL-${Math.floor(1000000 + Math.random() * 9000000)}`,
-      date: new Date().toLocaleDateString('pt-BR'),
-      items: [...cart],
-      subtotal,
-      shippingFee,
-      customsDuty,
-      discount: 0,
-      total,
-      currency: paymentDetails.currency,
-      deliveryAddress,
-      paymentDetails,
-      status: 'confirmed',
-      escrow: escrowDetails,
-      estimatedDelivery: isInternationalOrder ? 'Entrega estimada em 4 a 7 dias úteis' : 'Chega amanhã via Nusali Express',
-      trackingCode: `${deliveryAddress.country}${Math.floor(1000000000 + Math.random() * 9000000000)}NSL`,
-      carrierName: isInternationalOrder ? 'Nusali Cross-Border Freight' : 'Nusali Express Logistics',
-      originCountry: cart[0]?.product.shipping.originCountry || 'GW',
-      destinationCountry: deliveryAddress.country,
-      trackingSteps: [
-        { status: 'confirmed', title: 'Pagamento retido com sucesso (Escrow)', description: `Pagamento processado via ${paymentDetails.method.toUpperCase()}`, timestamp: 'Agora', completed: true },
-        { status: 'preparing', title: 'Solicitação enviada ao vendedor', description: 'Separação e preparação das mercadorias', timestamp: 'A caminho', completed: false },
-        { status: 'shipped', title: 'Despacho internacional / regional', description: 'Em trânsito para o HUB logístico', timestamp: 'Pendente', completed: false },
-        { status: 'in_customs', title: 'Fiscalização aduaneira e tributos', description: 'Liberado pela alfândega sem pendências', timestamp: 'Pendente', completed: false },
-        { status: 'out_for_delivery', title: 'Saiu para entrega', description: 'Entregador local a caminho do endereço', timestamp: 'Pendente', completed: false },
-        { status: 'delivered', title: 'Entregue ao comprador', description: 'Comprador confirma para liberação do pagamento ao vendedor', timestamp: 'Pendente', completed: false },
-      ],
-    };
-
-    setOrders(prev => [newOrder, ...prev]);
-    setActiveOrder(newOrder);
-    clearCart();
-    setActiveView('order_confirmation');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    showToast('Pedido realizado com sucesso! Dinheiro retido com segurança Escrow.');
-    return newOrder;
+  const placeOrder = (_deliveryAddress: DeliveryAddress, _paymentDetails: PaymentDetails): Order => {
+    throw new Error('LEGACY_CHECKOUT_DISABLED: O checkout local foi desativado. Utilize o CheckoutView com OrdersApi.');
   };
 
   const confirmOrderReceipt = (orderId: string) => {

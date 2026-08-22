@@ -516,6 +516,62 @@ export const cartItems = pgTable('cart_items', {
   cart_items_cart_product_variant_uq: uniqueIndex('cart_items_cart_product_variant_uq').on(table.cartId, table.productId, table.variantId),
 }));
 
+export const storeShippingPolicies = pgTable('store_shipping_policies', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  storeId: varchar('store_id', { length: 255 }).notNull().references(() => stores.id, { onDelete: 'cascade' }),
+  sellerId: varchar('seller_id', { length: 255 }).notNull().references(() => sellers.id, { onDelete: 'cascade' }),
+  mode: varchar('mode', { length: 50 }).notNull().default('CUSTOMER_PAYS'), // CUSTOMER_PAYS, SELLER_FREE_SHIPPING, SELLER_SUBSIDIZED, PICKUP
+  isActive: boolean('is_active').notNull().default(true),
+  freeShippingMinOrder: numeric('free_shipping_min_order', { precision: 12, scale: 2 }),
+  sellerSubsidyMaxAmount: numeric('seller_subsidy_max_amount', { precision: 12, scale: 2 }),
+  sellerSubsidyPercent: numeric('seller_subsidy_percent', { precision: 5, scale: 2 }),
+  allowedCountriesJson: jsonb('allowed_countries_json'),
+  allowedRegionsJson: jsonb('allowed_regions_json'),
+  allowedCitiesJson: jsonb('allowed_cities_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  store_shipping_policies_store_idx: index('store_shipping_policies_store_idx').on(table.storeId),
+  store_shipping_policies_seller_idx: index('store_shipping_policies_seller_idx').on(table.sellerId),
+}));
+
+export const shippingZones = pgTable('shipping_zones', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull(),
+  name: varchar('name', { length: 255 }).notNull(),
+  regionCode: varchar('region_code', { length: 50 }),
+  city: varchar('city', { length: 255 }),
+  postalCodePattern: varchar('postal_code_pattern', { length: 100 }),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_zones_country_idx: index('shipping_zones_country_idx').on(table.countryCode),
+}));
+
+export const shippingRates = pgTable('shipping_rates', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  zoneId: varchar('zone_id', { length: 255 }).references(() => shippingZones.id, { onDelete: 'cascade' }),
+  originCountry: varchar('origin_country', { length: 10 }).notNull(),
+  originRegion: varchar('origin_region', { length: 50 }),
+  destinationCountry: varchar('destination_country', { length: 10 }).notNull(),
+  destinationRegion: varchar('destination_region', { length: 50 }),
+  minWeightKg: numeric('min_weight_kg', { precision: 8, scale: 3 }).notNull().default('0.000'),
+  maxWeightKg: numeric('max_weight_kg', { precision: 8, scale: 3 }).notNull().default('999.000'),
+  price: numeric('price', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  estimatedMinDays: integer('estimated_min_days').notNull().default(1),
+  estimatedMaxDays: integer('estimated_max_days').notNull().default(5),
+  carrierId: varchar('carrier_id', { length: 255 }),
+  serviceType: varchar('service_type', { length: 100 }).notNull().default('standard'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_rates_route_idx: index('shipping_rates_route_idx').on(table.originCountry, table.destinationCountry),
+  shipping_rates_zone_idx: index('shipping_rates_zone_idx').on(table.zoneId),
+}));
+
 // ============================================================================
 // 6. PEDIDOS (SNAPSHOT COMPLETO, HISTÓRICO DE STATUS)
 // ============================================================================
@@ -542,6 +598,17 @@ export const orders = pgTable('orders', {
   trackingCode: varchar('tracking_code', { length: 100 }),
   countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
   notes: text('notes'),
+  shippingCost: numeric('shipping_cost', { precision: 12, scale: 2 }),
+  shippingChargedToBuyer: numeric('shipping_charged_to_buyer', { precision: 12, scale: 2 }),
+  shippingSellerSubsidy: numeric('shipping_seller_subsidy', { precision: 12, scale: 2 }),
+  shippingMarketplaceSubsidy: numeric('shipping_marketplace_subsidy', { precision: 12, scale: 2 }),
+  shippingPayer: varchar('shipping_payer', { length: 50 }),
+  shippingRateSource: varchar('shipping_rate_source', { length: 100 }),
+  shippingRateId: varchar('shipping_rate_id', { length: 255 }),
+  commissionRateSnapshot: numeric('commission_rate_snapshot', { precision: 5, scale: 2 }),
+  commissionBase: numeric('commission_base', { precision: 12, scale: 2 }),
+  marketplaceCommission: numeric('marketplace_commission', { precision: 12, scale: 2 }),
+  sellerNetAmount: numeric('seller_net_amount', { precision: 12, scale: 2 }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({

@@ -782,7 +782,7 @@ buyerRouter.patch('/addresses/:id/default', requireAuth, async (req: AuthRequest
       })),
     });
   } catch (error: any) {
-    return res.status(500).json({ success: false, error: { code: 'SET_DEFAULT_ADDRESS_FAILED', message: error?.message || 'Erro ao definir endereço padrão.' } });
+return res.status(500).json({ success: false, error: { code: 'SET_DEFAULT_ADDRESS_FAILED', message: error?.message || 'Erro ao definir endereço padrão.' } });
   }
 });
 
@@ -791,29 +791,40 @@ buyerRouter.patch('/addresses/:id/default', requireAuth, async (req: AuthRequest
 // ==========================================
 
 async function getFormattedUserCart(db: any, userId: string) {
-  let userCart = (await db.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
-  if (!userCart) {
+  const userCarts = await db.select().from(carts).where(eq(carts.userId, userId)).limit(1);
+  if (userCarts.length === 0) {
     return {
-      id: null,
+      id: '',
       userId,
-      currency: 'XOF',
-      countryCode: 'GW',
+      currency: 'BRL',
+      countryCode: 'BR',
       items: [],
       total: 0,
       totalCount: 0,
     };
   }
 
+  const userCart = userCarts[0];
   const dbCartItems = await db.select().from(cartItems).where(eq(cartItems.cartId, userCart.id)).orderBy(desc(cartItems.createdAt));
 
   const itemsFormatted = [];
   let totalAmount = 0;
   let totalQuantityCount = 0;
+  let effectiveCartCurrency = userCart.currency;
+  let effectiveCartCountry = userCart.countryCode;
 
   for (const ci of dbCartItems) {
     const prodRows = await db.select().from(products).where(eq(products.id, ci.productId)).limit(1);
     const prod = prodRows[0];
     if (!prod) continue; // skip if product deleted
+
+    const prodCurrency = prod.currency;
+    const prodCountry = prod.countryCode;
+
+    if (itemsFormatted.length === 0) {
+      effectiveCartCurrency = prodCurrency;
+      effectiveCartCountry = prodCountry;
+    }
 
     let varObj = null;
     if (ci.variantId) {
@@ -836,26 +847,38 @@ async function getFormattedUserCart(db: any, userId: string) {
       quantity: qty,
       unitPrice: realUnitPrice,
       subtotal: itemSubtotal,
+      currency: prodCurrency,
+      countryCode: prodCountry,
       selectedAttributes: ci.selectedAttributesJson || null,
       product: {
         id: prod.id,
         title: prod.title,
         price: realUnitPrice,
         originalPrice: prod.originalPrice ? Number(prod.originalPrice) : undefined,
+        currency: prodCurrency,
+        countryCode: prodCountry,
         image: prod.image || '',
         brand: prod.brand || '',
         stock: Number(prod.stock || 0),
         sellerId: prod.sellerId,
-        countryCode: prod.countryCode,
       },
     });
+  }
+
+  // Auto-sync cart currency/countryCode if out of date
+  if (itemsFormatted.length > 0 && (userCart.currency !== effectiveCartCurrency || userCart.countryCode !== effectiveCartCountry)) {
+    await db.update(carts).set({
+      currency: effectiveCartCurrency,
+      countryCode: effectiveCartCountry,
+      updatedAt: new Date(),
+    }).where(eq(carts.id, userCart.id));
   }
 
   return {
     id: userCart.id,
     userId: userCart.userId,
-    currency: userCart.currency || 'XOF',
-    countryCode: userCart.countryCode || 'GW',
+    currency: itemsFormatted.length > 0 ? effectiveCartCurrency : userCart.currency,
+    countryCode: itemsFormatted.length > 0 ? effectiveCartCountry : userCart.countryCode,
     items: itemsFormatted,
     total: totalAmount,
     totalCount: totalQuantityCount,
@@ -897,6 +920,16 @@ buyerRouter.post('/cart/items', requireAuth, async (req: AuthRequest, res: Respo
     }
 
     const prod = prodRows[0];
+    if (!prod.currency || !prod.countryCode) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'PRODUCT_INCONSISTENT', message: 'Produto possui dados de moeda ou país inconsistentes no catálogo.' },
+      });
+    }
+
+    const prodCurrency = prod.currency;
+    const prodCountry = prod.countryCode;
+
     let realUnitPrice = Number(prod.price);
 
     const targetVariantId = variantId || options?.selectedVariantSku || options?.variantId || null;
@@ -915,12 +948,39 @@ buyerRouter.post('/cart/items', requireAuth, async (req: AuthRequest, res: Respo
       await db.insert(carts).values({
         id: newCartId,
         userId: userId,
-        currency: 'XOF',
-        countryCode: 'GW',
+        currency: prodCurrency,
+        countryCode: prodCountry,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
       userCart = (await db.select().from(carts).where(eq(carts.id, newCartId)).limit(1))[0];
+    } else {
+      // Check existing items in cart for mixed currency rule
+      const existingCartItems = await db.select().from(cartItems).where(eq(cartItems.cartId, userCart.id));
+      if (existingCartItems.length > 0) {
+        const firstItem = existingCartItems[0];
+        const firstProdRows = await db.select().from(products).where(eq(products.id, firstItem.productId)).limit(1);
+        if (firstProdRows.length > 0) {
+          const firstProd = firstProdRows[0];
+          if (firstProd.currency && firstProd.currency !== prodCurrency) {
+            return res.status(400).json({
+              success: false,
+              error: {
+                code: 'CART_MIXED_CURRENCY_NOT_ALLOWED',
+                message: `Não é possível misturar produtos com moedas diferentes (${firstProd.currency} e ${prodCurrency}) no mesmo carrinho. Finalize ou limpe o carrinho atual primeiro.`,
+              },
+            });
+          }
+        }
+      }
+
+      if (userCart.currency !== prodCurrency || userCart.countryCode !== prodCountry) {
+        await db.update(carts).set({
+          currency: prodCurrency,
+          countryCode: prodCountry,
+          updatedAt: new Date(),
+        }).where(eq(carts.id, userCart.id));
+      }
     }
 
     const existingItems = await db.select().from(cartItems).where(

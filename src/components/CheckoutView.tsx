@@ -23,6 +23,7 @@ import { countriesConfig, formatCurrency } from '../utils/currencyUtils';
 import { PixPaymentModal } from './PixPaymentModal';
 import { PixService } from '../services/pixService';
 import { convertToBRL, PixTransaction } from '../utils/pixEngine';
+import { ShippingService } from '../services/shippingService';
 
 import { OrdersApi } from '../api/clients/OrdersApi';
 import { PaymentsApi } from '../api/clients/PaymentsApi';
@@ -102,13 +103,80 @@ export const CheckoutView: React.FC = () => {
   const [activeOrderId, setActiveOrderId] = useState<string>('');
   const [pixInitiateData, setPixInitiateData] = useState<any>(null);
 
-  const isInternational = cart.some(
-    (i) => i.product.shipping?.isInternational || i.product.shipping?.originCountry !== country
-  );
+  const [freightQuote, setFreightQuote] = useState<{
+    shippingCost: number;
+    shippingChargedToBuyer: number;
+    shippingSellerSubsidy: number;
+    estimatedMinDays: number;
+    estimatedMaxDays: number;
+    available: boolean;
+    loading: boolean;
+    error?: string;
+  }>({
+    shippingCost: 0,
+    shippingChargedToBuyer: 0,
+    shippingSellerSubsidy: 0,
+    estimatedMinDays: 1,
+    estimatedMaxDays: 3,
+    available: true,
+    loading: false,
+  });
 
-  const customsDuty = isInternational ? cartTotal * 0.08 : 0;
-  const shippingFee = cart.every((i) => i.product.shipping?.freeShipping) ? 0 : (orderCurrency === 'XOF' ? 2500 : 25);
-  const grandTotal = cartTotal + shippingFee + customsDuty;
+  const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || 'BR').toUpperCase();
+  const destCountry = (address.countryCode || address.country || country || 'BR').toUpperCase();
+  const isCrossBorder = originCountry !== destCountry;
+  const CARD_PAYMENTS_ENABLED = false;
+
+  React.useEffect(() => {
+    let isMounted = true;
+    const fetchFreight = async () => {
+      setFreightQuote((prev) => ({ ...prev, loading: true, error: undefined }));
+      const totalWeight = cart.reduce((sum, item) => sum + (item.product.weightKg || 0.5) * item.quantity, 0);
+      const res = await ShippingService.calculateFreight({
+        originCountry,
+        destinationCountry: destCountry,
+        weightKg: totalWeight,
+        currency: orderCurrency,
+        storeId: cart[0]?.product?.storeId || cart[0]?.product?.seller?.storeId,
+        sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
+        productSubtotal: cartTotal,
+      });
+
+      if (!isMounted) return;
+
+      if (res.success && res.data) {
+        setFreightQuote({
+          shippingCost: res.data.shippingCost,
+          shippingChargedToBuyer: res.data.shippingChargedToBuyer,
+          shippingSellerSubsidy: res.data.shippingSellerSubsidy,
+          estimatedMinDays: res.data.estimatedMinDays,
+          estimatedMaxDays: res.data.estimatedMaxDays,
+          available: true,
+          loading: false,
+        });
+      } else {
+        setFreightQuote({
+          shippingCost: 0,
+          shippingChargedToBuyer: 0,
+          shippingSellerSubsidy: 0,
+          estimatedMinDays: 0,
+          estimatedMaxDays: 0,
+          available: false,
+          loading: false,
+          error: res.error?.message || 'Frete não disponível para o endereço informado.',
+        });
+      }
+    };
+
+    fetchFreight();
+    return () => {
+      isMounted = false;
+    };
+  }, [originCountry, destCountry, cartTotal, orderCurrency]);
+
+  const customsDuty = 0; // Removed 8% fake tax - national is 0, international is pending
+  const shippingFee = freightQuote.shippingChargedToBuyer;
+  const grandTotal = cartTotal + shippingFee;
   const grandTotalBrl = convertToBRL(grandTotal, orderCurrency);
 
   const handleSubmitOrder = async (e: React.FormEvent) => {
@@ -266,6 +334,36 @@ export const CheckoutView: React.FC = () => {
               </div>
 
               <div>
+                <label className="block font-semibold text-gray-700 mb-1">Cidade</label>
+                <input
+                  type="text"
+                  value={address.city}
+                  onChange={(e) => setAddress({ ...address, city: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                  required
+                />
+              </div>
+            </div>
+
+            {/* Route Scope Badge (Requirement 4) */}
+            <div className="pt-2 border-t border-gray-100">
+              {isCrossBorder ? (
+                <div className="flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 text-indigo-900 font-bold px-3 py-1.5 rounded-xl text-xs">
+                  <Globe className="w-4 h-4 text-indigo-600" />
+                  <span>
+                    Venda Internacional ({countriesConfig[originCountry as CountryCode]?.flag || ''} {countriesConfig[originCountry as CountryCode]?.name || originCountry} &rarr; {countriesConfig[destCountry as CountryCode]?.flag || ''} {countriesConfig[destCountry as CountryCode]?.name || destCountry})
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 text-emerald-900 font-bold px-3 py-1.5 rounded-xl text-xs">
+                  <span>{countriesConfig[originCountry as CountryCode]?.flag || '🇧🇷'}</span>
+                  <span>Venda Nacional ({countriesConfig[originCountry as CountryCode]?.name || originCountry})</span>
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+              <div>
                 <label className="block font-semibold text-gray-700 mb-1">Nome Completo</label>
                 <input
                   type="text"
@@ -385,19 +483,21 @@ export const CheckoutView: React.FC = () => {
                 </button>
               )}
 
-              <button
-                type="button"
-                onClick={() => setPaymentMethod('credit_card')}
-                className={`p-3 rounded-xl border flex flex-col items-center justify-center text-center gap-1 transition cursor-pointer ${
-                  paymentMethod === 'credit_card'
-                    ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-500/20'
-                    : 'border-gray-200 hover:border-gray-300 bg-white'
-                }`}
-              >
-                <CreditCard className="w-6 h-6 text-blue-600" />
-                <span className="text-xs font-bold text-gray-900">Cartão de Crédito</span>
-                <span className="text-[10px] text-gray-500">Visa / Master / Elo</span>
-              </button>
+              {CARD_PAYMENTS_ENABLED && (
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('credit_card')}
+                  className={`p-3 rounded-xl border flex flex-col items-center justify-center text-center gap-1 transition cursor-pointer ${
+                    paymentMethod === 'credit_card'
+                      ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-500/20'
+                      : 'border-gray-200 hover:border-gray-300 bg-white'
+                  }`}
+                >
+                  <CreditCard className="w-6 h-6 text-blue-600" />
+                  <span className="text-xs font-bold text-gray-900">Cartão de Crédito</span>
+                  <span className="text-[10px] text-gray-500">Visa / Master / Elo</span>
+                </button>
+              )}
             </div>
 
             {/* Payment Sub-fields */}
@@ -521,16 +621,20 @@ export const CheckoutView: React.FC = () => {
                     </div>
 
                     <div className="flex justify-between">
-                      <span>Logística Cross-Border:</span>
-                      <span className="font-bold text-emerald-700">
-                        {shippingFee === 0 ? 'GRÁTIS' : shippingFeeInfo.formatted}
+                      <span>Frete Logística:</span>
+                      <span className="font-semibold text-gray-900">
+                        {freightQuote.loading
+                          ? 'Calculando...'
+                          : freightQuote.shippingChargedToBuyer === 0
+                          ? 'GRÁTIS'
+                          : shippingFeeInfo.formatted}
                       </span>
                     </div>
 
-                    {isInternational && (
+                    {isCrossBorder && (
                       <div className="flex justify-between text-amber-800 font-medium">
-                        <span>Estimativa Tributo Aduaneiro:</span>
-                        <span>{customsDutyInfo.formatted}</span>
+                        <span>Tributos de Importação:</span>
+                        <span>A calcular</span>
                       </div>
                     )}
                   </div>
@@ -552,9 +656,15 @@ export const CheckoutView: React.FC = () => {
               );
             })()}
 
+            {freightQuote.error && (
+              <p className="text-xs text-red-600 font-semibold bg-red-50 p-2.5 rounded-lg border border-red-200">
+                {freightQuote.error}
+              </p>
+            )}
+
             <button
               type="submit"
-              disabled={isProcessing}
+              disabled={isProcessing || freightQuote.loading || !freightQuote.available}
               className={`w-full text-white font-extrabold py-3.5 px-4 rounded-xl shadow-md transition flex items-center justify-center gap-2 text-sm disabled:opacity-50 cursor-pointer ${
                 paymentMethod === 'pix'
                   ? 'bg-emerald-600 hover:bg-emerald-700 ring-2 ring-emerald-400/30'

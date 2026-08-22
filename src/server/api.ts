@@ -20,6 +20,7 @@ import { searchProductsIntelligent } from '../utils/searchEngine.js';
 import { ProductCreationService } from './modules/catalog/productCreationService.js';
 import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
+import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 
 export const apiRouter = Router();
@@ -37,6 +38,92 @@ apiRouter.use('/buyer', buyerRouter);
 apiRouter.use('/pix', pixRouter);
 apiRouter.use('/rates', ratesRouter);
 apiRouter.use('/upload', uploadRouter);
+
+// Public Freight Calculation Route (Requirement 2)
+apiRouter.post('/shipping/calculate', async (req: Request, res: Response) => {
+  try {
+    const {
+      storeId,
+      sellerId,
+      originCountry,
+      destinationCountry,
+      originRegion,
+      destinationRegion,
+      destinationCity,
+      weightKg,
+      dimensionsCm,
+      currency,
+      productSubtotal,
+    } = req.body;
+
+    const parsedWeight = Number(weightKg);
+    if (isNaN(parsedWeight) || parsedWeight <= 0 || parsedWeight > 1000) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'PRODUCT_WEIGHT_REQUIRED', message: 'O peso deve ser um número válido maior que zero.' },
+      });
+    }
+
+    if (!originCountry || !String(originCountry).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'SHIPPING_ORIGIN_REQUIRED', message: 'País de origem é obrigatório.' },
+      });
+    }
+
+    if (!destinationCountry || !String(destinationCountry).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'SHIPPING_DESTINATION_REQUIRED', message: 'País de destino é obrigatório.' },
+      });
+    }
+
+    if (!currency || !String(currency).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'SHIPPING_CURRENCY_REQUIRED', message: 'Moeda é obrigatória.' },
+      });
+    }
+
+    const result = await ShippingCalculatorService.calculateFreight({
+      storeId,
+      sellerId,
+      originCountry,
+      destinationCountry,
+      originRegion,
+      destinationRegion,
+      destinationCity,
+      weightKg: parsedWeight,
+      dimensionsCm,
+      currency,
+      productSubtotal: Number(productSubtotal) || 0,
+    });
+
+    if (!result.available) {
+      return res.status(400).json({
+        success: false,
+        error: {
+          code: 'SHIPPING_RATE_NOT_AVAILABLE',
+          message: result.errorMessage || 'Frete indisponível para este endereço.',
+        },
+        data: result,
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: result,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: {
+        code: 'SHIPPING_CALCULATION_FAILED',
+        message: err?.message || 'Erro ao calcular o frete.',
+      },
+    });
+  }
+});
 
 // Public Tracking Route (Requirement 29)
 apiRouter.get('/tracking/:trackingCode', async (req: Request, res: Response) => {

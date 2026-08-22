@@ -382,6 +382,49 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
               </div>
             </div>
 
+            {/* Financial Breakdown for Seller (Requirement 24) */}
+            <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-xs space-y-2 text-xs">
+              <h4 className="font-extrabold text-gray-900 flex items-center gap-1.5 border-b border-gray-100 pb-2">
+                <DollarSign className="w-4 h-4 text-emerald-600" /> Detalhamento Financeiro da Venda
+              </h4>
+              {(() => {
+                const subtotal = selectedOrder.amount;
+                const commissionRate = (selectedOrder as any).commissionRateSnapshot ? Number((selectedOrder as any).commissionRateSnapshot) : 10;
+                const commission = (selectedOrder as any).marketplaceCommission
+                  ? Number((selectedOrder as any).marketplaceCommission)
+                  : Math.round(subtotal * (commissionRate / 100) * 100) / 100;
+                const sellerSubsidy = (selectedOrder as any).shippingSellerSubsidy
+                  ? Number((selectedOrder as any).shippingSellerSubsidy)
+                  : 0;
+                const sellerNet = (selectedOrder as any).sellerNetAmount
+                  ? Number((selectedOrder as any).sellerNetAmount)
+                  : Math.round((subtotal - commission - sellerSubsidy) * 100) / 100;
+
+                return (
+                  <div className="space-y-1.5 pt-1">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Produtos (Subtotal):</span>
+                      <span className="font-bold text-gray-900">{formatCurrency(subtotal, selectedCurrency)}</span>
+                    </div>
+                    <div className="flex justify-between text-red-600 font-medium">
+                      <span>Comissão Nusali ({commissionRate}%):</span>
+                      <span>- {formatCurrency(commission, selectedCurrency)}</span>
+                    </div>
+                    {sellerSubsidy > 0 && (
+                      <div className="flex justify-between text-amber-700 font-medium">
+                        <span>Frete Subsidiado pela Loja:</span>
+                        <span>- {formatCurrency(sellerSubsidy, selectedCurrency)}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between items-baseline pt-2 border-t border-gray-100 font-extrabold text-sm text-emerald-800">
+                      <span>Líquido do Vendedor (Recebível):</span>
+                      <span>{formatCurrency(sellerNet, selectedCurrency)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
             {/* Buyer & Escrow Details */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-gray-50 p-4 rounded-2xl border border-gray-200">
               <div>

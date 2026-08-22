@@ -170,10 +170,18 @@ export class ProductCreationService {
       }
     }
 
+    if (!input.countryCode || !String(input.countryCode).trim()) {
+      throw new Error('PRODUCT_COUNTRY_REQUIRED: O código do país de origem (countryCode) é obrigatório para cadastrar o produto.');
+    }
+    if (!input.currency || !String(input.currency).trim()) {
+      throw new Error('PRODUCT_CURRENCY_REQUIRED: A moeda (currency) é obrigatória para cadastrar o produto.');
+    }
+
     // 5. Build clean, non-fictional product entity
     const productId = `prod_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const cleanBrand = input.brand?.trim() || null;
-    const cleanCountry = (input.countryCode || 'GW').toUpperCase();
+    const cleanCountry = String(input.countryCode).trim().toUpperCase();
+    const cleanCurrency = String(input.currency).trim().toUpperCase();
 
     const stockVal = input.stock;
     if (stockVal === undefined || stockVal === null || String(stockVal).trim() === '' || isNaN(Number(stockVal)) || Number(stockVal) < 0) {
@@ -185,7 +193,7 @@ export class ProductCreationService {
       id: productId,
       title: input.title.trim(),
       price: String(priceNum),
-      currency: input.currency || 'XOF',
+      currency: cleanCurrency,
       description: input.description?.trim() || '',
       categoryId: foundCat.id,
       brand: cleanBrand,
@@ -228,9 +236,15 @@ export class ProductCreationService {
       }
 
       // Insert product_images
-      const rawGallery: string[] = Array.isArray((input as any).galleryImages) && (input as any).galleryImages.length > 0
+      const rawGalleryInput = Array.isArray((input as any).galleryImages) && (input as any).galleryImages.length > 0
         ? (input as any).galleryImages
-        : [input.image];
+        : Array.isArray((input as any).images) && (input as any).images.length > 0
+          ? (input as any).images
+          : Array.isArray((input as any).gallery) && (input as any).gallery.length > 0
+            ? (input as any).gallery
+            : [];
+
+      const rawGallery: string[] = [input.image, ...rawGalleryInput].filter(Boolean);
 
       const validUrls = Array.from(new Set(rawGallery.filter((url) => typeof url === 'string' && url.trim() !== '')));
       if (validUrls.length > 0) {

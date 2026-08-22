@@ -476,6 +476,9 @@ export const SellerHubView: React.FC = () => {
             onOpenProductDetail={openProductDetail}
             showToast={showToast}
             selectedStoreName={selectedStore?.name || 'Loja Principal'}
+            selectedStore={selectedStore}
+            stores={stores}
+            onSelectStore={(stId) => setSelectedStoreId(stId)}
           />
         )}
 

@@ -1,5 +1,5 @@
 import { getDb } from '../../../db/index.js';
-import { products, categories, brands, productVariants, productImages, productAttributes, reviews } from '../../../db/schema.js';
+import { products, categories, brands, productVariants, productImages, productAttributes, reviews, sellers, stores } from '../../../db/schema.js';
 import { getCache, setCache, delCache } from '../../../db/redis.js';
 import { eq, and, ilike, or, gte, lte, desc, asc, sql } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -147,11 +147,39 @@ export class CatalogService {
       ...(p.attributesJson as Record<string, string>),
     };
 
+    const imageUrlList = imagesRes.map((img) => img.imageUrl).filter(Boolean);
+    const coverImageObj = imagesRes.find((img) => img.isCover);
+    const mainImage = coverImageObj?.imageUrl || (imageUrlList.length > 0 ? imageUrlList[0] : p.image);
+
+    let sellerInfo: any = null;
+    if (p.sellerId) {
+      const sellerRows = await db.select().from(sellers).where(eq(sellers.id, p.sellerId)).limit(1);
+      if (sellerRows.length > 0) {
+        const sel = sellerRows[0];
+        const storeRows = await db.select().from(stores).where(eq(stores.sellerId, sel.id)).limit(1);
+        const st = storeRows[0];
+        sellerInfo = {
+          id: sel.id,
+          name: st?.name || sel.companyName || 'Vendedor',
+          country: st?.countryCode || sel.countryCode || (p.currency === 'BRL' ? 'BR' : 'GW'),
+          isOfficialStore: false,
+          reputationLevel: st?.rating && Number(st.rating) >= 4.8 ? 'platinum' : 'silver',
+        };
+      }
+    }
+
+    const resolvedCountry = p.countryCode || sellerInfo?.country || (p.currency === 'BRL' ? 'BR' : '');
+
     const fullProduct = {
       ...p,
+      image: mainImage,
       price: Number(p.price),
+      currency: p.currency || (resolvedCountry === 'BR' ? 'BRL' : 'XOF'),
+      countryCode: resolvedCountry,
+      originCountry: resolvedCountry,
+      seller: sellerInfo || (p as any).seller,
       originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
-      rating: Number(p.rating || 5.0),
+      rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
       stock: Number(p.stock),
       specs: combinedSpecs,
       attributesJson: combinedSpecs,
@@ -160,7 +188,9 @@ export class CatalogService {
         price: Number(v.price),
         stock: Number(v.stock),
       })),
-      images: imagesRes,
+      images: imageUrlList.length > 0 ? imageUrlList : (p.image ? [p.image] : []),
+      galleryImages: imageUrlList.length > 0 ? imageUrlList : (p.image ? [p.image] : []),
+      productImages: imagesRes,
       recentReviews: reviewsRes,
     };
 

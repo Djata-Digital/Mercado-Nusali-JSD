@@ -198,13 +198,21 @@ export class SellerApi {
     return apiClient.post('/seller/ads', data);
   }
 
-  // Settings
+  // Settings & Shipping Policy
   static async getSettings(): Promise<ApiResponse<any>> {
     return apiClient.get('/seller/settings');
   }
 
   static async updateSettings(data: any): Promise<ApiResponse<any>> {
     return apiClient.patch('/seller/settings', data);
+  }
+
+  static async getShippingPolicy(storeId: string): Promise<ApiResponse<any>> {
+    return apiClient.get('/seller/shipping-policy', { params: { storeId } });
+  }
+
+  static async updateShippingPolicy(data: { storeId: string; [key: string]: any }): Promise<ApiResponse<any>> {
+    return apiClient.post('/seller/shipping-policy', data);
   }
 
   // Legacy compat aliases
