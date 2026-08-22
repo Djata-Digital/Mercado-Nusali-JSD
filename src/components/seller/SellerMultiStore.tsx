@@ -15,7 +15,8 @@ import {
   Image as ImageIcon,
   AlertTriangle,
 } from 'lucide-react';
-import { SellerStoreData } from '../../data/mockSellerData';
+import { isSellerKycApproved } from '../../utils/kycUtils';
+import { SellerStoreData, SellerProfileData } from '../../data/mockSellerData';
 import { CountryCode } from '../../types';
 import { countriesConfig } from '../../utils/currencyUtils';
 import { uploadService } from '../../services/uploadService';
@@ -23,6 +24,7 @@ import { apiClient } from '../../api/apiClient';
 
 interface SellerMultiStoreProps {
   stores: SellerStoreData[];
+  profile?: SellerProfileData;
   selectedStoreId: string;
   onSelectStore: (id: string) => void;
   onAddStore: (store: SellerStoreData) => void;
@@ -65,6 +67,7 @@ const initialBusinessHours = (): BusinessHoursState => ({
 
 export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
   stores,
+  profile,
   selectedStoreId,
   onSelectStore,
   onAddStore,
@@ -78,24 +81,34 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
   // Dynamic Categories from Backend
   const [categoriesList, setCategoriesList] = useState<CategoryItem[]>([]);
   const [isLoadingCategories, setIsLoadingCategories] = useState(true);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+
+  const isKycOk = isSellerKycApproved(profile?.kycStatus);
 
   useEffect(() => {
     const loadCategories = async () => {
       try {
         setIsLoadingCategories(true);
-        let res = await apiClient.get<any>('/categories');
-        if (!res.data?.data || !Array.isArray(res.data.data) || res.data.data.length === 0) {
-          res = await apiClient.get<any>('/catalog/categories');
+        setCategoryError(null);
+
+        const res = await apiClient.get<any>('/catalog/categories');
+        const rawList = Array.isArray(res?.data) ? res.data : Array.isArray((res as any)?.categories) ? (res as any).categories : [];
+
+        if (process.env.NODE_ENV !== 'production') {
+          console.log(`[CATEGORIES] endpoint: /catalog/categories status HTTP: 200 count recebido: ${rawList.length}`);
         }
-        if (res.data?.data && Array.isArray(res.data.data)) {
-          const active = res.data.data.filter((c: any) => c.isActive !== false);
-          setCategoriesList(active);
-        } else {
-          setCategoriesList([]);
+
+        const active = rawList.filter((c: any) => c.status === 'active' || c.isActive !== false);
+
+        if (process.env.NODE_ENV !== 'production') {
+          console.log(`[CATEGORIES] count após filtro: ${active.length}`);
         }
-      } catch (err) {
-        console.warn('Could not fetch catalog categories:', err);
+
+        setCategoriesList(active);
+      } catch (err: any) {
+        console.error('[CATEGORIES] Failed to load catalog categories:', err);
         setCategoriesList([]);
+        setCategoryError('Não foi possível carregar as categorias.');
       } finally {
         setIsLoadingCategories(false);
       }
@@ -334,20 +347,37 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
         </div>
 
         <button
-          onClick={handleOpenCreateModal}
-          disabled={categoriesList.length === 0}
+          onClick={() => {
+            if (!isKycOk) {
+              showToast('Você precisa ter a verificação KYC aprovada para criar uma loja.');
+              return;
+            }
+            if (categoriesList.length === 0) {
+              showToast('Nenhuma categoria disponível para associar à loja.');
+              return;
+            }
+            handleOpenCreateModal();
+          }}
+          disabled={!isKycOk || categoriesList.length === 0}
           className={`font-bold px-4 py-2.5 rounded-xl text-xs transition flex items-center gap-2 shadow-xs shrink-0 ${
-            categoriesList.length === 0
+            !isKycOk || categoriesList.length === 0
               ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
               : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
           }`}
-          title={categoriesList.length === 0 ? 'Nenhuma categoria disponível' : 'Cadastrar Nova Loja'}
+          title={!isKycOk ? 'Verificação KYC Necessária' : categoriesList.length === 0 ? 'Nenhuma categoria disponível' : 'Cadastrar Nova Loja'}
         >
           <PlusCircle className="w-4 h-4" /> Cadastrar Nova Loja
         </button>
       </div>
 
-      {categoriesList.length === 0 && !isLoadingCategories && (
+      {categoryError && (
+        <div className="p-4 bg-red-50 border border-red-200 rounded-2xl flex items-center gap-3 text-red-900 text-xs font-bold">
+          <AlertTriangle className="w-5 h-5 text-red-600 shrink-0" />
+          <span>{categoryError}</span>
+        </div>
+      )}
+
+      {!categoryError && categoriesList.length === 0 && !isLoadingCategories && (
         <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-center gap-3 text-amber-900 text-xs font-bold">
           <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
           <span>Nenhuma categoria disponível. Aguarde o administrador cadastrar categorias para criar lojas.</span>

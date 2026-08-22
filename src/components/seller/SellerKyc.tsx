@@ -18,6 +18,7 @@ import {
   ExternalLink,
   Loader2,
 } from 'lucide-react';
+import { isSellerKycApproved } from '../../utils/kycUtils';
 import { SellerProfileData } from '../../data/mockSellerData';
 import { SellerService } from '../../services/sellerService';
 import { uploadService } from '../../services/uploadService';
@@ -81,7 +82,7 @@ export const SellerKyc: React.FC<SellerKycProps> = ({ profile, showToast, onNavi
 
       if (res.success && res.data) {
         const st = res.data.status;
-        if (st === 'verified' || st === 'approved') {
+        if (isSellerKycApproved(st)) {
           setSubmittedStatus('verified');
         } else if (st === 'pending' || st === 'under_review' || st === 'review') {
           setSubmittedStatus('review');

@@ -507,6 +507,14 @@ sellerRouter.get('/profile', async (req: AuthRequest, res: Response) => {
     const userRows = await db.select().from(users).where(eq(users.id, seller.userId)).limit(1);
     const user = userRows[0];
 
+    const kycRows = await db.select().from(sellerKyc).where(eq(sellerKyc.sellerId, seller.id)).limit(1);
+    const kyc = kycRows[0];
+    const kycStatus = kyc?.status || (seller.status === 'active' ? 'approved' : seller.status) || user?.kycStatus || 'pending';
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[SELLER KYC] status recebido: ${kycStatus} source: GET /seller/profile`);
+    }
+
     return res.json({
       success: true,
       data: {
@@ -520,6 +528,8 @@ sellerRouter.get('/profile', async (req: AuthRequest, res: Response) => {
         email: user?.email || '',
         country: seller.countryCode,
         status: seller.status,
+        kycStatus,
+        kycLevel: kycStatus === 'verified' || kycStatus === 'approved' ? 'Nível 3 - Vendedor Global' : 'Nível 1 - Pendente de Verificação',
         description: profile.description || '',
         returnPolicy: profile.returnPolicy || '',
         shippingPolicy: profile.shippingPolicy || '',

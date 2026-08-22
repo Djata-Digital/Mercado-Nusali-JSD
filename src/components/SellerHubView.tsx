@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Lock, ShieldCheck, Loader2 } from 'lucide-react';
 import { useProducts } from '../hooks/useProducts';
 import { usePreferences } from '../context/PreferencesContext';
+import { isSellerKycApproved } from '../utils/kycUtils';
 import { Product } from '../types';
 import { SellerSidebar, SellerNavSection } from './seller/SellerSidebar';
 import { SellerOverview } from './seller/SellerOverview';
@@ -375,7 +376,7 @@ export const SellerHubView: React.FC = () => {
         )}
 
         {/* Unverified Seller Lock Banner for Restricted Features */}
-        {profile?.kycStatus !== 'verified' && profile?.kycStatus !== 'approved' && ['stores', 'team', 'product_create'].includes(activeSection) && (
+        {!isSellerKycApproved(profile?.kycStatus) && ['stores', 'team', 'product_create'].includes(activeSection) && (
           <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-6 shadow-xs mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="p-3 bg-amber-100 text-amber-800 rounded-2xl shrink-0">
@@ -410,7 +411,6 @@ export const SellerHubView: React.FC = () => {
         {activeSection === 'account' && (
           <SellerAccount
             profile={profile}
-            onUpdateProfile={handleUpdateProfile}
             showToast={showToast}
             onNavigateSection={setActiveSection}
           />
@@ -427,6 +427,7 @@ export const SellerHubView: React.FC = () => {
         {activeSection === 'stores' && (
           <SellerMultiStore
             stores={stores}
+            profile={profile}
             selectedStoreId={selectedStoreId}
             onSelectStore={setSelectedStoreId}
             onAddStore={handleAddStore}
