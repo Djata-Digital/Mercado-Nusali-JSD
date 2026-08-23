@@ -825,9 +825,18 @@ export const sellerPayouts = pgTable('seller_payouts', {
   status: varchar('status', { length: 50 }).notNull().default('pending'), // pending, processing, completed, failed
   processedAt: timestamp('processed_at'),
   transactionRef: varchar('transaction_ref', { length: 255 }),
+  // Fase "Payout multi-moeda": chave de idempotência fornecida pelo cliente na
+  // solicitação — protege contra um retry de rede reenviando a mesma ação do
+  // usuário e reservando saldo duas vezes. Nullable porque payouts antigos nunca
+  // tiveram essa chave; índice único parcial (só quando não-nulo) permite isso
+  // sem quebrar o histórico.
+  idempotencyKey: varchar('idempotency_key', { length: 255 }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => ({
   seller_payouts_seller_status_idx: index('seller_payouts_seller_status_idx').on(table.sellerId, table.status),
+  seller_payouts_idempotency_uq: uniqueIndex('seller_payouts_idempotency_uq')
+    .on(table.idempotencyKey)
+    .where(sql`${table.idempotencyKey} IS NOT NULL`),
 }));
 
 // ============================================================================

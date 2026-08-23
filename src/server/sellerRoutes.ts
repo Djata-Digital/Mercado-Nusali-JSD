@@ -66,6 +66,7 @@ import { requireAuth, AuthRequest } from './modules/auth/authMiddleware.js';
 import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { storageService } from './infra/storage.js';
+import { requestSellerPayout, PayoutValidationError } from './modules/wallet/payoutService.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -1866,11 +1867,7 @@ sellerRouter.get('/payouts', async (req: AuthRequest, res: Response) => {
 
 sellerRouter.post('/payouts/request', async (req: AuthRequest, res: Response) => {
   try {
-    const db = getDb();
     const seller = await resolveSeller(req);
-    const { amount, method, currency, bankAccountId } = req.body;
-    const payoutAmount = Number(amount);
-
     if (!seller) {
       return res.status(404).json({
         success: false,
@@ -1878,233 +1875,27 @@ sellerRouter.post('/payouts/request', async (req: AuthRequest, res: Response) =>
       });
     }
 
-    if (!payoutAmount || payoutAmount <= 0) {
-      return res.status(400).json({ success: false, message: 'Informe um valor válido para saque.' });
-    }
-
-    if (!db) {
-      return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
-    }
-
-    // Requirement 2: Canonical Method Code Validation
-    const canonicalMethod = (method || '').toLowerCase().trim();
-    const CANONICAL_METHODS = ['orange_money', 'mtn', 'pix', 'bank_transfer', 'wallet'];
-    if (!CANONICAL_METHODS.includes(canonicalMethod)) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 'INVALID_PAYOUT_METHOD',
-          message: `Método de saque "${method}" é inválido. Métodos suportados: ${CANONICAL_METHODS.join(', ')}.`,
-        },
-      });
-    }
-
-    // Requirement 1: External methods REQUIRE bankAccountId
-    if (canonicalMethod !== 'wallet' && !bankAccountId) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 'BANK_ACCOUNT_REQUIRED',
-          message: 'Uma conta bancária/de recebimento cadastrada é obrigatória para este método de saque.',
-        },
-      });
-    }
-
-    // Execute balance check and reservation in transaction
-    const result = await db.transaction(async (tx) => {
-      let walletRows = await tx.select().from(wallets).where(eq(wallets.userId, seller.userId)).limit(1);
-      let sellerWallet = walletRows[0];
-      if (!sellerWallet) {
-        // Race-safe wallet auto-provisioning (see paymentService.ts releaseEscrowForOrder for
-        // the same pattern): ON CONFLICT DO NOTHING + re-select, never a duplicate-insert error.
-        const wId = `wlt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        await tx
-          .insert(wallets)
-          .values({
-            id: wId,
-            userId: seller.userId,
-            balance: '0.00',
-            cashbackBalance: '0.00',
-            pendingBalance: '0.00',
-            currency: currency || 'XOF',
-            status: 'active',
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .onConflictDoNothing({ target: wallets.userId });
-        const createdW = await tx.select().from(wallets).where(eq(wallets.userId, seller.userId)).limit(1);
-        sellerWallet = createdW[0];
-      }
-
-      // Lock the wallet row for the rest of this transaction: concurrent payout requests (or a
-      // concurrent escrow release/deposit) for the same wallet must not read the same stale balance.
-      const lockedWalletRows = await tx.select().from(wallets).where(eq(wallets.id, sellerWallet.id)).for('update');
-      sellerWallet = lockedWalletRows[0] || sellerWallet;
-
-      if (sellerWallet.status !== 'active') {
-        throw new Error('WALLET_LOCKED: Sua carteira está inativa ou bloqueada para transações.');
-      }
-
-      // Requirement 5: Currency Validation (wallet.currency is source of truth)
-      const walletCurrency = sellerWallet.currency || 'XOF';
-      if (currency && currency.toUpperCase() !== walletCurrency.toUpperCase()) {
-        const err: any = new Error(`CURRENCY_MISMATCH: Moeda solicitada (${currency}) incompatível com a moeda da carteira (${walletCurrency}).`);
-        err.code = 'CURRENCY_MISMATCH';
-        throw err;
-      }
-      const finalCurrency = walletCurrency;
-
-      // Requirement 4 & 5 & 7: Validate Destination Account Ownership, Method Compatibility & Currency
-      let validatedBankAccountId: string | null = null;
-      if (bankAccountId) {
-        const bAccs = await tx
-          .select()
-          .from(sellerBankAccounts)
-          .where(and(eq(sellerBankAccounts.id, bankAccountId), eq(sellerBankAccounts.sellerId, seller.id)))
-          .limit(1);
-
-        if (bAccs.length === 0) {
-          const err: any = new Error('INVALID_BANK_ACCOUNT: A conta bancária informada não foi encontrada ou não pertence ao vendedor autenticado.');
-          err.code = 'INVALID_BANK_ACCOUNT';
-          throw err;
-        }
-
-        const bAcc = bAccs[0];
-
-        // Currency Match with Bank Account
-        if (bAcc.currency && bAcc.currency.toUpperCase() !== walletCurrency.toUpperCase()) {
-          const err: any = new Error(`CURRENCY_MISMATCH: A moeda da conta cadastrada (${bAcc.currency}) difere da moeda da carteira (${walletCurrency}).`);
-          err.code = 'CURRENCY_MISMATCH';
-          throw err;
-        }
-
-        // Requirement 4: Method vs Account Field Compatibility
-        if (canonicalMethod === 'bank_transfer') {
-          const hasAcc = Boolean(bAcc.accountNumber && bAcc.accountNumber.trim() && bAcc.accountNumber !== 'N/A');
-          const hasIban = Boolean(bAcc.ibanOrRouting && bAcc.ibanOrRouting.trim());
-          if (!hasAcc && !hasIban) {
-            const err: any = new Error('PAYOUT_DESTINATION_INCOMPATIBLE: A conta selecionada não possui número de conta nem IBAN/Routing para transferência bancária.');
-            err.code = 'PAYOUT_DESTINATION_INCOMPATIBLE';
-            throw err;
-          }
-        } else if (canonicalMethod === 'pix') {
-          const hasPix = Boolean(bAcc.pixKey && bAcc.pixKey.trim());
-          if (!hasPix) {
-            const err: any = new Error('PAYOUT_DESTINATION_INCOMPATIBLE: A conta selecionada não possui Chave PIX cadastrada.');
-            err.code = 'PAYOUT_DESTINATION_INCOMPATIBLE';
-            throw err;
-          }
-        } else if (canonicalMethod === 'orange_money' || canonicalMethod === 'mtn') {
-          const hasMobile = Boolean(
-            (bAcc.mobileMoneyNumber && bAcc.mobileMoneyNumber.trim()) ||
-            (bAcc.accountNumber && bAcc.accountNumber.trim() && bAcc.accountNumber !== 'N/A')
-          );
-          if (!hasMobile) {
-            const err: any = new Error(`PAYOUT_DESTINATION_INCOMPATIBLE: A conta selecionada não possui número de celular/mobile money para ${canonicalMethod.toUpperCase()}.`);
-            err.code = 'PAYOUT_DESTINATION_INCOMPATIBLE';
-            throw err;
-          }
-        }
-
-        validatedBankAccountId = bAcc.id;
-      }
-
-      const availableBalance = Number(sellerWallet.balance || 0);
-      if (payoutAmount > availableBalance) {
-        const err: any = new Error('INSUFFICIENT_AVAILABLE_BALANCE: Saldo disponível insuficiente para solicitar o saque.');
-        err.code = 'INSUFFICIENT_AVAILABLE_BALANCE';
-        throw err;
-      }
-
-      // Reserve balance upon payout creation
-      const newBalance = availableBalance - payoutAmount;
-      await tx
-        .update(wallets)
-        .set({
-          balance: String(newBalance.toFixed(2)),
-          updatedAt: new Date(),
-        })
-        .where(eq(wallets.id, sellerWallet.id));
-
-      const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      await tx.insert(sellerPayouts).values({
-        id: payoutId,
-        sellerId: seller.id,
-        amount: String(payoutAmount.toFixed(2)),
-        currency: finalCurrency,
-        method: canonicalMethod,
-        bankAccountId: validatedBankAccountId,
-        status: 'pending',
-        createdAt: new Date(),
-      });
-
-      await tx.insert(walletTransactions).values({
-        id: `wtx_payout_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        walletId: sellerWallet.id,
-        type: 'payout',
-        amount: String((-payoutAmount).toFixed(2)),
-        currency: finalCurrency,
-        title: `Solicitação de Saque (${canonicalMethod.toUpperCase()})`,
-        referenceId: payoutId,
-        referenceType: 'withdrawal',
-        status: 'pending',
-        balanceAfter: String(newBalance.toFixed(2)),
-        idempotencyKey: `payout_request:${payoutId}`,
-        createdAt: new Date(),
-      });
-
-      return {
-        id: payoutId,
-        amount: payoutAmount,
-        currency: finalCurrency,
-        method: canonicalMethod,
-        bankAccountId: validatedBankAccountId,
-        status: 'pending',
-        newAvailableBalance: newBalance,
-      };
+    const { amount, method, currency, bankAccountId, idempotencyKey } = req.body;
+    const result = await requestSellerPayout({
+      sellerId: seller.id,
+      sellerUserId: seller.userId,
+      amount: Number(amount),
+      currency,
+      method,
+      bankAccountId,
+      idempotencyKey,
     });
 
     return res.json({
       success: true,
-      message: `Solicitação de saque de ${result.amount.toLocaleString()} ${result.currency} enviada com sucesso!`,
+      message: (result as any).alreadyRequested
+        ? `Esta solicitação de saque já havia sido enviada (${result.amount.toLocaleString()} ${result.currency}) — nenhum novo saldo foi reservado.`
+        : `Solicitação de saque de ${result.amount.toLocaleString()} ${result.currency} enviada com sucesso!`,
       data: result,
     });
   } catch (err: any) {
-    if (err?.code === 'INVALID_PAYOUT_METHOD' || err?.message?.includes('INVALID_PAYOUT_METHOD')) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'INVALID_PAYOUT_METHOD', message: err.message },
-      });
-    }
-    if (err?.code === 'BANK_ACCOUNT_REQUIRED' || err?.message?.includes('BANK_ACCOUNT_REQUIRED')) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'BANK_ACCOUNT_REQUIRED', message: err.message },
-      });
-    }
-    if (err?.code === 'PAYOUT_DESTINATION_INCOMPATIBLE' || err?.message?.includes('PAYOUT_DESTINATION_INCOMPATIBLE')) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'PAYOUT_DESTINATION_INCOMPATIBLE', message: err.message },
-      });
-    }
-    if (err?.code === 'CURRENCY_MISMATCH' || err?.message?.includes('CURRENCY_MISMATCH')) {
-      return res.status(409).json({
-        success: false,
-        error: { code: 'CURRENCY_MISMATCH', message: err.message },
-      });
-    }
-    if (err?.code === 'INVALID_BANK_ACCOUNT' || err?.message?.includes('INVALID_BANK_ACCOUNT')) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'INVALID_BANK_ACCOUNT', message: err.message },
-      });
-    }
-    if (err?.code === 'INSUFFICIENT_AVAILABLE_BALANCE' || err?.message?.includes('INSUFFICIENT_AVAILABLE_BALANCE')) {
-      return res.status(409).json({
-        success: false,
-        error: { code: 'INSUFFICIENT_AVAILABLE_BALANCE', message: 'Saldo disponível insuficiente para solicitar o saque.' },
-      });
+    if (err instanceof PayoutValidationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
     }
     return res.status(500).json({ success: false, message: err?.message });
   }

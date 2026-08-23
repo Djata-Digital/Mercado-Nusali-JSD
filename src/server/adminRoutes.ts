@@ -53,6 +53,7 @@ import { InventoryService } from './modules/inventory/inventoryService.js';
 import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { PaymentService } from './modules/payments/paymentService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
+import { processPayoutStatusChange } from './modules/wallet/payoutService.js';
 
 export const adminRouter = Router();
 
@@ -1740,170 +1741,16 @@ adminRouter.get('/payouts', async (req: Request, res: Response) => {
 
 adminRouter.post('/payouts/:id/status', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
     const { id } = req.params;
     const { status, transactionRef } = req.body;
 
-    if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
     if (!['pending', 'processing', 'completed', 'failed'].includes(status)) {
       return res.status(400).json({ success: false, message: 'Status inválido para saque.' });
     }
 
-    const result = await db.transaction(async (tx) => {
-      const payoutRows = await tx.select().from(sellerPayouts).where(eq(sellerPayouts.id, id)).limit(1);
-      if (payoutRows.length === 0) throw new Error('Solicitação de saque não encontrada.');
-
-      const p = payoutRows[0];
-      const currentStatus = p.status;
-
-      // Requirement 5: State machine transition rules & idempotency
-      if (currentStatus === status) {
-        return {
-          success: true,
-          message: `Saque já se encontra no status "${status}".`,
-          alreadyInState: true,
-          status: currentStatus,
-        };
-      }
-
-      // Requirement 1: Explicit Payout State Machine
-      const isValidTransition =
-        (currentStatus === 'pending' && (status === 'processing' || status === 'failed')) ||
-        (currentStatus === 'processing' && (status === 'completed' || status === 'failed'));
-
-      if (!isValidTransition) {
-        const err: any = new Error(
-          `PAYOUT_INVALID_TRANSITION: Transição inválida de "${currentStatus}" para "${status}".`
-        );
-        err.code = 'PAYOUT_INVALID_TRANSITION';
-        throw err;
-      }
-
-      if (status === 'completed') {
-        // Requirement 6: Payout completed transactionRef rules
-        let ref = transactionRef;
-        const isDev = process.env.NODE_ENV !== 'production';
-        if (!ref) {
-          if (isDev) {
-            ref = `DEV_SANDBOX_TX_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-          } else {
-            const err: any = new Error('TRANSACTION_REF_REQUIRED: Em produção, a referência de transação real do comprovante é obrigatória.');
-            err.code = 'TRANSACTION_REF_REQUIRED';
-            throw err;
-          }
-        }
-
-        await tx
-          .update(sellerPayouts)
-          .set({
-            status: 'completed',
-            processedAt: new Date(),
-            transactionRef: ref,
-          })
-          .where(eq(sellerPayouts.id, p.id));
-
-        const wtxRows = await tx
-          .select()
-          .from(walletTransactions)
-          .where(eq(walletTransactions.referenceId, p.id))
-          .limit(1);
-
-        if (wtxRows.length > 0) {
-          await tx
-            .update(walletTransactions)
-            .set({ status: 'completed' })
-            .where(eq(walletTransactions.id, wtxRows[0].id));
-        }
-
-        return { success: true, message: `Saque #${p.id} concluído com sucesso. Ref: ${ref}` };
-      }
-
-      if (status === 'processing') {
-        await tx
-          .update(sellerPayouts)
-          .set({ status: 'processing' })
-          .where(eq(sellerPayouts.id, p.id));
-
-        return { success: true, message: `Saque #${p.id} alterado para em processamento.` };
-      }
-
-      if (status === 'failed') {
-        // Requirement 4: Idempotency of Payout Failed (Check payout_refund:{payoutId})
-        const refundIdempotencyKey = `payout_refund:${p.id}`;
-        const existingRefundWtx = await tx
-          .select()
-          .from(walletTransactions)
-          .where(eq(walletTransactions.idempotencyKey, refundIdempotencyKey))
-          .limit(1);
-
-        await tx
-          .update(sellerPayouts)
-          .set({ status: 'failed' })
-          .where(eq(sellerPayouts.id, p.id));
-
-        if (existingRefundWtx.length > 0) {
-          return {
-            success: true,
-            message: `Saque #${p.id} marcado como falho. Reembolso já efetuado anteriormente.`,
-            alreadyRefunded: true,
-          };
-        }
-
-        // Refund exact reserved amount ONCE
-        const selRows = await tx.select().from(sellers).where(eq(sellers.id, p.sellerId)).limit(1);
-        if (selRows.length > 0) {
-          const sellerUserId = selRows[0].userId;
-          // Lock the wallet row for the rest of this transaction (concurrent deposit/release/payout
-          // for the same wallet must not read the same stale balance).
-          const walletRows = await tx.select().from(wallets).where(eq(wallets.userId, sellerUserId)).for('update').limit(1);
-          if (walletRows.length > 0) {
-            const sellerWallet = walletRows[0];
-            const currentBal = Number(sellerWallet.balance || 0);
-            const refundAmt = Number(p.amount || 0);
-            const newBal = currentBal + refundAmt;
-
-            await tx
-              .update(wallets)
-              .set({
-                balance: String(newBal.toFixed(2)),
-                updatedAt: new Date(),
-              })
-              .where(eq(wallets.id, sellerWallet.id));
-
-            const wtxRows = await tx
-              .select()
-              .from(walletTransactions)
-              .where(eq(walletTransactions.referenceId, p.id))
-              .limit(1);
-
-            if (wtxRows.length > 0) {
-              await tx
-                .update(walletTransactions)
-                .set({ status: 'cancelled' })
-                .where(eq(walletTransactions.id, wtxRows[0].id));
-            }
-
-            await tx.insert(walletTransactions).values({
-              id: `wtx_refund_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-              walletId: sellerWallet.id,
-              type: 'refund',
-              amount: String(refundAmt.toFixed(2)),
-              currency: p.currency || 'XOF',
-              title: `Estorno de Saque #${p.id}`,
-              referenceId: p.id,
-              referenceType: 'withdrawal',
-              status: 'completed',
-              balanceAfter: String(newBal.toFixed(2)),
-              idempotencyKey: refundIdempotencyKey,
-              createdAt: new Date(),
-            });
-          }
-        }
-
-        return { success: true, message: `Saque #${p.id} marcado como falho e valor devolvido ao saldo disponível.` };
-      }
-
-      return { success: true };
+    const result = await processPayoutStatusChange(id, status, {
+      transactionRef,
+      isProduction: process.env.NODE_ENV === 'production',
     });
 
     return res.json(result);
