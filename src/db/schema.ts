@@ -751,7 +751,7 @@ export const paymentWebhookEvents = pgTable('payment_webhook_events', {
 
 export const wallets = pgTable('wallets', {
   id: varchar('id', { length: 255 }).primaryKey(),
-  userId: varchar('user_id', { length: 255 }).notNull().unique().references(() => users.id, { onDelete: 'restrict' }),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
   balance: numeric('balance', { precision: 15, scale: 2 }).notNull().default('0.00'),
   cashbackBalance: numeric('cashback_balance', { precision: 15, scale: 2 }).notNull().default('0.00'),
   pendingBalance: numeric('pending_balance', { precision: 15, scale: 2 }).notNull().default('0.00'),
@@ -759,7 +759,14 @@ export const wallets = pgTable('wallets', {
   status: varchar('status', { length: 50 }).notNull().default('active'), // active, locked, frozen
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
-});
+}, (table) => ({
+  // Fase 6 (correção do achado CRÍTICO C — escrow release): uma wallet por
+  // usuário POR MOEDA, não mais uma única wallet global por usuário. Um
+  // vendedor que recebe em BRL e XOF precisa de duas linhas — nunca um saldo
+  // único somando moedas diferentes. Substitui o antigo UNIQUE(user_id) puro.
+  // Ver drizzle/0016_wallets_unique_user_currency.sql.
+  wallets_user_currency_uq: uniqueIndex('wallets_user_currency_uq').on(table.userId, table.currency),
+}));
 
 export const walletTransactions = pgTable('wallet_transactions', {
   id: varchar('id', { length: 255 }).primaryKey(),

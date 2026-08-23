@@ -1,5 +1,5 @@
 import { getDb } from '../../../db/index.js';
-import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions } from '../../../db/schema.js';
+import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions, ledgerEntries, ledgerAccounts } from '../../../db/schema.js';
 import { syncOrderFulfillmentStatus } from '../orders/orderService.js';
 import { eq, and, ne, sql } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -24,17 +24,37 @@ export interface ConfirmOrderPaymentOptions {
 }
 
 /**
- * Calculates the net amount to be released from escrow to the seller's wallet.
- * 
- * ARCHITECTURAL NOTE:
- * Currently, Mercado Nusali does not store a separate commission/fee deduction breakdown
- * (e.g. sellerNetAmount, platformFee, commission) on escrowAccounts.
- * Therefore: seller gross = escrow amount.
- * When the commission engine is implemented, this function will compute:
- * netAmount = escrow.amount - platformFee - gatewayFee.
+ * Erro financeiro explícito — lançado quando o pedido não tem os snapshots
+ * financeiros necessários para liberar o escrow com segurança. Nunca inventamos
+ * um valor nem caímos de volta para escrow.amount bruto (Fase 6, correção do
+ * achado CRÍTICO B). Pedidos legado/fixture sem esse snapshot precisam de
+ * tratamento manual separado — esta função não tenta adivinhar por eles.
  */
-export function calculateSellerReleaseAmount(escrow: { amount: string | number }, order?: { totalAmount?: string | number }): number {
-  return Number(escrow?.amount || order?.totalAmount || 0);
+export class MissingFinancialSnapshotError extends Error {
+  constructor(orderId: string, detail: string) {
+    super(`MISSING_FINANCIAL_SNAPSHOT: pedido ${orderId} não pode liberar escrow — ${detail}. escrow.amount bruto nunca é usado como fallback.`);
+    this.name = 'MissingFinancialSnapshotError';
+  }
+}
+
+/**
+ * Fonte de verdade do valor a creditar ao vendedor na liberação do escrow:
+ * SEMPRE orders.sellerNetAmount — o snapshot financeiro gravado no momento da
+ * criação do pedido (orderService.ts). Nunca o valor bruto do escrow (que inclui
+ * frete e a comissão da Nusali) e nunca recalculado com a regra de comissão
+ * vigente no momento do release — a regra pode ter mudado desde a criação do
+ * pedido; usar o snapshot preserva exatamente o que foi cobrado do comprador
+ * naquele momento (Fase 6, correção do achado CRÍTICO B).
+ */
+export function calculateSellerReleaseAmount(order: { id: string; sellerNetAmount: string | number | null | undefined }): number {
+  if (order.sellerNetAmount === null || order.sellerNetAmount === undefined) {
+    throw new MissingFinancialSnapshotError(order.id, 'orders.sellerNetAmount ausente');
+  }
+  const amount = Number(order.sellerNetAmount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new MissingFinancialSnapshotError(order.id, `orders.sellerNetAmount inválido (${order.sellerNetAmount})`);
+  }
+  return amount;
 }
 
 export class PaymentService {
@@ -536,6 +556,18 @@ export class PaymentService {
       }
       const esc = escRows[0];
 
+      // Moeda do escrow tem que bater com a moeda do pedido — nunca creditar uma
+      // wallet com um valor rotulado numa moeda diferente da que a conta
+      // realmente representa (Fase 6, correção do achado CRÍTICO C). Na criação
+      // do escrow (HOLD) as duas sempre vêm de ord.currency, então isto é uma
+      // guarda defensiva contra corrupção de dado futura, não um caminho normal.
+      if (esc.currency !== ord.currency) {
+        throw new Error(
+          `ESCROW_CURRENCY_MISMATCH: escrow do pedido ${ord.id} está em ${esc.currency}, mas o pedido está em ${ord.currency}. Release recusado, nenhum crédito realizado.`
+        );
+      }
+      const releaseCurrency = esc.currency;
+
       let performedBy: string | null = options?.performedBy || ord.buyerId;
       if (performedBy) {
         const uCheck = await tx.select().from(users).where(eq(users.id, performedBy)).limit(1);
@@ -557,15 +589,27 @@ export class PaymentService {
         }
       }
 
-      // 2. Locate or create Seller Wallet & Credit Balance (Idempotent)
-      const releaseAmount = calculateSellerReleaseAmount(esc, ord);
+      // 2. Locate or create Seller Wallet (por usuário + moeda) & Credit Balance (Idempotent)
+      // releaseAmount = orders.sellerNetAmount, nunca escrow.amount bruto — o bruto inclui
+      // frete e a comissão da Nusali, que não pertencem à wallet do vendedor (Fase 6,
+      // achados CRÍTICO B e itens 2/3 — frete e comissão nunca são creditados ao seller).
+      // Lança MissingFinancialSnapshotError antes de qualquer escrita se o snapshot
+      // obrigatório estiver ausente/inválido — nenhuma wallet é tocada nesse caso.
+      const releaseAmount = calculateSellerReleaseAmount(ord);
       if (sellerUserId && releaseAmount > 0) {
-        let walletRows = await tx.select().from(wallets).where(eq(wallets.userId, sellerUserId)).limit(1);
+        // Uma wallet por usuário POR MOEDA (Fase 6, achado CRÍTICO C) — nunca soma valores
+        // de moedas diferentes no mesmo saldo numérico.
+        let walletRows = await tx
+          .select()
+          .from(wallets)
+          .where(and(eq(wallets.userId, sellerUserId), eq(wallets.currency, releaseCurrency)))
+          .limit(1);
         let sellerWallet = walletRows[0];
         if (!sellerWallet) {
-          // Race-safe wallet auto-provisioning: ON CONFLICT DO NOTHING on the unique userId,
-          // then re-select whichever row actually won, instead of risking a duplicate-insert
-          // error if a concurrent release/payout for the same brand-new wallet runs at once.
+          // Race-safe wallet auto-provisioning: ON CONFLICT DO NOTHING no par (userId,
+          // currency), depois re-seleciona a linha que realmente venceu, em vez de arriscar
+          // erro de insert duplicado se uma liberação/payout concorrente para a mesma
+          // wallet-nova rodar ao mesmo tempo.
           const wId = `wlt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
           await tx
             .insert(wallets)
@@ -575,13 +619,17 @@ export class PaymentService {
               balance: '0.00',
               cashbackBalance: '0.00',
               pendingBalance: '0.00',
-              currency: esc.currency || ord.currency || 'XOF',
+              currency: releaseCurrency,
               status: 'active',
               createdAt: new Date(),
               updatedAt: new Date(),
             })
-            .onConflictDoNothing({ target: wallets.userId });
-          const createdW = await tx.select().from(wallets).where(eq(wallets.userId, sellerUserId)).limit(1);
+            .onConflictDoNothing({ target: [wallets.userId, wallets.currency] });
+          const createdW = await tx
+            .select()
+            .from(wallets)
+            .where(and(eq(wallets.userId, sellerUserId), eq(wallets.currency, releaseCurrency)))
+            .limit(1);
           sellerWallet = createdW[0];
         }
 
@@ -608,20 +656,30 @@ export class PaymentService {
             })
             .where(eq(wallets.id, sellerWallet.id));
 
-          await tx.insert(walletTransactions).values({
-            id: `wtx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-            walletId: sellerWallet.id,
-            type: 'escrow_release',
-            amount: String(releaseAmount.toFixed(2)),
-            currency: esc.currency || ord.currency || 'XOF',
-            title: `Venda liberada - Pedido #${ord.orderNumber || ord.id}`,
-            referenceId: ord.id,
-            referenceType: 'order',
-            status: 'completed',
-            balanceAfter: String(newBalance.toFixed(2)),
-            idempotencyKey,
-            createdAt: new Date(),
-          });
+          try {
+            await tx.insert(walletTransactions).values({
+              id: `wtx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+              walletId: sellerWallet.id,
+              type: 'escrow_release',
+              amount: String(releaseAmount.toFixed(2)),
+              currency: releaseCurrency,
+              title: `Venda liberada - Pedido #${ord.orderNumber || ord.id}`,
+              referenceId: ord.id,
+              referenceType: 'order',
+              status: 'completed',
+              balanceAfter: String(newBalance.toFixed(2)),
+              idempotencyKey,
+              createdAt: new Date(),
+            });
+          } catch (wtxErr: any) {
+            // Corrida: duas liberações concorrentes passaram pelo SELECT acima antes de
+            // qualquer uma commitar. O índice único de idempotencyKey (Postgres) rejeita a
+            // segunda — deixamos a transação inteira dar rollback (nenhum crédito parcial
+            // fica de pé) e o erro sobe como está; não tentamos "engolir" silenciosamente
+            // aqui porque o saldo já foi somado localmente em memória (newBalance) e não é
+            // seguro assumir qual das duas deveria "vencer" sem reprocessar do zero.
+            throw wtxErr;
+          }
         }
       }
 
@@ -694,6 +752,9 @@ export class PaymentService {
           escrowStatus: 'released',
           status: 'delivered',
         },
+        // Uso interno só para o diagnóstico de comparação com o ledger shadow logo abaixo
+        // (Fase 6, item 9) — não faz parte do contrato público da função.
+        _releasedAmount: releaseAmount,
       };
     };
 
@@ -708,6 +769,13 @@ export class PaymentService {
     // ------------------------------------------------------------------------
     // SHADOW LEDGER (Fase 5A) — roda DEPOIS que o fluxo legado acima já commitou,
     // nunca afeta o resultado real. Ver nota equivalente em confirmOrderPayment.
+    //
+    // Fase 6, item 9: além de postar, comparamos o valor realmente liberado ao
+    // vendedor no fluxo legado (orders.sellerNetAmount) contra o SELLER_PAYABLE
+    // do ledger shadow para o mesmo pedido — os dois já leem do mesmo snapshot
+    // (orders.sellerNetAmount), então um mismatch aqui indicaria um bug real em
+    // um dos dois caminhos, nunca um comportamento esperado. Só loga um
+    // diagnóstico; nunca bloqueia nem reverte o fluxo real, que já commitou.
     // ------------------------------------------------------------------------
     try {
       const shadow = await FinancialLedgerService.recordDeliveryConfirmed({
@@ -719,11 +787,35 @@ export class PaymentService {
         logger.info({ orderId, reason: shadow.reason, detail: shadow.detail }, '[ShadowLedger] recordDeliveryConfirmed pulado (esperado para pedidos legados/sem snapshot)');
       } else {
         logger.info({ orderId, transactionId: shadow.transactionId }, '[ShadowLedger] recordDeliveryConfirmed postado');
+
+        const releasedAmount = (result as any)?._releasedAmount;
+        if (shadow.transactionId && typeof releasedAmount === 'number') {
+          const db = getDb();
+          if (db) {
+            const sellerPayableRows = await db
+              .select({ amount: ledgerEntries.amount })
+              .from(ledgerEntries)
+              .innerJoin(ledgerAccounts, eq(ledgerEntries.accountId, ledgerAccounts.id))
+              .where(and(eq(ledgerEntries.transactionId, shadow.transactionId), eq(ledgerAccounts.code, 'SELLER_PAYABLE')));
+            const shadowAmount = sellerPayableRows.reduce((sum, r) => sum + Number(r.amount), 0);
+            if (Math.abs(shadowAmount - releasedAmount) > 0.005) {
+              logger.warn(
+                { orderId, releasedAmount, shadowAmount, transactionId: shadow.transactionId },
+                '[ShadowLedger] MISMATCH: valor liberado no fluxo real diverge do SELLER_PAYABLE do ledger shadow — investigar (não deveria acontecer, os dois leem sellerNetAmount)'
+              );
+            } else {
+              logger.info({ orderId, releasedAmount, shadowAmount }, '[ShadowLedger] valor liberado bate com SELLER_PAYABLE do ledger shadow');
+            }
+          }
+        }
       }
     } catch (shadowErr: any) {
       logger.error({ orderId, error: shadowErr?.message }, '[ShadowLedger] recordDeliveryConfirmed falhou — fluxo real não afetado');
     }
 
+    if (result && typeof result === 'object' && '_releasedAmount' in result) {
+      delete (result as any)._releasedAmount;
+    }
     return result;
   }
 }
