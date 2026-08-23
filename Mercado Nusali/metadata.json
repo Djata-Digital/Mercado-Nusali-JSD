@@ -1,6 +1,0 @@
-{
-  "name": "Mercado Nusali",
-  "description": "Marketplace internacional para Guiné-Bissau, Brasil, Portugal e expansão global. Suporte a múltiplas moedas (XOF, BRL, EUR, USD), verificação de vendedores KYC, retenção Escrow, disputas, pagamentos regionais (Orange Money, MTN, PIX), logística internacional e centro administrativo.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
