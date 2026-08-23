@@ -21,7 +21,7 @@ const registerSchema = z.object({
   password: z.string().min(6, 'A senha deve ter no mínimo 6 caracteres'),
   fullName: z.string().min(2, 'Nome completo obrigatório'),
   phone: z.string().optional(),
-  countryCode: z.string().optional().default('GW'),
+  countryCode: z.string().min(2, 'País é obrigatório'),
   role: z.enum(['BUYER', 'SELLER', 'ADMIN', 'COUNTRY_REPRESENTATIVE', 'REGIONAL_SUPERVISOR']).optional().default('BUYER'),
 });
 

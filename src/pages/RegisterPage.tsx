@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import {
   ShieldCheck,
@@ -21,20 +21,22 @@ import {
   Upload,
   Sparkles,
   Image as ImageIcon,
+  Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { NusaliLogo } from '../components/NusaliLogo';
 import { UserRole } from '../types';
+import { CountriesApi } from '../api/clients/CountriesApi';
 
-const COUNTRIES = [
-  { code: 'GW', name: 'Guiné-Bissau', flag: '🇬🇼', phoneCode: '+245' },
-  { code: 'BR', name: 'Brasil', flag: '🇧🇷', phoneCode: '+55' },
-  { code: 'PT', name: 'Portugal', flag: '🇵🇹', phoneCode: '+351' },
-  { code: 'AO', name: 'Angola', flag: '🇦🇴', phoneCode: '+244' },
-  { code: 'CV', name: 'Cabo Verde', flag: '🇨🇻', phoneCode: '+238' },
-  { code: 'SN', name: 'Senegal', flag: '🇸🇳', phoneCode: '+221' },
-  { code: 'US', name: 'Estados Unidos', flag: '🇺🇸', phoneCode: '+1' },
-];
+interface OperationalCountry {
+  code: string;
+  name: string;
+  flag: string;
+  currency: string;
+  currencySymbol: string;
+  phonePrefix: string;
+}
 
 const PRESET_AVATARS = [
   { label: 'Profissional', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250' },
@@ -50,8 +52,40 @@ export const RegisterPage: React.FC = () => {
 
   const [step, setStep] = useState<number>(1);
 
+  // Countries operacionais reais — carregados de GET /api/v1/countries (fonte: tabela `countries`, isActive=true)
+  const [countries, setCountries] = useState<OperationalCountry[]>([]);
+  const [countriesLoading, setCountriesLoading] = useState(true);
+  const [countriesError, setCountriesError] = useState<string | null>(null);
+
+  const loadCountries = async () => {
+    setCountriesLoading(true);
+    setCountriesError(null);
+    try {
+      const res = await CountriesApi.list();
+      if (res.success && Array.isArray(res.data) && res.data.length > 0) {
+        setCountries(res.data as OperationalCountry[]);
+      } else {
+        setCountries([]);
+        setCountriesError('Nenhum país disponível para cadastro no momento.');
+      }
+    } catch (err: any) {
+      setCountries([]);
+      setCountriesError(
+        err?.response?.data?.error?.message ||
+          err?.message ||
+          'Não foi possível carregar a lista de países. Verifique sua conexão e tente novamente.'
+      );
+    } finally {
+      setCountriesLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadCountries();
+  }, []);
+
   // Form Fields
-  const [country, setCountry] = useState('GW');
+  const [country, setCountry] = useState('');
   const [accountType, setAccountType] = useState<UserRole>('BUYER');
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
@@ -62,7 +96,7 @@ export const RegisterPage: React.FC = () => {
   const avatarFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [email, setEmail] = useState('');
-  const [phoneCode, setPhoneCode] = useState('+245');
+  const [phoneCode, setPhoneCode] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -93,8 +127,8 @@ export const RegisterPage: React.FC = () => {
 
   const handleCountryChange = (cCode: string) => {
     setCountry(cCode);
-    const found = COUNTRIES.find((c) => c.code === cCode);
-    if (found) setPhoneCode(found.phoneCode);
+    const found = countries.find((c) => c.code === cCode);
+    if (found) setPhoneCode(found.phonePrefix);
   };
 
   const handleAvatarFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -240,29 +274,60 @@ export const RegisterPage: React.FC = () => {
                   O país selecionado definirá sua moeda principal e os métodos de pagamento locais.
                 </p>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
-                  {COUNTRIES.map((c) => (
+                {countriesLoading && (
+                  <div className="flex items-center justify-center gap-2 py-10 text-gray-500 text-xs font-medium">
+                    <Loader2 className="w-5 h-5 animate-spin text-blue-900" />
+                    Carregando países disponíveis...
+                  </div>
+                )}
+
+                {!countriesLoading && countriesError && (
+                  <div className="p-4 rounded-xl bg-red-50 border border-red-200 flex flex-col items-start gap-3 text-red-900 text-xs font-medium">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                      <div>{countriesError}</div>
+                    </div>
                     <button
-                      key={c.code}
                       type="button"
-                      onClick={() => handleCountryChange(c.code)}
-                      className={`p-3 rounded-xl border text-left transition flex items-center gap-3 cursor-pointer ${
-                        country === c.code
-                          ? 'border-blue-900 bg-blue-50/50 shadow-xs'
-                          : 'border-gray-200 hover:border-gray-300 bg-white'
-                      }`}
+                      onClick={loadCountries}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-red-300 rounded-lg text-red-800 font-bold hover:bg-red-100 transition cursor-pointer"
                     >
-                      <span className="text-2xl">{c.flag}</span>
-                      <div>
-                        <div className="font-bold text-xs text-gray-900">{c.name}</div>
-                        <div className="text-[10px] text-gray-500 font-mono">{c.phoneCode}</div>
-                      </div>
-                      {country === c.code && (
-                        <Check className="w-4 h-4 text-blue-900 ml-auto" />
-                      )}
+                      <RefreshCw className="w-3.5 h-3.5" /> Tentar novamente
                     </button>
-                  ))}
-                </div>
+                  </div>
+                )}
+
+                {!countriesLoading && !countriesError && countries.length === 0 && (
+                  <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-medium">
+                    Nenhum país está disponível para cadastro no momento.
+                  </div>
+                )}
+
+                {!countriesLoading && !countriesError && countries.length > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
+                    {countries.map((c) => (
+                      <button
+                        key={c.code}
+                        type="button"
+                        onClick={() => handleCountryChange(c.code)}
+                        className={`p-3 rounded-xl border text-left transition flex items-center gap-3 cursor-pointer ${
+                          country === c.code
+                            ? 'border-blue-900 bg-blue-50/50 shadow-xs'
+                            : 'border-gray-200 hover:border-gray-300 bg-white'
+                        }`}
+                      >
+                        <span className="text-2xl">{c.flag}</span>
+                        <div>
+                          <div className="font-bold text-xs text-gray-900">{c.name}</div>
+                          <div className="text-[10px] text-gray-500 font-mono">{c.phonePrefix}</div>
+                        </div>
+                        {country === c.code && (
+                          <Check className="w-4 h-4 text-blue-900 ml-auto" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -510,9 +575,9 @@ export const RegisterPage: React.FC = () => {
                       onChange={(e) => setPhoneCode(e.target.value)}
                       className="bg-gray-50 border border-gray-300 font-bold rounded-xl px-2.5 py-2.5 focus:border-blue-800 focus:outline-hidden"
                     >
-                      {COUNTRIES.map((c) => (
-                        <option key={c.code} value={c.phoneCode}>
-                          {c.flag} {c.phoneCode}
+                      {countries.map((c) => (
+                        <option key={c.code} value={c.phonePrefix}>
+                          {c.flag} {c.phonePrefix}
                         </option>
                       ))}
                     </select>

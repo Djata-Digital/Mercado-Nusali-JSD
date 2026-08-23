@@ -40,7 +40,6 @@ import { AdminAuditLogs } from './admin/AdminAuditLogs';
 import { AdminRolesPermissions } from './admin/AdminRolesPermissions';
 import { AdminPlatformSettings } from './admin/AdminPlatformSettings';
 import { AdminSecurityCenter } from './admin/AdminSecurityCenter';
-import { CountryOperationsView } from './admin/CountryOperationsView';
 import { RegionalOperationsView } from './admin/RegionalOperationsView';
 import { AdminDatabaseMonitor } from './admin/AdminDatabaseMonitor';
 
@@ -62,7 +61,6 @@ export const AdminDashboardView: React.FC = () => {
       group: 'Liderança & Operações',
       items: [
         { id: 'overview', label: 'Painel Global', icon: Globe },
-        { id: 'country_ops', label: 'Operações País (Country Manager)', icon: Globe },
         { id: 'regional_ops', label: 'Operações Regionais', icon: MapPin },
         { id: 'countries', label: 'Países & Parâmetros', icon: Globe },
         { id: 'regions', label: 'Regiões & Setores', icon: MapPin },
@@ -386,7 +384,6 @@ export const AdminDashboardView: React.FC = () => {
             {activeTab === 'db_monitor' && <AdminDatabaseMonitor />}
             {activeTab === 'overview' && <AdminFinanceDashboard showToast={showToast} />}
 
-            {activeTab === 'country_ops' && <CountryOperationsView showToast={showToast} />}
             {activeTab === 'regional_ops' && <RegionalOperationsView showToast={showToast} />}
             {activeTab === 'countries' && <AdminCountriesManager showToast={showToast} />}
             {activeTab === 'regions' && <AdminRegionsManager showToast={showToast} />}

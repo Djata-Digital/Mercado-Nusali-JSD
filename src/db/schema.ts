@@ -10,8 +10,10 @@ import {
   index,
   uniqueIndex,
   primaryKey,
+  check,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 // ============================================================================
 // 1. IDENTIDADE E SEGURANÇA (RBAC, USERS, SESSIONS)
@@ -474,7 +476,7 @@ export const inventoryTransfers = pgTable('inventory_transfers', {
   toWarehouseId: varchar('to_warehouse_id', { length: 255 }).notNull().references(() => warehouses.id, { onDelete: 'cascade' }),
   quantity: integer('quantity').notNull(),
   status: varchar('status', { length: 50 }).notNull().default('PENDING'), // PENDING, IN_TRANSIT, RECEIVED, CANCELLED
-  deliveryMode: varchar('delivery_mode', { length: 50 }), // NUSALI_PICKUP, SELLER_DROPOFF (Nullable for legacy records)
+  deliveryMode: varchar('delivery_mode', { length: 50 }).notNull().default('NUSALI_PICKUP'), // NUSALI_PICKUP, SELLER_DROPOFF
   pickupSnapshotJson: jsonb('pickup_snapshot_json'),
   trackingCode: varchar('tracking_code', { length: 100 }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -837,8 +839,8 @@ export const shipments = pgTable('shipments', {
   serviceType: varchar('service_type', { length: 50 }).default('standard'), // standard, express, full
   status: varchar('status', { length: 50 }).notNull().default('READY_TO_SHIP'), // READY_TO_SHIP, SHIPPED, IN_TRANSIT, OUT_FOR_DELIVERY, DELIVERED, DELIVERY_FAILED, RETURNING, RETURNED, CANCELLED
   originWarehouseId: varchar('origin_warehouse_id', { length: 255 }).references(() => warehouses.id, { onDelete: 'set null' }),
-  originCountry: varchar('origin_country', { length: 10 }),
-  destinationCountry: varchar('destination_country', { length: 10 }),
+  originCountry: varchar('origin_country', { length: 10 }).notNull(),
+  destinationCountry: varchar('destination_country', { length: 10 }).notNull(),
   recipientName: varchar('recipient_name', { length: 255 }),
   recipientAddressJson: jsonb('recipient_address_json'),
   senderName: varchar('sender_name', { length: 255 }),
@@ -1212,4 +1214,139 @@ export const riskEvents = pgTable('risk_events', {
 }, (table) => ({
   risk_events_entity_idx: index('risk_events_entity_idx').on(table.entityType, table.entityId),
   risk_events_created_idx: index('risk_events_created_idx').on(table.createdAt),
+}));
+
+// ============================================================================
+// 15. LEDGER FINANCEIRO — FASE 5A (FUNDAÇÃO / SHADOW)
+//
+// Fonte de verdade contábil de dupla entrada, projetada na Fase 4B e implementada
+// aqui em modo shadow: grava em paralelo ao fluxo legado (orders/payments/escrow_
+// accounts/wallets), sem substituir nenhum deles ainda. Ver ADR em
+// src/server/modules/ledger/financialLedgerService.ts para o racional completo.
+//
+// Regras que o schema por si só NÃO consegue expressar (exigem trigger em SQL —
+// ver drizzle/0011_ledger_financial_foundation.sql, revisão pós-auditoria):
+//   - ledger_entries.currency deve bater com a moeda de ledger_accounts.currency
+//     E com a moeda de ledger_transactions.currency (uma transaction não pode
+//     misturar duas moedas);
+//   - ledger_entries só pode ser INSERIDA/alterada/apagada enquanto a transaction-
+//     pai está DRAFT — inclusive INSERT, não só UPDATE/DELETE;
+//   - ledger_transactions: DRAFT->POSTED livre; POSTED só pode virar REVERSED e
+//     nenhum outro campo pode mudar nessa transição; REVERSED é terminal;
+//     POSTED/REVERSED nunca podem ser fisicamente apagadas;
+//   - ledger_accounts.owner_id (polimórfico, sem FK possível) é validado contra
+//     sellers.id/users.id conforme owner_type; sellers/users ganham um trigger
+//     que impede DELETE enquanto ainda houver uma ledger_accounts vinculada;
+//   - uma ledger_transaction POSTED tem que somar zero (débito=crédito) por moeda —
+//     verificado por um CONSTRAINT TRIGGER DEFERRABLE INITIALLY DEFERRED, porque a
+//     regra depende da soma de várias linhas de outra tabela, o que um CHECK comum
+//     (avalia só a própria linha) não consegue expressar. Combinado com as regras
+//     de imutabilidade acima, esse resultado fica congelado para sempre depois de
+//     POSTED — não existe mais nenhum caminho (INSERT de entry, UPDATE de status)
+//     capaz de desbalancear uma transaction já aprovada.
+// ============================================================================
+
+export const ledgerAccounts = pgTable('ledger_accounts', {
+  id: varchar('id', { length: 255 }).primaryKey(), // determinístico: `${code}:${ownerType}:${ownerId}:${currency}` (ou sem ownerId para PLATFORM)
+  code: varchar('code', { length: 50 }).notNull(), // PAYMENT_CLEARING, BUYER_ESCROW, SELLER_PAYABLE, ...
+  ownerType: varchar('owner_type', { length: 20 }).notNull(), // PLATFORM | SELLER | BUYER
+  ownerId: varchar('owner_id', { length: 255 }), // nulo para contas PLATFORM (pool único por moeda)
+  currency: varchar('currency', { length: 10 }).notNull(),
+  normalBalance: varchar('normal_balance', { length: 10 }).notNull(), // DEBIT | CREDIT
+  isClearing: boolean('is_clearing').notNull().default(false),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  // Unicidade correta com owner_id nulo: um UNIQUE comum trata cada NULL como distinto
+  // (permitiria N contas PLATFORM "iguais"). Dois índices únicos parciais resolvem isso.
+  ledger_accounts_owned_uq: uniqueIndex('ledger_accounts_owned_uq')
+    .on(table.code, table.ownerType, table.ownerId, table.currency)
+    .where(sql`${table.ownerId} IS NOT NULL`),
+  ledger_accounts_platform_uq: uniqueIndex('ledger_accounts_platform_uq')
+    .on(table.code, table.ownerType, table.currency)
+    .where(sql`${table.ownerId} IS NULL`),
+  ledger_accounts_normal_balance_check: check('ledger_accounts_normal_balance_check', sql`${table.normalBalance} IN ('DEBIT','CREDIT')`),
+  ledger_accounts_owner_type_check: check('ledger_accounts_owner_type_check', sql`${table.ownerType} IN ('PLATFORM','SELLER','BUYER')`),
+  ledger_accounts_owner_id_platform_check: check(
+    'ledger_accounts_owner_id_platform_check',
+    sql`(${table.ownerType} = 'PLATFORM' AND ${table.ownerId} IS NULL) OR (${table.ownerType} <> 'PLATFORM' AND ${table.ownerId} IS NOT NULL)`
+  ),
+  // Catálogo fechado — os 13 códigos de accounts.ts (ACCOUNT_DEFINITIONS). Um typo
+  // num code novo passa a ser rejeitado pelo banco, não aceito como conta nova.
+  ledger_accounts_code_check: check(
+    'ledger_accounts_code_check',
+    sql`${table.code} IN ('PAYMENT_CLEARING','BUYER_ESCROW','SELLER_PAYABLE','SELLER_AVAILABLE','SELLER_PAYOUT_CLEARING','NUSALI_COMMISSION_REVENUE','SHIPPING_PAYABLE','SHIPPING_SUBSIDY_NUSALI','TAX_PAYABLE','REFUND_PAYABLE','CHARGEBACK_RECEIVABLE','PAYMENT_PROCESSOR_FEES','NUSALI_PROMOTION_EXPENSE')`
+  ),
+}));
+
+export const ledgerTransactions = pgTable('ledger_transactions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  type: varchar('type', { length: 50 }).notNull(), // PAYMENT_RECEIVED, ORDER_DELIVERY_CONFIRMED, ...
+  status: varchar('status', { length: 20 }).notNull().default('DRAFT'), // DRAFT | POSTED | REVERSED
+  currency: varchar('currency', { length: 10 }).notNull(),
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'restrict' }),
+  paymentId: varchar('payment_id', { length: 255 }).references(() => payments.id, { onDelete: 'restrict' }),
+  escrowId: varchar('escrow_id', { length: 255 }).references(() => escrowAccounts.id, { onDelete: 'restrict' }),
+  payoutId: varchar('payout_id', { length: 255 }).references(() => sellerPayouts.id, { onDelete: 'restrict' }),
+  refundId: varchar('refund_id', { length: 255 }).references(() => refunds.id, { onDelete: 'restrict' }),
+  disputeId: varchar('dispute_id', { length: 255 }).references(() => disputes.id, { onDelete: 'restrict' }),
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'restrict' }),
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'restrict' }),
+  buyerId: varchar('buyer_id', { length: 255 }).references(() => users.id, { onDelete: 'restrict' }),
+  countryCode: varchar('country_code', { length: 10 }),
+  idempotencyKey: varchar('idempotency_key', { length: 255 }).notNull(),
+  reversalOfTransactionId: varchar('reversal_of_transaction_id', { length: 255 }).references((): AnyPgColumn => ledgerTransactions.id, { onDelete: 'restrict' }),
+  performedBy: varchar('performed_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  source: varchar('source', { length: 100 }), // asaas_webhook | dev_simulator | admin_panel | system
+  reason: text('reason'),
+  correlationId: varchar('correlation_id', { length: 255 }),
+  requestId: varchar('request_id', { length: 255 }),
+  metadataJson: jsonb('metadata_json'),
+  occurredAt: timestamp('occurred_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  ledger_transactions_idempotency_uq: uniqueIndex('ledger_transactions_idempotency_uq').on(table.idempotencyKey),
+  ledger_transactions_status_check: check('ledger_transactions_status_check', sql`${table.status} IN ('DRAFT','POSTED','REVERSED')`),
+  // Auto-referência proibida: uma transaction nunca pode ser o estorno dela mesma.
+  ledger_transactions_reversal_not_self_check: check(
+    'ledger_transactions_reversal_not_self_check',
+    sql`${table.reversalOfTransactionId} IS NULL OR ${table.reversalOfTransactionId} <> ${table.id}`
+  ),
+  // Catálogo fechado — só os eventos implementados NESTA fase (financialLedgerService.ts).
+  // Eventos futuros (PAYOUT_*, REFUND_*, CHARGEBACK_*, DISPUTE_*, ADJUSTMENT, REVERSAL, ...)
+  // entram numa migration aditiva quando o código que os usa for implementado.
+  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED')`),
+  ledger_transactions_order_idx: index('ledger_transactions_order_idx').on(table.orderId),
+  ledger_transactions_type_status_idx: index('ledger_transactions_type_status_idx').on(table.type, table.status),
+}));
+
+export const ledgerEntries = pgTable('ledger_entries', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  transactionId: varchar('transaction_id', { length: 255 }).notNull().references(() => ledgerTransactions.id, { onDelete: 'restrict' }),
+  accountId: varchar('account_id', { length: 255 }).notNull().references(() => ledgerAccounts.id, { onDelete: 'restrict' }),
+  // Linha determinística (1, 2, 3, ...) dentro da transaction, atribuída pelo
+  // FinancialLedgerService. Não impede lançamentos legítimos repetindo a mesma
+  // conta/direção com dimensões diferentes — só impede um retry/bug duplicar o
+  // CONJUNTO inteiro de entries de uma transaction (colidiria em UNIQUE abaixo).
+  lineNumber: integer('line_number').notNull(),
+  direction: varchar('direction', { length: 10 }).notNull(), // DEBIT | CREDIT
+  amount: numeric('amount', { precision: 18, scale: 6 }).notNull(), // 6 casas: não assume 2 casas para toda moeda (minor units)
+  currency: varchar('currency', { length: 10 }).notNull(),
+  dimensions: jsonb('dimensions'), // { component?: 'PRODUCT'|'SHIPPING'|'COMMISSION'|'TAX', subsidySource?: 'NONE'|'BUYER'|'SELLER'|'NUSALI' }
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'restrict' }),
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'restrict' }),
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'restrict' }),
+  buyerId: varchar('buyer_id', { length: 255 }).references(() => users.id, { onDelete: 'restrict' }),
+  countryCode: varchar('country_code', { length: 10 }),
+  referenceType: varchar('reference_type', { length: 100 }),
+  referenceId: varchar('reference_id', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  ledger_entries_amount_check: check('ledger_entries_amount_check', sql`${table.amount} > 0`),
+  ledger_entries_direction_check: check('ledger_entries_direction_check', sql`${table.direction} IN ('DEBIT','CREDIT')`),
+  ledger_entries_line_number_check: check('ledger_entries_line_number_check', sql`${table.lineNumber} > 0`),
+  ledger_entries_transaction_line_uq: uniqueIndex('ledger_entries_transaction_line_uq').on(table.transactionId, table.lineNumber),
+  ledger_entries_transaction_idx: index('ledger_entries_transaction_idx').on(table.transactionId),
+  ledger_entries_account_idx: index('ledger_entries_account_idx').on(table.accountId, table.createdAt),
+  ledger_entries_order_idx: index('ledger_entries_order_idx').on(table.orderId),
+  ledger_entries_seller_idx: index('ledger_entries_seller_idx').on(table.sellerId, table.currency),
 }));

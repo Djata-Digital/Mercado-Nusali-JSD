@@ -777,6 +777,11 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
+    if (!isEditing && !selectedStore?.id) {
+      showToast('Selecione uma loja antes de publicar um produto. A loja define o país de origem do produto.');
+      return;
+    }
+
     const priceNum = parseFloat(price) || 0;
     const origPriceNum = originalPrice ? parseFloat(originalPrice) : priceNum * 1.2;
     const discPercentage = Math.round(((origPriceNum - priceNum) / origPriceNum) * 100);
@@ -933,6 +938,8 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       title,
       price: priceNum,
       currency,
+      storeId: selectedStore?.id,
+      countryCode: originCountry,
       originalPrice: origPriceNum,
       discountPercentage: discPercentage > 0 ? discPercentage : undefined,
       image: mainCoverImage,
@@ -1388,23 +1395,26 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
               </div>
             </div>
 
-            {/* Country of Origin */}
+            {/* Country of Origin — locked to the selected store's country. The store is the
+                authority over the product's operational origin; this can no longer be picked
+                independently to avoid store/product country divergence (validated again on
+                the backend regardless). */}
             <div className="p-4 bg-gray-50 border border-gray-200 rounded-2xl space-y-2">
               <label className="block text-gray-800 font-bold">
-                País de Origem / Expedição do Produto *
+                País de Origem / Expedição do Produto
               </label>
-              <select
-                value={originCountry}
-                onChange={(e) => setOriginCountry(e.target.value as CountryCode)}
-                className="w-full sm:w-1/2 p-2.5 border border-gray-300 rounded-xl bg-white font-bold"
-              >
-                {ALL_COUNTRY_CODES.map((c) => (
-                  <option key={c} value={c}>
-                    {getCountryFlag(c)} {getCountryName(c)} ({c})
-                  </option>
-                ))}
-              </select>
+              {originCountry ? (
+                <div className="w-full sm:w-1/2 p-2.5 border border-gray-300 rounded-xl bg-gray-100 font-bold text-gray-700 flex items-center gap-2">
+                  <span>{getCountryFlag(originCountry)}</span>
+                  <span>{getCountryName(originCountry)} ({originCountry})</span>
+                </div>
+              ) : (
+                <div className="w-full sm:w-1/2 p-2.5 border border-amber-300 rounded-xl bg-amber-50 font-bold text-amber-800 text-xs">
+                  Selecione uma loja para definir o país de origem.
+                </div>
+              )}
               <p className="text-[11px] text-gray-500">
+                Definido automaticamente pelo país cadastrado da sua loja ({selectedStoreName || 'loja selecionada'}) — não pode divergir dela.
                 Os compradores verão a bandeira e nome deste país como a origem do produto no anúncio.
               </p>
             </div>

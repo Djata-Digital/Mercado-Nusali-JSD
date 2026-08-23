@@ -41,6 +41,7 @@ import {
   stores as storesTable,
   storeMembers,
   storeShippingPolicies,
+  countries,
   shippingRates,
   shippingZones,
   payments,
@@ -1302,6 +1303,67 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     if (updates.freeShipping !== undefined) fieldsToUpdate.freeShipping = updates.freeShipping;
     if (updates.full !== undefined) fieldsToUpdate.full = updates.full;
 
+    // The store is the sole authority over the product's country/currency — same rule as
+    // creation (ProductCreationService). This applies whether or not storeId is being changed:
+    // resolve the effective target store (new one if provided, otherwise the product's current
+    // one) and use it to validate/derive countryCode and currency. Never trust a client-supplied
+    // countryCode/currency that diverges from the store.
+    const rawStoreId = updates.storeId !== undefined ? String(updates.storeId).trim() : '';
+    const storeChanged = rawStoreId !== '' && rawStoreId !== check.product.storeId;
+    const effectiveStoreId = storeChanged ? rawStoreId : check.product.storeId;
+
+    let resolvedStoreCountryCode: string | null = null;
+    let resolvedStoreCurrency: string | null = null;
+
+    if (effectiveStoreId) {
+      const [store] = await db.select().from(storesTable).where(eq(storesTable.id, effectiveStoreId)).limit(1);
+      if (!store) {
+        return res.status(400).json({ success: false, error: { code: 'PRODUCT_STORE_NOT_FOUND', message: 'Loja informada não encontrada.' } });
+      }
+      if (store.sellerId !== check.seller.id) {
+        return res.status(403).json({ success: false, error: { code: 'PRODUCT_STORE_FORBIDDEN', message: 'Esta loja não pertence ao vendedor autenticado.' } });
+      }
+      if (store.status !== 'active') {
+        return res.status(400).json({ success: false, error: { code: 'PRODUCT_STORE_INACTIVE', message: 'A loja precisa estar ativa.' } });
+      }
+      if (!store.countryCode || !String(store.countryCode).trim()) {
+        return res.status(400).json({ success: false, error: { code: 'PRODUCT_STORE_COUNTRY_MISSING', message: 'A loja não possui país operacional definido.' } });
+      }
+      const storeCountryCode = String(store.countryCode).trim().toUpperCase();
+      const [countryRow] = await db.select().from(countries).where(eq(countries.code, storeCountryCode)).limit(1);
+      if (!countryRow) {
+        return res.status(400).json({ success: false, error: { code: 'PRODUCT_STORE_COUNTRY_INVALID', message: `O país da loja ("${storeCountryCode}") não está cadastrado como país operacional do Mercado Nusali.` } });
+      }
+      resolvedStoreCountryCode = storeCountryCode;
+      resolvedStoreCurrency = countryRow.currency;
+
+      if (storeChanged) {
+        fieldsToUpdate.storeId = store.id;
+      }
+    }
+
+    // Reject any explicit countryCode/currency in the payload that diverges from the resolved
+    // store — never silently override, and never let the client set an inconsistent value.
+    if (updates.countryCode !== undefined && resolvedStoreCountryCode && String(updates.countryCode).trim().toUpperCase() !== resolvedStoreCountryCode) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'PRODUCT_COUNTRY_MISMATCH', message: `O país informado ("${updates.countryCode}") diverge do país da loja ("${resolvedStoreCountryCode}"). A loja é a autoridade sobre o país de origem do produto.` },
+      });
+    }
+    if (updates.currency !== undefined && resolvedStoreCurrency && String(updates.currency).trim().toUpperCase() !== resolvedStoreCurrency) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'PRODUCT_CURRENCY_MISMATCH', message: `A moeda informada ("${updates.currency}") diverge da moeda oficial do país da loja ("${resolvedStoreCurrency}").` },
+      });
+    }
+
+    // If the store changed, the product's country/currency are always re-derived from it —
+    // never taken from client input.
+    if (storeChanged && resolvedStoreCountryCode && resolvedStoreCurrency) {
+      fieldsToUpdate.countryCode = resolvedStoreCountryCode;
+      fieldsToUpdate.currency = resolvedStoreCurrency;
+    }
+
     if (Object.keys(fieldsToUpdate).length > 1) {
       await db.update(products).set(fieldsToUpdate).where(eq(products.id, id));
     }
@@ -1853,21 +1915,31 @@ sellerRouter.post('/payouts/request', async (req: AuthRequest, res: Response) =>
       let walletRows = await tx.select().from(wallets).where(eq(wallets.userId, seller.userId)).limit(1);
       let sellerWallet = walletRows[0];
       if (!sellerWallet) {
+        // Race-safe wallet auto-provisioning (see paymentService.ts releaseEscrowForOrder for
+        // the same pattern): ON CONFLICT DO NOTHING + re-select, never a duplicate-insert error.
         const wId = `wlt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        await tx.insert(wallets).values({
-          id: wId,
-          userId: seller.userId,
-          balance: '0.00',
-          cashbackBalance: '0.00',
-          pendingBalance: '0.00',
-          currency: currency || 'XOF',
-          status: 'active',
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        });
-        const createdW = await tx.select().from(wallets).where(eq(wallets.id, wId)).limit(1);
+        await tx
+          .insert(wallets)
+          .values({
+            id: wId,
+            userId: seller.userId,
+            balance: '0.00',
+            cashbackBalance: '0.00',
+            pendingBalance: '0.00',
+            currency: currency || 'XOF',
+            status: 'active',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .onConflictDoNothing({ target: wallets.userId });
+        const createdW = await tx.select().from(wallets).where(eq(wallets.userId, seller.userId)).limit(1);
         sellerWallet = createdW[0];
       }
+
+      // Lock the wallet row for the rest of this transaction: concurrent payout requests (or a
+      // concurrent escrow release/deposit) for the same wallet must not read the same stale balance.
+      const lockedWalletRows = await tx.select().from(wallets).where(eq(wallets.id, sellerWallet.id)).for('update');
+      sellerWallet = lockedWalletRows[0] || sellerWallet;
 
       if (sellerWallet.status !== 'active') {
         throw new Error('WALLET_LOCKED: Sua carteira está inativa ou bloqueada para transações.');

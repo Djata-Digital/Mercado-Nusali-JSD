@@ -22,6 +22,7 @@ import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
+import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
 
 export const apiRouter = Router();
 
@@ -38,6 +39,8 @@ apiRouter.use('/buyer', buyerRouter);
 apiRouter.use('/pix', pixRouter);
 apiRouter.use('/rates', ratesRouter);
 apiRouter.use('/upload', uploadRouter);
+// Public read-only countries catalog (source of truth: `countries` table, active only)
+apiRouter.use('/countries', countriesPublicRouter);
 
 // Public Freight Calculation Route (Requirement 2)
 apiRouter.post('/shipping/calculate', async (req: Request, res: Response) => {

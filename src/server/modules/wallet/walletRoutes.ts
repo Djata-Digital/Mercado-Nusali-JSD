@@ -1,7 +1,6 @@
 import { Router, Response } from 'express';
 import { WalletService } from './walletService.js';
 import { requireAuth, requireRole, AuthRequest } from '../auth/authMiddleware.js';
-import { z } from 'zod';
 
 export const walletRouter = Router();
 
@@ -21,42 +20,22 @@ walletRouter.get('/wallet', requireAuth, async (req: AuthRequest, res: Response)
   }
 });
 
-const depositSchema = z.object({
-  amount: z.number().positive('O valor deve ser positivo'),
-  currency: z.string().default('XOF'),
-  method: z.string().default('orange_money'),
-  idempotencyKey: z.string().optional(),
-});
-
 // POST /api/v1/wallet/deposit
-walletRouter.post('/wallet/deposit', requireAuth, async (req: AuthRequest, res: Response) => {
-  try {
-    const validated = depositSchema.parse(req.body);
-    const result = await WalletService.deposit(
-      req.user!.id,
-      validated.amount,
-      validated.currency,
-      validated.method,
-      validated.idempotencyKey
-    );
-
-    return res.json({
-      success: true,
-      data: result,
-    });
-  } catch (err: any) {
-    if (err instanceof z.ZodError) {
-      const issue = (err as any).issues?.[0] || (err as any).errors?.[0];
-      return res.status(400).json({
-        success: false,
-        error: { code: 'VALIDATION_ERROR', message: issue?.message || 'Dados inválidos' },
-      });
-    }
-    return res.status(400).json({
-      success: false,
-      error: { code: 'DEPOSIT_FAILED', message: err.message },
-    });
-  }
+//
+// SECURITY (Fase 4A hardening): this endpoint used to credit `wallets.balance` with
+// whatever `amount` the authenticated client sent in the request body, with no link to
+// any real, gateway-confirmed payment — any logged-in user could mint arbitrary balance.
+// It is disabled in ALL environments (no dev-only bypass) until a real top-up flow is
+// built on top of PaymentService + a confirmed provider (Asaas/Orange/MTN). This is
+// intentionally NOT implemented in this phase — see Fase 3B audit, item H.2.
+walletRouter.post('/wallet/deposit', requireAuth, async (_req: AuthRequest, res: Response) => {
+  return res.status(403).json({
+    success: false,
+    error: {
+      code: 'DIRECT_DEPOSIT_DISABLED',
+      message: 'Depósito direto de saldo não é permitido. O crédito de carteira só pode ocorrer através de um pagamento real, confirmado por um provedor (Asaas/Orange Money/MTN).',
+    },
+  });
 });
 
 // POST /api/v1/escrow/:id/release (Admin / System)

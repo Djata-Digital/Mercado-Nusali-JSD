@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomBytes } from 'crypto';
 import { getDb, checkDbConnection } from '../db/index.js';
+import { validateCountryAgainstReference } from './modules/countries/isoCountryReference.js';
 import {
   users,
   userProfiles,
@@ -1852,7 +1853,9 @@ adminRouter.post('/payouts/:id/status', async (req: Request, res: Response) => {
         const selRows = await tx.select().from(sellers).where(eq(sellers.id, p.sellerId)).limit(1);
         if (selRows.length > 0) {
           const sellerUserId = selRows[0].userId;
-          const walletRows = await tx.select().from(wallets).where(eq(wallets.userId, sellerUserId)).limit(1);
+          // Lock the wallet row for the rest of this transaction (concurrent deposit/release/payout
+          // for the same wallet must not read the same stale balance).
+          const walletRows = await tx.select().from(wallets).where(eq(wallets.userId, sellerUserId)).for('update').limit(1);
           if (walletRows.length > 0) {
             const sellerWallet = walletRows[0];
             const currentBal = Number(sellerWallet.balance || 0);
@@ -2546,16 +2549,41 @@ adminRouter.post('/countries', requireGlobalAdmin, async (req: AuthRequest, res:
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
     const { name, code, flag, currency, currencySymbol, phonePrefix } = req.body ?? {};
     if (!name || !code) throw new AdminRequestError(400, 'Nome e código do país são obrigatórios.');
+    if (!currency || !phonePrefix) {
+      throw new AdminRequestError(400, 'Moeda (currency) e DDI (phonePrefix) são obrigatórios — não é permitido cadastrar país com valores padrão genéricos.');
+    }
 
     const countryCode = String(code).trim().toUpperCase();
+    const countryName = String(name).trim();
+    const countryCurrency = String(currency).trim().toUpperCase();
+    const countryPhonePrefix = String(phonePrefix).trim();
+
+    // Cross-check code/name/currency/phonePrefix against the known ISO reference catalog.
+    // This is a validation aid only — it does not decide which countries are operational,
+    // it only blocks internally-inconsistent combinations (e.g. "Gâmbia" + code BJ + currency XOF).
+    const validation = validateCountryAgainstReference({
+      code: countryCode,
+      name: countryName,
+      currency: countryCurrency,
+      phonePrefix: countryPhonePrefix,
+    });
+    if (!validation.ok) {
+      throw new AdminRequestError(400, validation.message || 'Combinação de dados do país inválida.');
+    }
+
+    const existing = await db.select().from(countries).where(eq(countries.code, countryCode)).limit(1);
+    if (existing.length > 0) {
+      throw new AdminRequestError(409, `Já existe um país cadastrado com o código "${countryCode}" (${existing[0].name}).`);
+    }
+
     const inserted = await db.insert(countries).values({
       id: countryCode,
       code: countryCode,
-      name: String(name).trim(),
+      name: countryName,
       flag: String(flag || '🌍').trim(),
-      currency: String(currency || 'USD').trim().toUpperCase(),
-      currencySymbol: String(currencySymbol || '$').trim(),
-      phonePrefix: String(phonePrefix || '+000').trim(),
+      currency: countryCurrency,
+      currencySymbol: String(currencySymbol || countryCurrency).trim(),
+      phonePrefix: countryPhonePrefix,
       isActive: true,
       createdAt: new Date(),
     }).returning();

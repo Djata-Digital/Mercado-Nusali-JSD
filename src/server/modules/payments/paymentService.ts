@@ -1,10 +1,11 @@
 import { getDb } from '../../../db/index.js';
 import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions } from '../../../db/schema.js';
 import { syncOrderFulfillmentStatus } from '../orders/orderService.js';
-import { eq, and, ne } from 'drizzle-orm';
+import { eq, and, ne, sql } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser, broadcastAdminEvent } from '../../infra/websocket.js';
 import { AsaasPaymentProvider } from './providers/asaasPaymentProvider.js';
+import { FinancialLedgerService } from '../ledger/financialLedgerService.js';
 
 export interface InitiatePaymentDTO {
   orderId: string;
@@ -37,66 +38,161 @@ export function calculateSellerReleaseAmount(escrow: { amount: string | number }
 }
 
 export class PaymentService {
+  /**
+   * Initiates a payment for an order.
+   *
+   * SECURITY (Fase 4A hardening): the amount and currency actually charged/recorded are
+   * ALWAYS derived from the real `orders` row in Postgres — never from the client-supplied
+   * `data.amount`/`data.currency`. If the client sends an explicit value that diverges from
+   * the order, the request is rejected (not silently corrected), so a stale/buggy frontend
+   * surfaces as an error instead of a hidden amount mismatch. Ownership (order.buyerId ===
+   * data.buyerId), payment eligibility (not already paid, not cancelled) and idempotency
+   * across concurrent initiations for the same order are enforced here, before any gateway
+   * call, via a Postgres advisory lock scoped to the order id for the duration of this
+   * transaction.
+   */
   static async initiatePayment(data: InitiatePaymentDTO) {
     const db = getDb();
-    const provider = data.provider || (data.method === 'pix' ? 'pix_engine' : data.method.includes('orange') ? 'orange_money' : 'nusali_pay');
+    if (!db) throw new Error('Banco de dados indisponível.');
 
-    if (provider === 'asaas') {
-      const asaasProvider = new AsaasPaymentProvider();
-      const gatewayRes = await asaasProvider.initiatePayment({
-        orderId: data.orderId,
-        amount: data.amount || 0,
-        currency: data.currency || 'BRL',
-        customerName: '',
-        customerEmail: '',
-        paymentMethod: data.method,
-        metadata: {
-          buyerId: data.buyerId,
-          idempotencyKey: data.idempotencyKey,
-        },
-      });
-
-      return {
-        paymentId: gatewayRes.rawResponse?.paymentId || gatewayRes.transactionRef,
-        provider: 'asaas',
-        providerPaymentId: gatewayRes.transactionRef,
-        method: data.method,
-        status: 'pending',
-        amount: gatewayRes.rawResponse?.amount,
-        currency: gatewayRes.rawResponse?.currency,
-        pix: {
-          encodedImage: gatewayRes.qrCodeUrl,
-          payload: gatewayRes.pixCopiaECola,
-          expirationDate: gatewayRes.rawResponse?.expirationDate,
-        },
-        qrCode: gatewayRes.pixCopiaECola,
-        qrCodeBase64: gatewayRes.qrCodeUrl,
-      };
+    if (!data.orderId || !String(data.orderId).trim()) {
+      const err: any = new Error('ORDER_ID_REQUIRED: O identificador do pedido é obrigatório para iniciar um pagamento.');
+      err.code = 'ORDER_ID_REQUIRED';
+      err.status = 400;
+      throw err;
+    }
+    if (!data.buyerId) {
+      const err: any = new Error('UNAUTHORIZED: Comprador não identificado.');
+      err.code = 'UNAUTHORIZED';
+      err.status = 401;
+      throw err;
     }
 
-    const paymentId = `pay_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    return await db.transaction(async (tx) => {
+      // Serialize concurrent initiate-payment calls for the SAME order. The lock is held for
+      // the whole transaction (including the external gateway call below) and released
+      // automatically on commit/rollback, so a second concurrent call for the same orderId
+      // blocks here until the first one has fully created (or reused) its payment record.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${data.orderId}))`);
 
-    if (db && data.idempotencyKey) {
-      const existing = await db.select().from(payments).where(eq(payments.idempotencyKey, data.idempotencyKey)).limit(1);
-      if (existing.length > 0) {
-        logger.info({ key: data.idempotencyKey }, 'Returning idempotent existing payment');
-        return existing[0];
+      const [order] = await tx.select().from(orders).where(eq(orders.id, data.orderId)).limit(1);
+      if (!order) {
+        const err: any = new Error(`Pedido "${data.orderId}" não foi encontrado.`);
+        err.code = 'ORDER_NOT_FOUND';
+        err.status = 404;
+        throw err;
       }
-    }
 
-    let qrCode: string | undefined;
+      if (order.buyerId !== data.buyerId) {
+        const err: any = new Error('Você não tem permissão para iniciar pagamento para este pedido.');
+        err.code = 'FORBIDDEN_ORDER_ACCESS';
+        err.status = 403;
+        throw err;
+      }
 
-    if (data.method === 'pix') {
-      qrCode = `00020101021226830014BR.GOV.BCB.PIX2561pix.mercadonusali.com/qr/v2/${paymentId}520400005303986540${data.amount.toFixed(2)}5802BR5914MERCADO NUSALI6006BISSAU62070503***6304`;
-    }
+      if (order.paymentStatus === 'paid') {
+        const err: any = new Error('ORDER_ALREADY_PAID: Este pedido já foi pago.');
+        err.code = 'ORDER_ALREADY_PAID';
+        err.status = 409;
+        throw err;
+      }
 
-    if (db) {
-      await db.insert(payments).values({
+      if (order.status === 'cancelled') {
+        const err: any = new Error('ORDER_NOT_PAYABLE: Este pedido foi cancelado e não pode mais ser pago.');
+        err.code = 'ORDER_NOT_PAYABLE';
+        err.status = 409;
+        throw err;
+      }
+
+      // Source of truth: the real order row. Client-supplied amount/currency are only used
+      // to DETECT a mismatch, never to decide what gets charged/recorded.
+      const realAmount = Number(order.totalAmount);
+      const realCurrency = String(order.currency).toUpperCase();
+
+      if (data.amount !== undefined && data.amount !== null) {
+        const clientAmount = Number(data.amount);
+        if (isNaN(clientAmount) || Math.abs(clientAmount - realAmount) > 0.01) {
+          const err: any = new Error(`PAYMENT_AMOUNT_MISMATCH: O valor informado (${data.amount}) diverge do total real do pedido (${realAmount}).`);
+          err.code = 'PAYMENT_AMOUNT_MISMATCH';
+          err.status = 400;
+          throw err;
+        }
+      }
+      if (data.currency && String(data.currency).trim().toUpperCase() !== realCurrency) {
+        const err: any = new Error(`PAYMENT_CURRENCY_MISMATCH: A moeda informada (${data.currency}) diverge da moeda real do pedido (${realCurrency}).`);
+        err.code = 'PAYMENT_CURRENCY_MISMATCH';
+        err.status = 400;
+        throw err;
+      }
+
+      const provider = data.provider || (data.method === 'pix' ? 'pix_engine' : data.method.includes('orange') ? 'orange_money' : 'nusali_pay');
+
+      if (provider === 'asaas') {
+        const asaasProvider = new AsaasPaymentProvider();
+        const gatewayRes = await asaasProvider.initiatePayment({
+          orderId: order.id,
+          amount: realAmount,
+          currency: realCurrency,
+          customerName: '',
+          customerEmail: '',
+          paymentMethod: data.method,
+          metadata: {
+            buyerId: data.buyerId,
+            idempotencyKey: data.idempotencyKey,
+          },
+        });
+
+        return {
+          paymentId: gatewayRes.rawResponse?.paymentId || gatewayRes.transactionRef,
+          provider: 'asaas',
+          providerPaymentId: gatewayRes.transactionRef,
+          method: data.method,
+          status: 'pending',
+          amount: gatewayRes.rawResponse?.amount,
+          currency: gatewayRes.rawResponse?.currency,
+          pix: {
+            encodedImage: gatewayRes.qrCodeUrl,
+            payload: gatewayRes.pixCopiaECola,
+            expirationDate: gatewayRes.rawResponse?.expirationDate,
+          },
+          qrCode: gatewayRes.pixCopiaECola,
+          qrCodeBase64: gatewayRes.qrCodeUrl,
+        };
+      }
+
+      // Non-Asaas (simulated/local) providers — idempotency by explicit key first.
+      if (data.idempotencyKey) {
+        const existing = await tx.select().from(payments).where(eq(payments.idempotencyKey, data.idempotencyKey)).limit(1);
+        if (existing.length > 0) {
+          logger.info({ key: data.idempotencyKey }, 'Returning idempotent existing payment');
+          return existing[0];
+        }
+      }
+
+      // Reuse an already-pending payment for this order+provider instead of creating a duplicate.
+      const existingPending = await tx
+        .select()
+        .from(payments)
+        .where(and(eq(payments.orderId, order.id), eq(payments.provider, provider), eq(payments.status, 'pending')))
+        .limit(1);
+      if (existingPending.length > 0) {
+        logger.info({ orderId: order.id, provider }, 'Returning existing pending local payment (idempotent)');
+        return existingPending[0];
+      }
+
+      const paymentId = `pay_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+      let qrCode: string | undefined;
+      if (data.method === 'pix') {
+        qrCode = `00020101021226830014BR.GOV.BCB.PIX2561pix.mercadonusali.com/qr/v2/${paymentId}520400005303986540${realAmount.toFixed(2)}5802BR5914MERCADO NUSALI6006BISSAU62070503***6304`;
+      }
+
+      await tx.insert(payments).values({
         id: paymentId,
-        orderId: data.orderId,
+        orderId: order.id,
         buyerId: data.buyerId,
-        amount: String(data.amount),
-        currency: data.currency,
+        amount: String(realAmount),
+        currency: realCurrency,
         provider,
         method: data.method,
         status: 'pending',
@@ -106,26 +202,26 @@ export class PaymentService {
         updatedAt: new Date(),
       });
 
-      await db.insert(paymentAttempts).values({
+      await tx.insert(paymentAttempts).values({
         id: `att_${Date.now()}`,
         paymentId,
         provider,
         status: 'initiated',
         createdAt: new Date(),
       });
-    }
 
-    logger.info({ paymentId, orderId: data.orderId, amount: data.amount, method: data.method }, 'Payment initiated');
+      logger.info({ paymentId, orderId: order.id, amount: realAmount, method: data.method }, 'Payment initiated');
 
-    return {
-      id: paymentId,
-      orderId: data.orderId,
-      amount: data.amount,
-      currency: data.currency,
-      method: data.method,
-      status: 'pending',
-      qrCode,
-    };
+      return {
+        id: paymentId,
+        orderId: order.id,
+        amount: realAmount,
+        currency: realCurrency,
+        method: data.method,
+        status: 'pending',
+        qrCode,
+      };
+    });
   }
 
   /**
@@ -138,7 +234,7 @@ export class PaymentService {
     const db = getDb();
     if (!db) throw new Error('Banco de dados indisponível.');
 
-    return await db.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       // 1. Fetch Order
       const ordRows = await tx
         .select()
@@ -347,6 +443,29 @@ export class PaymentService {
         },
       };
     });
+
+    // ------------------------------------------------------------------------
+    // SHADOW LEDGER (Fase 5A) — roda DEPOIS que o fluxo legado acima já commitou.
+    // Nunca pode afetar o resultado real: qualquer falha aqui é só logada. O
+    // FinancialLedgerService é idempotente e reconhece pedidos anteriores ao
+    // cutoff (LEGACY_ORDER) e snapshots ausentes (MISSING_SNAPSHOT) sem lançar.
+    // ------------------------------------------------------------------------
+    try {
+      const shadow = await FinancialLedgerService.recordPaymentReceived({
+        orderId,
+        performedBy: options?.performedBy ?? null,
+        source: options?.provider || 'DEV_SIMULATOR',
+      });
+      if (shadow.skipped) {
+        logger.info({ orderId, reason: shadow.reason, detail: shadow.detail }, '[ShadowLedger] recordPaymentReceived pulado (esperado para pedidos legados/sem snapshot)');
+      } else {
+        logger.info({ orderId, transactionId: shadow.transactionId }, '[ShadowLedger] recordPaymentReceived postado');
+      }
+    } catch (shadowErr: any) {
+      logger.error({ orderId, error: shadowErr?.message }, '[ShadowLedger] recordPaymentReceived falhou — fluxo real não afetado');
+    }
+
+    return result;
   }
 
   /**
@@ -444,19 +563,25 @@ export class PaymentService {
         let walletRows = await tx.select().from(wallets).where(eq(wallets.userId, sellerUserId)).limit(1);
         let sellerWallet = walletRows[0];
         if (!sellerWallet) {
+          // Race-safe wallet auto-provisioning: ON CONFLICT DO NOTHING on the unique userId,
+          // then re-select whichever row actually won, instead of risking a duplicate-insert
+          // error if a concurrent release/payout for the same brand-new wallet runs at once.
           const wId = `wlt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-          await tx.insert(wallets).values({
-            id: wId,
-            userId: sellerUserId,
-            balance: '0.00',
-            cashbackBalance: '0.00',
-            pendingBalance: '0.00',
-            currency: esc.currency || ord.currency || 'XOF',
-            status: 'active',
-            createdAt: new Date(),
-            updatedAt: new Date(),
-          });
-          const createdW = await tx.select().from(wallets).where(eq(wallets.id, wId)).limit(1);
+          await tx
+            .insert(wallets)
+            .values({
+              id: wId,
+              userId: sellerUserId,
+              balance: '0.00',
+              cashbackBalance: '0.00',
+              pendingBalance: '0.00',
+              currency: esc.currency || ord.currency || 'XOF',
+              status: 'active',
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .onConflictDoNothing({ target: wallets.userId });
+          const createdW = await tx.select().from(wallets).where(eq(wallets.userId, sellerUserId)).limit(1);
           sellerWallet = createdW[0];
         }
 
@@ -468,7 +593,11 @@ export class PaymentService {
           .limit(1);
 
         if (existingWtx.length === 0) {
-          const currentBalance = Number(sellerWallet.balance || 0);
+          // Lock the wallet row for the rest of this transaction so a concurrent release/payout
+          // for the same wallet cannot read the same stale balance.
+          const lockedRows = await tx.select().from(wallets).where(eq(wallets.id, sellerWallet.id)).for('update');
+          const lockedWallet = lockedRows[0] || sellerWallet;
+          const currentBalance = Number(lockedWallet.balance || 0);
           const newBalance = currentBalance + releaseAmount;
 
           await tx
@@ -568,12 +697,33 @@ export class PaymentService {
       };
     };
 
-    if (executor) {
-      return await runInTx(executor);
+    const result = executor
+      ? await runInTx(executor)
+      : await (async () => {
+          const db = getDb();
+          if (!db) throw new Error('Banco de dados indisponível.');
+          return await db.transaction(runInTx);
+        })();
+
+    // ------------------------------------------------------------------------
+    // SHADOW LEDGER (Fase 5A) — roda DEPOIS que o fluxo legado acima já commitou,
+    // nunca afeta o resultado real. Ver nota equivalente em confirmOrderPayment.
+    // ------------------------------------------------------------------------
+    try {
+      const shadow = await FinancialLedgerService.recordDeliveryConfirmed({
+        orderId,
+        performedBy: options?.performedBy ?? null,
+        source: 'payment_service',
+      });
+      if (shadow.skipped) {
+        logger.info({ orderId, reason: shadow.reason, detail: shadow.detail }, '[ShadowLedger] recordDeliveryConfirmed pulado (esperado para pedidos legados/sem snapshot)');
+      } else {
+        logger.info({ orderId, transactionId: shadow.transactionId }, '[ShadowLedger] recordDeliveryConfirmed postado');
+      }
+    } catch (shadowErr: any) {
+      logger.error({ orderId, error: shadowErr?.message }, '[ShadowLedger] recordDeliveryConfirmed falhou — fluxo real não afetado');
     }
 
-    const db = getDb();
-    if (!db) throw new Error('Banco de dados indisponível.');
-    return await db.transaction(runInTx);
+    return result;
   }
 }

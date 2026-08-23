@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Scratchpad de investigação/scripts temporários e dumps de banco (podem conter
+# estrutura real do Supabase, IDs de produção, etc.) — nunca versionar.
+scratch/

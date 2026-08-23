@@ -6,6 +6,8 @@ import {
   productAttributes,
   productImages,
   sellers,
+  stores,
+  countries,
   inventory,
   inventoryMovements,
 } from '../../../db/schema.js';
@@ -22,6 +24,7 @@ export interface CreateProductInput {
   model?: string | null;
   stock?: number;
   image: string;
+  storeId: string;
   countryCode?: string;
   freeShipping?: boolean;
   full?: boolean;
@@ -107,6 +110,41 @@ export class ProductCreationService {
       throw new Error('🔒 Sua conta de vendedor precisa estar ativa para cadastrar produtos.');
     }
 
+    // 1b. Resolve and validate the store — the store is the sole authority over the
+    // product's operational country/origin. This also fixes the historical bug where
+    // products were created with store_id = NULL (never linked to any store).
+    if (!input.storeId || !String(input.storeId).trim()) {
+      throw new Error('PRODUCT_STORE_REQUIRED: A loja (storeId) é obrigatória para cadastrar o produto.');
+    }
+    const [store] = await db.select().from(stores).where(eq(stores.id, String(input.storeId).trim())).limit(1);
+    if (!store) {
+      throw new Error('PRODUCT_STORE_NOT_FOUND: Loja informada não encontrada.');
+    }
+    if (store.sellerId !== seller.id) {
+      throw new Error('PRODUCT_STORE_FORBIDDEN: Esta loja não pertence ao vendedor autenticado.');
+    }
+    if (store.status !== 'active') {
+      throw new Error('PRODUCT_STORE_INACTIVE: A loja precisa estar ativa para cadastrar produtos.');
+    }
+    if (!store.countryCode || !String(store.countryCode).trim()) {
+      throw new Error('PRODUCT_STORE_COUNTRY_MISSING: A loja não possui país operacional definido.');
+    }
+    const storeCountryCode = String(store.countryCode).trim().toUpperCase();
+    const [storeCountry] = await db.select().from(countries).where(eq(countries.code, storeCountryCode)).limit(1);
+    if (!storeCountry) {
+      throw new Error(`PRODUCT_STORE_COUNTRY_INVALID: O país da loja ("${storeCountryCode}") não está cadastrado como país operacional do Mercado Nusali.`);
+    }
+
+    // The store is authoritative: product.countryCode/currency are always derived from it.
+    // If the caller sends an explicit countryCode/currency that diverges, reject instead of
+    // silently overriding — a mismatch means the client is out of sync with the real store.
+    if (input.countryCode && String(input.countryCode).trim().toUpperCase() !== storeCountryCode) {
+      throw new Error(`PRODUCT_COUNTRY_MISMATCH: O país informado ("${input.countryCode}") diverge do país da loja ("${storeCountryCode}"). A loja é a autoridade sobre o país de origem do produto.`);
+    }
+    if (input.currency && String(input.currency).trim().toUpperCase() !== storeCountry.currency) {
+      throw new Error(`PRODUCT_CURRENCY_MISMATCH: A moeda informada ("${input.currency}") diverge da moeda oficial do país da loja ("${storeCountry.currency}").`);
+    }
+
     // 2. Validate input fields
     if (!input.title || !input.title.trim()) {
       throw new Error('O título do produto é obrigatório.');
@@ -170,18 +208,13 @@ export class ProductCreationService {
       }
     }
 
-    if (!input.countryCode || !String(input.countryCode).trim()) {
-      throw new Error('PRODUCT_COUNTRY_REQUIRED: O código do país de origem (countryCode) é obrigatório para cadastrar o produto.');
-    }
-    if (!input.currency || !String(input.currency).trim()) {
-      throw new Error('PRODUCT_CURRENCY_REQUIRED: A moeda (currency) é obrigatória para cadastrar o produto.');
-    }
-
     // 5. Build clean, non-fictional product entity
+    // countryCode/currency are NOT taken from client input — they are derived from the
+    // store resolved and validated in step 1b, which is the sole authority over origin.
     const productId = `prod_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const cleanBrand = input.brand?.trim() || null;
-    const cleanCountry = String(input.countryCode).trim().toUpperCase();
-    const cleanCurrency = String(input.currency).trim().toUpperCase();
+    const cleanCountry = storeCountryCode;
+    const cleanCurrency = storeCountry.currency;
 
     const stockVal = input.stock;
     if (stockVal === undefined || stockVal === null || String(stockVal).trim() === '' || isNaN(Number(stockVal)) || Number(stockVal) < 0) {
@@ -198,6 +231,7 @@ export class ProductCreationService {
       categoryId: foundCat.id,
       brand: cleanBrand,
       sellerId: seller.id, // REAL seller.id from sellers table
+      storeId: store.id, // REAL store.id — fixes historical bug where store_id was never persisted
       stock: cleanStock,
       image: input.image.trim(),
       countryCode: cleanCountry,

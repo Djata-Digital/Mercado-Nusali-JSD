@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getDb } from '../../../db/index.js';
-import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens, sessions, sellers, sellerProfiles } from '../../../db/schema.js';
+import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens, sessions, sellers, sellerProfiles, countries } from '../../../db/schema.js';
 import { eq, and, gt } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { generateEmailVerificationCode, hashEmailVerificationCode, sendVerificationEmail } from './emailService.js';
@@ -39,11 +39,29 @@ export class AuthService {
       }
     }
 
+    // Country is mandatory and must be a real, operational (isActive) country from the
+    // `countries` table — no silent default to GW. This is the single source of truth
+    // for which countries the Mercado Nusali currently accepts customers/sellers from.
+    const countryCode = String(data.countryCode || '').trim().toUpperCase();
+    if (!countryCode) {
+      throw new Error('COUNTRY_REQUIRED: País é obrigatório para o cadastro.');
+    }
+    if (!db) {
+      throw new Error('DATABASE_UNAVAILABLE: Não foi possível validar o país no momento. Tente novamente.');
+    }
+    const [countryRow] = await db.select().from(countries).where(eq(countries.code, countryCode)).limit(1);
+    if (!countryRow) {
+      throw new Error(`COUNTRY_NOT_FOUND: País "${countryCode}" não é reconhecido pelo Mercado Nusali.`);
+    }
+    if (countryRow.isActive !== true) {
+      throw new Error(`COUNTRY_INACTIVE: O Mercado Nusali ainda não está disponível em ${countryRow.name}.`);
+    }
+    const countryCurrency = countryRow.currency;
+
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(data.password, salt);
     const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const role = (data.role || 'BUYER').toUpperCase();
-    const countryCode = (data.countryCode || 'GW').toUpperCase();
 
     const newUser = {
       id: userId,
@@ -69,7 +87,7 @@ export class AuthService {
       await db.insert(userProfiles).values({
         id: `prof_${userId}`,
         userId,
-        preferredCurrency: countryCode === 'BR' ? 'BRL' : countryCode === 'PT' ? 'EUR' : 'XOF',
+        preferredCurrency: countryCurrency,
         preferredLanguage: 'pt',
         membershipLevel: 'standard',
         createdAt: new Date(),
@@ -83,7 +101,7 @@ export class AuthService {
         balance: '0.00',
         cashbackBalance: '0.00',
         pendingBalance: '0.00',
-        currency: countryCode === 'BR' ? 'BRL' : countryCode === 'PT' ? 'EUR' : 'XOF',
+        currency: countryCurrency,
         status: 'active',
         createdAt: new Date(),
         updatedAt: new Date(),
