@@ -47,6 +47,16 @@ import {
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull } from 'drizzle-orm';
 import { AuthRequest, requireAuth } from './modules/auth/authMiddleware.js';
+import {
+  resolveAdministrativeScope,
+  assertCountryAccess,
+  scopeCountryFilter,
+  requireFinanceApproval,
+  requireDisputeResolvePermission,
+  isShipmentWithinScope,
+  assertShipmentScopeAccess,
+  ScopeError,
+} from './modules/auth/scopeService.js';
 import { storageService } from './infra/storage.js';
 import { wouldCreateCycle } from '../utils/categoryUtils.js';
 import { InventoryService } from './modules/inventory/inventoryService.js';
@@ -414,6 +424,13 @@ async function writeRealAudit(req: AuthRequest, action: string, resource: string
 }
 
 function sendAdminError(res: Response, error: unknown) {
+  if (error instanceof ScopeError) {
+    return res.status(error.status).json({
+      success: false,
+      error: { code: error.code, message: error.message },
+      message: error.message,
+    });
+  }
   if (error instanceof AdminRequestError) {
     return res.status(error.statusCode).json({
       success: false,
@@ -1201,8 +1218,16 @@ adminRouter.get('/users', async (req: AuthRequest, res: Response) => {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
 
+    // Escopo territorial (fechamento RBAC): país autorizado vem só de
+    // req.user (JWT) — nunca de req.query, mesmo que ?countryCode=XX seja
+    // enviado (essa rota nem lê esse parâmetro).
+    const scope = resolveAdministrativeScope(req.user);
+    const userFilter = scopeCountryFilter(scope, users.countryCode);
+
     const { role, status, q } = req.query;
-    const rows = await db.select().from(users).orderBy(desc(users.createdAt));
+    const rows = userFilter
+      ? await db.select().from(users).where(userFilter).orderBy(desc(users.createdAt))
+      : await db.select().from(users).orderBy(desc(users.createdAt));
     let mapped = rows.map(mapDbUserToAdmin);
 
     if (role && typeof role === 'string' && role !== 'all') {
@@ -1277,6 +1302,10 @@ adminRouter.get('/users/:id', async (req: AuthRequest, res: Response) => {
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
     const rows = await db.select().from(users).where(eq(users.id, req.params.id)).limit(1);
     if (!rows.length) throw new AdminRequestError(404, 'Usuário não encontrado.');
+
+    const scope = resolveAdministrativeScope(req.user);
+    assertCountryAccess(scope, rows[0].countryCode);
+
     return res.json({ success: true, data: mapDbUserToAdmin(rows[0]) });
   } catch (error) {
     return sendAdminError(res, error);
@@ -1560,14 +1589,24 @@ adminRouter.post('/kyc/:id/reject', requireGlobalAdmin, async (req: AuthRequest,
   }
 });
 
-adminRouter.get('/sellers', async (req: Request, res: Response) => {
+adminRouter.get('/sellers', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
 
-    const sellerRows = await db.select().from(sellers).orderBy(desc(sellers.createdAt));
+    // Escopo territorial: nunca aceita país vindo de query/body — deriva
+    // sempre da identidade autenticada (req.user).
+    const scope = resolveAdministrativeScope(req.user);
+    const sellerFilter = scopeCountryFilter(scope, sellers.countryCode);
+
+    const sellerRows = sellerFilter
+      ? await db.select().from(sellers).where(sellerFilter).orderBy(desc(sellers.createdAt))
+      : await db.select().from(sellers).orderBy(desc(sellers.createdAt));
     const allUsers = await db.select().from(users);
-    const sellerUsers = allUsers.filter((u: any) => String(u.role).toUpperCase() === 'SELLER');
+    const sellerUsers = allUsers.filter((u: any) =>
+      String(u.role).toUpperCase() === 'SELLER' &&
+      (scope.kind === 'GLOBAL' || String(u.countryCode || '').toUpperCase() === scope.countryCode)
+    );
 
     const data = sellerRows.map((s: any) => {
       const user = allUsers.find((u: any) => u.id === s.userId);
@@ -1618,12 +1657,17 @@ adminRouter.get('/sellers', async (req: Request, res: Response) => {
   }
 });
 
-adminRouter.get('/stores', async (req: Request, res: Response) => {
+adminRouter.get('/stores', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
 
-    const storeRows = await db.select().from(stores).orderBy(desc(stores.createdAt));
+    const scope = resolveAdministrativeScope(req.user);
+    const storeFilter = scopeCountryFilter(scope, stores.countryCode);
+
+    const storeRows = storeFilter
+      ? await db.select().from(stores).where(storeFilter).orderBy(desc(stores.createdAt))
+      : await db.select().from(stores).orderBy(desc(stores.createdAt));
     return res.json({ success: true, data: storeRows });
   } catch (error) {
     return sendAdminError(res, error);
@@ -1636,14 +1680,20 @@ adminRouter.get('/stores', async (req: Request, res: Response) => {
 // ==========================================
 // 4. ESCROW CUSTODY & NUSALI PROTEÇÃO
 // ==========================================
-adminRouter.get('/escrow', async (req: Request, res: Response) => {
+adminRouter.get('/escrow', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (db) {
-      const rows = await db.select().from(escrowAccounts).orderBy(desc(escrowAccounts.createdAt));
+      const scope = resolveAdministrativeScope(req.user);
+      const rows = await db
+        .select({ escrow: escrowAccounts, sellerCountry: sellers.countryCode })
+        .from(escrowAccounts)
+        .innerJoin(sellers, eq(escrowAccounts.sellerId, sellers.id))
+        .where(scope.kind === 'GLOBAL' ? undefined : eq(sellers.countryCode, scope.countryCode))
+        .orderBy(desc(escrowAccounts.createdAt));
       return res.json({
         success: true,
-        data: rows.map(r => ({
+        data: rows.map(({ escrow: r }) => ({
           ...r,
           amount: Number(r.amount),
         })),
@@ -1651,23 +1701,34 @@ adminRouter.get('/escrow', async (req: Request, res: Response) => {
     }
     return res.json({ success: true, data: [] });
   } catch (err: any) {
+    if (err instanceof ScopeError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
     return res.status(500).json({ success: false, message: err?.message });
   }
 });
 
-adminRouter.post('/escrow/:id/release', async (req: Request, res: Response) => {
+adminRouter.post('/escrow/:id/release', requireFinanceApproval, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     const { id } = req.params;
     if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
 
-    const escRows = await db.select().from(escrowAccounts).where(eq(escrowAccounts.id, id)).limit(1);
+    const escRows = await db
+      .select({ escrow: escrowAccounts, sellerCountry: sellers.countryCode })
+      .from(escrowAccounts)
+      .innerJoin(sellers, eq(escrowAccounts.sellerId, sellers.id))
+      .where(eq(escrowAccounts.id, id))
+      .limit(1);
     if (escRows.length === 0) {
       return res.status(404).json({ success: false, message: 'Custódia Escrow não encontrada.' });
     }
 
-    const esc = escRows[0];
-    const performedBy = (req as AuthRequest).user?.id || 'admin';
+    const esc = escRows[0].escrow;
+    const scope = resolveAdministrativeScope(req.user);
+    assertCountryAccess(scope, escRows[0].sellerCountry);
+
+    const performedBy = req.user?.id || 'admin';
     const releaseResult = await PaymentService.releaseEscrowForOrder(esc.orderId, {
       performedBy,
       reason: 'Liberação manual de custódia efetuada pelo administrador.',
@@ -1679,22 +1740,41 @@ adminRouter.post('/escrow/:id/release', async (req: Request, res: Response) => {
       data: releaseResult,
     });
   } catch (err: any) {
+    if (err instanceof ScopeError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
     return res.status(400).json({ success: false, message: err?.message || 'Falha ao liberar custódia.' });
   }
 });
 
-adminRouter.post('/escrow/:id/freeze', async (req: Request, res: Response) => {
+adminRouter.post('/escrow/:id/freeze', requireFinanceApproval, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     const { id } = req.params;
-    if (db) {
-      await db.update(escrowAccounts).set({ status: 'disputed', disputedAt: new Date(), updatedAt: new Date() }).where(eq(escrowAccounts.id, id));
+    if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
+
+    const escRows = await db
+      .select({ sellerCountry: sellers.countryCode })
+      .from(escrowAccounts)
+      .innerJoin(sellers, eq(escrowAccounts.sellerId, sellers.id))
+      .where(eq(escrowAccounts.id, id))
+      .limit(1);
+    if (escRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Custódia Escrow não encontrada.' });
     }
+
+    const scope = resolveAdministrativeScope(req.user);
+    assertCountryAccess(scope, escRows[0].sellerCountry);
+
+    await db.update(escrowAccounts).set({ status: 'disputed', disputedAt: new Date(), updatedAt: new Date() }).where(eq(escrowAccounts.id, id));
     return res.json({
       success: true,
       message: `Custódia #${id} bloqueada para auditoria.`,
     });
   } catch (err: any) {
+    if (err instanceof ScopeError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
     return res.status(500).json({ success: false, message: err?.message });
   }
 });
@@ -1702,11 +1782,12 @@ adminRouter.post('/escrow/:id/freeze', async (req: Request, res: Response) => {
 // ==========================================
 // 4B. SELLER PAYOUTS MANAGEMENT
 // ==========================================
-adminRouter.get('/payouts', async (req: Request, res: Response) => {
+adminRouter.get('/payouts', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.json({ success: true, data: [] });
 
+    const scope = resolveAdministrativeScope(req.user);
     const payoutsList = await db
       .select({
         payout: sellerPayouts,
@@ -1718,6 +1799,7 @@ adminRouter.get('/payouts', async (req: Request, res: Response) => {
       .innerJoin(sellers, eq(sellerPayouts.sellerId, sellers.id))
       .leftJoin(users, eq(sellers.userId, users.id))
       .leftJoin(sellerProfiles, eq(sellers.id, sellerProfiles.sellerId))
+      .where(scope.kind === 'GLOBAL' ? undefined : eq(sellers.countryCode, scope.countryCode))
       .orderBy(desc(sellerPayouts.createdAt));
 
     const result = payoutsList.map(({ payout, seller, user }) => ({
@@ -1740,14 +1822,30 @@ adminRouter.get('/payouts', async (req: Request, res: Response) => {
   }
 });
 
-adminRouter.post('/payouts/:id/status', async (req: Request, res: Response) => {
+adminRouter.post('/payouts/:id/status', requireFinanceApproval, async (req: AuthRequest, res: Response) => {
   try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
+
     const { id } = req.params;
     const { status, transactionRef } = req.body;
 
     if (!['pending', 'processing', 'completed', 'failed'].includes(status)) {
       return res.status(400).json({ success: false, message: 'Status inválido para saque.' });
     }
+
+    const payoutRows = await db
+      .select({ sellerCountry: sellers.countryCode })
+      .from(sellerPayouts)
+      .innerJoin(sellers, eq(sellerPayouts.sellerId, sellers.id))
+      .where(eq(sellerPayouts.id, id))
+      .limit(1);
+    if (payoutRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Saque não encontrado.' });
+    }
+
+    const scope = resolveAdministrativeScope(req.user);
+    assertCountryAccess(scope, payoutRows[0].sellerCountry);
 
     const result = await processPayoutStatusChange(id, status, {
       transactionRef,
@@ -1756,6 +1854,9 @@ adminRouter.post('/payouts/:id/status', async (req: Request, res: Response) => {
 
     return res.json(result);
   } catch (err: any) {
+    if (err instanceof ScopeError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
     if (err?.code === 'PAYOUT_INVALID_TRANSITION' || err?.message?.includes('PAYOUT_INVALID_TRANSITION')) {
       return res.status(409).json({
         success: false,
@@ -1772,7 +1873,7 @@ adminRouter.post('/payouts/:id/status', async (req: Request, res: Response) => {
   }
 });
 
-adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
+adminRouter.get('/finance/overview', requireFinanceApproval, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) {
@@ -1790,6 +1891,12 @@ adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
       });
     }
 
+    // Escopo territorial: GLOBAL_ADMIN/ADMIN/FINANCE veem todos os países,
+    // agrupados por moeda (nunca somando BRL+XOF); COUNTRY_REPRESENTATIVE só
+    // vê o próprio país. Nunca aceita país vindo de query/body do cliente.
+    const scope = resolveAdministrativeScope(req.user);
+    const isGlobal = scope.kind === 'GLOBAL';
+
     // Requirement 8: Multi-currency breakdown & Requirement 7: Aggregate ONLY sellers' wallets
     const gmvRows = await db
       .select({
@@ -1797,7 +1904,7 @@ adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
         total: sql<string>`COALESCE(SUM(${orders.totalAmount}), '0')`,
       })
       .from(orders)
-      .where(eq(orders.paymentStatus, 'paid'))
+      .where(isGlobal ? eq(orders.paymentStatus, 'paid') : and(eq(orders.paymentStatus, 'paid'), eq(orders.countryCode, scope.countryCode)))
       .groupBy(orders.currency);
 
     const escrowHeldRows = await db
@@ -1806,7 +1913,8 @@ adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
         total: sql<string>`COALESCE(SUM(${escrowAccounts.amount}), '0')`,
       })
       .from(escrowAccounts)
-      .where(eq(escrowAccounts.status, 'held'))
+      .innerJoin(sellers, eq(escrowAccounts.sellerId, sellers.id))
+      .where(isGlobal ? eq(escrowAccounts.status, 'held') : and(eq(escrowAccounts.status, 'held'), eq(sellers.countryCode, scope.countryCode)))
       .groupBy(escrowAccounts.currency);
 
     const escrowReleasedRows = await db
@@ -1815,7 +1923,8 @@ adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
         total: sql<string>`COALESCE(SUM(${escrowAccounts.amount}), '0')`,
       })
       .from(escrowAccounts)
-      .where(eq(escrowAccounts.status, 'released'))
+      .innerJoin(sellers, eq(escrowAccounts.sellerId, sellers.id))
+      .where(isGlobal ? eq(escrowAccounts.status, 'released') : and(eq(escrowAccounts.status, 'released'), eq(sellers.countryCode, scope.countryCode)))
       .groupBy(escrowAccounts.currency);
 
     // Requirement 7: Filter wallets to ONLY users registered in sellers table
@@ -1826,6 +1935,7 @@ adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
       })
       .from(wallets)
       .innerJoin(sellers, eq(wallets.userId, sellers.userId))
+      .where(isGlobal ? undefined : eq(sellers.countryCode, scope.countryCode))
       .groupBy(wallets.currency);
 
     const payoutsPendingRows = await db
@@ -1834,7 +1944,8 @@ adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
         total: sql<string>`COALESCE(SUM(${sellerPayouts.amount}), '0')`,
       })
       .from(sellerPayouts)
-      .where(eq(sellerPayouts.status, 'pending'))
+      .innerJoin(sellers, eq(sellerPayouts.sellerId, sellers.id))
+      .where(isGlobal ? eq(sellerPayouts.status, 'pending') : and(eq(sellerPayouts.status, 'pending'), eq(sellers.countryCode, scope.countryCode)))
       .groupBy(sellerPayouts.currency);
 
     const payoutsCompletedRows = await db
@@ -1843,7 +1954,8 @@ adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
         total: sql<string>`COALESCE(SUM(${sellerPayouts.amount}), '0')`,
       })
       .from(sellerPayouts)
-      .where(eq(sellerPayouts.status, 'completed'))
+      .innerJoin(sellers, eq(sellerPayouts.sellerId, sellers.id))
+      .where(isGlobal ? eq(sellerPayouts.status, 'completed') : and(eq(sellerPayouts.status, 'completed'), eq(sellers.countryCode, scope.countryCode)))
       .groupBy(sellerPayouts.currency);
 
     const currencies = Array.from(new Set([
@@ -1892,14 +2004,20 @@ adminRouter.get('/finance/overview', async (req: Request, res: Response) => {
 // ==========================================
 // 5. DISPUTES MEDIATION
 // ==========================================
-adminRouter.get('/disputes', async (req: Request, res: Response) => {
+adminRouter.get('/disputes', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (db) {
-      const rows = await db.select().from(disputes).orderBy(desc(disputes.createdAt));
+      const scope = resolveAdministrativeScope(req.user);
+      const rows = await db
+        .select({ dispute: disputes, sellerCountry: sellers.countryCode })
+        .from(disputes)
+        .innerJoin(sellers, eq(disputes.sellerId, sellers.id))
+        .where(scope.kind === 'GLOBAL' ? undefined : eq(sellers.countryCode, scope.countryCode))
+        .orderBy(desc(disputes.createdAt));
       return res.json({
         success: true,
-        data: rows.map(r => ({
+        data: rows.map(({ dispute: r }) => ({
           ...r,
           claimAmount: Number(r.claimAmount),
         })),
@@ -1911,10 +2029,26 @@ adminRouter.get('/disputes', async (req: Request, res: Response) => {
   }
 });
 
-adminRouter.post('/disputes/:id/resolve', async (req: Request, res: Response) => {
+adminRouter.post('/disputes/:id/resolve', requireDisputeResolvePermission, async (req: AuthRequest, res: Response) => {
   try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
+
     const { id } = req.params;
     const { resolution, performedBy } = req.body;
+
+    const disputeRows = await db
+      .select({ sellerCountry: sellers.countryCode })
+      .from(disputes)
+      .innerJoin(sellers, eq(disputes.sellerId, sellers.id))
+      .where(eq(disputes.id, id))
+      .limit(1);
+    if (disputeRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Disputa não encontrada.' });
+    }
+
+    const scope = resolveAdministrativeScope(req.user);
+    assertCountryAccess(scope, disputeRows[0].sellerCountry);
 
     // Fase "Refund/disputa/chargeback": antes desta fase, resolver uma disputa
     // só mudava disputes.status — BUYER_WIN nunca acionava refund de verdade.
@@ -1926,6 +2060,9 @@ adminRouter.post('/disputes/:id/resolve', async (req: Request, res: Response) =>
 
     return res.json(result);
   } catch (err: any) {
+    if (err instanceof ScopeError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
     if (err instanceof RefundValidationError) {
       return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
     }
@@ -2192,7 +2329,7 @@ adminRouter.post('/inventory/transfers/:id/cancel', requireLogisticsStaff, async
 // ==========================================
 // 7. COUNTRY REPS & SUPERVISORS - REAL ACCOUNTS
 // ==========================================
-adminRouter.get('/country-reps', async (req: AuthRequest, res: Response) => {
+adminRouter.get('/country-reps', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
@@ -2274,7 +2411,7 @@ adminRouter.post('/country-reps', requireGlobalAdmin, async (req: AuthRequest, r
   }
 });
 
-adminRouter.get('/supervisors', async (req: AuthRequest, res: Response) => {
+adminRouter.get('/supervisors', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
@@ -3308,7 +3445,12 @@ adminRouter.get('/logistics/shipments', requireLogisticsStaff, async (req: AuthR
       };
     });
 
-    let filtered = mapped;
+    // Escopo territorial (fechamento RBAC): nunca aceita o país vindo de
+    // query/body — o escopo autorizado vem exclusivamente de req.user (JWT).
+    // Aplicado ANTES do filtro opcional ?countryCode=, que só pode restringir
+    // ainda mais dentro do escopo, nunca ampliá-lo.
+    const shipmentScope = resolveAdministrativeScope(req.user);
+    let filtered = mapped.filter(s => isShipmentWithinScope(shipmentScope, s.originCountry, s.destinationCountry));
 
     if (normStatus) {
       const stUpper = normStatus.toUpperCase();
@@ -3365,6 +3507,8 @@ adminRouter.get('/logistics/shipments/:shipmentId/details', requireLogisticsStaf
   try {
     const { shipmentId } = req.params;
     const details = await ShipmentService.getShipmentWithEvents(shipmentId);
+    const scope = resolveAdministrativeScope(req.user);
+    assertShipmentScopeAccess(scope, (details as any)?.originCountry, (details as any)?.destinationCountry);
     return res.json({ success: true, data: details });
   } catch (error: any) {
     return sendAdminError(res, error);
