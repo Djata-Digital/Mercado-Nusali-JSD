@@ -724,10 +724,25 @@ export const refunds = pgTable('refunds', {
   reason: text('reason'),
   status: varchar('status', { length: 50 }).notNull().default('pending'), // pending, processed, failed
   approvedBy: varchar('approved_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  // Fase "Refund/disputa/chargeback": quanto foi de fato debitado da wallet do
+  // vendedor (proporcional a orders.sellerNetAmount) — null quando o refund
+  // aconteceu ANTES do escrow release (vendedor nunca recebeu, nada a debitar).
+  // Auditável: mostra exatamente o que aconteceu com o dinheiro do vendedor em
+  // cada refund, sem precisar recalcular.
+  sellerDebitAmount: numeric('seller_debit_amount', { precision: 12, scale: 2 }),
+  // Chave de idempotência do CHAMADOR (refund:{refundId} para refund manual,
+  // dispute_resolution:{disputeId} para disputa, chargeback:{providerEventId}
+  // para chargeback, payment_refunded_webhook:{eventId} para o webhook Asaas) —
+  // nunca gerada aqui a partir do próprio ID recém-criado (isso seria sempre
+  // único e não protegeria nada, o mesmo bug já corrigido em seller_payouts).
+  idempotencyKey: varchar('idempotency_key', { length: 255 }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => ({
   refunds_payment_idx: index('refunds_payment_idx').on(table.paymentId),
   refunds_order_idx: index('refunds_order_idx').on(table.orderId),
+  refunds_idempotency_uq: uniqueIndex('refunds_idempotency_uq')
+    .on(table.idempotencyKey)
+    .where(sql`${table.idempotencyKey} IS NOT NULL`),
 }));
 
 export const paymentWebhookEvents = pgTable('payment_webhook_events', {

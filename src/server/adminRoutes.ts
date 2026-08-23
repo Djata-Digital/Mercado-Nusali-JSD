@@ -54,6 +54,7 @@ import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { PaymentService } from './modules/payments/paymentService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { processPayoutStatusChange } from './modules/wallet/payoutService.js';
+import { resolveDispute, RefundValidationError } from './modules/payments/refundService.js';
 
 export const adminRouter = Router();
 
@@ -1912,21 +1913,22 @@ adminRouter.get('/disputes', async (req: Request, res: Response) => {
 
 adminRouter.post('/disputes/:id/resolve', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
     const { id } = req.params;
-    const { resolution } = req.body;
-    if (db) {
-      await db.update(disputes).set({
-        status: resolution === 'refund_buyer' ? 'resolved_buyer' : 'resolved_seller',
-        resolution: resolution || 'Resolvido pelo Administrador',
-        updatedAt: new Date(),
-      }).where(eq(disputes.id, id));
-    }
-    return res.json({
-      success: true,
-      message: `Disputa #${id} resolvida com sucesso! Decisão registrada.`,
-    });
+    const { resolution, performedBy } = req.body;
+
+    // Fase "Refund/disputa/chargeback": antes desta fase, resolver uma disputa
+    // só mudava disputes.status — BUYER_WIN nunca acionava refund de verdade.
+    const result = await resolveDispute(
+      id,
+      resolution === 'refund_buyer' ? 'refund_buyer' : 'seller_win',
+      { performedBy, resolutionNote: resolution }
+    );
+
+    return res.json(result);
   } catch (err: any) {
+    if (err instanceof RefundValidationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
     return res.status(500).json({ success: false, message: err?.message });
   }
 });

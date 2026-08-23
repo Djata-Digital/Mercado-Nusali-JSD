@@ -2,6 +2,7 @@ import { getDb } from '../../../db/index.js';
 import { payments, orders, paymentWebhookEvents } from '../../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { PaymentService } from './paymentService.js';
+import { processRefund } from './refundService.js';
 import { logger } from '../../infra/logger.js';
 import crypto from 'crypto';
 
@@ -51,8 +52,14 @@ export class AsaasWebhookService {
 
   /**
    * Main entry point for processing incoming Asaas webhooks.
+   *
+   * `executor` opcional (mesmo padrão de PaymentService/payoutService/
+   * refundService): permite injetar uma conexão/transação já aberta — usado
+   * pelos testes reais contra Postgres Docker, nunca chamado em produção (lá
+   * sempre usa getDb() como antes, comportamento idêntico ao anterior a esta
+   * mudança).
    */
-  static async processWebhook(tokenHeader: string | undefined, payload: AsaasWebhookPayload) {
+  static async processWebhook(tokenHeader: string | undefined, payload: AsaasWebhookPayload, executor?: any) {
     const configuredToken = process.env.ASAAS_WEBHOOK_AUTH_TOKEN;
 
     // 1. Token Configuration Verification
@@ -86,7 +93,7 @@ export class AsaasWebhookService {
     const paymentData = payload.payment;
     const asaasPaymentId = paymentData.id;
 
-    const db = getDb();
+    const db = executor ?? getDb();
     if (!db) {
       const err: any = new Error('Banco de dados indisponível para processamento de webhook.');
       err.code = 'DATABASE_UNAVAILABLE';
@@ -271,11 +278,35 @@ export class AsaasWebhookService {
       }
 
       case 'PAYMENT_REFUNDED': {
+        // Fase "Refund/disputa/chargeback": antes só marcava payments.status —
+        // o escrow continuava HELD ou (pior) já RELEASED sem nunca ser
+        // revertido, e o vendedor nunca era debitado. Agora aciona a mesma
+        // reversão real usada pelo admin. idempotencyKey usa o eventId do
+        // próprio webhook Asaas — uma entrega duplicada do mesmo evento (Asaas
+        // reenviar o webhook) não reverte o dinheiro duas vezes.
+        try {
+          // Passa o `executor` ORIGINAL (não o `db` já resolvido acima) —
+          // undefined em produção, deixando processRefund abrir e gerenciar a
+          // própria transação atômica (comportamento inalterado); só em teste
+          // (executor = uma transação já aberta) processRefund escreve dentro
+          // dela em vez de tentar getDb() de novo.
+          await processRefund({
+            orderId: order.id,
+            amount: Number(order.totalAmount),
+            reason: `Webhook Asaas PAYMENT_REFUNDED (eventId=${eventId}).`,
+            idempotencyKey: `payment_refunded_webhook:${eventId}`,
+            performedBy: null,
+          }, executor);
+          logger.info({ orderId: order.id, asaasPaymentId, eventId }, '[Asaas Webhook] PAYMENT_REFUNDED processado: escrow/wallet revertidos.');
+        } catch (refundErr: any) {
+          // Um refund que já tinha sido processado por outro caminho (ex.:
+          // resolução de disputa) não é um erro deste webhook — só registra.
+          logger.warn({ orderId: order.id, asaasPaymentId, eventId, error: refundErr?.message }, '[Asaas Webhook] PAYMENT_REFUNDED: processRefund não completou (provavelmente já revertido por outro caminho).');
+        }
         await db
           .update(payments)
           .set({ status: 'refunded', updatedAt: new Date() })
           .where(eq(payments.id, localPayment.id));
-        logger.warn({ orderId: order.id, asaasPaymentId }, '[Asaas Webhook] Evento PAYMENT_REFUNDED recebido e registrado para conciliação.');
         break;
       }
 
@@ -285,6 +316,32 @@ export class AsaasWebhookService {
           .set({ status: 'cancelled', updatedAt: new Date() })
           .where(eq(payments.id, localPayment.id));
         logger.info({ orderId: order.id, asaasPaymentId }, '[Asaas Webhook] Evento PAYMENT_DELETED recebido e registrado.');
+        break;
+      }
+
+      // Fase "Chargeback Asaas real": os 3 eventos abaixo são só ESTÁGIOS
+      // intermediários de uma contestação de cartão — nenhum deles, sozinho,
+      // significa que o dinheiro já saiu de verdade. O único evento que
+      // representa a reversão financeira final é PAYMENT_REFUNDED (tratado
+      // acima) — é ele quem chama processRefund(). Os 3 abaixo só REGISTRAM a
+      // ocorrência (já persistida em payment_webhook_events pelo passo 4 desta
+      // função, com o payload completo) e logam para acompanhamento — nunca
+      // debitam o seller, nunca criam um segundo refund. Isso é o que garante
+      // "efeito financeiro único" mesmo se a sequência completa
+      // REQUESTED -> DISPUTE -> AWAITING_REVERSAL -> REFUNDED chegar inteira:
+      // só o último evento move dinheiro, e ele já é idempotente por eventId.
+      case 'PAYMENT_CHARGEBACK_REQUESTED': {
+        logger.warn({ orderId: order.id, asaasPaymentId, eventId }, '[Asaas Webhook] PAYMENT_CHARGEBACK_REQUESTED — chargeback aberto pelo emissor do cartão. Nenhum débito financeiro nesta etapa; aguardando desfecho (PAYMENT_REFUNDED ou reversão a favor do lojista).');
+        break;
+      }
+
+      case 'PAYMENT_CHARGEBACK_DISPUTE': {
+        logger.warn({ orderId: order.id, asaasPaymentId, eventId }, '[Asaas Webhook] PAYMENT_CHARGEBACK_DISPUTE — contestação do chargeback em andamento. Nenhum movimento financeiro novo; nenhum refund duplicado.');
+        break;
+      }
+
+      case 'PAYMENT_AWAITING_CHARGEBACK_REVERSAL': {
+        logger.warn({ orderId: order.id, asaasPaymentId, eventId }, '[Asaas Webhook] PAYMENT_AWAITING_CHARGEBACK_REVERSAL — decisão favorável ao comprador, aguardando reversão do adquirente. Ainda NÃO é o evento financeiro final; nenhum refund é disparado aqui — só PAYMENT_REFUNDED aciona processRefund().');
         break;
       }
 
