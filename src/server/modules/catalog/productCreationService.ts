@@ -23,6 +23,7 @@ export interface CreateProductInput {
   brand?: string | null;
   model?: string | null;
   stock?: number;
+  weightKg?: number | string;
   image: string;
   storeId: string;
   countryCode?: string;
@@ -94,8 +95,13 @@ export async function getCategoryAttributesWithInheritance(db: any, targetCatego
  * Single, consolidated product creation service.
  */
 export class ProductCreationService {
-  static async createProduct(userId: string, input: CreateProductInput) {
-    const db = getDb();
+  // `executor` opcional: permite testar esta função contra um Postgres
+  // Docker isolado (mesmo padrão já usado em payoutService/refundService),
+  // sem depender do pool singleton getDb() (SSL fixo, incompatível com
+  // Docker). Em produção, executor é sempre undefined e o comportamento é
+  // idêntico ao anterior.
+  static async createProduct(userId: string, input: CreateProductInput, executor?: any) {
+    const db = executor ?? getDb();
     if (!db) {
       throw new Error('Banco de dados indisponível.');
     }
@@ -222,6 +228,17 @@ export class ProductCreationService {
     }
     const cleanStock = Math.floor(Number(stockVal));
 
+    // BLOCKER_LAUNCH (fase "Desbloqueio do lançamento"): orderService exige
+    // itemWeightKg > 0 para calcular frete no checkout, e lê esse valor de
+    // products.shippingJson.weightKg — mas nenhuma rota jamais persistia
+    // esse campo, então todo produto ficava impossível de comprar. Peso é
+    // obrigatório na criação (arquitetura mais simples e segura: rejeitar
+    // na origem, nunca inventar um fallback fictício de peso).
+    const weightNum = typeof input.weightKg === 'number' ? input.weightKg : parseFloat(String(input.weightKg ?? ''));
+    if (isNaN(weightNum) || weightNum <= 0) {
+      throw new Error('PRODUCT_WEIGHT_REQUIRED: O peso do produto (em kg) é obrigatório e deve ser maior que zero — é necessário para o cálculo de frete.');
+    }
+
     const newProduct = {
       id: productId,
       title: input.title.trim(),
@@ -242,6 +259,7 @@ export class ProductCreationService {
       status: 'active',
       isActive: true,
       attributesJson: specsMap,
+      shippingJson: { weightKg: weightNum },
       createdAt: new Date(),
       updatedAt: new Date(),
     };

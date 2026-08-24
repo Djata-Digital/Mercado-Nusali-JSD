@@ -828,7 +828,15 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
+    // BLOCKER_LAUNCH: peso é obrigatório — o backend rejeita a criação sem
+    // ele (orderService precisa desse valor para calcular frete no
+    // checkout), então bloqueamos aqui também para dar um erro claro antes
+    // de bater na API.
     const parsedWeight = weightKg ? parseFloat(weightKg) : undefined;
+    if (parsedWeight === undefined || isNaN(parsedWeight) || parsedWeight <= 0) {
+      showToast('Por favor, informe o peso do produto com embalagem, em kg (obrigatório, maior que zero) — necessário para calcular o frete.');
+      return;
+    }
     const parsedLength = lengthCm ? parseFloat(lengthCm) : undefined;
     const parsedWidth = widthCm ? parseFloat(widthCm) : undefined;
     const parsedHeight = heightCm ? parseFloat(heightCm) : undefined;

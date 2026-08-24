@@ -15,7 +15,7 @@
  * quando falta snapshot financeiro.
  */
 import { getDb } from '../../../db/index.js';
-import { orders, payments, escrowAccounts, escrowTransactions, users, sellers, wallets, walletTransactions, refunds, disputes } from '../../../db/schema.js';
+import { orders, payments, escrowAccounts, escrowTransactions, users, sellers, wallets, walletTransactions, refunds, disputes, disputeMessages } from '../../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 
 export class RefundValidationError extends Error {
@@ -239,6 +239,80 @@ export async function processRefund(input: ProcessRefundInput, executor?: any) {
       id: refundId, orderId: order.id, amount: input.amount, currency,
       status: 'processed', sellerDebitAmount, alreadyProcessed: false,
     };
+  };
+
+  if (executor) return runInTx(executor);
+  const db = getDb();
+  if (!db) throw new Error('Banco de dados indisponível.');
+  return db.transaction(runInTx);
+}
+
+export interface CreateBuyerDisputeInput {
+  orderId: string;
+  buyerId: string;
+  reason?: string;
+  description: string;
+  claimAmount?: number;
+}
+
+/**
+ * Abertura de disputa pelo comprador (fase "Desbloqueio do lançamento").
+ * ACHADO BLOCKER_LAUNCH corrigido: a rota anterior gravava sellerId e
+ * currency fixos ('seller_001'/'XOF'), nunca lendo o pedido real. Aqui
+ * sellerId e currency vêm exclusivamente do pedido; nunca de entrada do
+ * cliente. Segue a mesma convenção "um vendedor por pedido" já usada por
+ * escrow_accounts/orders (schema atual não modela pedidos multi-vendedor de
+ * forma inequívoca — não inventamos uma regra nova aqui).
+ */
+export async function createBuyerDispute(input: CreateBuyerDisputeInput, executor?: any) {
+  const runInTx = async (tx: any) => {
+    const orderRows = await tx.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
+    const order = orderRows[0];
+    if (!order) {
+      throw new RefundValidationError('ORDER_NOT_FOUND', 'Pedido não encontrado.', 404);
+    }
+    if (order.buyerId !== input.buyerId) {
+      throw new RefundValidationError('FORBIDDEN', 'Você não tem permissão para abrir uma disputa sobre este pedido.', 403);
+    }
+    if (!order.sellerId) {
+      throw new RefundValidationError('ORDER_SELLER_MISSING', 'Este pedido não possui um vendedor associado — não é possível abrir disputa.', 400);
+    }
+    if (order.paymentStatus !== 'paid') {
+      throw new RefundValidationError('ORDER_NOT_ELIGIBLE_FOR_DISPUTE', 'Este pedido ainda não teve o pagamento confirmado — não é possível abrir disputa.', 409);
+    }
+
+    const existingDisputes = await tx.select().from(disputes).where(eq(disputes.orderId, input.orderId));
+    const existingOpen = existingDisputes.find((d: any) => d.status === 'open' || d.status === 'in_mediation');
+    if (existingOpen) {
+      return { ...existingOpen, claimAmount: Number(existingOpen.claimAmount), alreadyOpen: true };
+    }
+
+    const dispId = `disp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const newDispute = {
+      id: dispId,
+      orderId: order.id,
+      buyerId: input.buyerId,
+      sellerId: order.sellerId,
+      reason: input.reason || 'Produto divergente',
+      description: input.description,
+      status: 'open',
+      claimAmount: String(input.claimAmount || order.totalAmount || 0),
+      currency: order.currency,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    await tx.insert(disputes).values(newDispute);
+    await tx.insert(disputeMessages).values({
+      id: `dm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      disputeId: dispId,
+      senderId: input.buyerId,
+      senderRole: 'buyer',
+      message: input.description,
+      createdAt: new Date(),
+    });
+
+    return { ...newDispute, claimAmount: Number(newDispute.claimAmount), alreadyOpen: false };
   };
 
   if (executor) return runInTx(executor);

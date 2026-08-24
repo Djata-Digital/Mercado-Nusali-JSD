@@ -51,6 +51,7 @@ export const ProfileView: React.FC = () => {
   const [editName, setEditName] = useState('');
   const [editPhone, setEditPhone] = useState('');
   const [editCity, setEditCity] = useState('');
+  const [editTaxId, setEditTaxId] = useState('');
   const [editAvatar, setEditAvatar] = useState('');
   const [customAvatarUrl, setCustomAvatarUrl] = useState('');
   const [showCustomUrlInput, setShowCustomUrlInput] = useState(false);
@@ -70,6 +71,7 @@ export const ProfileView: React.FC = () => {
         setEditName(profRes.data.fullName);
         setEditPhone(profRes.data.phone);
         setEditCity(profRes.data.city);
+        setEditTaxId(profRes.data.taxId || '');
         setEditAvatar(profRes.data.avatar || user?.avatar || '');
       }
       if (overRes.success && overRes.data) {
@@ -133,6 +135,7 @@ export const ProfileView: React.FC = () => {
         phone: editPhone,
         city: editCity,
         avatar: editAvatar,
+        ...(editTaxId.trim() ? { taxId: editTaxId.trim() } : {}),
       });
 
       if (res.success && res.data) {
@@ -321,7 +324,7 @@ export const ProfileView: React.FC = () => {
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
               <div>
                 <label className="block text-xs font-bold text-gray-200 mb-1">Nome Completo</label>
                 <input
@@ -351,6 +354,21 @@ export const ProfileView: React.FC = () => {
                   className="w-full bg-white/10 border border-white/30 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-400 focus:outline-hidden focus:ring-2 focus:ring-yellow-400"
                   required
                 />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-200 mb-1">
+                  {currentCountry.currency === 'BRL' ? 'CPF ou CNPJ' : 'Documento (NIF/BI)'}
+                </label>
+                <input
+                  type="text"
+                  value={editTaxId}
+                  onChange={e => setEditTaxId(e.target.value)}
+                  placeholder={currentCountry.currency === 'BRL' ? '000.000.000-00' : ''}
+                  className="w-full bg-white/10 border border-white/30 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-400 focus:outline-hidden focus:ring-2 focus:ring-yellow-400"
+                />
+                {currentCountry.currency === 'BRL' && (
+                  <span className="block text-[10px] text-yellow-300 mt-1">Obrigatório para pagar via PIX.</span>
+                )}
               </div>
             </div>
 

@@ -1179,6 +1179,7 @@ sellerRouter.get('/products', async (req: AuthRequest, res: Response) => {
         originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
         rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
         stock: Number(p.stock),
+        weightKg: (p.shippingJson && typeof p.shippingJson === 'object') ? (p.shippingJson as any).weightKg : undefined,
       }));
       if (q && typeof q === 'string') {
         const term = q.toLowerCase();
@@ -1216,6 +1217,7 @@ sellerRouter.get('/products/:id', async (req: Request, res: Response) => {
             originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
             rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
             stock: Number(p.stock),
+            weightKg: (p.shippingJson && typeof p.shippingJson === 'object') ? (p.shippingJson as any).weightKg : undefined,
             variants,
             images: imageUrls.length > 0 ? imageUrls : (p.image ? [p.image] : []),
             galleryImages: imageUrls.length > 0 ? imageUrls : (p.image ? [p.image] : []),
@@ -1303,6 +1305,21 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     if (updates.brand !== undefined) fieldsToUpdate.brand = updates.brand;
     if (updates.freeShipping !== undefined) fieldsToUpdate.freeShipping = updates.freeShipping;
     if (updates.full !== undefined) fieldsToUpdate.full = updates.full;
+
+    // BLOCKER_LAUNCH: peso é obrigatório para o checkout calcular frete
+    // (orderService lê products.shippingJson.weightKg). Editar não pode
+    // apagar um peso já válido nem persistir peso <= 0.
+    if (updates.weightKg !== undefined) {
+      const weightNum = typeof updates.weightKg === 'number' ? updates.weightKg : parseFloat(String(updates.weightKg));
+      if (isNaN(weightNum) || weightNum <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'PRODUCT_WEIGHT_REQUIRED', message: 'O peso do produto (em kg) deve ser maior que zero.' },
+        });
+      }
+      const existingShippingJson = (check.product.shippingJson && typeof check.product.shippingJson === 'object') ? check.product.shippingJson : {};
+      fieldsToUpdate.shippingJson = { ...existingShippingJson, weightKg: weightNum };
+    }
 
     // The store is the sole authority over the product's country/currency — same rule as
     // creation (ProductCreationService). This applies whether or not storeId is being changed:

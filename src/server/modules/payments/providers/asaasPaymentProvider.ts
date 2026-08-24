@@ -21,7 +21,7 @@ export function normalizeAsaasBrazilianMobilePhone(phone?: string | null): strin
   return null;
 }
 
-function isValidCpf(cpf: string): boolean {
+export function isValidCpf(cpf: string): boolean {
   if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
   let sum = 0;
   for (let i = 0; i < 9; i++) sum += parseInt(cpf.charAt(i)) * (10 - i);
@@ -36,7 +36,7 @@ function isValidCpf(cpf: string): boolean {
   return true;
 }
 
-function isValidCnpj(cnpj: string): boolean {
+export function isValidCnpj(cnpj: string): boolean {
   if (cnpj.length !== 14 || /^(\d)\1{13}$/.test(cnpj)) return false;
   let size = cnpj.length - 2;
   let numbers = cnpj.substring(0, size);

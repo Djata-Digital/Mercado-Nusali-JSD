@@ -556,6 +556,16 @@ export class PaymentService {
       }
       const esc = escRows[0];
 
+      // Fase "Refund/disputa/chargeback", item 3: um refund processado antes do
+      // release marca a escrow como 'refunded' — isso tem que impedir qualquer
+      // release futuro, mesmo que o chamador não tenha visto o refund a tempo
+      // (concorrência: releaseEscrowForOrder também trava a linha da escrow
+      // mais abaixo, mas essa checagem de status já barra o caso comum antes
+      // de qualquer escrita).
+      if (esc.status === 'refunded' || esc.status === 'disputed') {
+        throw new Error(`ESCROW_ALREADY_REVERSED: escrow do pedido ${ord.id} está em status "${esc.status}" — não pode mais ser liberada.`);
+      }
+
       // Moeda do escrow tem que bater com a moeda do pedido — nunca creditar uma
       // wallet com um valor rotulado numa moeda diferente da que a conta
       // realmente representa (Fase 6, correção do achado CRÍTICO C). Na criação

@@ -43,6 +43,8 @@ import {
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, and, or, isNull } from 'drizzle-orm';
+import { createBuyerDispute, RefundValidationError } from './modules/payments/refundService.js';
+import { updateBuyerTaxId, BuyerProfileValidationError } from './modules/buyer/buyerProfileService.js';
 
 export const buyerRouter = Router();
 buyerRouter.use(requireAuth);
@@ -294,7 +296,7 @@ buyerRouter.put('/profile', requireAuth, async (req: AuthRequest, res: Response)
     }
 
     const userId = req.user!.id;
-    const { fullName, phone, country, avatar, city } = req.body ?? {};
+    const { fullName, phone, country, avatar, city, taxId } = req.body ?? {};
     const userUpdates: Record<string, unknown> = { updatedAt: new Date() };
     if (typeof fullName === 'string') userUpdates.fullName = fullName.trim();
     if (typeof phone === 'string') userUpdates.phone = phone.trim() || null;
@@ -302,6 +304,21 @@ buyerRouter.put('/profile', requireAuth, async (req: AuthRequest, res: Response)
     if (typeof avatar === 'string') userUpdates.avatarUrl = avatar.trim() || null;
 
     await db.update(users).set(userUpdates).where(eq(users.id, userId));
+
+    // BLOCKER_LAUNCH (fase "Desbloqueio do lançamento") corrigido em
+    // updateBuyerTaxId(): userId vem exclusivamente de req.user.id (nunca do
+    // corpo da requisição) — um comprador nunca altera o perfil de outro.
+    if (typeof taxId === 'string') {
+      const effectiveCountryCode = (typeof country === 'string' && country.trim() ? country.trim() : (req.user!.countryCode || ''));
+      try {
+        await updateBuyerTaxId({ userId, taxId, effectiveCountryCode });
+      } catch (err: any) {
+        if (err instanceof BuyerProfileValidationError) {
+          return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+        }
+        throw err;
+      }
+    }
 
     // City belongs to addresses. Update it only when the user already has an address;
     // never create a fabricated address just to persist a city.
@@ -1614,51 +1631,35 @@ buyerRouter.get('/disputes', requireAuth, async (req: AuthRequest, res: Response
 
 buyerRouter.post('/disputes', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const db = getDb();
     if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
-    const userId = req.user.id;
     const { orderId, reason, description, claimAmount } = req.body;
 
     if (!orderId || !description) {
       return res.status(400).json({ success: false, message: 'ID do pedido e descrição são obrigatórios.' });
     }
 
-    const dispId = `disp_${Date.now()}`;
-    const newDispute = {
-      id: dispId,
+    // BLOCKER_LAUNCH (fase "Desbloqueio do lançamento") corrigido em
+    // createBuyerDispute(): sellerId/currency vêm exclusivamente do pedido
+    // real (nunca fixos, nunca do que o cliente envia no corpo).
+    const result = await createBuyerDispute({
       orderId,
-      buyerId: userId,
-      sellerId: 'seller_001',
-      reason: reason || 'Produto divergente',
+      buyerId: req.user.id,
+      reason,
       description,
-      status: 'open',
-      claimAmount: String(claimAmount || 0),
-      currency: 'XOF',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-
-    if (db) {
-      await db.insert(disputes).values(newDispute);
-      await db.insert(disputeMessages).values({
-        id: `dm_${Date.now()}`,
-        disputeId: dispId,
-        senderId: userId,
-        senderRole: 'buyer',
-        message: description,
-        createdAt: new Date(),
-      });
-    }
+      claimAmount,
+    });
 
     return res.json({
       success: true,
-      message: 'Disputa aberta com sucesso! O pagamento permanece protegido sob custódia Escrow.',
-      data: {
-        ...newDispute,
-        claimAmount: Number(newDispute.claimAmount),
-      },
+      message: (result as any).alreadyOpen
+        ? 'Já existe uma disputa em aberto para este pedido — nenhuma nova disputa foi criada.'
+        : 'Disputa aberta com sucesso! O pagamento permanece protegido sob custódia Escrow.',
+      data: result,
     });
   } catch (err: any) {
+    if (err instanceof RefundValidationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
     return res.status(500).json({ success: false, message: err?.message });
   }
 });

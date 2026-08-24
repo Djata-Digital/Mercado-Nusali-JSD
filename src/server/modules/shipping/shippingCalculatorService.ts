@@ -50,8 +50,8 @@ export class ShippingCalculatorService {
     destinationCity?: string;
     weightKg: number;
     currency: string;
-  }): Promise<{ price: number; estimatedMinDays: number; estimatedMaxDays: number; rateId: string; source: string; currency: string } | null> {
-    const db = getDb();
+  }, executor?: any): Promise<{ price: number; estimatedMinDays: number; estimatedMaxDays: number; rateId: string; source: string; currency: string } | null> {
+    const db = executor ?? getDb();
     if (!db) return null;
 
     if (!input.originCountry || !input.originCountry.trim()) return null;
@@ -149,7 +149,7 @@ export class ShippingCalculatorService {
   /**
    * Main Freight Calculator API - computes raw cost from DB, applies store policy, and resolves subsidies.
    */
-  static async calculateFreight(input: CalculateFreightInput): Promise<FreightCalculationResult> {
+  static async calculateFreight(input: CalculateFreightInput, executor?: any): Promise<FreightCalculationResult> {
     // Requirement 1: Weight is strictly required (> 0)
     if (!input.weightKg || Number(input.weightKg) <= 0) {
       return {
@@ -233,7 +233,7 @@ export class ShippingCalculatorService {
       destinationCity: input.destinationCity,
       weightKg: input.weightKg,
       currency: input.currency.trim().toUpperCase(),
-    });
+    }, executor);
 
     if (!rawRate) {
       return {
@@ -259,7 +259,7 @@ export class ShippingCalculatorService {
     let sellerSubsidyPercent = 0;
 
     // Fetch store policy if storeId or sellerId supplied
-    const db = getDb();
+    const db = executor ?? getDb();
     if (db && (input.storeId || input.sellerId)) {
       try {
         let policyRows = [];

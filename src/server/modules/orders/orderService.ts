@@ -34,8 +34,13 @@ export interface CreateOrderRequestDTO {
 }
 
 export class OrderService {
-  static async createOrderFromCart(data: CreateOrderRequestDTO) {
-    const db = getDb();
+  // `executor` opcional: permite testar esta função contra um Postgres
+  // Docker isolado (mesmo padrão já usado em payoutService/refundService),
+  // sem depender do pool singleton getDb() (SSL fixo, incompatível com
+  // Docker). Em produção, executor é sempre undefined e o comportamento é
+  // idêntico ao anterior.
+  static async createOrderFromCart(data: CreateOrderRequestDTO, executor?: any) {
+    const db = executor ?? getDb();
     if (!db) {
       throw new Error('Banco de dados indisponível.');
     }
@@ -97,7 +102,7 @@ export class OrderService {
     }
 
     // 2. Execute Atomic Transaction
-    return await db.transaction(async (tx) => {
+    return await db.transaction(async (tx: any) => {
       // Fetch active user cart
       const userCarts = await tx.select().from(carts).where(eq(carts.userId, userId)).limit(1);
       if (userCarts.length === 0) {
@@ -135,8 +140,8 @@ export class OrderService {
       let primarySellerId: string | null = null;
       let primaryStoreId: string | null = null;
 
-      const whRows = await tx.select().from(warehouses);
-      const whMap = new Map(whRows.map((w) => [w.id, w]));
+      const whRows: any[] = await tx.select().from(warehouses);
+      const whMap = new Map<string, any>(whRows.map((w) => [w.id, w]));
 
       // Validate products, DB unit prices, and INVENTORY table stock
       for (const ci of itemsInCart) {
@@ -339,7 +344,7 @@ export class OrderService {
         weightKg: totalWeightKg,
         currency,
         productSubtotal: realSubtotal,
-      });
+      }, tx);
 
       if (!freightRes.available) {
         throw new Error(
