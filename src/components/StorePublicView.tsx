@@ -3,79 +3,93 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   Building2,
   ShieldCheck,
-  Star,
   MapPin,
   MessageSquare,
   Share2,
   Heart,
   CheckCircle2,
   Package,
-  Clock,
   Globe,
   Search,
-  Filter,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
 import { useProducts } from '../hooks/useProducts';
+import { useStore } from '../hooks/useStores';
+import { useCountries } from '../hooks/useCountries';
 import { usePreferences } from '../context/PreferencesContext';
 import { ProductCard } from './ProductCard';
-import { countriesConfig } from '../utils/currencyUtils';
 
 export const StorePublicView: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { data: products = [] } = useProducts();
   const { showToast } = usePreferences();
 
-  const [activeTab, setActiveTab] = useState<'catalog' | 'about' | 'reviews'>('catalog');
+  const [activeTab, setActiveTab] = useState<'catalog' | 'about'>('catalog');
   const [searchFilter, setSearchFilter] = useState('');
   const [isFollowing, setIsFollowing] = useState(false);
 
-  const mockStoreDefault = {
-    id: id || 'seller_tech',
-    name: 'TechStore Guiné Oficial',
-    description: 'A maior distribuidora de tecnologia, iPhones e eletrônicos de Guiné-Bissau e África Ocidental.',
-    rating: 4.9,
-    reviewsCount: 1420,
-    salesCount: 8900,
-    isOfficial: true,
-    joinedYear: '2021',
-    country: 'GW' as const,
-    bannerUrl: 'https://images.unsplash.com/photo-1550745165-9bc0b252726f?auto=format&fit=crop&q=80&w=1200',
-    logoUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&q=80&w=200',
-  };
-
-  const currentStore = mockStoreDefault;
-  const storeProducts = products.filter(
-    (p) => p.seller?.id === currentStore.id || p.seller?.name?.toLowerCase().includes('tech') || p.seller?.name?.toLowerCase().includes('oficial')
+  const { data: store, isLoading: storeLoading, isError: storeError } = useStore(id);
+  const { data: operationalCountries } = useCountries();
+  // Produtos filtrados pelo relacionamento real storeId — nunca por heurística
+  // de nome do seller. Só busca depois que sabemos o ID real da loja.
+  const { data: products = [], isLoading: productsLoading } = useProducts(
+    store ? { storeId: store.id } : undefined
   );
 
-  const filteredStoreProducts = storeProducts.filter(
-    (p) =>
-      p.title.toLowerCase().includes(searchFilter.toLowerCase()) ||
-      p.category.toLowerCase().includes(searchFilter.toLowerCase())
+  if (storeLoading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-24 flex flex-col items-center justify-center gap-3 text-gray-500">
+        <Loader2 className="w-8 h-8 animate-spin" />
+        <p className="text-sm">Carregando loja...</p>
+      </div>
+    );
+  }
+
+  if (storeError || !store) {
+    return (
+      <div className="max-w-3xl mx-auto px-4 py-24 flex flex-col items-center justify-center gap-4 text-center">
+        <AlertCircle className="w-12 h-12 text-gray-300" />
+        <h1 className="text-xl font-bold text-gray-800">Loja não encontrada</h1>
+        <p className="text-sm text-gray-500">
+          Esta loja não existe, foi removida, ou não está disponível publicamente no momento.
+        </p>
+        <button
+          onClick={() => navigate('/stores')}
+          className="mt-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-sm transition"
+        >
+          Ver todas as lojas
+        </button>
+      </div>
+    );
+  }
+
+  const storeCountry = operationalCountries?.find((c) => c.code === store.countryCode);
+
+  const filteredStoreProducts = (products || []).filter(
+    (p: any) =>
+      p.title?.toLowerCase().includes(searchFilter.toLowerCase()) ||
+      p.category?.toLowerCase().includes(searchFilter.toLowerCase())
   );
-
-  const storeCountry = countriesConfig[currentStore.country] || countriesConfig.GW;
-
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 animate-fadeIn">
       {/* Store Cover Banner */}
       <div className="relative h-48 sm:h-64 rounded-2xl overflow-hidden bg-gradient-to-r from-blue-950 via-emerald-900 to-teal-900 border border-gray-200 shadow-md mb-6">
-        {currentStore.bannerUrl && (
+        {store.bannerUrl && (
           <img
-            src={currentStore.bannerUrl}
-            alt={currentStore.name}
+            src={store.bannerUrl}
+            alt={store.name}
             className="w-full h-full object-cover opacity-40"
             referrerPolicy="no-referrer"
           />
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
 
-        {/* Store Top Action Badges */}
         <div className="absolute top-4 right-4 flex items-center gap-2">
           <button
             onClick={() => {
+              navigator.clipboard?.writeText(window.location.href).catch(() => {});
               showToast('Link da loja copiado para a área de transferência!');
             }}
             className="bg-white/90 hover:bg-white text-gray-900 p-2 rounded-full shadow-md text-xs font-bold transition flex items-center gap-1.5"
@@ -102,8 +116,8 @@ export const StorePublicView: React.FC = () => {
         <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
           <div className="flex items-center gap-4">
             <div className="w-20 h-20 rounded-2xl bg-emerald-600 text-white flex items-center justify-center font-black text-2xl shadow-lg border-4 border-white overflow-hidden shrink-0">
-              {currentStore.logoUrl ? (
-                <img src={currentStore.logoUrl} alt={currentStore.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+              {store.logoUrl ? (
+                <img src={store.logoUrl} alt={store.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
               ) : (
                 <Building2 className="w-10 h-10" />
               )}
@@ -111,30 +125,22 @@ export const StorePublicView: React.FC = () => {
 
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-2xl font-black text-gray-900">{currentStore.name}</h1>
-                {(currentStore as any).isVerified || currentStore.isOfficial ? (
+                <h1 className="text-2xl font-black text-gray-900">{store.name}</h1>
+                {store.isVerified && (
                   <span className="bg-emerald-100 text-emerald-800 text-[10px] font-black px-2 py-0.5 rounded-full flex items-center gap-1 border border-emerald-300">
-                    <ShieldCheck className="w-3 h-3 text-emerald-700" /> VENDEDOR OFICIAL VERIFICADO
+                    <ShieldCheck className="w-3 h-3 text-emerald-700" /> VENDEDOR VERIFICADO
                   </span>
-                ) : null}
+                )}
               </div>
 
               <p className="text-xs text-gray-600 mt-1 max-w-xl">
-                {currentStore.description || 'Loja oficial parceira do Mercado Nusali com suporte Escrow e entregas internacionais.'}
+                {store.description || 'Loja parceira do Mercado Nusali com suporte Escrow.'}
               </p>
 
               <div className="flex items-center gap-4 mt-3 text-xs text-gray-600 flex-wrap">
-                <span className="flex items-center gap-1 font-semibold text-gray-900">
-                  <Star className="w-4 h-4 text-amber-500 fill-amber-500" />
-                  {currentStore.rating.toFixed(1)} / 5.0 (Vendedor Líder)
-                </span>
                 <span className="flex items-center gap-1">
                   <MapPin className="w-4 h-4 text-emerald-700" />
-                  {storeCountry.flag} {(currentStore as any).city || 'Sede Regional'}, {storeCountry.name}
-                </span>
-                <span className="flex items-center gap-1">
-                  <Clock className="w-4 h-4 text-blue-700" />
-                  Responde em menos de 1 hora
+                  {storeCountry ? `${storeCountry.flag} ${storeCountry.name}` : store.countryCode}
                 </span>
               </div>
             </div>
@@ -171,51 +177,52 @@ export const StorePublicView: React.FC = () => {
               : 'border-transparent text-gray-500 hover:text-gray-800'
           }`}
         >
-          <Building2 className="w-4 h-4" /> Sobre a Loja & Garantias
-        </button>
-        <button
-          onClick={() => setActiveTab('reviews')}
-          className={`pb-3 border-b-2 transition flex items-center gap-2 ${
-            activeTab === 'reviews'
-              ? 'border-emerald-600 text-emerald-700'
-              : 'border-transparent text-gray-500 hover:text-gray-800'
-          }`}
-        >
-          <Star className="w-4 h-4" /> Reputação & Avaliações
+          <Building2 className="w-4 h-4" /> Sobre a Loja
         </button>
       </div>
 
       {/* Tab 1: Catalog */}
       {activeTab === 'catalog' && (
         <div>
-          {/* Search bar inside store */}
           <div className="bg-white p-4 rounded-xl border border-gray-200 mb-6 flex items-center justify-between gap-4">
             <div className="relative flex-1 max-w-md">
               <input
                 type="text"
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
-                placeholder={`Buscar dentro de ${currentStore.name}...`}
+                placeholder={`Buscar dentro de ${store.name}...`}
                 className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg text-xs font-medium focus:outline-hidden focus:border-emerald-600"
               />
               <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
             </div>
             <span className="text-xs text-gray-500 font-medium hidden sm:inline">
-              Exibindo {filteredStoreProducts.length} de {storeProducts.length} itens
+              Exibindo {filteredStoreProducts.length} de {products?.length || 0} itens
             </span>
           </div>
 
-          {filteredStoreProducts.length > 0 ? (
+          {productsLoading && (
+            <div className="py-12 flex items-center justify-center gap-2 text-gray-500 text-sm">
+              <Loader2 className="w-5 h-5 animate-spin" /> Carregando produtos...
+            </div>
+          )}
+
+          {!productsLoading && filteredStoreProducts.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-              {filteredStoreProducts.map(product => (
+              {filteredStoreProducts.map((product: any) => (
                 <ProductCard key={product.id} product={product} />
               ))}
             </div>
-          ) : (
+          )}
+
+          {!productsLoading && filteredStoreProducts.length === 0 && (
             <div className="bg-white rounded-2xl border border-gray-200 p-12 text-center my-8">
               <Package className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-              <h3 className="text-lg font-bold text-gray-800">Nenhum produto encontrado nesta busca</h3>
-              <p className="text-xs text-gray-500 mt-1">Tente ajustar o termo de pesquisa no catálogo da loja.</p>
+              <h3 className="text-lg font-bold text-gray-800">
+                {searchFilter ? 'Nenhum produto encontrado nesta busca' : 'Esta loja ainda não tem produtos publicados'}
+              </h3>
+              {searchFilter && (
+                <p className="text-xs text-gray-500 mt-1">Tente ajustar o termo de pesquisa no catálogo da loja.</p>
+              )}
             </div>
           )}
         </div>
@@ -224,9 +231,9 @@ export const StorePublicView: React.FC = () => {
       {/* Tab 2: About */}
       {activeTab === 'about' && (
         <div className="bg-white rounded-2xl border border-gray-200 p-8 space-y-6">
-          <h3 className="text-xl font-bold text-gray-900">Informações Oficiais do Vendedor</h3>
+          <h3 className="text-xl font-bold text-gray-900">Informações da Loja</h3>
           <p className="text-sm text-gray-600 leading-relaxed">
-            {currentStore.description || 'Esta loja é auditada e credenciada pela equipe do Mercado Nusali, garantindo autenticidade dos produtos, suporte pós-venda direto e conformidade tributária para envios entre países.'}
+            {store.description || 'Esta loja ainda não adicionou uma descrição.'}
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-gray-100">
@@ -238,66 +245,12 @@ export const StorePublicView: React.FC = () => {
             <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
               <Globe className="w-6 h-6 text-blue-700 mb-2" />
               <h4 className="font-bold text-sm text-gray-900">Envios com Rastreio</h4>
-              <p className="text-xs text-gray-600 mt-1">Parceria direta com operadores logísticos regionais e frota Nusali Express.</p>
+              <p className="text-xs text-gray-600 mt-1">Parceria direta com operadores logísticos regionais.</p>
             </div>
             <div className="p-4 bg-purple-50 rounded-xl border border-purple-100">
               <CheckCircle2 className="w-6 h-6 text-purple-700 mb-2" />
-              <h4 className="font-bold text-sm text-gray-900">Produtos com Nota e Garantia</h4>
-              <p className="text-xs text-gray-600 mt-1">Garantia legal de até 12 meses direto com a marca parceira.</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Tab 3: Reviews */}
-      {activeTab === 'reviews' && (
-        <div className="bg-white rounded-2xl border border-gray-200 p-8">
-          <div className="flex items-center gap-4 mb-6 pb-6 border-b border-gray-100">
-            <div className="text-center px-6 border-r border-gray-200">
-              <div className="text-4xl font-black text-gray-900">{currentStore.rating.toFixed(1)}</div>
-              <div className="flex items-center justify-center gap-1 text-amber-500 my-1">
-                {[...Array(5)].map((_, i) => (
-                  <Star key={i} className="w-4 h-4 fill-amber-500" />
-                ))}
-              </div>
-              <span className="text-xs text-gray-500 font-medium">Classificação do Vendedor</span>
-            </div>
-            <div className="text-xs text-gray-600 space-y-1">
-              <p className="font-bold text-gray-900">99% de compradores satisfeitos</p>
-              <p>Entregas pontuais: 98.4%</p>
-              <p>Atendimento rápido: Excelente</p>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold text-xs text-gray-900">Mariama D. (Bissau)</span>
-                <span className="text-[10px] text-gray-400">Há 3 dias</span>
-              </div>
-              <div className="flex items-center gap-1 text-amber-500 text-xs mb-1">
-                {[...Array(5)].map((_, i) => (
-                  <Star key={i} className="w-3.5 h-3.5 fill-amber-500" />
-                ))}
-              </div>
-              <p className="text-xs text-gray-600">
-                Excelente loja! Comprei e entregaram no dia seguinte em Bissau. Embalagem super bem protegida.
-              </p>
-            </div>
-
-            <div className="p-4 bg-gray-50 rounded-xl border border-gray-200">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold text-xs text-gray-900">Carlos E. (Lisboa)</span>
-                <span className="text-[10px] text-gray-400">Há 1 semana</span>
-              </div>
-              <div className="flex items-center gap-1 text-amber-500 text-xs mb-1">
-                {[...Array(5)].map((_, i) => (
-                  <Star key={i} className="w-3.5 h-3.5 fill-amber-500" />
-                ))}
-              </div>
-              <p className="text-xs text-gray-600">
-                Comunicação impecável do vendedor. Produto 100% original e pagamento via MB WAY muito prático.
-              </p>
+              <h4 className="font-bold text-sm text-gray-900">Compra Protegida</h4>
+              <p className="text-xs text-gray-600 mt-1">Disputas mediadas pelo Mercado Nusali em caso de problema com o pedido.</p>
             </div>
           </div>
         </div>

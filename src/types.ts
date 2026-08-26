@@ -388,6 +388,7 @@ export interface FilterState {
   query: string;
   category: string;
   country?: CountryCode | 'all';
+  storeId?: string;
   priceMin?: number;
   priceMax?: number;
   condition?: ProductCondition | 'all';

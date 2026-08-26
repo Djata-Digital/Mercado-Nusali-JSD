@@ -8,6 +8,7 @@ export interface ProductQueryFilters {
   q?: string;
   category?: string;
   country?: string;
+  storeId?: string;
   brand?: string;
   minPrice?: number;
   maxPrice?: number;
@@ -52,6 +53,12 @@ export class CatalogService {
 
     if (filters.country && filters.country !== 'ALL') {
       conditions.push(eq(products.countryCode, filters.country.toUpperCase()));
+    }
+
+    // Fase "Lojas oficiais reais": relacionamento real produto↔loja — nunca
+    // heurística de texto no nome do seller.
+    if (filters.storeId) {
+      conditions.push(eq(products.storeId, filters.storeId));
     }
 
     if (filters.brand) {

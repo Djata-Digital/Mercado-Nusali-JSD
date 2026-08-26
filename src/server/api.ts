@@ -23,6 +23,7 @@ import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
+import { storesPublicRouter } from './modules/stores/storesRoutes.js';
 
 export const apiRouter = Router();
 
@@ -41,6 +42,8 @@ apiRouter.use('/rates', ratesRouter);
 apiRouter.use('/upload', uploadRouter);
 // Public read-only countries catalog (source of truth: `countries` table, active only)
 apiRouter.use('/countries', countriesPublicRouter);
+// Public read-only stores catalog (source of truth: `stores` table, real eligibility filter)
+apiRouter.use('/stores', storesPublicRouter);
 
 // Public Freight Calculation Route (Requirement 2)
 apiRouter.post('/shipping/calculate', async (req: Request, res: Response) => {
@@ -433,16 +436,23 @@ export const inMemoryStore = {
 // 3. Products Endpoints (PostgreSQL + Redis Cache + In-Memory Fallback)
 apiRouter.get('/products', async (req: Request, res: Response) => {
   await ensureDbInitialized();
+
+  // Fase "Lojas oficiais reais": relacionamento real produto↔loja via
+  // products.storeId (nunca heurística de texto no nome do seller). Só a
+  // consulta SEM filtro usa o cache global — uma consulta filtrada por loja
+  // teria que sujar um cache que outras páginas (sem filtro) também leem.
+  const { storeId } = req.query as Record<string, string>;
   const cacheKey = 'products_list_all';
 
-  // Check Redis Cache
-  const cachedProducts = await getCache(cacheKey);
-  if (cachedProducts) {
-    return res.json({
-      success: true,
-      source: 'redis_cache',
-      data: cachedProducts,
-    });
+  if (!storeId) {
+    const cachedProducts = await getCache(cacheKey);
+    if (cachedProducts) {
+      return res.json({
+        success: true,
+        source: 'redis_cache',
+        data: cachedProducts,
+      });
+    }
   }
 
   try {
@@ -450,8 +460,13 @@ apiRouter.get('/products', async (req: Request, res: Response) => {
     if (isConnected) {
       const db = getDb();
       if (db) {
-        const productList = await db.select().from(products).orderBy(desc(products.createdAt));
-        await setCache(cacheKey, productList, 60);
+        const productList = storeId
+          ? await db.select().from(products).where(eq(products.storeId, storeId)).orderBy(desc(products.createdAt))
+          : await db.select().from(products).orderBy(desc(products.createdAt));
+
+        if (!storeId) {
+          await setCache(cacheKey, productList, 60);
+        }
 
         return res.json({
           success: true,
@@ -464,10 +479,12 @@ apiRouter.get('/products', async (req: Request, res: Response) => {
     // DB offline
   }
 
+  // Sem fallback fictício quando a consulta é filtrada por loja — inMemoryStore
+  // não tem noção de storeId real; melhor retornar vazio do que produto errado.
   return res.json({
     success: true,
     source: 'in_memory_fallback',
-    data: inMemoryStore.products,
+    data: storeId ? [] : inMemoryStore.products,
   });
 });
 
