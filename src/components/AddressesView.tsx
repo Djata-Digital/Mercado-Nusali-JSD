@@ -16,9 +16,11 @@ import { BuyerNavHeader } from './BuyerNavHeader';
 import { countriesConfig } from '../utils/currencyUtils';
 import { CountryCode } from '../types';
 import { BuyerService } from '../services/buyerService';
+import { useCountries } from '../hooks/useCountries';
 
 export const AddressesView: React.FC = () => {
   const { selectedCountry, showToast } = usePreferences();
+  const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [savedAddresses, setSavedAddresses] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -31,7 +33,7 @@ export const AddressesView: React.FC = () => {
   const [formComplement, setFormComplement] = useState('');
   const [formCity, setFormCity] = useState('');
   const [formZip, setFormZip] = useState('');
-  const [formCountry, setFormCountry] = useState<CountryCode>('GW');
+  const [formCountry, setFormCountry] = useState<CountryCode>(selectedCountry);
   const [formPhone, setFormPhone] = useState('');
 
   const loadAddresses = async () => {
@@ -287,15 +289,23 @@ export const AddressesView: React.FC = () => {
                   <label className="block text-xs font-bold text-gray-700 mb-1">País</label>
                   <select
                     value={formCountry}
+                    disabled={countriesLoading}
                     onChange={e => setFormCountry(e.target.value as CountryCode)}
-                    className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                   >
-                    {Object.entries(countriesConfig).map(([code, info]) => (
-                      <option key={code} value={code}>
+                    {(!operationalCountries || !operationalCountries.some((c) => c.code === formCountry)) && formCountry && (
+                      <option value={formCountry}>{formCountry}</option>
+                    )}
+                    {operationalCountries?.map((info) => (
+                      <option key={info.code} value={info.code}>
                         {info.flag} {info.name}
                       </option>
                     ))}
                   </select>
+                  {countriesLoading && <p className="text-[10px] text-gray-500 mt-1">Carregando países...</p>}
+                  {!countriesLoading && countriesError && (
+                    <p className="text-[10px] text-red-600 mt-1">Não foi possível carregar a lista de países.</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-gray-700 mb-1">Telefone de Contato</label>

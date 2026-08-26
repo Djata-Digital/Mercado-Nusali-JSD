@@ -23,6 +23,8 @@ import { normalizeProduct } from '../utils/productUtils';
 import { CartService } from '../services/cartService';
 import { storageService } from '../services/storage/storageService';
 import { useAuth } from './AuthContext';
+import { useCountries } from '../hooks/useCountries';
+import { resolveCurrencyForCountry as resolveCurrencyForCountryShared } from '../utils/countryResolution';
 
 interface MarketplaceContextType {
   products: Product[];
@@ -115,14 +117,37 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
     return (localStorage.getItem(LOCAL_STORAGE_KEY_COUNTRY) as CountryCode) || 'GW';
   });
 
+  // Países operacionais reais (GET /api/v1/countries) — fonte única de
+  // verdade para moeda por país. countriesConfig só serve de fallback
+  // seguro enquanto a lista real ainda não carregou (nunca trava a UI, e
+  // nunca é usado para decidir QUAIS países existem).
+  const { data: operationalCountries } = useCountries();
+
+  const resolveCurrencyForCountry = (code: CountryCode): CurrencyCode => {
+    const legacyMap: Record<string, string> = Object.fromEntries(
+      Object.entries(countriesConfig).map(([k, v]) => [k, v.currency])
+    );
+    return (resolveCurrencyForCountryShared(code, operationalCountries, legacyMap) as CurrencyCode) || 'XOF';
+  };
+
   const [selectedCurrency, setSelectedCurrency] = useState<CurrencyCode>(
-    countriesConfig[selectedCountry]?.currency || 'XOF'
+    resolveCurrencyForCountry(selectedCountry)
   );
+
+  // Se a lista real carrega DEPOIS da seleção inicial (ex.: país vindo do
+  // localStorage), resincroniza a moeda assim que os dados reais chegarem —
+  // sem isso, um país real como GM/SN ficaria preso na moeda de fallback.
+  useEffect(() => {
+    if (operationalCountries) {
+      setSelectedCurrency(resolveCurrencyForCountry(selectedCountry));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalCountries]);
 
   const setSelectedCountry = (country: CountryCode) => {
     setSelectedCountryState(country);
     localStorage.setItem(LOCAL_STORAGE_KEY_COUNTRY, country);
-    setSelectedCurrency(countriesConfig[country].currency);
+    setSelectedCurrency(resolveCurrencyForCountry(country));
   };
 
   const initialAllProducts = [...mockInternationalProducts, ...mockProducts.map(p => ({

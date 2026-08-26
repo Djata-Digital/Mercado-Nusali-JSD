@@ -19,6 +19,7 @@ import { isSellerKycApproved } from '../../utils/kycUtils';
 import { SellerStoreData, SellerProfileData } from '../../data/mockSellerData';
 import { CountryCode } from '../../types';
 import { countriesConfig } from '../../utils/currencyUtils';
+import { useCountries } from '../../hooks/useCountries';
 import { uploadService } from '../../services/uploadService';
 import { apiClient } from '../../api/apiClient';
 
@@ -120,7 +121,10 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [selectedCategoryId, setSelectedCategoryId] = useState('');
-  const [country, setCountry] = useState<CountryCode>('GW');
+  // Sem fallback fixo para GW: parte do país real do próprio vendedor
+  // quando disponível; vazio até os países operacionais carregarem, caso não.
+  const [country, setCountry] = useState<CountryCode>(profile?.country || '');
+  const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
   const [city, setCity] = useState('');
   const [address, setAddress] = useState('');
   const [phone, setPhone] = useState('');
@@ -563,14 +567,22 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
                   <select
                     value={country}
                     onChange={(e) => setCountry(e.target.value as CountryCode)}
-                    className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-bold"
+                    disabled={countriesLoading}
+                    className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-bold disabled:opacity-60"
                   >
-                    {(Object.keys(countriesConfig) as CountryCode[]).map((c) => (
-                      <option key={c} value={c}>
-                        {countriesConfig[c].flag} {countriesConfig[c].name}
+                    {(!operationalCountries || !operationalCountries.some((c) => c.code === country)) && country && (
+                      <option value={country}>{country}</option>
+                    )}
+                    {operationalCountries?.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.flag} {c.name}
                       </option>
                     ))}
                   </select>
+                  {countriesLoading && <p className="text-[11px] text-gray-500 mt-1">Carregando países operacionais...</p>}
+                  {!countriesLoading && countriesError && (
+                    <p className="text-[11px] text-red-600 mt-1">Não foi possível carregar a lista de países.</p>
+                  )}
                 </div>
               </div>
 

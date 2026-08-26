@@ -52,6 +52,7 @@ import {
   ProductVariant,
 } from '../../types';
 import { countriesConfig, getCountryFlag, getCountryName } from '../../utils/currencyUtils';
+import { useCountries } from '../../hooks/useCountries';
 
 interface SellerProductWizardProps {
   initialProduct?: Product | null;
@@ -66,7 +67,6 @@ interface SellerProductWizardProps {
   onSelectStore?: (storeId: string) => void;
 }
 
-const ALL_COUNTRY_CODES: CountryCode[] = ['GW', 'BR', 'PT', 'AO', 'US', 'MZ', 'CV', 'ST'];
 
 const COLOR_PRESETS = [
   { name: 'Preto', hex: '#111827' },
@@ -166,13 +166,37 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     return '' as CountryCode;
   });
 
+  const hasExplicitTargetCountries = Boolean(
+    (initialProduct?.targetCountries && initialProduct.targetCountries.length > 0) ||
+    (initialProduct?.shipping?.targetCountries && initialProduct.shipping.targetCountries.length > 0)
+  );
   const [targetCountries, setTargetCountries] = useState<CountryCode[]>(
     initialProduct?.targetCountries && initialProduct.targetCountries.length > 0
       ? initialProduct.targetCountries
       : initialProduct?.shipping?.targetCountries && initialProduct.shipping.targetCountries.length > 0
       ? initialProduct.shipping.targetCountries
-      : ALL_COUNTRY_CODES
+      : []
   );
+
+  // Países operacionais reais (GET /api/v1/countries) — nunca ALL_COUNTRY_CODES.
+  const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
+
+  // Sem alcance internacional automático inventado: só preenche "todos os
+  // países" com dados REAIS assim que a lista carrega, e só quando não havia
+  // seleção explícita salva (produto novo, ou sem esse campo no histórico).
+  useEffect(() => {
+    if (!hasExplicitTargetCountries && operationalCountries && operationalCountries.length > 0 && targetCountries.length === 0) {
+      setTargetCountries(operationalCountries.map((c) => c.code));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalCountries]);
+
+  // Bandeira/nome reais do país de origem (da loja) — getCountryFlag/getCountryName
+  // caem para Guiné-Bissau quando o código não está no countriesConfig legado
+  // (ex.: GM, SN), o que mostraria o país errado para essas lojas.
+  const realOriginCountry = operationalCountries?.find((c) => c.code === originCountry);
+  const originCountryFlag = realOriginCountry?.flag || getCountryFlag(originCountry);
+  const originCountryName = realOriginCountry?.name || getCountryName(originCountry);
 
   // Requirements 1 & 2: NO 'XOF' fallback. Derive from store's countryCode or initialProduct
   const [currency, setCurrency] = useState<CurrencyCode>(() => {
@@ -334,7 +358,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
           ? initialProduct.targetCountries
           : initialProduct.shipping?.targetCountries && initialProduct.shipping.targetCountries.length > 0
           ? initialProduct.shipping.targetCountries
-          : ALL_COUNTRY_CODES
+          : (operationalCountries?.map((c) => c.code) || [])
       );
 
       if (initialProduct.availableColors && initialProduct.availableColors.length > 0) {
@@ -666,8 +690,8 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   };
 
   const handleSelectAllCountries = () => {
-    setTargetCountries(ALL_COUNTRY_CODES);
-    showToast('Todos os países da CPLP e EUA selecionados!');
+    setTargetCountries(operationalCountries?.map((c) => c.code) || []);
+    showToast('Todos os países operacionais selecionados!');
   };
 
   // Media Handlers
@@ -849,7 +873,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
 
     const isInternationalProduct = publishingScope === 'international';
     const effectiveTargetCountries = isInternationalProduct
-      ? (targetCountries.length > 0 ? targetCountries : ALL_COUNTRY_CODES)
+      ? (targetCountries.length > 0 ? targetCountries : (operationalCountries?.map((c) => c.code) || []))
       : [originCountry];
 
     if (isEditing && initialProduct && onUpdateProduct) {
@@ -1372,7 +1396,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                   />
                 </div>
                 <p className="text-xs text-gray-600 leading-relaxed">
-                  O produto será visível e entregue apenas dentro do país de origem ({getCountryName(originCountry)}). Sem taxas aduaneiras internacionais.
+                  O produto será visível e entregue apenas dentro do país de origem ({originCountryName}). Sem taxas aduaneiras internacionais.
                 </p>
               </div>
 
@@ -1413,8 +1437,8 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
               </label>
               {originCountry ? (
                 <div className="w-full sm:w-1/2 p-2.5 border border-gray-300 rounded-xl bg-gray-100 font-bold text-gray-700 flex items-center gap-2">
-                  <span>{getCountryFlag(originCountry)}</span>
-                  <span>{getCountryName(originCountry)} ({originCountry})</span>
+                  <span>{originCountryFlag}</span>
+                  <span>{originCountryName} ({originCountry})</span>
                 </div>
               ) : (
                 <div className="w-full sm:w-1/2 p-2.5 border border-amber-300 rounded-xl bg-amber-50 font-bold text-amber-800 text-xs">
@@ -1459,8 +1483,20 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                   </div>
                 </div>
 
+                {countriesLoading && (
+                  <p className="text-xs text-gray-500">Carregando países operacionais...</p>
+                )}
+                {!countriesLoading && countriesError && (
+                  <p className="text-xs text-red-600">Não foi possível carregar a lista de países. Tente novamente em instantes.</p>
+                )}
+                {!countriesLoading && !countriesError && (!operationalCountries || operationalCountries.length === 0) && (
+                  <p className="text-xs text-amber-700">Nenhum país operacional disponível no momento.</p>
+                )}
+
+                {!countriesLoading && !countriesError && operationalCountries && operationalCountries.length > 0 && (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  {ALL_COUNTRY_CODES.map((code) => {
+                  {operationalCountries.map((c) => {
+                    const code = c.code;
                     const isSelected = targetCountries.includes(code);
                     const isOrigin = code === originCountry;
                     return (
@@ -1474,9 +1510,9 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                         }`}
                       >
                         <div className="flex items-center gap-2">
-                          <span className="text-xl">{getCountryFlag(code)}</span>
+                          <span className="text-xl">{c.flag}</span>
                           <div>
-                            <p className="font-bold text-gray-900 text-xs">{getCountryName(code)}</p>
+                            <p className="font-bold text-gray-900 text-xs">{c.name}</p>
                             <span className="text-[10px] text-gray-500 font-mono">{code}</span>
                           </div>
                         </div>
@@ -1491,11 +1527,12 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                     );
                   })}
                 </div>
+                )}
 
                 <div className="bg-white p-3 rounded-xl border border-indigo-100 flex items-center gap-2 text-xs text-indigo-950">
                   <CheckCircle2 className="w-4 h-4 text-indigo-600 shrink-0" />
                   <span>
-                    Produto visível em <strong>{targetCountries.length} de {ALL_COUNTRY_CODES.length} países</strong>. Compradores desses locais verão os preços convertidos e prazos de entrega específicos.
+                    Produto visível em <strong>{targetCountries.length} de {operationalCountries?.length || 0} países</strong>. Compradores desses locais verão os preços convertidos e prazos de entrega específicos.
                   </span>
                 </div>
               </div>

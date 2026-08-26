@@ -2,7 +2,12 @@ export type ProductCondition = 'novo' | 'usado' | 'recondicionado';
 
 export type ReputationLevel = 'platinum' | 'gold' | 'lider' | 'bom';
 
-export type CountryCode = 'GW' | 'BR' | 'PT' | 'AO' | 'US' | 'MZ' | 'CV' | 'ST';
+// Fase "Países operacionais dinâmicos": deixou de ser um union fixo. Países
+// realmente disponíveis vêm de GET /api/v1/countries (tabela `countries`,
+// isActive=true) — validados em runtime pelo backend, não pelo TypeScript.
+// Mantido como alias de string (não string pura) só para preservar a
+// intenção semântica nos tipos que o consomem.
+export type CountryCode = string;
 export type CurrencyCode = 'XOF' | 'BRL' | 'EUR' | 'AOA' | 'USD' | 'MZN' | 'CVE' | 'STN';
 
 export interface CountryConfig {

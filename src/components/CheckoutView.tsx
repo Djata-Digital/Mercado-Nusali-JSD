@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { PaymentMethodType, DeliveryAddress, PaymentDetails, CountryCode, CurrencyCode } from '../types';
 import { countriesConfig, formatCurrency } from '../utils/currencyUtils';
+import { useCountries } from '../hooks/useCountries';
 import { PixPaymentModal } from './PixPaymentModal';
 import { PixService } from '../services/pixService';
 import { convertToBRL, PixTransaction } from '../utils/pixEngine';
@@ -35,6 +36,7 @@ export const CheckoutView: React.FC = () => {
   const { selectedCountry, selectedCurrency, formatPrice } = usePreferences();
 
   const [country, setCountry] = useState<CountryCode>(selectedCountry);
+  const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Address State initialized with empty/default fields, filled from DB on mount
@@ -314,23 +316,34 @@ export const CheckoutView: React.FC = () => {
                 <label className="block font-semibold text-gray-700 mb-1">País do Destinatário</label>
                 <select
                   value={country}
+                  disabled={countriesLoading}
                   onChange={(e) => {
                     const newCountry = e.target.value as CountryCode;
                     setCountry(newCountry);
                     setAddress({ ...address, country: newCountry });
-                    const newPayMethods = countriesConfig[newCountry].paymentMethods;
-                    if (!newPayMethods.includes(paymentMethod) && paymentMethod !== 'pix') {
+                    // countriesConfig cobre só os 8 países legados — para um
+                    // país real fora dele (ex.: GM, SN) simplesmente não
+                    // reatribui o método de pagamento, em vez de quebrar.
+                    const newPayMethods = countriesConfig[newCountry]?.paymentMethods;
+                    if (newPayMethods && !newPayMethods.includes(paymentMethod) && paymentMethod !== 'pix') {
                       setPaymentMethod(newPayMethods[0] as PaymentMethodType);
                     }
                   }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold bg-gray-50"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold bg-gray-50 disabled:opacity-60"
                 >
-                  {(Object.keys(countriesConfig) as CountryCode[]).map((c) => (
-                    <option key={c} value={c}>
-                      {countriesConfig[c].flag} {countriesConfig[c].name} ({countriesConfig[c].currency})
+                  {(!operationalCountries || !operationalCountries.some((c) => c.code === country)) && country && (
+                    <option value={country}>{country}</option>
+                  )}
+                  {operationalCountries?.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.flag} {c.name} ({c.currency})
                     </option>
                   ))}
                 </select>
+                {countriesLoading && <p className="text-[11px] text-gray-500 mt-1">Carregando países...</p>}
+                {!countriesLoading && countriesError && (
+                  <p className="text-[11px] text-red-600 mt-1">Não foi possível carregar a lista de países.</p>
+                )}
               </div>
 
               <div>

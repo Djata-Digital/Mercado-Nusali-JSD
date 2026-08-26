@@ -45,6 +45,7 @@ import { useProducts, useCategories } from '../hooks/useProducts';
 import { LocationModal } from './LocationModal';
 import { countriesConfig } from '../utils/currencyUtils';
 import { CountryCode } from '../types';
+import { useCountries } from '../hooks/useCountries';
 import { NusaliLogo } from './NusaliLogo';
 import { searchProductsIntelligent, getSynonymsForTerm } from '../utils/searchEngine';
 import { CurrencyConverterModal } from './CurrencyConverterModal';
@@ -231,7 +232,12 @@ export const Header: React.FC = () => {
     return null;
   }, [activeCategory, allProducts]);
 
-  const currentCountry = countriesConfig[selectedCountry] || countriesConfig.GW;
+  const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
+  const currentCountryReal = operationalCountries?.find((c) => c.code === selectedCountry);
+  // Fallback só de exibição (flag/nome/símbolo) enquanto a lista real ainda
+  // não carregou — nunca decide quais países existem, só evita a UI vazia
+  // durante o primeiro carregamento.
+  const currentCountry = currentCountryReal || countriesConfig[selectedCountry] || { flag: '🏳️', name: selectedCountry, currency: '' };
   const curTheme = themeConfig[headerTheme] || themeConfig.green;
 
   return (
@@ -272,31 +278,37 @@ export const Header: React.FC = () => {
                 <div className="px-3 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100">
                   Selecione o País de Operação
                 </div>
-                {(Object.keys(countriesConfig) as CountryCode[]).map((cCode) => {
-                  const conf = countriesConfig[cCode];
-                  return (
-                    <button
-                      key={cCode}
-                      onClick={() => {
-                        setSelectedCountry(cCode);
-                        setIsCountryMenuOpen(false);
-                      }}
-                      className={`w-full text-left px-3.5 py-2 text-xs flex items-center justify-between font-medium transition ${
-                        selectedCountry === cCode
-                          ? 'bg-emerald-50 text-emerald-900 font-bold border-l-4 border-emerald-600'
-                          : 'text-gray-700 hover:bg-gray-50'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg">{conf.flag}</span>
-                        <span>{conf.name}</span>
-                      </div>
-                      <span className="text-[10px] font-black text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
-                        {conf.currency} ({conf.currencySymbol})
-                      </span>
-                    </button>
-                  );
-                })}
+                {countriesLoading && (
+                  <div className="px-3.5 py-3 text-xs text-gray-500">Carregando países...</div>
+                )}
+                {!countriesLoading && countriesError && (
+                  <div className="px-3.5 py-3 text-xs text-red-600">Não foi possível carregar os países. Tente novamente.</div>
+                )}
+                {!countriesLoading && !countriesError && (!operationalCountries || operationalCountries.length === 0) && (
+                  <div className="px-3.5 py-3 text-xs text-amber-700">Nenhum país operacional disponível.</div>
+                )}
+                {!countriesLoading && !countriesError && operationalCountries?.map((conf) => (
+                  <button
+                    key={conf.code}
+                    onClick={() => {
+                      setSelectedCountry(conf.code);
+                      setIsCountryMenuOpen(false);
+                    }}
+                    className={`w-full text-left px-3.5 py-2 text-xs flex items-center justify-between font-medium transition ${
+                      selectedCountry === conf.code
+                        ? 'bg-emerald-50 text-emerald-900 font-bold border-l-4 border-emerald-600'
+                        : 'text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">{conf.flag}</span>
+                      <span>{conf.name}</span>
+                    </div>
+                    <span className="text-[10px] font-black text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
+                      {conf.currency} ({conf.currencySymbol})
+                    </span>
+                  </button>
+                ))}
               </div>
             )}
           </div>
@@ -489,7 +501,7 @@ export const Header: React.FC = () => {
               <div className="flex flex-col text-left">
                 <span className={`text-[10px] leading-3 ${curTheme.addressSubtext}`}>Enviar para</span>
                 <span className={`font-semibold leading-3 ${curTheme.addressMaintext}`}>
-                  {userLocation.city}, {countriesConfig[userLocation.country]?.name || 'Guiné-Bissau'}
+                  {userLocation.city}, {currentCountry.name}
                 </span>
               </div>
             </button>

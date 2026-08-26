@@ -22,6 +22,7 @@ import {
 import { SellerProfileData } from '../../data/mockSellerData';
 import { CountryCode, CurrencyCode } from '../../types';
 import { countriesConfig } from '../../utils/currencyUtils';
+import { useCountries } from '../../hooks/useCountries';
 
 const PRESET_AVATARS = [
   { label: 'Profissional', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250' },
@@ -49,6 +50,7 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
   const [sellerType, setSellerType] = useState(profile.sellerType);
   const [taxId, setTaxId] = useState(profile.taxId);
   const [country, setCountry] = useState<CountryCode>(profile.country);
+  const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
   const [city, setCity] = useState(profile.city);
   const [address, setAddress] = useState(profile.address);
   const [phone, setPhone] = useState(profile.phone);
@@ -300,14 +302,27 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <select
               value={country}
               onChange={(e) => setCountry(e.target.value as CountryCode)}
-              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden bg-white"
+              disabled={countriesLoading}
+              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden bg-white disabled:opacity-60"
             >
-              {(Object.keys(countriesConfig) as CountryCode[]).map((c) => (
-                <option key={c} value={c}>
-                  {countriesConfig[c].flag} {countriesConfig[c].name}
+              {/* País atual do vendedor sempre presente na lista, mesmo antes do
+                  carregamento terminar ou se não estiver mais entre os ativos —
+                  nunca perde a seleção já cadastrada. */}
+              {(!operationalCountries || !operationalCountries.some((c) => c.code === country)) && country && (
+                <option value={country}>{country}</option>
+              )}
+              {operationalCountries?.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.flag} {c.name}
                 </option>
               ))}
             </select>
+            {countriesLoading && (
+              <p className="text-[11px] text-gray-500 mt-1">Carregando países operacionais...</p>
+            )}
+            {!countriesLoading && countriesError && (
+              <p className="text-[11px] text-red-600 mt-1">Não foi possível carregar a lista de países. Tente novamente em instantes.</p>
+            )}
           </div>
 
           <div>

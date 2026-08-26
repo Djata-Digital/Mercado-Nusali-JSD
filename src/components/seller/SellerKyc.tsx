@@ -22,6 +22,7 @@ import { isSellerKycApproved } from '../../utils/kycUtils';
 import { SellerProfileData } from '../../data/mockSellerData';
 import { SellerService } from '../../services/sellerService';
 import { uploadService } from '../../services/uploadService';
+import { useCountries } from '../../hooks/useCountries';
 
 interface SellerKycProps {
   profile: SellerProfileData;
@@ -60,8 +61,10 @@ export const SellerKyc: React.FC<SellerKycProps> = ({ profile, showToast, onNavi
   const [payoutAccount, setPayoutAccount] = useState('');
   const [payoutHolder, setPayoutHolder] = useState(profile?.fullName || '');
 
-  // Authorized Countries State
-  const [selectedCountries, setSelectedCountries] = useState<string[]>(['GW', 'PT', 'BR']);
+  // Authorized Countries State — nenhuma pré-seleção fictícia; o seller marca
+  // os países realmente atendidos entre os operacionais reais (useCountries).
+  const [selectedCountries, setSelectedCountries] = useState<string[]>([]);
+  const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
 
   // Overall Submission Status
   const [submittedStatus, setSubmittedStatus] = useState<'verified' | 'review' | 'pending'>(
@@ -669,31 +672,46 @@ export const SellerKyc: React.FC<SellerKycProps> = ({ profile, showToast, onNavi
           <div className="space-y-4">
             <h3 className="text-sm font-bold text-gray-900">Etapa 7: Seleção de Países de Entrega</h3>
             <p className="text-xs text-gray-500">Marque quais países você tem capacidade logística para enviar produtos.</p>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-              {[
-                { code: 'GW', name: 'Guiné-Bissau' },
-                { code: 'PT', name: 'Portugal' },
-                { code: 'BR', name: 'Brasil' },
-                { code: 'AO', name: 'Angola' },
-                { code: 'MZ', name: 'Moçambique' },
-                { code: 'US', name: 'Estados Unidos' },
-              ].map((c) => {
-                const isSelected = selectedCountries.includes(c.code);
-                return (
-                  <button
-                    type="button"
-                    key={c.code}
-                    onClick={() => toggleCountry(c.code)}
-                    className={`p-3 rounded-xl border flex items-center justify-between font-bold transition cursor-pointer ${
-                      isSelected ? 'border-emerald-600 bg-emerald-50 text-emerald-900' : 'border-gray-200 bg-white text-gray-700'
-                    }`}
-                  >
-                    <span>{c.name}</span>
-                    {isSelected && <Check className="w-4 h-4 text-emerald-600" />}
-                  </button>
-                );
-              })}
-            </div>
+
+            {countriesLoading && (
+              <div className="p-4 text-center text-xs text-gray-500 flex items-center justify-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" /> Carregando países operacionais...
+              </div>
+            )}
+
+            {!countriesLoading && countriesError && (
+              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                Não foi possível carregar a lista de países operacionais. Tente novamente em instantes.
+              </div>
+            )}
+
+            {!countriesLoading && !countriesError && (!operationalCountries || operationalCountries.length === 0) && (
+              <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                Nenhum país operacional disponível no momento.
+              </div>
+            )}
+
+            {!countriesLoading && !countriesError && operationalCountries && operationalCountries.length > 0 && (
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                {operationalCountries.map((c) => {
+                  const isSelected = selectedCountries.includes(c.code);
+                  return (
+                    <button
+                      type="button"
+                      key={c.code}
+                      onClick={() => toggleCountry(c.code)}
+                      className={`p-3 rounded-xl border flex items-center justify-between font-bold transition cursor-pointer ${
+                        isSelected ? 'border-emerald-600 bg-emerald-50 text-emerald-900' : 'border-gray-200 bg-white text-gray-700'
+                      }`}
+                    >
+                      <span>{c.flag} {c.name}</span>
+                      {isSelected && <Check className="w-4 h-4 text-emerald-600" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 

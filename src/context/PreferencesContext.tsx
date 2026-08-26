@@ -8,6 +8,8 @@ import {
 } from '../utils/currencyUtils';
 import { CurrencyService } from '../services/currencyService';
 import { useAuth } from './AuthContext';
+import { useCountries } from '../hooks/useCountries';
+import { resolveCurrencyForCountry } from '../utils/countryResolution';
 
 export type HeaderThemeColor = 'green';
 
@@ -35,11 +37,21 @@ const PreferencesContext = createContext<PreferencesContextType | undefined>(und
 export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user } = useAuth();
 
-  // Initialize display country and currency
+  // Países operacionais reais (GET /api/v1/countries) — única fonte de
+  // verdade sobre quais países/moedas existem de fato. COUNTRY_TO_CURRENCY_MAP
+  // só é usado como fallback seguro enquanto a lista real não carregou, nunca
+  // para decidir se um país é válido.
+  const { data: operationalCountries } = useCountries();
+  const currencyForCountry = (code: CountryCode): CurrencyCode | undefined =>
+    resolveCurrencyForCountry(code, operationalCountries, COUNTRY_TO_CURRENCY_MAP) as CurrencyCode | undefined;
+
+  // Initialize display country and currency. Não invalida a preferência
+  // salva contra um mapa hardcoded — um país real (ex.: GM, SN) fora do
+  // antigo COUNTRY_TO_CURRENCY_MAP não pode ser descartado silenciosamente.
   const [selectedCountry, setSelectedCountryState] = useState<CountryCode>(() => {
     try {
       const saved = localStorage.getItem('nusali_display_country') as CountryCode;
-      if (saved && COUNTRY_TO_CURRENCY_MAP[saved]) return saved;
+      if (saved) return saved;
     } catch (e) {}
     return 'GW';
   });
@@ -49,7 +61,7 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
       const savedCurr = localStorage.getItem('nusali_display_currency') as CurrencyCode;
       if (savedCurr) return savedCurr;
     } catch (e) {}
-    return COUNTRY_TO_CURRENCY_MAP[selectedCountry] || 'XOF';
+    return (COUNTRY_TO_CURRENCY_MAP[selectedCountry] as CurrencyCode) || 'XOF';
   });
 
   // Track if user explicitly selected a preference in session or localStorage
@@ -61,18 +73,34 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   });
 
+  // Assim que a lista real de países carrega, corrige a moeda exibida caso o
+  // país selecionado (salvo ou do usuário) não estivesse no mapa hardcoded
+  // antigo — sem isso, GM/SN ficariam presos em XOF por engano.
+  useEffect(() => {
+    if (!operationalCountries) return;
+    const resolved = currencyForCountry(selectedCountry);
+    if (resolved && resolved !== selectedCurrency) {
+      setSelectedCurrencyState(resolved);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalCountries]);
+
   // Sync with authenticated user profile when logged in (unless user manually selected a header country/currency)
   useEffect(() => {
     if (user && !hasManualSelection) {
       const userCountry = (user.countryCode || (user as any).country || 'GW') as CountryCode;
-      const userCurrency = ((user as any).preferredCurrency || COUNTRY_TO_CURRENCY_MAP[userCountry] || 'XOF') as CurrencyCode;
+      const resolvedCurrency = currencyForCountry(userCountry);
+      const userCurrency = ((user as any).preferredCurrency || resolvedCurrency || 'XOF') as CurrencyCode;
 
-      if (COUNTRY_TO_CURRENCY_MAP[userCountry]) {
-        setSelectedCountryState(userCountry);
-        setSelectedCurrencyState(userCurrency);
-      }
+      // Antes só aplicava se o país estivesse no mapa hardcoded — isso
+      // impedia o próprio país real do usuário (ex.: GM, SN) de ser
+      // refletido no header. Agora aplica sempre: é o país já validado pelo
+      // backend no cadastro/login do usuário.
+      setSelectedCountryState(userCountry);
+      setSelectedCurrencyState(userCurrency);
     }
-  }, [user, hasManualSelection]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, hasManualSelection, operationalCountries]);
 
   const [language, setLanguage] = useState<string>('pt');
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
@@ -80,7 +108,7 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const setSelectedCountry = useCallback((country: CountryCode) => {
-    const matchedCurrency = COUNTRY_TO_CURRENCY_MAP[country] || 'XOF';
+    const matchedCurrency = currencyForCountry(country) || 'XOF';
     setSelectedCountryState(country);
     setSelectedCurrencyState(matchedCurrency);
     setHasManualSelection(true);
@@ -89,7 +117,8 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
       localStorage.setItem('nusali_display_country', country);
       localStorage.setItem('nusali_display_currency', matchedCurrency);
     } catch (e) {}
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [operationalCountries]);
 
   const setSelectedCurrency = useCallback((currency: CurrencyCode) => {
     setSelectedCurrencyState(currency);
