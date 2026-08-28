@@ -133,7 +133,23 @@ export const CheckoutView: React.FC = () => {
     let isMounted = true;
     const fetchFreight = async () => {
       setFreightQuote((prev) => ({ ...prev, loading: true, error: undefined }));
-      const totalWeight = cart.reduce((sum, item) => sum + (item.product.weightKg || 0.5) * item.quantity, 0);
+      // Sem fallback fictício de 0.5kg: se algum item não tem peso real
+      // cadastrado, o frete não pode ser calculado — o backend já rejeita
+      // isso (PRODUCT_WEIGHT_REQUIRED), então detectamos aqui para dar um
+      // erro claro em vez de subestimar o peso silenciosamente.
+      const itemsMissingWeight = cart.filter((item) => !item.product.weightKg || item.product.weightKg <= 0);
+      if (itemsMissingWeight.length > 0) {
+        if (isMounted) {
+          setFreightQuote((prev) => ({
+            ...prev,
+            loading: false,
+            available: false,
+            error: 'Não é possível calcular o frete: um ou mais produtos do carrinho não têm peso cadastrado.',
+          }));
+        }
+        return;
+      }
+      const totalWeight = cart.reduce((sum, item) => sum + item.product.weightKg! * item.quantity, 0);
       const res = await ShippingService.calculateFreight({
         originCountry,
         destinationCountry: destCountry,

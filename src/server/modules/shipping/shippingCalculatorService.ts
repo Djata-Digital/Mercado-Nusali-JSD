@@ -1,6 +1,65 @@
 import { getDb } from '../../../db/index.js';
-import { shippingRates, shippingZones, storeShippingPolicies, sellers, stores } from '../../../db/schema.js';
+import { shippingRates, shippingZones, storeShippingPolicies, sellers, stores, platformSettings } from '../../../db/schema.js';
 import { eq, and, lte, gte } from 'drizzle-orm';
+
+/**
+ * Fase "Comissão percentual + logística real" — peso volumétrico.
+ *
+ * Não existia nenhum modelo de peso volumétrico antes desta fase (confirmado
+ * por auditoria: nenhuma referência a "volumetric"/"cubagem" no código).
+ * Fórmula padrão do setor (mesma usada por Correios/transportadoras):
+ *
+ *   volumetricWeightKg = (lengthCm × widthCm × heightCm) / divisor
+ *   billableWeightKg   = max(actualWeightKg, volumetricWeightKg)
+ *
+ * O divisor é configurável via platformSettings (chave abaixo), nunca
+ * hardcoded. Se não estiver configurado, o peso volumétrico simplesmente não
+ * é calculado — billableWeight cai para o peso real, sem inventar divisor.
+ */
+const VOLUMETRIC_DIVISOR_SETTING_KEY = 'shippingVolumetricDivisor';
+const DEFAULT_SHIPPING_POLICY_SETTING_KEY = 'defaultShippingPolicyMode';
+
+export async function getVolumetricDivisor(executor?: any): Promise<number | null> {
+  const db = executor ?? getDb();
+  if (!db) return null;
+  try {
+    const rows = await db.select().from(platformSettings).where(eq(platformSettings.key, VOLUMETRIC_DIVISOR_SETTING_KEY)).limit(1);
+    if (rows.length === 0) return null;
+    const parsed = Number(rows[0].valueJson);
+    return !isNaN(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function computeBillableWeightKg(
+  actualWeightKg: number,
+  dimensionsCm: { length: number; width: number; height: number } | undefined,
+  volumetricDivisor: number | null
+): { billableWeightKg: number; volumetricWeightKg: number | null } {
+  if (!dimensionsCm || !volumetricDivisor) {
+    return { billableWeightKg: actualWeightKg, volumetricWeightKg: null };
+  }
+  const { length, width, height } = dimensionsCm;
+  if (!length || !width || !height || length <= 0 || width <= 0 || height <= 0) {
+    return { billableWeightKg: actualWeightKg, volumetricWeightKg: null };
+  }
+  const volumetricWeightKg = Math.round(((length * width * height) / volumetricDivisor) * 1000) / 1000;
+  return { billableWeightKg: Math.max(actualWeightKg, volumetricWeightKg), volumetricWeightKg };
+}
+
+async function getDefaultShippingPolicyMode(executor?: any): Promise<string | null> {
+  const db = executor ?? getDb();
+  if (!db) return null;
+  try {
+    const rows = await db.select().from(platformSettings).where(eq(platformSettings.key, DEFAULT_SHIPPING_POLICY_SETTING_KEY)).limit(1);
+    if (rows.length === 0) return null;
+    const mode = String(rows[0].valueJson || '').trim();
+    return mode || null;
+  } catch {
+    return null;
+  }
+}
 
 export interface CalculateFreightInput {
   storeId?: string;
@@ -29,6 +88,8 @@ export interface FreightCalculationResult {
   rateId?: string;
   currency: string;
   available: boolean;
+  billableWeightKg?: number;
+  volumetricWeightKg?: number | null;
   errorMessage?: string;
 }
 
@@ -225,13 +286,22 @@ export class ShippingCalculatorService {
     const originCountry = input.originCountry.trim().toUpperCase();
     const destinationCountry = input.destinationCountry.trim().toUpperCase();
 
+    // Peso volumétrico: só entra em jogo se houver dimensões E divisor
+    // configurado — nunca inventa nenhum dos dois.
+    const volumetricDivisor = await getVolumetricDivisor(executor);
+    const { billableWeightKg, volumetricWeightKg } = computeBillableWeightKg(
+      Number(input.weightKg),
+      input.dimensionsCm,
+      volumetricDivisor
+    );
+
     const rawRate = await this.getRawShippingRate({
       originCountry,
       destinationCountry,
       originRegion: input.originRegion,
       destinationRegion: input.destinationRegion,
       destinationCity: input.destinationCity,
-      weightKg: input.weightKg,
+      weightKg: billableWeightKg,
       currency: input.currency.trim().toUpperCase(),
     }, executor);
 
@@ -254,9 +324,11 @@ export class ShippingCalculatorService {
 
     const currency = rawRate.currency;
     const shippingCost = rawRate.price;
-    let policyMode = 'CUSTOMER_PAYS';
+    let policyMode: string | null = null;
     let sellerSubsidyMaxAmount = 0;
     let sellerSubsidyPercent = 0;
+    let marketplaceSubsidyMaxAmount = 0;
+    let marketplaceSubsidyPercent = 0;
 
     // Fetch store policy if storeId or sellerId supplied
     const db = executor ?? getDb();
@@ -271,13 +343,28 @@ export class ShippingCalculatorService {
         }
         if (policyRows.length > 0 && policyRows[0].isActive) {
           const pol = policyRows[0];
-          policyMode = pol.mode || 'CUSTOMER_PAYS';
+          policyMode = pol.mode || null;
           sellerSubsidyMaxAmount = pol.sellerSubsidyMaxAmount ? Number(pol.sellerSubsidyMaxAmount) : 0;
           sellerSubsidyPercent = pol.sellerSubsidyPercent ? Number(pol.sellerSubsidyPercent) : 0;
+          marketplaceSubsidyMaxAmount = (pol as any).marketplaceSubsidyMaxAmount ? Number((pol as any).marketplaceSubsidyMaxAmount) : 0;
+          marketplaceSubsidyPercent = (pol as any).marketplaceSubsidyPercent ? Number((pol as any).marketplaceSubsidyPercent) : 0;
         }
       } catch (err) {
         console.error('Error reading store shipping policy:', err);
       }
+    }
+
+    // Sem política específica da loja: cai para a política GLOBAL
+    // configurável (platformSettings.defaultShippingPolicyMode, admin via
+    // POST /admin/settings) — nunca um modo de negócio hardcoded no código.
+    // Só se NADA estiver configurado em lugar nenhum é que o comportamento
+    // mais conservador (CUSTOMER_PAYS — cobra o custo real do comprador)
+    // entra como rede de segurança final.
+    if (!policyMode) {
+      policyMode = await getDefaultShippingPolicyMode(executor);
+    }
+    if (!policyMode) {
+      policyMode = 'CUSTOMER_PAYS';
     }
 
     let shippingChargedToBuyer = shippingCost;
@@ -301,9 +388,26 @@ export class ShippingCalculatorService {
       shippingChargedToBuyer = Math.max(0, Math.round((shippingCost - subsidy) * 100) / 100);
       shippingPayer = shippingChargedToBuyer > 0 ? 'shared' : 'seller';
     } else if (policyMode === 'MARKETPLACE_FREE_SHIPPING') {
+      // Correção pós-relatório: MARKETPLACE_FREE_SHIPPING é uma política de
+      // "frete grátis para o comprador" — shippingChargedToBuyer é GARANTIDO
+      // zero enquanto essa política estiver ativa (nunca surpreende o buyer
+      // no checkout). O teto de subsídio da Nusali protege a NUSALI, não o
+      // buyer: o que exceder o teto configurado é transferido para o SELLER
+      // (ele já vende sabendo que a loja está no programa de frete grátis
+      // custeado em conjunto com o marketplace), nunca para o comprador.
+      // Sem teto configurado, a Nusali absorve o custo real integralmente
+      // (comportamento anterior, inalterado).
       shippingChargedToBuyer = 0;
-      shippingMarketplaceSubsidy = shippingCost;
-      shippingPayer = 'marketplace';
+      let marketplaceCap = Infinity;
+      if (marketplaceSubsidyMaxAmount > 0) {
+        marketplaceCap = marketplaceSubsidyMaxAmount;
+      } else if (marketplaceSubsidyPercent > 0) {
+        marketplaceCap = Math.round((shippingCost * (marketplaceSubsidyPercent / 100)) * 100) / 100;
+      }
+      const marketplaceAbsorbed = Math.min(shippingCost, marketplaceCap);
+      shippingMarketplaceSubsidy = marketplaceAbsorbed;
+      shippingSellerSubsidy = Math.max(0, Math.round((shippingCost - marketplaceAbsorbed) * 100) / 100);
+      shippingPayer = shippingSellerSubsidy > 0 ? 'shared' : 'marketplace';
     } else {
       // CUSTOMER_PAYS
       shippingChargedToBuyer = shippingCost;
@@ -325,6 +429,8 @@ export class ShippingCalculatorService {
       rateId: rawRate.rateId,
       currency,
       available: true,
+      billableWeightKg,
+      volumetricWeightKg,
     };
   }
 
@@ -338,13 +444,26 @@ export class ShippingCalculatorService {
     shippingSellerSubsidy: number;
     shippingMarketplaceSubsidy: number;
     commissionRatePercent: number;
+    // Fase "Comissão percentual + logística real": quando a comissão é
+    // calculada por item (categoria pode divergir do seller.commissionRate
+    // item a item), o valor exato já vem somado — evita reconstituir por uma
+    // taxa média e arredondar de novo, o que poderia divergir em centavos.
+    // Se ausente, cai no cálculo por taxa única (comportamento anterior).
+    precomputedCommissionAmount?: number;
     customsDuty?: number;
     buyerDiscounts?: number;
   }) {
     const productSubtotal = params.productSubtotal;
-    const commissionRateSnapshot = params.commissionRatePercent;
     const commissionBase = productSubtotal;
-    const marketplaceCommission = Math.round((commissionBase * (commissionRateSnapshot / 100)) * 100) / 100;
+    const marketplaceCommission = params.precomputedCommissionAmount !== undefined
+      ? Math.round(params.precomputedCommissionAmount * 100) / 100
+      : Math.round((commissionBase * (params.commissionRatePercent / 100)) * 100) / 100;
+    // commissionRateSnapshot é sempre a taxa EFETIVA real (derivada do valor
+    // realmente cobrado), nunca inventada — igual à taxa única quando não há
+    // comissão pré-computada por item.
+    const commissionRateSnapshot = commissionBase > 0
+      ? Math.round((marketplaceCommission / commissionBase) * 10000) / 100
+      : params.commissionRatePercent;
 
     const sellerNetAmount = Math.round((productSubtotal - marketplaceCommission - params.shippingSellerSubsidy) * 100) / 100;
     const customsDuty = params.customsDuty || 0;

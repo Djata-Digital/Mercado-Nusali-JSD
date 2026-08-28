@@ -24,6 +24,7 @@ export interface CreateProductInput {
   model?: string | null;
   stock?: number;
   weightKg?: number | string;
+  dimensionsCm?: { length?: number | string; width?: number | string; height?: number | string };
   image: string;
   storeId: string;
   countryCode?: string;
@@ -239,6 +240,17 @@ export class ProductCreationService {
       throw new Error('PRODUCT_WEIGHT_REQUIRED: O peso do produto (em kg) é obrigatório e deve ser maior que zero — é necessário para o cálculo de frete.');
     }
 
+    // Fase "Comissão percentual + logística real": dimensões reais, mesma
+    // exigência do peso — nenhuma tela pode inventar "20×15×10 cm" quando o
+    // vendedor não informou. Obrigatório > 0 nos três eixos.
+    const toDim = (v: unknown) => (typeof v === 'number' ? v : parseFloat(String(v ?? '')));
+    const lengthNum = toDim(input.dimensionsCm?.length);
+    const widthNum = toDim(input.dimensionsCm?.width);
+    const heightNum = toDim(input.dimensionsCm?.height);
+    if ([lengthNum, widthNum, heightNum].some((n) => isNaN(n) || n <= 0)) {
+      throw new Error('PRODUCT_DIMENSIONS_REQUIRED: As dimensões do produto (comprimento, largura e altura, em cm) são obrigatórias e devem ser maiores que zero — são necessárias para o cálculo de frete.');
+    }
+
     const newProduct = {
       id: productId,
       title: input.title.trim(),
@@ -259,7 +271,7 @@ export class ProductCreationService {
       status: 'active',
       isActive: true,
       attributesJson: specsMap,
-      shippingJson: { weightKg: weightNum },
+      shippingJson: { weightKg: weightNum, lengthCm: lengthNum, widthCm: widthNum, heightCm: heightNum },
       createdAt: new Date(),
       updatedAt: new Date(),
     };

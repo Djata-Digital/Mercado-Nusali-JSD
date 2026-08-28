@@ -162,7 +162,10 @@ export const sellers = pgTable('sellers', {
   phone: varchar('phone', { length: 50 }).notNull(),
   countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
   status: varchar('status', { length: 50 }).notNull().default('active'), // active, pending, suspended, blocked
-  commissionRate: numeric('commission_rate', { precision: 5, scale: 2 }).default('8.00'),
+  // SEM DEFAULT: null = "nenhuma comissão específica negociada para este seller".
+  // Um DEFAULT técnico aqui faria todo seller novo parecer "comercialmente configurado"
+  // sem que ninguém tivesse de fato negociado nada — ver orderService.ts (cadeia de comissão).
+  commissionRate: numeric('commission_rate', { precision: 5, scale: 2 }),
   rating: numeric('rating', { precision: 3, scale: 2 }).default('5.00'),
   totalSales: numeric('total_sales', { precision: 15, scale: 2 }).default('0.00'),
   totalOrders: integer('total_orders').default(0),
@@ -282,6 +285,12 @@ export const categories = pgTable('categories', {
 
   displayOrder: integer('display_order').default(0),
   isActive: boolean('is_active').notNull().default(true),
+  // Fase "Comissão percentual + logística real": comissão configurável por
+  // categoria (GLOBAL_ADMIN, via POST /admin/categories/:id). Nullable —
+  // quando ausente, orderService.ts cai para sellers.commissionRate, depois
+  // platformSettings.defaultSellerCommissionPercent, nunca um valor inventado
+  // sem fonte real.
+  commissionRate: numeric('commission_rate', { precision: 5, scale: 2 }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => ({
   categoriesParentIdx: index('categories_parent_idx').on(table.parentId),
@@ -527,6 +536,12 @@ export const storeShippingPolicies = pgTable('store_shipping_policies', {
   freeShippingMinOrder: numeric('free_shipping_min_order', { precision: 12, scale: 2 }),
   sellerSubsidyMaxAmount: numeric('seller_subsidy_max_amount', { precision: 12, scale: 2 }),
   sellerSubsidyPercent: numeric('seller_subsidy_percent', { precision: 5, scale: 2 }),
+  // Fase "Comissão percentual + logística real": teto do subsídio que a
+  // Nusali (marketplace) absorve no modo MARKETPLACE_FREE_SHIPPING — sem
+  // isso, o marketplace bancaria qualquer custo de frete sem limite. Mesmo
+  // padrão de max-amount OU percent já usado para o subsídio do seller.
+  marketplaceSubsidyMaxAmount: numeric('marketplace_subsidy_max_amount', { precision: 12, scale: 2 }),
+  marketplaceSubsidyPercent: numeric('marketplace_subsidy_percent', { precision: 5, scale: 2 }),
   allowedCountriesJson: jsonb('allowed_countries_json'),
   allowedRegionsJson: jsonb('allowed_regions_json'),
   allowedCitiesJson: jsonb('allowed_cities_json'),

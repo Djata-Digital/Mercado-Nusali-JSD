@@ -134,6 +134,13 @@
       "when": 1787570000000,
       "tag": "0018_refunds_idempotency_and_seller_debit",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1787780000000,
+      "tag": "0019_category_commission_and_marketplace_subsidy_cap",
+      "breakpoints": true
     }
   ]
 }

@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCart } from '../hooks/useCart';
 import { usePreferences } from '../context/PreferencesContext';
 import { formatCurrency } from '../utils/currencyUtils';
-import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag } from 'lucide-react';
+import { ShippingService } from '../services/shippingService';
+import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } from 'lucide-react';
 
 export const CartView: React.FC = () => {
   const navigate = useNavigate();
@@ -30,7 +31,57 @@ export const CartView: React.FC = () => {
   };
 
   const couponDiscount = appliedCoupon?.includes('NUSALI10') ? cartTotal * 0.10 : 0;
-  const shippingFee = cart.length > 0 && cart.every((i) => i.product.shipping?.freeShipping) ? 0 : 29.90;
+
+  // Fase "Comissão percentual + logística real": SEM cálculo financeiro
+  // paralelo no frontend. Mesmo endpoint real (POST /api/v1/shipping/calculate)
+  // que o checkout usa — nunca um valor fixo como os antigos "R$29,90".
+  const [shippingQuote, setShippingQuote] = useState<{
+    loading: boolean;
+    available: boolean;
+    shippingChargedToBuyer: number;
+    currency: string;
+    errorMessage?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    if (cart.length === 0) {
+      setShippingQuote(null);
+      return;
+    }
+    const itemsMissingWeight = cart.filter((i) => !i.product.weightKg || i.product.weightKg <= 0);
+    if (itemsMissingWeight.length > 0) {
+      setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: 'Um ou mais produtos do carrinho não têm peso cadastrado — não é possível calcular o frete.' });
+      return;
+    }
+    const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || '').toUpperCase();
+    if (!originCountry || !selectedCountry) {
+      setShippingQuote(null);
+      return;
+    }
+    setShippingQuote((prev) => ({ ...(prev || { loading: true, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF' }), loading: true }));
+    const totalWeight = cart.reduce((sum, item) => sum + item.product.weightKg! * item.quantity, 0);
+    ShippingService.calculateFreight({
+      originCountry,
+      destinationCountry: selectedCountry.toUpperCase(),
+      weightKg: totalWeight,
+      currency: cart[0]?.product?.currency || 'XOF',
+      storeId: cart[0]?.product?.storeId || cart[0]?.product?.seller?.storeId,
+      sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
+      productSubtotal: cartTotal,
+    }).then((res) => {
+      if (!isMounted) return;
+      if (res.success && res.data) {
+        setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: res.data.shippingChargedToBuyer, currency: res.data.currency });
+      } else {
+        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: res.error?.message || 'Frete indisponível para este destino.' });
+      }
+    });
+    return () => { isMounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cart.length, selectedCountry, cartTotal]);
+
+  const shippingFee = shippingQuote?.available ? shippingQuote.shippingChargedToBuyer : 0;
   const finalTotal = cartTotal + shippingFee - couponDiscount;
 
   if (cart.length === 0) {
@@ -225,9 +276,13 @@ export const CartView: React.FC = () => {
                       </span>
                     </div>
 
-                    <div className="flex justify-between">
-                      <span>Frete Nusali Logística:</span>
-                      {shippingFee === 0 ? (
+                    <div className="flex justify-between items-center">
+                      <span>Frete:</span>
+                      {shippingQuote?.loading ? (
+                        <span className="text-gray-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Calculando...</span>
+                      ) : shippingQuote && !shippingQuote.available ? (
+                        <span className="text-red-600 font-semibold text-[11px]">{shippingQuote.errorMessage || 'Indisponível'}</span>
+                      ) : shippingFee === 0 ? (
                         <span className="font-extrabold text-green-700">GRÁTIS</span>
                       ) : (
                         <span className="font-semibold text-gray-900">

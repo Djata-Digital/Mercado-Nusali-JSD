@@ -21,7 +21,8 @@ import { eq, and, desc, asc, sql, inArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
-import { ShippingCalculatorService } from '../shipping/shippingCalculatorService.js';
+import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor } from '../shipping/shippingCalculatorService.js';
+import { categories, platformSettings } from '../../../db/schema.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -134,6 +135,8 @@ export class OrderService {
         warehouseId: string | null;
         fulfillmentMode: string;
         weightKg: number;
+        dimensionsCm?: { length: number; width: number; height: number };
+        categoryId: string | null;
         originCountry?: string;
       }> = [];
 
@@ -155,11 +158,18 @@ export class OrderService {
         let variantTitle: string | null = null;
         let variantSku: string | null = null;
         let itemWeightKg = 0;
+        let itemDimensionsCm: { length: number; width: number; height: number } | undefined;
 
         if ((prod as any).weight) {
           itemWeightKg = Number((prod as any).weight);
         } else if (prod.shippingJson && typeof prod.shippingJson === 'object' && (prod.shippingJson as any).weightKg) {
           itemWeightKg = Number((prod.shippingJson as any).weightKg);
+        }
+        if (prod.shippingJson && typeof prod.shippingJson === 'object') {
+          const sj = prod.shippingJson as any;
+          if (sj.lengthCm && sj.widthCm && sj.heightCm) {
+            itemDimensionsCm = { length: Number(sj.lengthCm), width: Number(sj.widthCm), height: Number(sj.heightCm) };
+          }
         }
 
         if (ci.variantId) {
@@ -268,6 +278,8 @@ export class OrderService {
             warehouseId: inv.warehouseId || null,
             fulfillmentMode,
             weightKg: itemWeightKg,
+            dimensionsCm: itemDimensionsCm,
+            categoryId: prod.categoryId || null,
           });
 
           remQty -= taken;
@@ -275,13 +287,73 @@ export class OrderService {
         }
       }
 
-      let sellerCommissionRate = 10.0;
+      // Fase "Comissão percentual + logística real" (correção pós-relatório):
+      // comissão é SEMPRE percentual e calculada POR ITEM — nunca um valor
+      // fixo em dinheiro, e o fallback hardcoded de 10% foi REMOVIDO. Cadeia
+      // de fallback, do mais específico ao mais genérico:
+      //   1) categories.commissionRate (por categoria, GLOBAL_ADMIN)
+      //   2) sellers.commissionRate (real, já existente — ver ressalva abaixo)
+      //   3) platformSettings.defaultSellerCommissionPercent (GLOBAL_ADMIN,
+      //      já existia como configuração exibida no admin, nunca lida por
+      //      nenhum cálculo real até a fase anterior — agora é autoridade)
+      // Se NENHUM dos três existir para um item: bloqueia o pedido com
+      // COMMISSION_NOT_CONFIGURED. Nunca um percentual inventado.
+      //
+      // RESSALVA AUDITADA (instrução explícita desta fase): sellers.commissionRate
+      // NÃO é preenchido por negociação real por vendedor — authService.ts
+      // (cadastro público como SELLER) e adminRoutes.ts/createRealAccount
+      // (cadastro pelo admin) gravam '8.00' explicitamente no INSERT para
+      // TODO seller novo, sempre o mesmo valor. Ou seja, na prática, hoje
+      // isso funciona como um segundo default técnico global, não uma
+      // configuração por seller genuinamente negociada — mas é uma coluna
+      // real do banco (não um literal inventado aqui no orderService), e
+      // continua podendo ser editada por vendedor/admin depois da criação.
+      // Reportado explicitamente, não alterado nesta fase (mudar a origem
+      // desse valor é redesenho de arquitetura, fora do escopo pedido).
+      let globalDefaultCommissionRate: number | null = null;
+      const defaultCommissionRows = await tx.select().from(platformSettings).where(eq(platformSettings.key, 'defaultSellerCommissionPercent')).limit(1);
+      if (defaultCommissionRows.length > 0) {
+        const parsed = Number(defaultCommissionRows[0].valueJson);
+        if (!isNaN(parsed) && parsed >= 0) globalDefaultCommissionRate = parsed;
+      }
+
+      let sellerCommissionRate: number | null = null;
       if (primarySellerId) {
         const sellerRows = await tx.select().from(sellers).where(eq(sellers.id, primarySellerId)).limit(1);
-        if (sellerRows.length > 0 && sellerRows[0].commissionRate) {
+        if (sellerRows.length > 0 && sellerRows[0].commissionRate !== null && sellerRows[0].commissionRate !== undefined) {
           sellerCommissionRate = Number(sellerRows[0].commissionRate);
         }
       }
+      // Autoridade do seller, na ausência de comissão específica por categoria.
+      const sellerLevelFallbackRate = sellerCommissionRate ?? globalDefaultCommissionRate;
+
+      const categoryIdsInOrder = Array.from(new Set(verifiedItems.map((i) => i.categoryId).filter((c): c is string => Boolean(c))));
+      const categoryCommissionMap = new Map<string, number>();
+      if (categoryIdsInOrder.length > 0) {
+        const catRows = await tx.select().from(categories).where(inArray(categories.id, categoryIdsInOrder));
+        for (const c of catRows) {
+          if (c.commissionRate !== null && c.commissionRate !== undefined) {
+            categoryCommissionMap.set(c.id, Number(c.commissionRate));
+          }
+        }
+      }
+
+      let marketplaceCommissionPrecomputed = 0;
+      // Só para exibição/auditoria quando não há comissão por categoria em
+      // NENHUM item — o snapshot real do pedido usa o valor calculado por
+      // item de qualquer forma.
+      let sellerCommissionRateForSnapshot: number | null = sellerLevelFallbackRate;
+      for (const item of verifiedItems) {
+        const categoryRate = item.categoryId ? categoryCommissionMap.get(item.categoryId) : undefined;
+        const effectiveRate = categoryRate !== undefined ? categoryRate : sellerLevelFallbackRate;
+        if (effectiveRate === null || effectiveRate === undefined) {
+          throw new Error(
+            `COMMISSION_NOT_CONFIGURED: Não há comissão configurada (nem por categoria, nem por vendedor, nem padrão da plataforma) para o produto "${item.productTitle}". Pedido bloqueado — configure a comissão antes de vender este item.`
+          );
+        }
+        marketplaceCommissionPrecomputed += Math.round((item.subtotal * (effectiveRate / 100)) * 100) / 100;
+      }
+      marketplaceCommissionPrecomputed = Math.round(marketplaceCommissionPrecomputed * 100) / 100;
 
       // Requirement 4: Currency is strictly required
       const currency = userCart.currency || data.currency;
@@ -332,8 +404,15 @@ export class OrderService {
         throw new Error('SHIPPING_DESTINATION_REQUIRED: O endereço de entrega não possui país de destino.');
       }
 
-      // Requirement 6: Calculate real total weight from product/variant weight (NO 0.5kg fallback)
-      const totalWeightKg = verifiedItems.reduce((acc, i) => acc + (i.weightKg * i.quantity), 0);
+      // Requirement 6: Calculate real total weight from product/variant weight (NO 0.5kg fallback).
+      // Peso volumétrico (se dimensões + divisor configurado existirem) é
+      // aplicado POR ITEM antes de multiplicar pela quantidade e somar — o
+      // billableWeight de cada parcela, não do pedido inteiro combinado.
+      const volumetricDivisor = await getVolumetricDivisor(tx);
+      const totalWeightKg = verifiedItems.reduce((acc, i) => {
+        const { billableWeightKg } = computeBillableWeightKg(i.weightKg, i.dimensionsCm, volumetricDivisor);
+        return acc + billableWeightKg * i.quantity;
+      }, 0);
 
       // Requirement 2 & 3: Calculate freight via service & BLOCK order if freight rate unavailable
       const freightRes = await ShippingCalculatorService.calculateFreight({
@@ -358,7 +437,12 @@ export class OrderService {
         shippingChargedToBuyer: freightRes.shippingChargedToBuyer,
         shippingSellerSubsidy: freightRes.shippingSellerSubsidy,
         shippingMarketplaceSubsidy: freightRes.shippingMarketplaceSubsidy,
-        commissionRatePercent: sellerCommissionRate,
+        // Nunca usado de fato: precomputedCommissionAmount abaixo já é o
+        // valor real (por item, validado — pedido teria sido bloqueado por
+        // COMMISSION_NOT_CONFIGURED se algum item não tivesse comissão).
+        // Só serve de fallback teórico se commissionBase for <= 0.
+        commissionRatePercent: sellerCommissionRateForSnapshot ?? 0,
+        precomputedCommissionAmount: marketplaceCommissionPrecomputed,
         customsDuty: 0,
         buyerDiscounts: 0,
       });

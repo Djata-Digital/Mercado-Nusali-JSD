@@ -44,6 +44,8 @@ import { useFavorites } from '../hooks/useFavorites';
 import { usePreferences } from '../context/PreferencesContext';
 import { normalizeProduct } from '../utils/productUtils';
 import { getCountryFlag, getCountryName, formatCurrency } from '../utils/currencyUtils';
+import { useCountries } from '../hooks/useCountries';
+import { ShippingService } from '../services/shippingService';
 import { ProductMediaViewerModal, MediaItem } from './ProductMediaViewerModal';
 import { ProductShareModal } from './ProductShareModal';
 import { ProductKit, ProductColor, ProductVariant } from '../types';
@@ -382,6 +384,74 @@ export const ProductDetailView: React.FC = () => {
   const originCountry = product.originCountry || product.shipping?.originCountry || product.seller?.country || '';
 
   const [isAnsweringQuestion, setIsAnsweringQuestion] = useState(false);
+
+  // Fase "Comissão percentual + logística real" — Seção 10: a condição real
+  // de entrega (frete/prazo) precisa aparecer ANTES de Comprar/Adicionar ao
+  // carrinho, não só depois de clicar em Comprar. Usa o MESMO endpoint real
+  // (POST /api/v1/shipping/calculate) que o checkout já usa — nunca um
+  // cálculo paralelo no frontend.
+  const { data: operationalCountriesForDelivery } = useCountries();
+  const [deliveryQuote, setDeliveryQuote] = useState<{
+    loading: boolean;
+    available: boolean;
+    shippingChargedToBuyer: number;
+    currency: string;
+    estimatedMinDays: number;
+    estimatedMaxDays: number;
+    errorCode?: string;
+    errorMessage?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    const hasShippableData = Boolean(product?.weightKg && product.weightKg > 0 && originCountry && selectedCountry);
+    if (!hasShippableData) {
+      setDeliveryQuote(null);
+      return;
+    }
+    setDeliveryQuote((prev) => ({ ...(prev || {
+      loading: true, available: false, shippingChargedToBuyer: 0, currency: productCurrency, estimatedMinDays: 0, estimatedMaxDays: 0,
+    }), loading: true }));
+
+    ShippingService.calculateFreight({
+      originCountry,
+      destinationCountry: selectedCountry,
+      weightKg: product!.weightKg!,
+      dimensionsCm: product!.dimensionsCm,
+      currency: productCurrency,
+      storeId: product!.storeId || undefined,
+      sellerId: product!.seller?.id || undefined,
+      productSubtotal: effectiveUnitPrice * quantity,
+    }).then((res) => {
+      if (!isMounted) return;
+      if (res.success && res.data) {
+        setDeliveryQuote({
+          loading: false,
+          available: true,
+          shippingChargedToBuyer: res.data.shippingChargedToBuyer,
+          currency: res.data.currency,
+          estimatedMinDays: res.data.estimatedMinDays,
+          estimatedMaxDays: res.data.estimatedMaxDays,
+        });
+      } else {
+        setDeliveryQuote({
+          loading: false,
+          available: false,
+          shippingChargedToBuyer: 0,
+          currency: productCurrency,
+          estimatedMinDays: 0,
+          estimatedMaxDays: 0,
+          errorCode: res.error?.code,
+          errorMessage: res.error?.message || 'Frete indisponível para este destino.',
+        });
+      }
+    });
+
+    return () => { isMounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product?.id, product?.weightKg, originCountry, selectedCountry, quantity]);
+
+  const deliveryDestinationCountry = operationalCountriesForDelivery?.find((c) => c.code === selectedCountry);
 
   const handleAskQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -933,7 +1003,7 @@ export const ProductDetailView: React.FC = () => {
               <div>
                 Peso:{' '}
                 <strong className="text-gray-900">
-                  {product.weightKg ? `${product.weightKg} kg` : product.specs?.Peso || '0.50 kg'}
+                  {product.weightKg ? `${product.weightKg} kg` : 'Não informado'}
                 </strong>
               </div>
               <div>
@@ -941,7 +1011,7 @@ export const ProductDetailView: React.FC = () => {
                 <strong className="text-gray-900">
                   {product.dimensionsCm
                     ? `${product.dimensionsCm.length}×${product.dimensionsCm.width}×${product.dimensionsCm.height} cm`
-                    : product.specs?.Dimensões || '20×15×10 cm'}
+                    : 'Não informado'}
                 </strong>
               </div>
             </div>
@@ -952,19 +1022,61 @@ export const ProductDetailView: React.FC = () => {
         <div className="lg:col-span-3 space-y-4">
           {/* Buy Box Card */}
           <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-xs space-y-4">
-            {/* Shipping Info */}
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 font-bold text-sm text-gray-800">
-                <Truck className="w-5 h-5 text-gray-600" />
-                <span>
-                  {product.shipping?.freeShipping
-                    ? 'Frete GRÁTIS'
-                    : 'Frete calculado no checkout'}
+            {/* ENTREGA — condição real de frete, ANTES dos botões de compra.
+                Nunca "frete calculado no checkout": se já há peso/dimensões
+                do produto e um destino selecionado, o cálculo real já roda
+                aqui, pelo mesmo endpoint que o checkout usa. */}
+            <div className="space-y-2 bg-gray-50 p-3 rounded-xl border border-gray-200">
+              <div className="flex items-center gap-2 font-bold text-sm text-gray-900">
+                <Truck className="w-4.5 h-4.5 text-gray-700" />
+                <span>Entrega</span>
+              </div>
+
+              <div className="text-xs text-gray-700 flex items-center justify-between">
+                <span className="text-gray-500">Destino:</span>
+                <span className="font-bold text-gray-900 flex items-center gap-1">
+                  {deliveryDestinationCountry ? `${deliveryDestinationCountry.flag} ${deliveryDestinationCountry.name}` : selectedCountry}
                 </span>
               </div>
-              {product.shipping?.arrivesTomorrow && (
-                <p className="text-xs text-green-700 font-semibold pl-7">
-                  Chega amanhã em {userLocation.city}
+
+              {!product.weightKg && (
+                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                  Este produto ainda não tem peso cadastrado pelo vendedor — não é possível calcular o frete nem finalizar a compra até que isso seja corrigido.
+                </p>
+              )}
+
+              {product.weightKg && !selectedCountry && (
+                <p className="text-[11px] text-gray-600">Informe seu destino para calcular a entrega.</p>
+              )}
+
+              {product.weightKg && selectedCountry && deliveryQuote?.loading && (
+                <p className="text-xs text-gray-500 flex items-center gap-1.5">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Calculando frete...
+                </p>
+              )}
+
+              {product.weightKg && selectedCountry && !deliveryQuote?.loading && deliveryQuote?.available && (
+                <>
+                  <div className="text-xs flex items-center justify-between">
+                    <span className="text-gray-500">Frete:</span>
+                    <span className="font-black text-emerald-700">
+                      {deliveryQuote.shippingChargedToBuyer > 0
+                        ? formatCurrency(deliveryQuote.shippingChargedToBuyer, deliveryQuote.currency as any)
+                        : 'GRÁTIS'}
+                    </span>
+                  </div>
+                  <div className="text-xs flex items-center justify-between">
+                    <span className="text-gray-500">Prazo estimado:</span>
+                    <span className="font-bold text-gray-900">
+                      {deliveryQuote.estimatedMinDays}–{deliveryQuote.estimatedMaxDays} dias úteis
+                    </span>
+                  </div>
+                </>
+              )}
+
+              {product.weightKg && selectedCountry && !deliveryQuote?.loading && deliveryQuote && !deliveryQuote.available && (
+                <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
+                  {deliveryQuote.errorMessage || 'Frete indisponível para este destino no momento.'}
                 </p>
               )}
             </div>
@@ -1018,19 +1130,21 @@ export const ProductDetailView: React.FC = () => {
             {/* Action Buttons */}
             <div className="space-y-2 pt-2">
               <button
-                disabled={isCurrentVariationOutOfStock}
+                disabled={isCurrentVariationOutOfStock || !product.weightKg}
                 onClick={handleBuyNow}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black py-3 px-4 rounded-xl shadow-xs transition transform active:scale-98 text-sm cursor-pointer"
               >
                 {isCurrentVariationOutOfStock
                   ? 'Variação Esgotada'
+                  : !product.weightKg
+                  ? 'Indisponível (peso não cadastrado)'
                   : selectedKit
                   ? `Comprar ${selectedKit.title}`
                   : 'Comprar agora'}
               </button>
 
               <button
-                disabled={isCurrentVariationOutOfStock}
+                disabled={isCurrentVariationOutOfStock || !product.weightKg}
                 onClick={handleAddToCart}
                 className="w-full bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed text-blue-700 font-extrabold py-3 px-4 rounded-xl transition text-sm border border-blue-200 cursor-pointer"
               >

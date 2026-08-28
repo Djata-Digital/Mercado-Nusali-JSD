@@ -865,8 +865,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     const parsedWidth = widthCm ? parseFloat(widthCm) : undefined;
     const parsedHeight = heightCm ? parseFloat(heightCm) : undefined;
 
-    const hasDimensions = parsedLength !== undefined && parsedWidth !== undefined && parsedHeight !== undefined;
-    const dimensionsObj = hasDimensions ? { length: parsedLength, width: parsedWidth, height: parsedHeight } : undefined;
+    // Mesma exigência do peso: o backend rejeita a criação/edição sem
+    // dimensões válidas (shippingCalculatorService precisa delas para o
+    // peso volumétrico), então bloqueamos aqui também com um erro claro.
+    const hasDimensions = parsedLength !== undefined && !isNaN(parsedLength) && parsedLength > 0
+      && parsedWidth !== undefined && !isNaN(parsedWidth) && parsedWidth > 0
+      && parsedHeight !== undefined && !isNaN(parsedHeight) && parsedHeight > 0;
+    if (!hasDimensions) {
+      showToast('Por favor, informe o comprimento, largura e altura da embalagem, em cm (todos obrigatórios, maiores que zero) — necessários para calcular o frete.');
+      return;
+    }
+    const dimensionsObj = { length: parsedLength, width: parsedWidth, height: parsedHeight };
     const formattedDimensionsStr = hasDimensions ? `${parsedLength} × ${parsedWidth} × ${parsedHeight} cm` : undefined;
 
     const cleanVideoUrl = shortVideoUrl && shortVideoUrl.startsWith('http') ? shortVideoUrl.trim() : undefined;

@@ -463,7 +463,10 @@ sellerRouter.post('/onboard', async (req: AuthRequest, res: Response) => {
       phone: finalPhone,
       countryCode: finalCountryCode,
       status: 'pending',
-      commissionRate: '8.00',
+      // NULL = nenhuma comissão específica negociada ainda; a comissão real
+      // vem de category.commissionRate ou platformSettings.defaultSellerCommissionPercent
+      // (ver orderService.ts). NUNCA gravar aqui um percentual técnico "de fábrica".
+      commissionRate: null,
       rating: '5.00',
       totalSales: '0.00',
       totalOrders: 0,
@@ -1180,6 +1183,9 @@ sellerRouter.get('/products', async (req: AuthRequest, res: Response) => {
         rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
         stock: Number(p.stock),
         weightKg: (p.shippingJson && typeof p.shippingJson === 'object') ? (p.shippingJson as any).weightKg : undefined,
+        dimensionsCm: (p.shippingJson && typeof p.shippingJson === 'object' && (p.shippingJson as any).lengthCm)
+          ? { length: (p.shippingJson as any).lengthCm, width: (p.shippingJson as any).widthCm, height: (p.shippingJson as any).heightCm }
+          : undefined,
       }));
       if (q && typeof q === 'string') {
         const term = q.toLowerCase();
@@ -1218,6 +1224,9 @@ sellerRouter.get('/products/:id', async (req: Request, res: Response) => {
             rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
             stock: Number(p.stock),
             weightKg: (p.shippingJson && typeof p.shippingJson === 'object') ? (p.shippingJson as any).weightKg : undefined,
+            dimensionsCm: (p.shippingJson && typeof p.shippingJson === 'object' && (p.shippingJson as any).lengthCm)
+              ? { length: (p.shippingJson as any).lengthCm, width: (p.shippingJson as any).widthCm, height: (p.shippingJson as any).heightCm }
+              : undefined,
             variants,
             images: imageUrls.length > 0 ? imageUrls : (p.image ? [p.image] : []),
             galleryImages: imageUrls.length > 0 ? imageUrls : (p.image ? [p.image] : []),
@@ -1306,9 +1315,14 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     if (updates.freeShipping !== undefined) fieldsToUpdate.freeShipping = updates.freeShipping;
     if (updates.full !== undefined) fieldsToUpdate.full = updates.full;
 
-    // BLOCKER_LAUNCH: peso é obrigatório para o checkout calcular frete
-    // (orderService lê products.shippingJson.weightKg). Editar não pode
-    // apagar um peso já válido nem persistir peso <= 0.
+    // BLOCKER_LAUNCH: peso e dimensões são obrigatórios para o checkout
+    // calcular frete (orderService/shippingCalculatorService leem
+    // products.shippingJson). Editar não pode apagar um valor já válido nem
+    // persistir peso/dimensão <= 0. Os dois blocos escrevem no MESMO objeto
+    // acumulado — nunca um sobrescrevendo o outro.
+    const existingShippingJson: Record<string, any> = (check.product.shippingJson && typeof check.product.shippingJson === 'object') ? { ...check.product.shippingJson } : {};
+    let shippingJsonChanged = false;
+
     if (updates.weightKg !== undefined) {
       const weightNum = typeof updates.weightKg === 'number' ? updates.weightKg : parseFloat(String(updates.weightKg));
       if (isNaN(weightNum) || weightNum <= 0) {
@@ -1317,8 +1331,29 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
           error: { code: 'PRODUCT_WEIGHT_REQUIRED', message: 'O peso do produto (em kg) deve ser maior que zero.' },
         });
       }
-      const existingShippingJson = (check.product.shippingJson && typeof check.product.shippingJson === 'object') ? check.product.shippingJson : {};
-      fieldsToUpdate.shippingJson = { ...existingShippingJson, weightKg: weightNum };
+      existingShippingJson.weightKg = weightNum;
+      shippingJsonChanged = true;
+    }
+
+    if (updates.dimensionsCm !== undefined) {
+      const toDim = (v: unknown) => (typeof v === 'number' ? v : parseFloat(String(v ?? '')));
+      const lengthNum = toDim(updates.dimensionsCm?.length);
+      const widthNum = toDim(updates.dimensionsCm?.width);
+      const heightNum = toDim(updates.dimensionsCm?.height);
+      if ([lengthNum, widthNum, heightNum].some((n) => isNaN(n) || n <= 0)) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'PRODUCT_DIMENSIONS_REQUIRED', message: 'As dimensões do produto (comprimento, largura e altura, em cm) devem ser maiores que zero.' },
+        });
+      }
+      existingShippingJson.lengthCm = lengthNum;
+      existingShippingJson.widthCm = widthNum;
+      existingShippingJson.heightCm = heightNum;
+      shippingJsonChanged = true;
+    }
+
+    if (shippingJsonChanged) {
+      fieldsToUpdate.shippingJson = existingShippingJson;
     }
 
     // The store is the sole authority over the product's country/currency — same rule as

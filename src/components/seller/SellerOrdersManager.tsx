@@ -26,6 +26,7 @@ import { CurrencyCode } from '../../types';
 import { formatCurrency, countriesConfig } from '../../utils/currencyUtils';
 import { SellerService } from '../../services/sellerService';
 import { ShippingLabelModal, ShippingLabelData } from '../common/ShippingLabelModal';
+import { computeSellerOrderFinancialBreakdown } from '../../utils/sellerOrderFinancials';
 
 interface SellerOrdersManagerProps {
   orders: SellerOrderData[];
@@ -388,17 +389,8 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                 <DollarSign className="w-4 h-4 text-emerald-600" /> Detalhamento Financeiro da Venda
               </h4>
               {(() => {
-                const subtotal = selectedOrder.amount;
-                const commissionRate = (selectedOrder as any).commissionRateSnapshot ? Number((selectedOrder as any).commissionRateSnapshot) : 10;
-                const commission = (selectedOrder as any).marketplaceCommission
-                  ? Number((selectedOrder as any).marketplaceCommission)
-                  : Math.round(subtotal * (commissionRate / 100) * 100) / 100;
-                const sellerSubsidy = (selectedOrder as any).shippingSellerSubsidy
-                  ? Number((selectedOrder as any).shippingSellerSubsidy)
-                  : 0;
-                const sellerNet = (selectedOrder as any).sellerNetAmount
-                  ? Number((selectedOrder as any).sellerNetAmount)
-                  : Math.round((subtotal - commission - sellerSubsidy) * 100) / 100;
+                const { subtotal, commissionRateLabel, commission, sellerSubsidy, sellerNet } =
+                  computeSellerOrderFinancialBreakdown(selectedOrder as any);
 
                 return (
                   <div className="space-y-1.5 pt-1">
@@ -407,8 +399,8 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                       <span className="font-bold text-gray-900">{formatCurrency(subtotal, selectedCurrency)}</span>
                     </div>
                     <div className="flex justify-between text-red-600 font-medium">
-                      <span>Comissão Nusali ({commissionRate}%):</span>
-                      <span>- {formatCurrency(commission, selectedCurrency)}</span>
+                      <span>Comissão Nusali ({commissionRateLabel}):</span>
+                      <span>{commission !== null ? `- ${formatCurrency(commission, selectedCurrency)}` : '—'}</span>
                     </div>
                     {sellerSubsidy > 0 && (
                       <div className="flex justify-between text-amber-700 font-medium">
@@ -418,7 +410,7 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                     )}
                     <div className="flex justify-between items-baseline pt-2 border-t border-gray-100 font-extrabold text-sm text-emerald-800">
                       <span>Líquido do Vendedor (Recebível):</span>
-                      <span>{formatCurrency(sellerNet, selectedCurrency)}</span>
+                      <span>{sellerNet !== null ? formatCurrency(sellerNet, selectedCurrency) : '—'}</span>
                     </div>
                   </div>
                 );

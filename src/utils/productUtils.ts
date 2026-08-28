@@ -103,8 +103,23 @@ export function normalizeProduct(p: any): Product {
     storeId: p.storeId || p.seller?.storeId || '',
     storeName: p.storeName || p.seller?.name || '',
     isDigitalProduct: Boolean(p.isDigitalProduct),
-    weightKg: typeof p.weightKg === 'number' ? p.weightKg : (p.specs?.Peso ? parseFloat(p.specs.Peso.replace(/[^\d.]/g, '')) || 0 : 0),
-    dimensionsCm: p.dimensionsCm || undefined,
+    // Fase "Comissão percentual + logística real": peso/dimensões reais só
+    // vêm de campos estruturados de verdade — nunca de p.specs (texto livre
+    // digitado pelo vendedor em outro contexto) nem de um número inventado.
+    // A fonte "achatada" (weightKg/dimensionsCm) é usada quando já vem assim
+    // de rotas que já normalizam (ex.: painel do vendedor); a fonte "crua"
+    // products.shippingJson é usada quando o objeto vem direto do banco
+    // (ex.: GET /products/:id público) — mesma coluna, dois formatos de
+    // resposta possíveis.
+    weightKg: typeof p.weightKg === 'number' && p.weightKg > 0
+      ? p.weightKg
+      : (p.shippingJson && typeof p.shippingJson === 'object' && Number(p.shippingJson.weightKg) > 0
+        ? Number(p.shippingJson.weightKg)
+        : undefined),
+    dimensionsCm: p.dimensionsCm
+      || (p.shippingJson && typeof p.shippingJson === 'object' && p.shippingJson.lengthCm && p.shippingJson.widthCm && p.shippingJson.heightCm
+        ? { length: Number(p.shippingJson.lengthCm), width: Number(p.shippingJson.widthCm), height: Number(p.shippingJson.heightCm) }
+        : undefined),
     publishingScope: p.publishingScope || (p.shipping?.isInternational ? 'international' : 'national'),
     targetCountries: Array.isArray(p.targetCountries) ? p.targetCountries : (p.shipping?.targetCountries || []),
     originCountry: resolvedOriginCountry,

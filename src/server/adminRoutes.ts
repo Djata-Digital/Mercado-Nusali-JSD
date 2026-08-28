@@ -22,6 +22,7 @@ import {
   platformSettings,
   disputes,
   sellers,
+  storeShippingPolicies,
   sellerProfiles,
   sellerKyc,
   sellerDocuments,
@@ -2865,7 +2866,7 @@ adminRouter.patch('/categories/:id', requireAuth, async (req: AuthRequest, res: 
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
 
     const { id } = req.params;
-    const { name, slug, icon, parentId, displayOrder, isActive } = req.body ?? {};
+    const { name, slug, icon, parentId, displayOrder, isActive, commissionRate } = req.body ?? {};
 
     const [existing] = await db.select().from(categories).where(eq(categories.id, id)).limit(1);
     if (!existing) {
@@ -2902,6 +2903,20 @@ adminRouter.patch('/categories/:id', requireAuth, async (req: AuthRequest, res: 
     }
     if (displayOrder !== undefined) updateData.displayOrder = Number(displayOrder);
     if (isActive !== undefined) updateData.isActive = Boolean(isActive);
+    // Fase "Comissão percentual + logística real": comissão por categoria —
+    // SEMPRE percentual (nunca valor fixo em dinheiro), null explícito
+    // remove a taxa da categoria (volta a cair para sellers.commissionRate).
+    if (commissionRate !== undefined) {
+      if (commissionRate === null || commissionRate === '') {
+        updateData.commissionRate = null;
+      } else {
+        const rate = Number(commissionRate);
+        if (isNaN(rate) || rate < 0 || rate > 100) {
+          throw new AdminRequestError(400, 'A comissão da categoria deve ser um percentual entre 0 e 100.');
+        }
+        updateData.commissionRate = String(rate);
+      }
+    }
 
     await db.update(categories).set(updateData).where(eq(categories.id, id));
     await delCache('catalog:categories');
@@ -3606,6 +3621,84 @@ adminRouter.delete('/shipping-rates/:id', requireLogisticsStaff, async (req: Aut
     const { id } = req.params;
     await db.delete(shippingRates).where(eq(shippingRates.id, id));
     return res.json({ success: true, message: 'Tarifa de frete removida.' });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// ==========================================
+// POLÍTICA DE FRETE — SUBSÍDIO NUSALI (Fase "Comissão percentual + logística real")
+// ==========================================
+// MARKETPLACE_FREE_SHIPPING e o teto de subsídio da Nusali são autoridade
+// exclusiva do GLOBAL_ADMIN — sellerRoutes.ts já bloqueia sellers de
+// escolherem esse modo ("Requirement 12"). Reaproveita a mesma tabela
+// store_shipping_policies já usada pelo vendedor, sem criar estrutura nova.
+adminRouter.get('/stores/:id/shipping-policy', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const { id } = req.params;
+    const [store] = await db.select().from(stores).where(eq(stores.id, id)).limit(1);
+    if (!store) return res.status(404).json({ success: false, message: 'Loja não encontrada.' });
+
+    const [policy] = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.storeId, id)).limit(1);
+    return res.json({
+      success: true,
+      data: policy || { storeId: id, mode: null, marketplaceSubsidyMaxAmount: null, marketplaceSubsidyPercent: null, isActive: false },
+    });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+adminRouter.post('/stores/:id/shipping-policy', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const { id: storeId } = req.params;
+    const { mode, marketplaceSubsidyMaxAmount, marketplaceSubsidyPercent, isActive } = req.body ?? {};
+
+    const [store] = await db.select().from(stores).where(eq(stores.id, storeId)).limit(1);
+    if (!store) return res.status(404).json({ success: false, message: 'Loja não encontrada.' });
+
+    const ALLOWED_MODES = ['CUSTOMER_PAYS', 'SELLER_FREE_SHIPPING', 'SELLER_SUBSIDIZED', 'MARKETPLACE_FREE_SHIPPING', 'PICKUP'];
+    if (mode !== undefined && !ALLOWED_MODES.includes(mode)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_SHIPPING_POLICY_MODE', message: `Modo inválido. Use um de: ${ALLOWED_MODES.join(', ')}.` } });
+    }
+    if (marketplaceSubsidyMaxAmount !== undefined && marketplaceSubsidyMaxAmount !== null) {
+      const n = Number(marketplaceSubsidyMaxAmount);
+      if (isNaN(n) || n < 0) return res.status(400).json({ success: false, message: 'Teto de subsídio (valor) deve ser um número maior ou igual a zero.' });
+    }
+    if (marketplaceSubsidyPercent !== undefined && marketplaceSubsidyPercent !== null) {
+      const n = Number(marketplaceSubsidyPercent);
+      if (isNaN(n) || n < 0 || n > 100) return res.status(400).json({ success: false, message: 'Teto de subsídio (percentual) deve estar entre 0 e 100.' });
+    }
+
+    const existing = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.storeId, storeId)).limit(1);
+    const updateFields: any = { updatedAt: new Date() };
+    if (mode !== undefined) updateFields.mode = mode;
+    if (marketplaceSubsidyMaxAmount !== undefined) updateFields.marketplaceSubsidyMaxAmount = marketplaceSubsidyMaxAmount === null ? null : String(Number(marketplaceSubsidyMaxAmount));
+    if (marketplaceSubsidyPercent !== undefined) updateFields.marketplaceSubsidyPercent = marketplaceSubsidyPercent === null ? null : String(Number(marketplaceSubsidyPercent));
+    if (isActive !== undefined) updateFields.isActive = Boolean(isActive);
+
+    if (existing.length > 0) {
+      await db.update(storeShippingPolicies).set(updateFields).where(eq(storeShippingPolicies.id, existing[0].id));
+    } else {
+      await db.insert(storeShippingPolicies).values({
+        id: `pol_admin_${Date.now()}`,
+        storeId,
+        sellerId: store.sellerId,
+        mode: mode || 'CUSTOMER_PAYS',
+        marketplaceSubsidyMaxAmount: marketplaceSubsidyMaxAmount !== undefined && marketplaceSubsidyMaxAmount !== null ? String(Number(marketplaceSubsidyMaxAmount)) : null,
+        marketplaceSubsidyPercent: marketplaceSubsidyPercent !== undefined && marketplaceSubsidyPercent !== null ? String(Number(marketplaceSubsidyPercent)) : null,
+        isActive: isActive !== undefined ? Boolean(isActive) : true,
+      });
+    }
+
+    await writeRealAudit(req, 'admin.shipping_policy.updated', 'store_shipping_policies', storeId, req.body);
+
+    const [updated] = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.storeId, storeId)).limit(1);
+    return res.json({ success: true, message: 'Política de frete da loja atualizada com sucesso!', data: updated });
   } catch (error: any) {
     return sendAdminError(res, error);
   }

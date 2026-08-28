@@ -119,7 +119,10 @@ export class AuthService {
           phone: data.phone || '',
           countryCode,
           status: 'pending',
-          commissionRate: '8.00',
+          // NULL = nenhuma comissão específica negociada ainda; a comissão real
+          // vem de category.commissionRate ou platformSettings.defaultSellerCommissionPercent
+          // (ver orderService.ts). NUNCA gravar aqui um percentual técnico "de fábrica".
+          commissionRate: null,
           rating: '5.00',
           totalSales: '0.00',
           totalOrders: 0,
