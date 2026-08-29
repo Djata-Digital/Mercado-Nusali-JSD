@@ -706,7 +706,11 @@ export const ProductDetailView: React.FC = () => {
           {/* Condition, Rating & Share */}
           <div className="flex items-center justify-between text-xs text-gray-500">
             <span>
-              {['novo', 'new'].includes(String(product.condition).toLowerCase()) ? 'Novo' : 'Usado'} | {product.salesCount || 0} vendidos
+              {/* Correção pré-piloto (condição opcional): sem condition real
+                  (ex.: Manga, Banana), não mostra "Novo" nem "Usado" — só a
+                  contagem de vendas, exatamente como no exemplo aprovado. */}
+              {product.condition === 'novo' ? 'Novo | ' : product.condition === 'usado' ? 'Usado | ' : product.condition === 'recondicionado' ? 'Recondicionado | ' : ''}
+              {product.salesCount || 0} vendidos
             </span>
             <div className="flex items-center gap-1.5">
               <button

@@ -179,7 +179,10 @@ export interface Product {
   shortVideo?: ProductVideo;
   category: string;
   categorySlug: string;
-  condition: ProductCondition;
+  // Correção pré-piloto (condição opcional): nem todo produto tem
+  // condição aplicável (ex.: Manga, Banana, serviços) — undefined/ausente
+  // significa "não se aplica", nunca 'usado' por omissão.
+  condition?: ProductCondition;
   brand: string;
   model: string;
   rating: number;

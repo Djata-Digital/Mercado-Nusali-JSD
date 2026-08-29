@@ -59,20 +59,33 @@ export function normalizeProduct(p: any): Product {
 
   const mainImage = p.image || p.imageUrl || (galleryImages.length > 0 ? galleryImages[0] : '');
 
-  // Normalize condition
-  const rawCond = String(p.condition || '').toLowerCase().trim();
-  const normalizedCondition = rawCond === 'used' || rawCond === 'usado' ? 'usado' : 'novo';
+  // Correção pré-piloto (condição opcional): condição real e opcional —
+  // NUNCA um fallback para 'novo' nem 'usado'. Sem valor real (null/vazio),
+  // fica undefined ("não se aplica"), e a UI simplesmente não mostra nada.
+  const rawCond = String(p.condition ?? '').toLowerCase().trim();
+  let normalizedCondition: 'novo' | 'usado' | 'recondicionado' | undefined;
+  if (rawCond === 'new' || rawCond === 'novo') normalizedCondition = 'novo';
+  else if (rawCond === 'used' || rawCond === 'usado') normalizedCondition = 'usado';
+  else if (rawCond === 'refurbished' || rawCond === 'recondicionado') normalizedCondition = 'recondicionado';
+  else normalizedCondition = undefined;
 
   // Normalize origin country
   const resolvedOriginCountry = (p.originCountry || p.shipping?.originCountry || p.seller?.country || p.countryCode || (p.currency === 'BRL' ? 'BR' : '')) as any;
+
+  // Correção pré-piloto (preço promocional): preço anterior só é real quando
+  // maior que o preço atual — nunca uma promoção falsa. O percentual é
+  // sempre CALCULADO a partir desses dois valores reais (nunca um campo
+  // solto que possa ficar dessincronizado se um dos dois mudar depois).
+  const resolvedOriginalPrice = p.originalPrice ? Number(p.originalPrice) : undefined;
+  const hasRealPromo = resolvedOriginalPrice !== undefined && resolvedOriginalPrice > rawPrice;
 
   return {
     id: String(p.id || ''),
     title: String(p.title || p.name || ''),
     price: rawPrice,
     currency: p.currency || (resolvedOriginCountry === 'BR' ? 'BRL' : 'XOF'),
-    originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
-    discountPercentage: p.discountPercentage ? Number(p.discountPercentage) : undefined,
+    originalPrice: hasRealPromo ? resolvedOriginalPrice : undefined,
+    discountPercentage: hasRealPromo ? Math.round(((resolvedOriginalPrice! - rawPrice) / resolvedOriginalPrice!) * 100) : undefined,
     installmentsMax: p.installmentsMax ? Number(p.installmentsMax) : 1,
     installmentsInterestFree: Boolean(p.installmentsInterestFree),
     image: mainImage,

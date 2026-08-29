@@ -33,7 +33,12 @@ import { BuyerService } from '../services/buyerService';
 
 export const CheckoutView: React.FC = () => {
   const navigate = useNavigate();
-  const { items: cart, total: cartTotal, clearCart, isLoading: isCartLoading } = useCart();
+  // Correção pré-piloto (quantidade no checkout): cart.length é o número de
+  // LINHAS distintas do carrinho (SKUs), não a quantidade de unidades — por
+  // isso "Produtos (2)" no carrinho (soma de quantity) virava "Resumo do
+  // Pedido (1 itens)" no checkout (contava só a linha). totalCount já soma
+  // quantity corretamente (useCart.ts) — usar a mesma fonte nos dois lugares.
+  const { items: cart, total: cartTotal, totalCount: cartTotalUnits, clearCart, isLoading: isCartLoading } = useCart();
   const { selectedCountry, selectedCurrency, formatPrice } = usePreferences();
 
   const [country, setCountry] = useState<CountryCode>(selectedCountry);
@@ -72,8 +77,11 @@ export const CheckoutView: React.FC = () => {
     number: '',
     complement: '',
     neighborhood: '',
-    city: 'Bissau',
-    state: 'Bissau',
+    // Correção pré-piloto: "Bissau"/"Bissau" eram fallback fixo, mostrado
+    // mesmo para país=Brasil — nunca inventar cidade/estado. Sem endereço
+    // real do comprador, o campo começa vazio e ele preenche.
+    city: '',
+    state: '',
     country: selectedCountry,
     phone: '',
   });
@@ -91,8 +99,8 @@ export const CheckoutView: React.FC = () => {
           number: defaultAddr.number || '',
           complement: defaultAddr.complement || '',
           neighborhood: defaultAddr.neighborhood || '',
-          city: defaultAddr.city || 'Bissau',
-          state: defaultAddr.state || 'Bissau',
+          city: defaultAddr.city || '',
+          state: defaultAddr.state || '',
           country: (defaultAddr.country || defaultAddr.countryCode || selectedCountry) as CountryCode,
           phone: defaultAddr.phone || '',
         });
@@ -720,7 +728,7 @@ export const CheckoutView: React.FC = () => {
         <div className="lg:col-span-4 space-y-4">
           <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xs space-y-4">
             <h2 className="text-base font-bold text-gray-900 border-b border-gray-200 pb-3">
-              Resumo do Pedido ({cart.length} itens)
+              Resumo do Pedido ({cartTotalUnits} itens)
             </h2>
 
             {(() => {

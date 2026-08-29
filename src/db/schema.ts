@@ -327,7 +327,11 @@ export const products = pgTable('products', {
   freeShipping: boolean('free_shipping').default(false),
   full: boolean('full').default(false),
   countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
-  condition: varchar('condition', { length: 50 }).default('new'), // new, refurbished, used
+  // Correção pré-piloto (condição opcional): SEM DEFAULT — 'new' era um
+  // default técnico que fazia todo produto legado parecer "configurado como
+  // novo" mesmo quando o vendedor nunca escolheu nada (ex.: Manga, Banana,
+  // onde condição não se aplica). null = "não se aplica/não informado".
+  condition: varchar('condition', { length: 50 }), // new, used, refurbished, ou null (não se aplica)
   warranty: varchar('warranty', { length: 100 }),
   status: varchar('status', { length: 50 }).notNull().default('active'), // active, draft, paused, archived
   isActive: boolean('is_active').notNull().default(true),

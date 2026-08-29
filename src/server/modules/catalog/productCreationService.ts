@@ -37,6 +37,13 @@ export interface CreateProductInput {
   // 'international' = só os países explicitamente listados em targetCountries.
   publishingScope?: 'national' | 'international';
   targetCountries?: string[];
+  // Correção pré-piloto (preço promocional): preço "de antes" real e
+  // opcional. Só é aceito (e só faz sentido mostrar riscado) se for
+  // estritamente maior que o preço atual — nunca um desconto inventado.
+  originalPrice?: number | string;
+  // Correção pré-piloto (condição opcional): NEW/USED/REFURBISHED ou
+  // ausente/null — "não se aplica". Nunca um fallback para 'used'.
+  condition?: 'new' | 'used' | 'refurbished' | null;
 }
 
 /**
@@ -278,6 +285,35 @@ export class ProductCreationService {
       targetCountriesJson = requested;
     }
 
+    // Correção pré-piloto (preço promocional): backend é a autoridade final
+    // — mesmo que o wizard já filtre, um preço anterior <= preço atual nunca
+    // pode ser persistido (seria um desconto falso). Sem valor real, fica
+    // null (nunca inventado, nunca copiado do preço atual).
+    let cleanOriginalPrice: string | null = null;
+    if (input.originalPrice !== undefined && input.originalPrice !== null && String(input.originalPrice).trim() !== '') {
+      const origPriceNum = typeof input.originalPrice === 'number' ? input.originalPrice : parseFloat(String(input.originalPrice));
+      if (isNaN(origPriceNum)) {
+        throw new Error('PRODUCT_ORIGINAL_PRICE_INVALID: Preço anterior inválido.');
+      }
+      if (origPriceNum <= priceNum) {
+        throw new Error('PRODUCT_ORIGINAL_PRICE_INVALID: O preço anterior deve ser maior que o preço atual — do contrário não é uma promoção real.');
+      }
+      cleanOriginalPrice = String(origPriceNum);
+    }
+
+    // Correção pré-piloto (condição opcional): NUNCA um fallback para
+    // 'used'/'usado'. Sem valor explícito do vendedor, fica null — "não se
+    // aplica" (ex.: Manga, Banana, serviços). Só aceita os 3 valores reais.
+    let cleanCondition: string | null = null;
+    if (input.condition !== undefined && input.condition !== null && String(input.condition).trim() !== '') {
+      const conditionMap: Record<string, string> = { new: 'new', novo: 'new', used: 'used', usado: 'used', refurbished: 'refurbished', recondicionado: 'refurbished' };
+      const mapped = conditionMap[String(input.condition).toLowerCase()];
+      if (!mapped) {
+        throw new Error(`PRODUCT_CONDITION_INVALID: Condição "${input.condition}" inválida. Use new, used, refurbished ou deixe em branco.`);
+      }
+      cleanCondition = mapped;
+    }
+
     const newProduct = {
       id: productId,
       title: input.title.trim(),
@@ -301,6 +337,8 @@ export class ProductCreationService {
       shippingJson: { weightKg: weightNum, lengthCm: lengthNum, widthCm: widthNum, heightCm: heightNum },
       publishingScope,
       targetCountriesJson,
+      originalPrice: cleanOriginalPrice,
+      condition: cleanCondition,
       createdAt: new Date(),
       updatedAt: new Date(),
     };

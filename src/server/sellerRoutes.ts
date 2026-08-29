@@ -1315,6 +1315,42 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     if (updates.freeShipping !== undefined) fieldsToUpdate.freeShipping = updates.freeShipping;
     if (updates.full !== undefined) fieldsToUpdate.full = updates.full;
 
+    // Correção pré-piloto (preço promocional): mesma validação real da
+    // criação — preço anterior só é aceito se maior que o preço EFETIVO
+    // (o novo, se estiver sendo alterado nesta mesma chamada; senão o atual).
+    if (updates.originalPrice !== undefined) {
+      if (updates.originalPrice === null || String(updates.originalPrice).trim() === '') {
+        fieldsToUpdate.originalPrice = null;
+      } else {
+        const effectivePrice = updates.price !== undefined ? Number(updates.price) : Number(check.product.price);
+        const origPriceNum = Number(updates.originalPrice);
+        if (isNaN(origPriceNum)) {
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_ORIGINAL_PRICE_INVALID', message: 'Preço anterior inválido.' } });
+        }
+        if (origPriceNum <= effectivePrice) {
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_ORIGINAL_PRICE_INVALID', message: 'O preço anterior deve ser maior que o preço atual — do contrário não é uma promoção real.' } });
+        }
+        fieldsToUpdate.originalPrice = String(origPriceNum);
+      }
+    }
+
+    // Correção pré-piloto (condição opcional): NUNCA fallback para
+    // 'used'/'usado' — null explícito é uma escolha válida ("não se aplica").
+    // Aceita tanto os valores reais em inglês (products.condition) quanto os
+    // sinônimos em português já usados pelo estado local do wizard/edição.
+    if (updates.condition !== undefined) {
+      if (updates.condition === null || String(updates.condition).trim() === '') {
+        fieldsToUpdate.condition = null;
+      } else {
+        const conditionMap: Record<string, string> = { new: 'new', novo: 'new', used: 'used', usado: 'used', refurbished: 'refurbished', recondicionado: 'refurbished' };
+        const mapped = conditionMap[String(updates.condition).toLowerCase()];
+        if (!mapped) {
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_CONDITION_INVALID', message: `Condição "${updates.condition}" inválida. Use new, used, refurbished ou deixe em branco.` } });
+        }
+        fieldsToUpdate.condition = mapped;
+      }
+    }
+
     // BLOCKER_LAUNCH: peso e dimensões são obrigatórios para o checkout
     // calcular frete (orderService/shippingCalculatorService leem
     // products.shippingJson). Editar não pode apagar um valor já válido nem

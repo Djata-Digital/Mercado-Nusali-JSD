@@ -226,8 +226,11 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
 
         {/* Quick Add to Cart Button */}
         <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
+          {/* Correção pré-piloto (condição opcional): sem condition real
+              (ex.: Manga, Banana), não inventa nem "Novo" nem "Usado" — o
+              espaço fica simplesmente vazio. */}
           <span className="text-[10px] font-medium text-gray-400 uppercase">
-            {product.condition === 'novo' ? 'Novo' : 'Usado'}
+            {product.condition === 'novo' ? 'Novo' : product.condition === 'usado' ? 'Usado' : product.condition === 'recondicionado' ? 'Recondicionado' : ''}
           </span>
           <button
             onClick={() => addItem(product, 1)}

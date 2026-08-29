@@ -104,7 +104,12 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   const [category, setCategory] = useState(initialProduct?.categoryId || initialProduct?.category || '');
   const [brand, setBrand] = useState(initialProduct?.brand || initialProduct?.specs?.Marca || '');
   const [model, setModel] = useState(initialProduct?.model || initialProduct?.specs?.Modelo || '');
-  const [condition, setCondition] = useState<'novo' | 'usado'>(initialProduct?.condition || 'novo');
+  // Correção pré-piloto (condição opcional): NUNCA pré-selecionar 'novo' nem
+  // 'usado' — string vazia = "não se aplica" (ex.: Manga, Banana, serviços).
+  // O vendedor escolhe explicitamente, ou deixa em branco.
+  const [condition, setCondition] = useState<'novo' | 'usado' | 'recondicionado' | ''>(initialProduct?.condition || '');
+  const conditionLabel = (c: typeof condition): string | undefined =>
+    c === 'novo' ? 'Novo' : c === 'usado' ? 'Usado' : c === 'recondicionado' ? 'Recondicionado' : undefined;
 
   const [dbAttributes, setDbAttributes] = useState<any[]>([]);
   const [isLoadingDbAttributes, setIsLoadingDbAttributes] = useState(false);
@@ -339,7 +344,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       setCategory(initialProduct.categoryId || initialProduct.category || '');
       setBrand(initialProduct.brand || initialProduct.specs?.Marca || '');
       setModel(initialProduct.model || initialProduct.specs?.Modelo || '');
-      setCondition(initialProduct.condition || 'novo');
+      setCondition(initialProduct.condition || '');
 
       setPublishingScope(
         initialProduct.publishingScope ||
@@ -769,7 +774,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
           brand: brand && brand.trim() ? brand.trim() : undefined,
           specs: {
             Modelo: model && model.trim() ? model.trim() : undefined,
-            Condição: condition === 'novo' ? 'Novo' : 'Usado',
+            Condição: conditionLabel(condition),
             Estoque: stock !== '' ? stock : undefined,
           },
         }),
@@ -802,8 +807,16 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     }
 
     const priceNum = parseFloat(price) || 0;
-    const origPriceNum = originalPrice ? parseFloat(originalPrice) : priceNum * 1.2;
-    const discPercentage = Math.round(((origPriceNum - priceNum) / origPriceNum) * 100);
+    // Correção pré-piloto (preço promocional): "preço anterior" NUNCA pode
+    // ser inventado (era priceNum * 1.2 — um desconto de 20% fictício
+    // aplicado a todo produto que o vendedor não configurasse). Sem valor
+    // real informado, não existe preço anterior — undefined, não um cálculo.
+    const parsedOrigPrice = originalPrice ? parseFloat(originalPrice) : undefined;
+    if (parsedOrigPrice !== undefined && parsedOrigPrice <= priceNum) {
+      showToast('Preço anterior precisa ser maior que o preço atual para configurar uma promoção — ele não será exibido.');
+    }
+    const origPriceNum = parsedOrigPrice !== undefined && parsedOrigPrice > priceNum ? parsedOrigPrice : undefined;
+    const discPercentage = origPriceNum ? Math.round(((origPriceNum - priceNum) / origPriceNum) * 100) : 0;
     const selectedCategoryObj = activeCategories.find(
       (c: any) => c.id === category || c.slug === category || c.name === category
     ) || activeCategories[0];
@@ -894,7 +907,8 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       else delete cleanEditSpecs['Marca'];
       if (model && model.trim()) cleanEditSpecs['Modelo'] = model.trim();
       else delete cleanEditSpecs['Modelo'];
-      cleanEditSpecs['Condição'] = condition === 'novo' ? 'Novo' : 'Usado';
+      if (conditionLabel(condition)) cleanEditSpecs['Condição'] = conditionLabel(condition);
+      else delete cleanEditSpecs['Condição'];
       if (parsedWeight !== undefined) cleanEditSpecs['Peso'] = `${parsedWeight} kg`;
       if (formattedDimensionsStr) cleanEditSpecs['Dimensões'] = formattedDimensionsStr;
       if (warrantyMonths && warrantyMonths.trim()) cleanEditSpecs['Garantia'] = `${warrantyMonths.trim()} Meses`;
@@ -942,7 +956,10 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         categoryId: selectedCategoryObj.id,
         category: selectedCategoryObj.name,
         categorySlug: selectedCategoryObj.slug,
-        condition,
+        // null explícito (não undefined) para que a limpeza de condição
+        // realmente chegue ao PATCH — undefined seria descartado pelo
+        // JSON.stringify e o backend nunca saberia que deve limpar o campo.
+        condition: (condition || null) as any,
         brand: brand && brand.trim() ? brand.trim() : undefined,
         model: model && model.trim() ? model.trim() : undefined,
         stock: parsedStock,
@@ -969,7 +986,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     const cleanCreateSpecs: Record<string, any> = { ...categorySpecs };
     if (brand && brand.trim()) cleanCreateSpecs['Marca'] = brand.trim();
     if (model && model.trim()) cleanCreateSpecs['Modelo'] = model.trim();
-    cleanCreateSpecs['Condição'] = condition === 'novo' ? 'Novo' : 'Usado';
+    if (conditionLabel(condition)) cleanCreateSpecs['Condição'] = conditionLabel(condition);
     if (parsedWeight !== undefined) cleanCreateSpecs['Peso'] = `${parsedWeight} kg`;
     if (formattedDimensionsStr) cleanCreateSpecs['Dimensões'] = formattedDimensionsStr;
     if (warrantyMonths && warrantyMonths.trim()) cleanCreateSpecs['Garantia'] = `${warrantyMonths.trim()} Meses`;
@@ -982,6 +999,9 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       storeId: selectedStore?.id,
       countryCode: originCountry,
       originalPrice: origPriceNum,
+      // Mapeia para os valores reais aceitos pelo backend (products.condition).
+      // '' (não se aplica) -> null, nunca um fallback para 'used'.
+      condition: condition === 'novo' ? 'new' : condition === 'usado' ? 'used' : condition === 'recondicionado' ? 'refurbished' : null,
       discountPercentage: discPercentage > 0 ? discPercentage : undefined,
       image: mainCoverImage,
       galleryImages: gallery,
@@ -1211,14 +1231,19 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
             )}
 
               <div>
-                <label className="block text-gray-800 font-bold mb-1">Condição do Produto *</label>
+                {/* Correção pré-piloto (condição opcional): NÃO obrigatória
+                    para todo tipo de produto (ex.: Manga, Banana, serviços)
+                    — "Não se aplica" fica disponível e NADA vem pré-selecionado. */}
+                <label className="block text-gray-800 font-bold mb-1">Condição do Produto (opcional)</label>
                 <select
                   value={condition}
                   onChange={(e) => setCondition(e.target.value as any)}
                   className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-bold"
                 >
+                  <option value="">Não se aplica</option>
                   <option value="novo">Novo (Lacrado de fábrica)</option>
                   <option value="usado">Usado (Excelente estado)</option>
+                  <option value="recondicionado">Recondicionado</option>
                 </select>
               </div>
             </div>
