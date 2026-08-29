@@ -143,6 +143,19 @@ export class OrderService {
         throw new Error(`DESTINATION_COUNTRY_INACTIVE: O Mercado Nusali ainda não está disponível para entregas em ${destinationCountryRow.name}.`);
       }
 
+      // Correção crítica (PAYMENT_CURRENCY_MISMATCH): moeda autoritativa do
+      // pedido é a do carrinho (userCart.currency — já sincronizada a cada
+      // item adicionado, ver addItemToCartForUser em buyerRoutes.ts), nunca
+      // a preferência visual do comprador nem nada vindo do request de
+      // pagamento. Resolvida cedo para poder revalidar por item abaixo —
+      // defesa extra: addItemToCartForUser já impede misturar moedas no
+      // momento de adicionar (CART_MIXED_CURRENCY_NOT_ALLOWED), isto aqui é
+      // o portão final antes de criar o pedido de verdade.
+      const orderCurrency = (userCart.currency || data.currency || '').trim().toUpperCase();
+      if (!orderCurrency) {
+        throw new Error('SHIPPING_CURRENCY_REQUIRED: A moeda do pedido é obrigatória para o cálculo de frete.');
+      }
+
       let realSubtotal = 0;
       const verifiedItems: Array<{
         productId: string;
@@ -189,6 +202,16 @@ export class OrderService {
         // pedido parcial).
         if (!isProductAvailableForCountry(prod, destinationCountry)) {
           throw new Error(`PRODUCT_NOT_AVAILABLE_FOR_DESTINATION: "${prod.title}" não pode ser entregue em ${destinationCountry}. ${eligibilityReason(prod, destinationCountry)}`);
+        }
+
+        // Correção crítica (PAYMENT_CURRENCY_MISMATCH): defesa extra — o
+        // marketplace ainda não tem câmbio (FX) autoritativo aprovado, então
+        // um pedido só pode ter UMA moeda. addItemToCartForUser já impede
+        // misturar moedas no momento de adicionar (CART_MIXED_CURRENCY_NOT_ALLOWED);
+        // isto é o portão final, para nunca criar um pedido com item cuja
+        // moeda real diverge da moeda do carrinho/pedido.
+        if (prod.currency && prod.currency.toUpperCase() !== orderCurrency) {
+          throw new Error(`CART_CURRENCY_MISMATCH: O produto "${prod.title}" está em ${prod.currency}, mas o pedido está sendo criado em ${orderCurrency}. O Mercado Nusali ainda não converte moedas — produtos de moedas diferentes não podem ser pagos juntos.`);
         }
 
         let unitPrice = Number(prod.price);
@@ -392,11 +415,9 @@ export class OrderService {
       }
       marketplaceCommissionPrecomputed = Math.round(marketplaceCommissionPrecomputed * 100) / 100;
 
-      // Requirement 4: Currency is strictly required
-      const currency = userCart.currency || data.currency;
-      if (!currency || !currency.trim()) {
-        throw new Error('SHIPPING_CURRENCY_REQUIRED: A moeda do pedido é obrigatória para o cálculo de frete.');
-      }
+      // orderCurrency já foi resolvida e validada no início da transação —
+      // reaproveitada aqui (mesmo nome curto usado no resto da função).
+      const currency = orderCurrency;
 
       // Requirement 2: Determine origin from actual inventory allocation (Warehouse/Store) and detect multi-origin
       const itemOrigins = new Set<string>();

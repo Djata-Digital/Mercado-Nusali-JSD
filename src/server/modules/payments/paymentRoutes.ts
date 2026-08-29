@@ -12,10 +12,19 @@ const payLimiter = createRateLimiter({
   keyPrefix: 'rl:payments:',
 });
 
+// Correção crítica (PAYMENT_CURRENCY_MISMATCH): currency NUNCA pode ter um
+// default aqui. `.default('XOF')` fazia TODO pedido cuja requisição não
+// enviasse currency (o caso normal — o frontend não envia esse campo)
+// receber XOF fabricado, mesmo para um pedido real em BRL/GMD/qualquer
+// outra moeda — PaymentService.initiatePayment já trata currency ausente
+// corretamente (usa order.currency, a fonte real, como autoridade; só
+// valida um mismatch quando o cliente de fato envia algo). Sem default,
+// currency fica undefined quando omitido, exatamente o comportamento que
+// PaymentService já espera.
 const initiatePaymentSchema = z.object({
   orderId: z.string(),
   amount: z.number().positive().optional(),
-  currency: z.string().optional().default('XOF'),
+  currency: z.string().optional(),
   method: z.string(),
   provider: z.string().optional(),
   idempotencyKey: z.string().optional(),

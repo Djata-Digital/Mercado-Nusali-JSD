@@ -71,8 +71,13 @@ export class PaymentService {
    * call, via a Postgres advisory lock scoped to the order id for the duration of this
    * transaction.
    */
-  static async initiatePayment(data: InitiatePaymentDTO) {
-    const db = getDb();
+  // `executor` opcional: mesmo padrão de testabilidade já usado em
+  // orderService/payoutService/refundService — permite testar contra um
+  // Postgres Docker isolado sem depender do pool singleton getDb() (SSL
+  // fixo, incompatível com Docker). Em produção, executor é sempre
+  // undefined e o comportamento é idêntico ao anterior.
+  static async initiatePayment(data: InitiatePaymentDTO, executor?: any) {
+    const db = executor ?? getDb();
     if (!db) throw new Error('Banco de dados indisponível.');
 
     if (!data.orderId || !String(data.orderId).trim()) {
@@ -198,6 +203,19 @@ export class PaymentService {
       if (existingPending.length > 0) {
         logger.info({ orderId: order.id, provider }, 'Returning existing pending local payment (idempotent)');
         return existingPending[0];
+      }
+
+      // Correção crítica (PAYMENT_CURRENCY_MISMATCH): PIX é um método
+      // brasileiro (formato EMV/BR Code, liquidação no SPB) — mesma regra
+      // que já existe para o provider Asaas (ASAAS_CURRENCY_NOT_SUPPORTED),
+      // aplicada também aqui no motor de PIX local/genérico, para nenhum
+      // caminho gerar um "PIX" fictício para pedido em XOF/GMD/qualquer
+      // moeda que não seja BRL.
+      if (data.method === 'pix' && realCurrency !== 'BRL') {
+        const err: any = new Error(`PAYMENT_METHOD_NOT_AVAILABLE_FOR_CURRENCY: PIX está disponível apenas para pedidos em Reais (BRL). Este pedido está em ${realCurrency}.`);
+        err.code = 'PAYMENT_METHOD_NOT_AVAILABLE_FOR_CURRENCY';
+        err.status = 400;
+        throw err;
       }
 
       const paymentId = `pay_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;

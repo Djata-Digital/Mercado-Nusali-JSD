@@ -282,6 +282,7 @@ export const CheckoutView: React.FC = () => {
           DESTINATION_COUNTRY_REQUIRED: 'Informe o país do endereço de entrega.',
           DESTINATION_COUNTRY_NOT_FOUND: 'O país informado no endereço de entrega não é reconhecido pelo Mercado Nusali.',
           DESTINATION_COUNTRY_INACTIVE: 'O Mercado Nusali ainda não está disponível para entregas neste país.',
+          CART_CURRENCY_MISMATCH: 'Os produtos deste carrinho usam moedas diferentes e não podem ser pagos juntos.',
         };
         const rawMsg = res.error?.message || res.message || 'Erro ao processar checkout.';
         const msg = friendlyMessages[code] || (rawMsg.includes('undefined') ? 'Não foi possível confirmar o país de entrega. Verifique o endereço e tente novamente.' : rawMsg);
@@ -319,10 +320,15 @@ export const CheckoutView: React.FC = () => {
           msg = 'Dados inválidos para geração do Pix. Verifique seu cadastro.';
         } else if (errCode === 'ASAAS_PROVIDER_UNAVAILABLE' || errCode === 'ASAAS_NETWORK_ERROR') {
           msg = 'O serviço PIX do Asaas está indisponível no momento. Tente novamente em alguns instantes.';
-        } else if (errCode === 'ASAAS_CURRENCY_NOT_SUPPORTED') {
-          msg = 'Pagamento via PIX Asaas é suportado apenas para pedidos em Reais (BRL).';
+        } else if (errCode === 'ASAAS_CURRENCY_NOT_SUPPORTED' || errCode === 'PAYMENT_METHOD_NOT_AVAILABLE_FOR_CURRENCY') {
+          msg = 'Pagamento via PIX é suportado apenas para pedidos em Reais (BRL).';
         } else if (errCode === 'ASAAS_RATE_LIMITED') {
           msg = 'Serviço PIX temporariamente ocupado. Aguarde alguns instantes e tente novamente.';
+        } else if (errCode === 'PAYMENT_CURRENCY_MISMATCH') {
+          // Nunca deveria acontecer no fluxo normal (o frontend não envia mais
+          // currency para /payments/initiate), mas nunca expor o erro técnico
+          // cru ao comprador se, por algum motivo, chegar aqui.
+          msg = 'Não foi possível iniciar o pagamento porque a moeda do pagamento não corresponde à moeda do pedido.';
         }
 
         setErrorMessage(msg);
