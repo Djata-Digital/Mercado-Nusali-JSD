@@ -260,15 +260,31 @@ export const CheckoutView: React.FC = () => {
 
     try {
       // 1. Create Order in PostgreSQL
+      // Correção crítica de checkout: DeliveryAddress (types.ts) só tem o
+      // campo `country`, não `countryCode` — o backend (OrderService) lê
+      // primeiro `countryCode`, depois `country`, então já funcionava por
+      // fallback, mas enviar `countryCode` explicitamente aqui também
+      // (mesma convenção usada quando o endereço vem de addressId/endereço
+      // padrão, que sempre preenche as duas chaves) deixa o payload
+      // inequívoco, sem depender só do fallback.
       const res = await OrdersApi.create({
-        shippingAddress: address,
+        shippingAddress: { ...address, countryCode: country },
         paymentMethod: paymentMethod,
         currency: orderCurrency,
         countryCode: country,
       });
 
       if (!res.success || !res.data) {
-        const msg = res.error?.message || res.message || 'Erro ao processar checkout.';
+        // Nunca deixar o comprador ver um erro técnico com "undefined" —
+        // esses ficam nos logs/API; a UI mostra uma mensagem amigável.
+        const code = res.error?.code || '';
+        const friendlyMessages: Record<string, string> = {
+          DESTINATION_COUNTRY_REQUIRED: 'Informe o país do endereço de entrega.',
+          DESTINATION_COUNTRY_NOT_FOUND: 'O país informado no endereço de entrega não é reconhecido pelo Mercado Nusali.',
+          DESTINATION_COUNTRY_INACTIVE: 'O Mercado Nusali ainda não está disponível para entregas neste país.',
+        };
+        const rawMsg = res.error?.message || res.message || 'Erro ao processar checkout.';
+        const msg = friendlyMessages[code] || (rawMsg.includes('undefined') ? 'Não foi possível confirmar o país de entrega. Verifique o endereço e tente novamente.' : rawMsg);
         setErrorMessage(msg);
         setIsProcessing(false);
         return;

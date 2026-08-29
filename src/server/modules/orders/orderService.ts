@@ -22,7 +22,7 @@ import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
 import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor } from '../shipping/shippingCalculatorService.js';
-import { categories, platformSettings } from '../../../db/schema.js';
+import { categories, platformSettings, countries } from '../../../db/schema.js';
 import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
 
 export interface CreateOrderRequestDTO {
@@ -118,6 +118,31 @@ export class OrderService {
         throw new Error('Seu carrinho está vazio. Adicione produtos antes de finalizar o pedido.');
       }
 
+      // Correção crítica de checkout: o destino de entrega precisa estar
+      // resolvido ANTES de qualquer validação por item (elegibilidade,
+      // frete) — antes esse cálculo só existia mais abaixo, depois do loop
+      // de itens, então a checagem de elegibilidade usava
+      // targetAddress.countryCode diretamente. Quando o frontend envia
+      // shippingAddress inline (objeto do formulário, campo `country`, não
+      // `countryCode` — ver types.ts DeliveryAddress), esse campo sempre foi
+      // undefined nesse caminho específico, e só "funcionava" por acidente
+      // quando o endereço vinha de addressId/endereço padrão (único lugar
+      // que já preenchia as duas chaves). Mesma prioridade de sempre —
+      // endereço real primeiro, nunca Bissau/Brasil como fallback — só
+      // resolvida cedo o bastante para todo o resto do fluxo (elegibilidade
+      // por item, frete, e a própria linha do pedido) usar uma ÚNICA fonte.
+      const destinationCountry = (targetAddress?.countryCode || targetAddress?.country || data.countryCode || '').trim().toUpperCase();
+      if (!destinationCountry) {
+        throw new Error('DESTINATION_COUNTRY_REQUIRED: O endereço de entrega não possui país de destino definido. Informe o país do endereço de entrega.');
+      }
+      const [destinationCountryRow] = await tx.select().from(countries).where(eq(countries.code, destinationCountry)).limit(1);
+      if (!destinationCountryRow) {
+        throw new Error(`DESTINATION_COUNTRY_NOT_FOUND: País de destino "${destinationCountry}" não é reconhecido pelo Mercado Nusali.`);
+      }
+      if (destinationCountryRow.isActive !== true) {
+        throw new Error(`DESTINATION_COUNTRY_INACTIVE: O Mercado Nusali ainda não está disponível para entregas em ${destinationCountryRow.name}.`);
+      }
+
       let realSubtotal = 0;
       const verifiedItems: Array<{
         productId: string;
@@ -156,13 +181,14 @@ export class OrderService {
         const prod = prodRows[0];
 
         // Melhoria pré-piloto (elegibilidade por país): portão definitivo,
-        // não contornável pelo frontend — usa o país do endereço de entrega
-        // REAL já resolvido acima (targetAddress), nunca o destino "de
-        // navegação" do marketplace. Produto nacional só entrega no próprio
-        // país; internacional só nos países que o vendedor autorizou
-        // explicitamente. Bloqueia o pedido inteiro (nenhum pedido parcial).
-        if (!isProductAvailableForCountry(prod, targetAddress.countryCode)) {
-          throw new Error(`PRODUCT_NOT_AVAILABLE_FOR_DESTINATION: "${prod.title}" não pode ser entregue em ${targetAddress.countryCode}. ${eligibilityReason(prod, targetAddress.countryCode)}`);
+        // não contornável pelo frontend — usa destinationCountry (já
+        // resolvido e validado acima, nunca undefined a partir daqui), não o
+        // destino "de navegação" do marketplace. Produto nacional só entrega
+        // no próprio país; internacional só nos países que o vendedor
+        // autorizou explicitamente. Bloqueia o pedido inteiro (nenhum
+        // pedido parcial).
+        if (!isProductAvailableForCountry(prod, destinationCountry)) {
+          throw new Error(`PRODUCT_NOT_AVAILABLE_FOR_DESTINATION: "${prod.title}" não pode ser entregue em ${destinationCountry}. ${eligibilityReason(prod, destinationCountry)}`);
         }
 
         let unitPrice = Number(prod.price);
@@ -409,11 +435,8 @@ export class OrderService {
 
       const originCountry = Array.from(itemOrigins)[0];
 
-      // Requirement 3: Destination Country is strictly required
-      const destinationCountry = (targetAddress?.countryCode || targetAddress?.country || data.countryCode || '').trim().toUpperCase();
-      if (!destinationCountry) {
-        throw new Error('SHIPPING_DESTINATION_REQUIRED: O endereço de entrega não possui país de destino.');
-      }
+      // destinationCountry já foi resolvido e validado (existe + está
+      // ativo) logo no início da transação, antes do loop de itens — reaproveitado aqui.
 
       // Requirement 6: Calculate real total weight from product/variant weight (NO 0.5kg fallback).
       // Peso volumétrico (se dimensões + divisor configurado existirem) é
