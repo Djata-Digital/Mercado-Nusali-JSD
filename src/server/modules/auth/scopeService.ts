@@ -112,6 +112,35 @@ export function assertShipmentScopeAccess(
 }
 
 // ---------------------------------------------------------------------------
+// Painel Admin — Tarifas de Frete (shipping_rates). Diferente de shipments
+// (que exige origem E destino dentro do país autorizado — parcela física
+// real), uma TARIFA é uma configuração comercial: um admin de país deve
+// poder configurar tanto rotas de exportação (origem=seu país) quanto de
+// importação (destino=seu país). Por isso o critério aqui é OR, não AND.
+// ---------------------------------------------------------------------------
+
+export function isShippingRateWithinScope(
+  scope: AdministrativeScope,
+  originCountry: string | null | undefined,
+  destinationCountry: string | null | undefined
+): boolean {
+  if (scope.kind === 'GLOBAL') return true;
+  const origin = (originCountry || '').toUpperCase();
+  const destination = (destinationCountry || '').toUpperCase();
+  return !!scope.countryCode && (origin === scope.countryCode || destination === scope.countryCode);
+}
+
+export function assertShippingRateScopeAccess(
+  scope: AdministrativeScope,
+  originCountry: string | null | undefined,
+  destinationCountry: string | null | undefined
+) {
+  if (!isShippingRateWithinScope(scope, originCountry, destinationCountry)) {
+    throw new ScopeError('Esta tarifa de frete não envolve o seu país e está fora do seu escopo administrativo.', 'SHIPPING_RATE_SCOPE_FORBIDDEN');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Permissões financeiras mínimas. Reaproveita o conceito já existente em
 // adminRoutes.ts (ROLE_PERMISSION_CODES: view_financials / manage_disputes)
 // em vez de criar dezenas de códigos novos.

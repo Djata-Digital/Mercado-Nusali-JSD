@@ -27,6 +27,7 @@ import { AdminRefundsManager } from './admin/AdminRefundsManager';
 import { AdminDisputesManager } from './admin/AdminDisputesManager';
 import { AdminReturnsManager } from './admin/AdminReturnsManager';
 import { AdminLogisticsDashboard } from './admin/AdminLogisticsDashboard';
+import { AdminShippingRatesManager } from './admin/AdminShippingRatesManager';
 import { AdminWarehousesManager } from './admin/AdminWarehousesManager';
 import { AdminCarriersManager } from './admin/AdminCarriersManager';
 import { AdminCustomsManager } from './admin/AdminCustomsManager';
@@ -103,6 +104,7 @@ export const AdminDashboardView: React.FC = () => {
       group: 'Logística & Cadeia CPLP',
       items: [
         { id: 'logistics', label: 'Expedição & Entregas', icon: Truck },
+        { id: 'shipping_rates', label: 'Tarifas de Frete', icon: DollarSign },
         { id: 'warehouses', label: 'HUBs & Armazéns', icon: Warehouse },
         { id: 'carriers', label: 'Transportadoras & Frotas', icon: Truck },
         { id: 'customs', label: 'Alfândega & DTA', icon: Shield },
@@ -405,6 +407,7 @@ export const AdminDashboardView: React.FC = () => {
             {activeTab === 'disputes' && <AdminDisputesManager showToast={showToast} />}
             {activeTab === 'returns' && <AdminReturnsManager showToast={showToast} />}
             {activeTab === 'logistics' && <AdminLogisticsDashboard showToast={showToast} />}
+            {activeTab === 'shipping_rates' && <AdminShippingRatesManager showToast={showToast} />}
             {activeTab === 'warehouses' && <AdminWarehousesManager showToast={showToast} />}
             {activeTab === 'carriers' && <AdminCarriersManager showToast={showToast} />}
             {activeTab === 'customs' && <AdminCustomsManager showToast={showToast} />}

@@ -241,4 +241,20 @@ export class AdminApi {
   static async deleteShippingRate(id: string): Promise<ApiResponse<any>> {
     return apiClient.delete(`/admin/shipping-rates/${id}`);
   }
+
+  static async updateShippingRate(id: string, data: any): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/shipping-rates/${id}`, data);
+  }
+
+  static async toggleShippingRate(id: string, isActive?: boolean): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/shipping-rates/${id}/toggle`, isActive !== undefined ? { isActive } : {});
+  }
+
+  static async getShippingRateCoverage(params: { originCountry: string; destinationCountry: string; currency: string }): Promise<ApiResponse<any>> {
+    return apiClient.get('/admin/shipping-rates/coverage', { params });
+  }
+
+  static async simulateShippingRate(data: any): Promise<ApiResponse<any>> {
+    return apiClient.post('/admin/shipping-rates/simulate', data);
+  }
 }

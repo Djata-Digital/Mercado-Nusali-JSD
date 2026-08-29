@@ -46,7 +46,7 @@ import {
   shippingZones,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
-import { eq, desc, asc, sql, count, and, isNull } from 'drizzle-orm';
+import { eq, desc, asc, sql, count, and, isNull, or, gte, lte, ne, inArray } from 'drizzle-orm';
 import { AuthRequest, requireAuth } from './modules/auth/authMiddleware.js';
 import {
   resolveAdministrativeScope,
@@ -56,6 +56,8 @@ import {
   requireDisputeResolvePermission,
   isShipmentWithinScope,
   assertShipmentScopeAccess,
+  isShippingRateWithinScope,
+  assertShippingRateScopeAccess,
   ScopeError,
 } from './modules/auth/scopeService.js';
 import { storageService } from './infra/storage.js';
@@ -66,6 +68,7 @@ import { PaymentService } from './modules/payments/paymentService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { processPayoutStatusChange } from './modules/wallet/payoutService.js';
 import { resolveDispute, RefundValidationError } from './modules/payments/refundService.js';
+import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
 
 export const adminRouter = Router();
 
@@ -136,6 +139,37 @@ function requireLogisticsStaff(req: AuthRequest, res: Response, next: NextFuncti
     });
   }
 
+  return next();
+}
+
+// Painel Admin — Tarifas de Frete: escrita (criar/editar/ativar/desativar/
+// excluir) é uma decisão COMERCIAL/financeira (define o custo real de
+// entrega usado no checkout), não uma tarefa operacional de armazém — por
+// isso um subconjunto mais estrito de LOGISTICS_STAFF_ROLES, sem
+// WAREHOUSE_MANAGER/WAREHOUSE_OPERATOR/HUB_MANAGER/LOGISTICS/LOGISTICS_OPERATOR.
+// Leitura (GET) continua usando requireLogisticsStaff (mais amplo), como já
+// era antes desta fase — nenhum acesso de leitura existente é reduzido.
+const SHIPPING_RATE_MANAGER_ROLES = new Set([
+  'GLOBAL_ADMIN',
+  'ADMIN',
+  'COUNTRY_REPRESENTATIVE',
+  'REGIONAL_SUPERVISOR',
+]);
+
+function requireShippingRateManager(req: AuthRequest, res: Response, next: NextFunction) {
+  const role = (req.user?.role || '').toUpperCase();
+  if (!req.user) {
+    return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Acesso não autorizado.' } });
+  }
+  if (!SHIPPING_RATE_MANAGER_ROLES.has(role)) {
+    return res.status(403).json({
+      success: false,
+      error: {
+        code: 'FORBIDDEN_SHIPPING_RATE_MANAGER_ONLY',
+        message: 'Apenas Administração Global, Administração, Representante Nacional ou Supervisor Regional podem configurar tarifas de frete.',
+      },
+    });
+  }
   return next();
 }
 
@@ -3530,96 +3564,435 @@ adminRouter.get('/logistics/shipments/:shipmentId/details', requireLogisticsStaf
   }
 });
 
+// ==========================================
+// TARIFAS DE FRETE (shipping_rates) — Painel Admin
+// ==========================================
+// Reaproveita 100% a tabela shipping_rates já usada pelo
+// ShippingCalculatorService (checkout/carrinho/produto) — nenhuma tabela
+// nova. Boundaries são INCLUSIVE-INCLUSIVE dos dois lados, exatamente como
+// getRawShippingRate já consulta (lte(minWeightKg, peso) AND
+// gte(maxWeightKg, peso)) — não alterado aqui, só respeitado.
+
+export async function validateShippingRateInput(db: any, body: any, isPartial: boolean) {
+  const errors: string[] = [];
+  const out: any = {};
+
+  if (body.originCountry !== undefined || !isPartial) {
+    const origin = String(body.originCountry || '').trim().toUpperCase();
+    if (!origin) errors.push('País de origem é obrigatório.');
+    else out.originCountry = origin;
+  }
+  if (body.destinationCountry !== undefined || !isPartial) {
+    const destination = String(body.destinationCountry || '').trim().toUpperCase();
+    if (!destination) errors.push('País de destino é obrigatório.');
+    else out.destinationCountry = destination;
+  }
+  if (body.currency !== undefined || !isPartial) {
+    const currency = String(body.currency || '').trim().toUpperCase();
+    if (!currency) errors.push('Moeda é obrigatória.');
+    else out.currency = currency;
+  }
+  if (body.price !== undefined || !isPartial) {
+    const numPrice = Number(body.price);
+    if (isNaN(numPrice) || numPrice < 0) errors.push('O preço da tarifa deve ser um número maior ou igual a zero.');
+    else out.price = String(numPrice.toFixed(2));
+  }
+  if (body.minWeightKg !== undefined || !isPartial) {
+    const numMinWeight = Number(body.minWeightKg ?? 0);
+    if (isNaN(numMinWeight) || numMinWeight < 0) errors.push('O peso mínimo deve ser um número maior ou igual a zero.');
+    else out.minWeightKg = String(numMinWeight.toFixed(3));
+  }
+  if (body.maxWeightKg !== undefined || !isPartial) {
+    const numMaxWeight = Number(body.maxWeightKg);
+    if (isNaN(numMaxWeight)) errors.push('O peso máximo é obrigatório e deve ser um número.');
+    else out.maxWeightKg = String(numMaxWeight.toFixed(3));
+  }
+  if (out.minWeightKg !== undefined && out.maxWeightKg !== undefined) {
+    if (Number(out.maxWeightKg) <= Number(out.minWeightKg)) {
+      errors.push('O peso máximo deve ser estritamente maior que o peso mínimo.');
+    }
+  }
+  if (body.estimatedMinDays !== undefined) {
+    const n = Number(body.estimatedMinDays);
+    if (isNaN(n) || n < 0) errors.push('Prazo mínimo estimado inválido.');
+    else out.estimatedMinDays = n;
+  }
+  if (body.estimatedMaxDays !== undefined) {
+    const n = Number(body.estimatedMaxDays);
+    if (isNaN(n) || n < 0) errors.push('Prazo máximo estimado inválido.');
+    else out.estimatedMaxDays = n;
+  }
+  if (out.estimatedMinDays !== undefined && out.estimatedMaxDays !== undefined && out.estimatedMaxDays < out.estimatedMinDays) {
+    errors.push('Prazo máximo estimado não pode ser menor que o mínimo.');
+  }
+  if (body.originRegion !== undefined) out.originRegion = body.originRegion ? String(body.originRegion).trim().toUpperCase() : null;
+  if (body.destinationRegion !== undefined) out.destinationRegion = body.destinationRegion ? String(body.destinationRegion).trim().toUpperCase() : null;
+  if (body.serviceType !== undefined) out.serviceType = body.serviceType ? String(body.serviceType).trim() : 'standard';
+  if (body.carrierId !== undefined) out.carrierId = body.carrierId || null;
+  if (body.isActive !== undefined) out.isActive = Boolean(body.isActive);
+
+  if (errors.length > 0) return { errors, out: null };
+
+  // País deve ser real e ativo — nunca aceitar um código inventado (mesma
+  // fonte única de verdade: tabela countries, GET /api/v1/countries).
+  const countriesToCheck = [out.originCountry, out.destinationCountry].filter(Boolean);
+  if (countriesToCheck.length > 0) {
+    const realCountries = await db.select().from(countries).where(inArray(countries.code, countriesToCheck));
+    const realActive = new Map<string, any>(realCountries.map((c: any) => [c.code, c]));
+    for (const code of countriesToCheck) {
+      const c = realActive.get(code);
+      if (!c) errors.push(`País "${code}" não está cadastrado como país operacional do Mercado Nusali.`);
+      else if (!c.isActive) errors.push(`País "${code}" existe mas não está ativo no momento.`);
+    }
+    // Moeda deve ser a moeda oficial de algum país operacional real (nunca
+    // uma sigla inventada) — mesma fonte, sem lista hardcoded de moedas.
+    if (out.currency) {
+      const allActiveCountries = await db.select().from(countries).where(eq(countries.isActive, true));
+      const validCurrencies = new Set(allActiveCountries.map((c: any) => c.currency));
+      if (!validCurrencies.has(out.currency)) {
+        errors.push(`Moeda "${out.currency}" não corresponde à moeda oficial de nenhum país operacional ativo.`);
+      }
+    }
+  }
+
+  if (errors.length > 0) return { errors, out: null };
+  return { errors: null, out };
+}
+
+// Duas faixas de peso [minA,maxA] e [minB,maxB] (ambas INCLUSIVE-INCLUSIVE,
+// mesma semântica de getRawShippingRate) se sobrepõem sse minA<=maxB E
+// minB<=maxA. Só compara tarifas do MESMO escopo exato (rota+moeda+região+
+// serviço) — duas tarifas de especificidade DIFERENTE (ex.: uma genérica de
+// país e outra específica de região) podem legitimamente coexistir, porque
+// getRawShippingRate já as desempata por especificidade; ambiguidade real só
+// existe quando tudo mais é idêntico e só o peso se sobrepõe.
+export async function findOverlappingShippingRate(db: any, candidate: any, excludeId?: string) {
+  const conditions = [
+    eq(shippingRates.originCountry, candidate.originCountry),
+    eq(shippingRates.destinationCountry, candidate.destinationCountry),
+    eq(shippingRates.currency, candidate.currency),
+    eq(shippingRates.isActive, true),
+    lte(shippingRates.minWeightKg, candidate.maxWeightKg),
+    gte(shippingRates.maxWeightKg, candidate.minWeightKg),
+  ];
+  if (candidate.originRegion) conditions.push(eq(shippingRates.originRegion, candidate.originRegion));
+  else conditions.push(isNull(shippingRates.originRegion));
+  if (candidate.destinationRegion) conditions.push(eq(shippingRates.destinationRegion, candidate.destinationRegion));
+  else conditions.push(isNull(shippingRates.destinationRegion));
+  if (candidate.serviceType) conditions.push(eq(shippingRates.serviceType, candidate.serviceType));
+  if (excludeId) conditions.push(ne(shippingRates.id, excludeId));
+
+  const [overlap] = await db.select().from(shippingRates).where(and(...conditions)).limit(1);
+  return overlap || null;
+}
+
 // GET /admin/shipping-rates
 adminRouter.get('/shipping-rates', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
-    const rates = await db.select().from(shippingRates).orderBy(desc(shippingRates.createdAt));
+
+    const scope = resolveAdministrativeScope(req.user);
+    const allRates = await db.select().from(shippingRates).orderBy(desc(shippingRates.updatedAt));
+    // Admin de país escopado (COUNTRY_REPRESENTATIVE/REGIONAL_SUPERVISOR) só
+    // vê tarifas que envolvem o próprio país, na origem OU no destino —
+    // GLOBAL_ADMIN/ADMIN continuam vendo tudo, comportamento inalterado.
+    const rates = scope.kind === 'GLOBAL'
+      ? allRates
+      : allRates.filter((r: any) => isShippingRateWithinScope(scope, r.originCountry, r.destinationCountry));
+
     return res.json({ success: true, data: rates });
   } catch (error: any) {
     return sendAdminError(res, error);
   }
 });
 
-// POST /admin/shipping-rates
-adminRouter.post('/shipping-rates', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+// GET /admin/shipping-rates/coverage — diagnóstico de lacunas de peso para
+// uma rota real (mesmo escopo país+país+moeda que getRawShippingRate usa).
+adminRouter.get('/shipping-rates/coverage', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
 
-    const {
-      originCountry,
-      destinationCountry,
-      minWeightKg,
-      maxWeightKg,
-      price,
-      currency,
-      estimatedMinDays,
-      estimatedMaxDays,
-      isActive,
-      carrierId,
-      serviceType,
-    } = req.body;
+    const originCountry = String(req.query.originCountry || '').trim().toUpperCase();
+    const destinationCountry = String(req.query.destinationCountry || '').trim().toUpperCase();
+    const currency = String(req.query.currency || '').trim().toUpperCase();
+    if (!originCountry || !destinationCountry || !currency) {
+      return res.status(400).json({ success: false, error: { code: 'COVERAGE_PARAMS_REQUIRED', message: 'originCountry, destinationCountry e currency são obrigatórios.' } });
+    }
 
-    if (!originCountry || !String(originCountry).trim()) {
-      return res.status(400).json({ success: false, message: 'País de origem é obrigatório.' });
+    const scope = resolveAdministrativeScope(req.user);
+    try {
+      assertShippingRateScopeAccess(scope, originCountry, destinationCountry);
+    } catch (e) {
+      if (e instanceof ScopeError) return res.status(e.status).json({ success: false, error: { code: e.code, message: e.message } });
+      throw e;
     }
-    if (!destinationCountry || !String(destinationCountry).trim()) {
-      return res.status(400).json({ success: false, message: 'País de destino é obrigatório.' });
+
+    const rates = await db.select().from(shippingRates).where(and(
+      eq(shippingRates.originCountry, originCountry),
+      eq(shippingRates.destinationCountry, destinationCountry),
+      eq(shippingRates.currency, currency),
+      eq(shippingRates.isActive, true),
+    )).orderBy(asc(shippingRates.minWeightKg));
+
+    const segments: Array<{ from: number; to: number; covered: boolean; rateId?: string; price?: number }> = [];
+    let cursor = 0;
+    for (const r of rates) {
+      const min = Number(r.minWeightKg);
+      const max = Number(r.maxWeightKg);
+      if (min > cursor) {
+        segments.push({ from: cursor, to: min, covered: false });
+      }
+      segments.push({ from: min, to: max, covered: true, rateId: r.id, price: Number(r.price) });
+      cursor = Math.max(cursor, max);
     }
-    if (!currency || !String(currency).trim()) {
-      return res.status(400).json({ success: false, message: 'Moeda é obrigatória (ex: BRL ou XOF).' });
+
+    return res.json({ success: true, data: { originCountry, destinationCountry, currency, segments, hasAnyRate: rates.length > 0 } });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// POST /admin/shipping-rates/simulate — chama a MESMA função real usada por
+// checkout/carrinho/produto (ShippingCalculatorService.calculateFreight).
+// Nunca duplica o cálculo aqui.
+adminRouter.post('/shipping-rates/simulate', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const { originCountry, destinationCountry, originRegion, destinationRegion, weightKg, currency, dimensionsCm, storeId, sellerId } = req.body ?? {};
+    const result = await ShippingCalculatorService.calculateFreight({
+      originCountry: String(originCountry || ''),
+      destinationCountry: String(destinationCountry || ''),
+      originRegion: originRegion || undefined,
+      destinationRegion: destinationRegion || undefined,
+      weightKg: Number(weightKg),
+      currency: String(currency || ''),
+      dimensionsCm: dimensionsCm || undefined,
+      storeId: storeId || undefined,
+      sellerId: sellerId || undefined,
+      productSubtotal: 0,
+    }, db);
+    return res.json({ success: true, data: result });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// POST /admin/shipping-rates
+adminRouter.post('/shipping-rates', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Autenticação necessária.' });
+
+    const { errors, out } = await validateShippingRateInput(db, req.body ?? {}, false);
+    if (errors) {
+      return res.status(400).json({ success: false, error: { code: 'SHIPPING_RATE_INVALID', message: errors.join(' ') } });
     }
-    const numPrice = Number(price);
-    if (isNaN(numPrice) || numPrice <= 0) {
-      return res.status(400).json({ success: false, message: 'O preço do frete deve ser maior que zero.' });
+
+    const scope = resolveAdministrativeScope(req.user);
+    try {
+      assertShippingRateScopeAccess(scope, out.originCountry, out.destinationCountry);
+    } catch (e) {
+      if (e instanceof ScopeError) return res.status(e.status).json({ success: false, error: { code: e.code, message: e.message } });
+      throw e;
     }
-    const numMinWeight = Number(minWeightKg || 0);
-    const numMaxWeight = Number(maxWeightKg || 0);
-    if (isNaN(numMinWeight) || numMinWeight < 0) {
-      return res.status(400).json({ success: false, message: 'O peso mínimo não pode ser negativo.' });
-    }
-    if (isNaN(numMaxWeight) || numMaxWeight <= numMinWeight) {
-      return res.status(400).json({ success: false, message: 'O peso máximo deve ser estritamente maior que o peso mínimo.' });
-    }
-    const numMinDays = Number(estimatedMinDays || 0);
-    const numMaxDays = Number(estimatedMaxDays || 0);
-    if (numMinDays < 0 || numMaxDays < numMinDays) {
-      return res.status(400).json({ success: false, message: 'Prazo estimado de entrega inválido.' });
+
+    const overlap = await findOverlappingShippingRate(db, out);
+    if (overlap) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'SHIPPING_RATE_WEIGHT_RANGE_OVERLAP',
+          message: `Já existe uma tarifa ativa (${Number(overlap.minWeightKg)}–${Number(overlap.maxWeightKg)} kg) que cobre parte desta faixa de peso para esta rota.`,
+        },
+      });
     }
 
     const newRate = {
-      id: `rate_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      originCountry: String(originCountry).trim().toUpperCase(),
-      destinationCountry: String(destinationCountry).trim().toUpperCase(),
-      minWeightKg: String(numMinWeight.toFixed(3)),
-      maxWeightKg: String(numMaxWeight.toFixed(3)),
-      price: String(numPrice.toFixed(2)),
-      currency: String(currency).trim().toUpperCase(),
-      estimatedMinDays: numMinDays,
-      estimatedMaxDays: numMaxDays,
-      carrierId: carrierId || null,
-      serviceType: serviceType || 'standard',
-      isActive: isActive !== undefined ? Boolean(isActive) : true,
+      id: `rate_${Date.now()}_${randomBytes(4).toString('hex')}`,
+      originCountry: out.originCountry,
+      destinationCountry: out.destinationCountry,
+      originRegion: out.originRegion ?? null,
+      destinationRegion: out.destinationRegion ?? null,
+      minWeightKg: out.minWeightKg,
+      maxWeightKg: out.maxWeightKg,
+      price: out.price,
+      currency: out.currency,
+      estimatedMinDays: out.estimatedMinDays ?? 1,
+      estimatedMaxDays: out.estimatedMaxDays ?? 5,
+      carrierId: out.carrierId ?? null,
+      serviceType: out.serviceType || 'standard',
+      isActive: out.isActive !== undefined ? out.isActive : true,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
 
     await db.insert(shippingRates).values(newRate);
+    await writeRealAudit(req, 'SHIPPING_RATE_CREATED', 'shipping_rate', newRate.id, { after: newRate });
     return res.json({ success: true, message: 'Tarifa de frete cadastrada com sucesso!', data: newRate });
   } catch (error: any) {
     return sendAdminError(res, error);
   }
 });
 
-// DELETE /admin/shipping-rates/:id
-adminRouter.delete('/shipping-rates/:id', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+// PATCH /admin/shipping-rates/:id
+adminRouter.patch('/shipping-rates/:id', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Autenticação necessária.' });
+
     const { id } = req.params;
+    const [existing] = await db.select().from(shippingRates).where(eq(shippingRates.id, id)).limit(1);
+    if (!existing) return res.status(404).json({ success: false, error: { code: 'SHIPPING_RATE_NOT_FOUND', message: 'Tarifa não encontrada.' } });
+
+    const scope = resolveAdministrativeScope(req.user);
+    try {
+      assertShippingRateScopeAccess(scope, existing.originCountry, existing.destinationCountry);
+    } catch (e) {
+      if (e instanceof ScopeError) return res.status(e.status).json({ success: false, error: { code: e.code, message: e.message } });
+      throw e;
+    }
+
+    // isActive é tratado pelo endpoint dedicado de toggle (audit action
+    // própria) — PATCH genérico continua aceitando o campo por
+    // conveniência, mas o toggle é o caminho recomendado no frontend.
+    const { errors, out } = await validateShippingRateInput(db, req.body ?? {}, true);
+    if (errors) {
+      return res.status(400).json({ success: false, error: { code: 'SHIPPING_RATE_INVALID', message: errors.join(' ') } });
+    }
+    if (Object.keys(out).length === 0) {
+      return res.status(400).json({ success: false, error: { code: 'SHIPPING_RATE_NO_CHANGES', message: 'Nenhum campo para atualizar.' } });
+    }
+
+    // Se a rota/país mudou, reconfirma o escopo para o país NOVO também.
+    const effectiveOrigin = out.originCountry ?? existing.originCountry;
+    const effectiveDestination = out.destinationCountry ?? existing.destinationCountry;
+    try {
+      assertShippingRateScopeAccess(scope, effectiveOrigin, effectiveDestination);
+    } catch (e) {
+      if (e instanceof ScopeError) return res.status(e.status).json({ success: false, error: { code: e.code, message: e.message } });
+      throw e;
+    }
+
+    const merged = {
+      originCountry: effectiveOrigin,
+      destinationCountry: effectiveDestination,
+      originRegion: out.originRegion !== undefined ? out.originRegion : existing.originRegion,
+      destinationRegion: out.destinationRegion !== undefined ? out.destinationRegion : existing.destinationRegion,
+      minWeightKg: out.minWeightKg ?? existing.minWeightKg,
+      maxWeightKg: out.maxWeightKg ?? existing.maxWeightKg,
+      currency: out.currency ?? existing.currency,
+      serviceType: out.serviceType ?? existing.serviceType,
+    };
+    if (Number(merged.maxWeightKg) <= Number(merged.minWeightKg)) {
+      return res.status(400).json({ success: false, error: { code: 'SHIPPING_RATE_INVALID', message: 'O peso máximo deve ser estritamente maior que o peso mínimo.' } });
+    }
+
+    const overlap = await findOverlappingShippingRate(db, merged, id);
+    if (overlap) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'SHIPPING_RATE_WEIGHT_RANGE_OVERLAP',
+          message: `Já existe outra tarifa ativa (${Number(overlap.minWeightKg)}–${Number(overlap.maxWeightKg)} kg) que cobre parte desta faixa de peso para esta rota.`,
+        },
+      });
+    }
+
+    const fieldsToUpdate: any = { ...out, updatedAt: new Date() };
+    await db.update(shippingRates).set(fieldsToUpdate).where(eq(shippingRates.id, id));
+    const [updated] = await db.select().from(shippingRates).where(eq(shippingRates.id, id)).limit(1);
+
+    await writeRealAudit(req, 'SHIPPING_RATE_UPDATED', 'shipping_rate', id, { before: existing, after: updated });
+    return res.json({ success: true, message: 'Tarifa de frete atualizada com sucesso!', data: updated });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// PATCH /admin/shipping-rates/:id/toggle — ativar/desativar com audit action dedicada.
+adminRouter.patch('/shipping-rates/:id/toggle', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Autenticação necessária.' });
+
+    const { id } = req.params;
+    const [existing] = await db.select().from(shippingRates).where(eq(shippingRates.id, id)).limit(1);
+    if (!existing) return res.status(404).json({ success: false, error: { code: 'SHIPPING_RATE_NOT_FOUND', message: 'Tarifa não encontrada.' } });
+
+    const scope = resolveAdministrativeScope(req.user);
+    try {
+      assertShippingRateScopeAccess(scope, existing.originCountry, existing.destinationCountry);
+    } catch (e) {
+      if (e instanceof ScopeError) return res.status(e.status).json({ success: false, error: { code: e.code, message: e.message } });
+      throw e;
+    }
+
+    const nextActive = req.body?.isActive !== undefined ? Boolean(req.body.isActive) : !existing.isActive;
+
+    if (nextActive) {
+      const overlap = await findOverlappingShippingRate(db, existing, id);
+      if (overlap) {
+        return res.status(409).json({
+          success: false,
+          error: {
+            code: 'SHIPPING_RATE_WEIGHT_RANGE_OVERLAP',
+            message: `Não é possível ativar: já existe outra tarifa ativa (${Number(overlap.minWeightKg)}–${Number(overlap.maxWeightKg)} kg) que cobre parte desta faixa de peso.`,
+          },
+        });
+      }
+    }
+
+    await db.update(shippingRates).set({ isActive: nextActive, updatedAt: new Date() }).where(eq(shippingRates.id, id));
+    const [updated] = await db.select().from(shippingRates).where(eq(shippingRates.id, id)).limit(1);
+
+    await writeRealAudit(req, nextActive ? 'SHIPPING_RATE_ENABLED' : 'SHIPPING_RATE_DISABLED', 'shipping_rate', id, { before: { isActive: existing.isActive }, after: { isActive: nextActive } });
+    return res.json({ success: true, message: nextActive ? 'Tarifa ativada.' : 'Tarifa desativada.', data: updated });
+  } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// DELETE /admin/shipping-rates/:id — só remove fisicamente se a tarifa NUNCA
+// foi usada em nenhum pedido real (orders.shippingRateId). Caso já tenha
+// histórico financeiro associado, o histórico não pode ficar órfão —
+// recomenda desativar em vez de excluir.
+adminRouter.delete('/shipping-rates/:id', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Autenticação necessária.' });
+
+    const { id } = req.params;
+    const [existing] = await db.select().from(shippingRates).where(eq(shippingRates.id, id)).limit(1);
+    if (!existing) return res.status(404).json({ success: false, error: { code: 'SHIPPING_RATE_NOT_FOUND', message: 'Tarifa não encontrada.' } });
+
+    const scope = resolveAdministrativeScope(req.user);
+    try {
+      assertShippingRateScopeAccess(scope, existing.originCountry, existing.destinationCountry);
+    } catch (e) {
+      if (e instanceof ScopeError) return res.status(e.status).json({ success: false, error: { code: e.code, message: e.message } });
+      throw e;
+    }
+
+    const [usedInOrder] = await db.select({ id: orders.id }).from(orders).where(eq(orders.shippingRateId, id)).limit(1);
+    if (usedInOrder) {
+      return res.status(409).json({
+        success: false,
+        error: {
+          code: 'SHIPPING_RATE_DELETE_UNSAFE',
+          message: 'Esta tarifa já foi usada em pedidos reais e não pode ser excluída (quebraria o histórico financeiro). Desative-a em vez de excluir.',
+        },
+      });
+    }
+
     await db.delete(shippingRates).where(eq(shippingRates.id, id));
+    await writeRealAudit(req, 'SHIPPING_RATE_DELETED', 'shipping_rate', id, { before: existing });
     return res.json({ success: true, message: 'Tarifa de frete removida.' });
   } catch (error: any) {
     return sendAdminError(res, error);
