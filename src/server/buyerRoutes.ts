@@ -807,7 +807,7 @@ return res.status(500).json({ success: false, error: { code: 'SET_DEFAULT_ADDRES
 // 3.5 SHOPPING CART (REAL DB - carts & cart_items)
 // ==========================================
 
-async function getFormattedUserCart(db: any, userId: string) {
+export async function getFormattedUserCart(db: any, userId: string) {
   const userCarts = await db.select().from(carts).where(eq(carts.userId, userId)).limit(1);
   if (userCarts.length === 0) {
     return {
@@ -874,10 +874,20 @@ async function getFormattedUserCart(db: any, userId: string) {
         originalPrice: prod.originalPrice ? Number(prod.originalPrice) : undefined,
         currency: prodCurrency,
         countryCode: prodCountry,
+        originCountry: prodCountry,
         image: prod.image || '',
         brand: prod.brand || '',
         stock: Number(prod.stock || 0),
         sellerId: prod.sellerId,
+        // Correção pós-deploy: faltavam storeId e shippingJson aqui — sem eles,
+        // o carrinho não conseguia calcular peso/frete real do produto (o
+        // normalizeProduct do frontend depende de shippingJson quando o campo
+        // achatado weightKg/dimensionsCm não vem pronto) e a política de loja
+        // não era resolvida (calculateFreight precisa de storeId). O
+        // ProductDetail nunca teve esse problema porque usa GET /products/:id,
+        // que já retorna shippingJson completo — este é o endpoint do carrinho.
+        storeId: prod.storeId,
+        shippingJson: prod.shippingJson,
       },
     });
   }

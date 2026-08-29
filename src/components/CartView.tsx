@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCart } from '../hooks/useCart';
 import { usePreferences } from '../context/PreferencesContext';
+import { useCountries } from '../hooks/useCountries';
 import { formatCurrency } from '../utils/currencyUtils';
 import { ShippingService } from '../services/shippingService';
 import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } from 'lucide-react';
@@ -10,8 +11,13 @@ export const CartView: React.FC = () => {
   const navigate = useNavigate();
   const { items: cart, removeItem: removeFromCart, updateQuantity: updateCartQuantity, total: cartTotal, totalCount: cartItemCount } = useCart();
   const { selectedCountry, formatPrice } = usePreferences();
-
-  const userLocation = { city: 'Bissau', state: 'Guiné-Bissau', zipCode: '1000' };
+  // Correção pós-deploy: "Bissau - Guiné-Bissau (1000)" era um destino 100%
+  // fictício, fixo, independente do país realmente selecionado — por isso
+  // divergia do que o ProductDetail mostrava (que já usa selectedCountry de
+  // verdade). O destino exibido aqui agora é o MESMO selectedCountry que o
+  // cálculo de frete abaixo já usa — nunca um valor inventado à parte.
+  const { data: operationalCountriesForDelivery } = useCountries();
+  const cartDestinationCountry = operationalCountriesForDelivery?.find((c) => c.code === selectedCountry);
 
   const [couponCode, setCouponCode] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
@@ -40,6 +46,8 @@ export const CartView: React.FC = () => {
     available: boolean;
     shippingChargedToBuyer: number;
     currency: string;
+    estimatedMinDays?: number;
+    estimatedMaxDays?: number;
     errorMessage?: string;
   } | null>(null);
 
@@ -72,7 +80,10 @@ export const CartView: React.FC = () => {
     }).then((res) => {
       if (!isMounted) return;
       if (res.success && res.data) {
-        setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: res.data.shippingChargedToBuyer, currency: res.data.currency });
+        setShippingQuote({
+          loading: false, available: true, shippingChargedToBuyer: res.data.shippingChargedToBuyer, currency: res.data.currency,
+          estimatedMinDays: res.data.estimatedMinDays, estimatedMaxDays: res.data.estimatedMaxDays,
+        });
       } else {
         setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: res.error?.message || 'Frete indisponível para este destino.' });
       }
@@ -117,9 +128,13 @@ export const CartView: React.FC = () => {
             <div className="p-4 bg-green-50 rounded-t-lg flex items-center justify-between text-xs text-green-800 font-semibold border-b border-green-100">
               <span className="flex items-center gap-2">
                 <Truck className="w-4 h-4 text-green-600" />
-                Entrega para {userLocation.city} - {userLocation.state} ({userLocation.zipCode})
+                Entrega para {cartDestinationCountry ? `${cartDestinationCountry.flag} ${cartDestinationCountry.name}` : selectedCountry}
               </span>
-              <span className="text-green-700 font-bold">⚡ Chega amanhã!</span>
+              {shippingQuote?.available && typeof shippingQuote.estimatedMinDays === 'number' && (
+                <span className="text-green-700 font-bold">
+                  {shippingQuote.estimatedMinDays}–{shippingQuote.estimatedMaxDays} dias úteis
+                </span>
+              )}
             </div>
 
             {/* Product row items */}
