@@ -17,6 +17,7 @@ import {
   Smartphone,
   Globe,
   Zap,
+  Loader2,
 } from 'lucide-react';
 import { PaymentMethodType, DeliveryAddress, PaymentDetails, CountryCode, CurrencyCode } from '../types';
 import { countriesConfig, formatCurrency } from '../utils/currencyUtils';
@@ -32,7 +33,7 @@ import { BuyerService } from '../services/buyerService';
 
 export const CheckoutView: React.FC = () => {
   const navigate = useNavigate();
-  const { items: cart, total: cartTotal, clearCart } = useCart();
+  const { items: cart, total: cartTotal, clearCart, isLoading: isCartLoading } = useCart();
   const { selectedCountry, selectedCurrency, formatPrice } = usePreferences();
 
   const [country, setCountry] = useState<CountryCode>(selectedCountry);
@@ -277,6 +278,20 @@ export const CheckoutView: React.FC = () => {
     clearCart();
     navigate(`/orders/${updatedOrder.id || activeOrderId}/confirmation`, { state: { order: updatedOrder } });
   };
+
+  // Correção pré-piloto (race condition): nunca tratar "carrinho ainda
+  // carregando" como "carrinho vazio" — sem isso, um Comprar agora que
+  // navegava direto para o checkout via a mesma janela de corrida (ou mesmo
+  // um refresh normal da página) mostrava esta mensagem antes do GET /cart
+  // real terminar, mesmo com o item já persistido no backend.
+  if (isCartLoading) {
+    return (
+      <div className="max-w-4xl mx-auto px-4 py-12 text-center flex flex-col items-center gap-3">
+        <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" />
+        <p className="text-gray-600 font-medium">Carregando seu carrinho...</p>
+      </div>
+    );
+  }
 
   if (cart.length === 0) {
     return (

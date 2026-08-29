@@ -929,127 +929,149 @@ buyerRouter.get('/cart', requireAuth, async (req: AuthRequest, res: Response) =>
   }
 });
 
+// Extraída do handler HTTP para ser testável diretamente (Docker Postgres)
+// sem precisar simular req/res. Retorna { error } OU { cart } — o handler
+// abaixo só traduz isso para a resposta HTTP.
+export async function addItemToCartForUser(
+  db: any,
+  userId: string,
+  payload: { productId?: string; variantId?: string; quantity?: number; selectedAttributes?: any; options?: any; color?: string; size?: string; storage?: string }
+): Promise<{ error: { status: number; code: string; message: string } } | { cart: Awaited<ReturnType<typeof getFormattedUserCart>> }> {
+  const { productId, variantId, quantity, selectedAttributes, options, color, size, storage } = payload;
+
+  if (!productId) {
+    return { error: { status: 400, code: 'MISSING_PRODUCT_ID', message: 'ID do produto é obrigatório.' } };
+  }
+
+  const prodRows = await db.select().from(products).where(eq(products.id, productId)).limit(1);
+  if (prodRows.length === 0) {
+    return { error: { status: 404, code: 'PRODUCT_NOT_FOUND', message: 'Produto não encontrado no catálogo.' } };
+  }
+
+  const prod = prodRows[0];
+  if (!prod.currency || !prod.countryCode) {
+    return { error: { status: 400, code: 'PRODUCT_INCONSISTENT', message: 'Produto possui dados de moeda ou país inconsistentes no catálogo.' } };
+  }
+
+  const prodCurrency = prod.currency;
+  const prodCountry = prod.countryCode;
+
+  let realUnitPrice = Number(prod.price);
+
+  const targetVariantId = variantId || options?.selectedVariantSku || options?.variantId || null;
+  if (targetVariantId) {
+    const varRows = await db.select().from(productVariants).where(eq(productVariants.id, targetVariantId)).limit(1);
+    if (varRows.length > 0 && varRows[0].price) {
+      realUnitPrice = Number(varRows[0].price);
+    }
+  }
+
+  const addQty = Math.max(1, Number(quantity) || 1);
+
+  let userCart = (await db.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
+  if (!userCart) {
+    const newCartId = `cart_${userId}`;
+    await db.insert(carts).values({
+      id: newCartId,
+      userId: userId,
+      currency: prodCurrency,
+      countryCode: prodCountry,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    userCart = (await db.select().from(carts).where(eq(carts.id, newCartId)).limit(1))[0];
+  } else {
+    // Check existing items in cart for mixed currency rule
+    const existingCartItems = await db.select().from(cartItems).where(eq(cartItems.cartId, userCart.id));
+    if (existingCartItems.length > 0) {
+      const firstItem = existingCartItems[0];
+      const firstProdRows = await db.select().from(products).where(eq(products.id, firstItem.productId)).limit(1);
+      if (firstProdRows.length > 0) {
+        const firstProd = firstProdRows[0];
+        if (firstProd.currency && firstProd.currency !== prodCurrency) {
+          return {
+            error: {
+              status: 400,
+              code: 'CART_MIXED_CURRENCY_NOT_ALLOWED',
+              message: `Não é possível misturar produtos com moedas diferentes (${firstProd.currency} e ${prodCurrency}) no mesmo carrinho. Finalize ou limpe o carrinho atual primeiro.`,
+            },
+          };
+        }
+      }
+    }
+
+    if (userCart.currency !== prodCurrency || userCart.countryCode !== prodCountry) {
+      await db.update(carts).set({
+        currency: prodCurrency,
+        countryCode: prodCountry,
+        updatedAt: new Date(),
+      }).where(eq(carts.id, userCart.id));
+    }
+  }
+
+  const existingItems = await db.select().from(cartItems).where(
+    and(
+      eq(cartItems.cartId, userCart.id),
+      eq(cartItems.productId, productId),
+      targetVariantId ? eq(cartItems.variantId, targetVariantId) : isNull(cartItems.variantId)
+    )
+  ).limit(1);
+
+  const attrData = selectedAttributes || options || (color || size || storage ? { color, size, storage } : null);
+
+  // Correção pré-piloto (item 10.J): quantidade no carrinho nunca pode
+  // ultrapassar o estoque real do produto — protege tanto contra cliques
+  // repetidos (mesmo com a race condition do frontend corrigida) quanto
+  // contra qualquer outro caminho que tente somar além do disponível.
+  const availableStock = Number(prod.stock);
+  const stockCap = !isNaN(availableStock) && availableStock >= 0 ? availableStock : Infinity;
+  if (stockCap <= 0) {
+    return { error: { status: 400, code: 'OUT_OF_STOCK', message: 'Este produto está sem estoque disponível no momento.' } };
+  }
+
+  if (existingItems.length > 0) {
+    const existing = existingItems[0];
+    const newQty = Math.min(Number(existing.quantity) + addQty, stockCap);
+    await db.update(cartItems).set({
+      quantity: newQty,
+      unitPrice: String(realUnitPrice),
+      selectedAttributesJson: attrData || existing.selectedAttributesJson,
+      updatedAt: new Date(),
+    }).where(eq(cartItems.id, existing.id));
+  } else {
+    const newItemId = `ci_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    await db.insert(cartItems).values({
+      id: newItemId,
+      cartId: userCart.id,
+      productId,
+      variantId: targetVariantId,
+      quantity: Math.min(addQty, stockCap),
+      unitPrice: String(realUnitPrice),
+      selectedAttributesJson: attrData,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+
+  const updatedCart = await getFormattedUserCart(db, userId);
+  return { cart: updatedCart };
+}
+
 buyerRouter.post('/cart/items', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
 
     const userId = req.user!.id;
-    const { productId, variantId, quantity, selectedAttributes, options, color, size, storage } = req.body ?? {};
-
-    if (!productId) {
-      return res.status(400).json({ success: false, error: { code: 'MISSING_PRODUCT_ID', message: 'ID do produto é obrigatório.' } });
+    const result = await addItemToCartForUser(db, userId, req.body ?? {});
+    if ('error' in result) {
+      return res.status(result.error.status).json({ success: false, error: { code: result.error.code, message: result.error.message } });
     }
-
-    const prodRows = await db.select().from(products).where(eq(products.id, productId)).limit(1);
-    if (prodRows.length === 0) {
-      return res.status(404).json({ success: false, error: { code: 'PRODUCT_NOT_FOUND', message: 'Produto não encontrado no catálogo.' } });
-    }
-
-    const prod = prodRows[0];
-    if (!prod.currency || !prod.countryCode) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'PRODUCT_INCONSISTENT', message: 'Produto possui dados de moeda ou país inconsistentes no catálogo.' },
-      });
-    }
-
-    const prodCurrency = prod.currency;
-    const prodCountry = prod.countryCode;
-
-    let realUnitPrice = Number(prod.price);
-
-    const targetVariantId = variantId || options?.selectedVariantSku || options?.variantId || null;
-    if (targetVariantId) {
-      const varRows = await db.select().from(productVariants).where(eq(productVariants.id, targetVariantId)).limit(1);
-      if (varRows.length > 0 && varRows[0].price) {
-        realUnitPrice = Number(varRows[0].price);
-      }
-    }
-
-    const addQty = Math.max(1, Number(quantity) || 1);
-
-    let userCart = (await db.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
-    if (!userCart) {
-      const newCartId = `cart_${userId}`;
-      await db.insert(carts).values({
-        id: newCartId,
-        userId: userId,
-        currency: prodCurrency,
-        countryCode: prodCountry,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-      userCart = (await db.select().from(carts).where(eq(carts.id, newCartId)).limit(1))[0];
-    } else {
-      // Check existing items in cart for mixed currency rule
-      const existingCartItems = await db.select().from(cartItems).where(eq(cartItems.cartId, userCart.id));
-      if (existingCartItems.length > 0) {
-        const firstItem = existingCartItems[0];
-        const firstProdRows = await db.select().from(products).where(eq(products.id, firstItem.productId)).limit(1);
-        if (firstProdRows.length > 0) {
-          const firstProd = firstProdRows[0];
-          if (firstProd.currency && firstProd.currency !== prodCurrency) {
-            return res.status(400).json({
-              success: false,
-              error: {
-                code: 'CART_MIXED_CURRENCY_NOT_ALLOWED',
-                message: `Não é possível misturar produtos com moedas diferentes (${firstProd.currency} e ${prodCurrency}) no mesmo carrinho. Finalize ou limpe o carrinho atual primeiro.`,
-              },
-            });
-          }
-        }
-      }
-
-      if (userCart.currency !== prodCurrency || userCart.countryCode !== prodCountry) {
-        await db.update(carts).set({
-          currency: prodCurrency,
-          countryCode: prodCountry,
-          updatedAt: new Date(),
-        }).where(eq(carts.id, userCart.id));
-      }
-    }
-
-    const existingItems = await db.select().from(cartItems).where(
-      and(
-        eq(cartItems.cartId, userCart.id),
-        eq(cartItems.productId, productId),
-        targetVariantId ? eq(cartItems.variantId, targetVariantId) : isNull(cartItems.variantId)
-      )
-    ).limit(1);
-
-    const attrData = selectedAttributes || options || (color || size || storage ? { color, size, storage } : null);
-
-    if (existingItems.length > 0) {
-      const existing = existingItems[0];
-      const newQty = Number(existing.quantity) + addQty;
-      await db.update(cartItems).set({
-        quantity: newQty,
-        unitPrice: String(realUnitPrice),
-        selectedAttributesJson: attrData || existing.selectedAttributesJson,
-        updatedAt: new Date(),
-      }).where(eq(cartItems.id, existing.id));
-    } else {
-      const newItemId = `ci_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      await db.insert(cartItems).values({
-        id: newItemId,
-        cartId: userCart.id,
-        productId,
-        variantId: targetVariantId,
-        quantity: addQty,
-        unitPrice: String(realUnitPrice),
-        selectedAttributesJson: attrData,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-    }
-
-    const updatedCart = await getFormattedUserCart(db, userId);
 
     return res.json({
       success: true,
       message: 'Produto adicionado ao carrinho com sucesso!',
-      data: updatedCart,
+      data: result.cart,
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, error: { code: 'CART_ADD_FAILED', message: error?.message || 'Erro ao adicionar item ao carrinho.' } });
@@ -1083,10 +1105,16 @@ const handleUpdateCartItem = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const newQty = Number(quantity);
-    if (isNaN(newQty) || newQty <= 0) {
+    const requestedQty = Number(quantity);
+    if (isNaN(requestedQty) || requestedQty <= 0) {
       await db.delete(cartItems).where(eq(cartItems.id, targetId));
     } else {
+      // Mesma proteção de estoque do POST /cart/items (item 10.J).
+      const targetItem = itemRows[0] || (await db.select().from(cartItems).where(eq(cartItems.id, targetId)).limit(1))[0];
+      const prodRows = await db.select().from(products).where(eq(products.id, targetItem.productId)).limit(1);
+      const availableStock = Number(prodRows[0]?.stock);
+      const stockCap = !isNaN(availableStock) && availableStock >= 0 ? availableStock : Infinity;
+      const newQty = Math.min(requestedQty, stockCap);
       await db.update(cartItems).set({
         quantity: newQty,
         updatedAt: new Date(),

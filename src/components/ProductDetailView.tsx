@@ -61,7 +61,15 @@ export const ProductDetailView: React.FC = () => {
 
   const { addItem } = useCart();
   const { toggleFavorite, isFavorite } = useFavorites();
-  const { selectedCountry, formatPrice } = usePreferences();
+  const { selectedCountry, formatPrice, showToast } = usePreferences();
+  // Correção pré-piloto (race condition/duplicação): "Adicionar ao carrinho" e
+  // "Comprar agora" navegavam ANTES do addItem() (assíncrono) terminar — a
+  // tela seguinte lia o carrinho antes da mutação estar persistida no
+  // backend. Agora navega só depois do await resolver com sucesso, e o botão
+  // fica desabilitado/com label de carregamento enquanto a operação está em
+  // andamento, para que um segundo clique (por o primeiro "parecer" ter
+  // falhado) não incremente a quantidade duas vezes.
+  const [cartActionPending, setCartActionPending] = useState<'add' | 'buy' | null>(null);
 
   const userLocation = { city: 'Bissau', country: selectedCountry };
 
@@ -482,32 +490,50 @@ export const ProductDetailView: React.FC = () => {
     }
   };
 
-  const handleBuyNow = () => {
-    const buyQty = selectedKit ? selectedKit.quantity : quantity;
-    addItem(product, buyQty, {
-      color: selectedColor || undefined,
-      size: selectedSize || undefined,
-      kit: selectedKit || undefined,
-      unitPriceOverride: effectiveUnitPrice,
-      selectedVariantSku: activeVariant?.sku || product.sku,
-      selectedVariantImage: activeVariant?.image || activeColorObj?.image || product.image,
-    });
-    navigate('/checkout');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  const handleBuyNow = async () => {
+    if (cartActionPending) return; // ignora clique duplicado/duplo-clique enquanto já há uma operação em andamento
+    setCartActionPending('buy');
+    try {
+      const buyQty = selectedKit ? selectedKit.quantity : quantity;
+      await addItem(product, buyQty, {
+        color: selectedColor || undefined,
+        size: selectedSize || undefined,
+        kit: selectedKit || undefined,
+        unitPriceOverride: effectiveUnitPrice,
+        selectedVariantSku: activeVariant?.sku || product.sku,
+        selectedVariantImage: activeVariant?.image || activeColorObj?.image || product.image,
+      });
+      // Só navega depois que o item está confirmado no backend — o checkout
+      // vai buscar o carrinho real (GET /cart) e já vai encontrá-lo lá.
+      navigate('/checkout');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err: any) {
+      showToast(err?.message || 'Não foi possível preparar a compra. Tente novamente.');
+    } finally {
+      setCartActionPending(null);
+    }
   };
 
-  const handleAddToCart = () => {
-    const buyQty = selectedKit ? selectedKit.quantity : quantity;
-    addItem(product, buyQty, {
-      color: selectedColor || undefined,
-      size: selectedSize || undefined,
-      kit: selectedKit || undefined,
-      unitPriceOverride: effectiveUnitPrice,
-      selectedVariantSku: activeVariant?.sku || product.sku,
-      selectedVariantImage: activeVariant?.image || activeColorObj?.image || product.image,
-    });
-    navigate('/cart');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+  const handleAddToCart = async () => {
+    if (cartActionPending) return;
+    setCartActionPending('add');
+    try {
+      const buyQty = selectedKit ? selectedKit.quantity : quantity;
+      await addItem(product, buyQty, {
+        color: selectedColor || undefined,
+        size: selectedSize || undefined,
+        kit: selectedKit || undefined,
+        unitPriceOverride: effectiveUnitPrice,
+        selectedVariantSku: activeVariant?.sku || product.sku,
+        selectedVariantImage: activeVariant?.image || activeColorObj?.image || product.image,
+      });
+      navigate('/cart');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err: any) {
+      showToast(err?.message || 'Não foi possível adicionar ao carrinho. Tente novamente.');
+    } finally {
+      setCartActionPending(null);
+    }
   };
 
   const handleCopyDirectLink = async () => {
@@ -1130,11 +1156,13 @@ export const ProductDetailView: React.FC = () => {
             {/* Action Buttons */}
             <div className="space-y-2 pt-2">
               <button
-                disabled={isCurrentVariationOutOfStock || !product.weightKg}
+                disabled={isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null}
                 onClick={handleBuyNow}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black py-3 px-4 rounded-xl shadow-xs transition transform active:scale-98 text-sm cursor-pointer"
               >
-                {isCurrentVariationOutOfStock
+                {cartActionPending === 'buy'
+                  ? 'Preparando compra...'
+                  : isCurrentVariationOutOfStock
                   ? 'Variação Esgotada'
                   : !product.weightKg
                   ? 'Indisponível (peso não cadastrado)'
@@ -1144,11 +1172,11 @@ export const ProductDetailView: React.FC = () => {
               </button>
 
               <button
-                disabled={isCurrentVariationOutOfStock || !product.weightKg}
+                disabled={isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null}
                 onClick={handleAddToCart}
                 className="w-full bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed text-blue-700 font-extrabold py-3 px-4 rounded-xl transition text-sm border border-blue-200 cursor-pointer"
               >
-                Adicionar ao carrinho
+                {cartActionPending === 'add' ? 'Adicionando...' : 'Adicionar ao carrinho'}
               </button>
 
               <div className="grid grid-cols-2 gap-2 pt-1">

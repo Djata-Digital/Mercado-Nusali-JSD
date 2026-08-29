@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useOrders } from '../hooks/useOrders';
 import { useCart } from '../hooks/useCart';
@@ -10,7 +10,11 @@ export const MyOrdersView: React.FC = () => {
   const navigate = useNavigate();
   const { data: orders = [] } = useOrders();
   const { addItem } = useCart();
-  const { selectedCurrency } = usePreferences();
+  const { selectedCurrency, showToast } = usePreferences();
+  // Correção pré-piloto (mesma race condition do ProductDetail): navegar
+  // antes do addItem() (assíncrono) confirmar deixava o carrinho aparecer
+  // vazio no primeiro clique.
+  const [buyAgainPendingKey, setBuyAgainPendingKey] = useState<string | null>(null);
 
   if (orders.length === 0) {
     return (
@@ -129,18 +133,31 @@ export const MyOrdersView: React.FC = () => {
                           </div>
                         </div>
 
-                        {prod.id && (
-                          <button
-                            onClick={() => {
-                              addItem(prod, qty);
-                              navigate('/cart');
-                            }}
-                            className="bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold px-3 py-1.5 rounded-xl text-xs transition flex items-center gap-1 shrink-0 border border-emerald-200 cursor-pointer"
-                          >
-                            <RefreshCw className="w-3.5 h-3.5" />
-                            <span>Comprar novamente</span>
-                          </button>
-                        )}
+                        {prod.id && (() => {
+                          const pendingKey = `${order.id || order.orderNumber}_${idx}`;
+                          const isPending = buyAgainPendingKey === pendingKey;
+                          return (
+                            <button
+                              disabled={buyAgainPendingKey !== null}
+                              onClick={async () => {
+                                if (buyAgainPendingKey !== null) return;
+                                setBuyAgainPendingKey(pendingKey);
+                                try {
+                                  await addItem(prod, qty);
+                                  navigate('/cart');
+                                } catch (err: any) {
+                                  showToast(err?.message || 'Não foi possível adicionar ao carrinho. Tente novamente.');
+                                } finally {
+                                  setBuyAgainPendingKey(null);
+                                }
+                              }}
+                              className="bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed text-emerald-800 font-bold px-3 py-1.5 rounded-xl text-xs transition flex items-center gap-1 shrink-0 border border-emerald-200 cursor-pointer"
+                            >
+                              <RefreshCw className={`w-3.5 h-3.5 ${isPending ? 'animate-spin' : ''}`} />
+                              <span>{isPending ? 'Adicionando...' : 'Comprar novamente'}</span>
+                            </button>
+                          );
+                        })()}
                       </div>
                     );
                   })}

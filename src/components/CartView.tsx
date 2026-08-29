@@ -9,7 +9,7 @@ import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } fro
 
 export const CartView: React.FC = () => {
   const navigate = useNavigate();
-  const { items: cart, removeItem: removeFromCart, updateQuantity: updateCartQuantity, total: cartTotal, totalCount: cartItemCount } = useCart();
+  const { items: cart, removeItem: removeFromCart, updateQuantity: updateCartQuantity, total: cartTotal, totalCount: cartItemCount, isLoading: isCartLoading } = useCart();
   const { selectedCountry, formatPrice } = usePreferences();
   // Correção pós-deploy: "Bissau - Guiné-Bissau (1000)" era um destino 100%
   // fictício, fixo, independente do país realmente selecionado — por isso
@@ -94,6 +94,19 @@ export const CartView: React.FC = () => {
 
   const shippingFee = shippingQuote?.available ? shippingQuote.shippingChargedToBuyer : 0;
   const finalTotal = cartTotal + shippingFee - couponDiscount;
+
+  // Correção pré-piloto (race condition): "carregando" e "vazio" são estados
+  // diferentes. Sem isso, a tela mostrava "carrinho vazio" no instante entre
+  // a navegação e o GET /cart real terminar — mesmo com o item já persistido
+  // no backend (ex.: logo após "Adicionar ao carrinho").
+  if (isCartLoading) {
+    return (
+      <div className="max-w-4xl mx-auto px-4 py-16 text-center space-y-4">
+        <Loader2 className="w-10 h-10 mx-auto text-blue-600 animate-spin" />
+        <p className="text-sm text-gray-600">Carregando seu carrinho...</p>
+      </div>
+    );
+  }
 
   if (cart.length === 0) {
     return (
