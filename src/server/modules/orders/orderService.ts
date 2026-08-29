@@ -23,6 +23,7 @@ import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
 import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor } from '../shipping/shippingCalculatorService.js';
 import { categories, platformSettings } from '../../../db/schema.js';
+import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -153,6 +154,16 @@ export class OrderService {
           throw new Error(`Produto com ID "${ci.productId}" não foi encontrado no catálogo.`);
         }
         const prod = prodRows[0];
+
+        // Melhoria pré-piloto (elegibilidade por país): portão definitivo,
+        // não contornável pelo frontend — usa o país do endereço de entrega
+        // REAL já resolvido acima (targetAddress), nunca o destino "de
+        // navegação" do marketplace. Produto nacional só entrega no próprio
+        // país; internacional só nos países que o vendedor autorizou
+        // explicitamente. Bloqueia o pedido inteiro (nenhum pedido parcial).
+        if (!isProductAvailableForCountry(prod, targetAddress.countryCode)) {
+          throw new Error(`PRODUCT_NOT_AVAILABLE_FOR_DESTINATION: "${prod.title}" não pode ser entregue em ${targetAddress.countryCode}. ${eligibilityReason(prod, targetAddress.countryCode)}`);
+        }
 
         let unitPrice = Number(prod.price);
         let variantTitle: string | null = null;

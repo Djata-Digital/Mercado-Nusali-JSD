@@ -141,6 +141,13 @@
       "when": 1787780000000,
       "tag": "0019_category_commission_and_marketplace_subsidy_cap",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1787950000000,
+      "tag": "0020_product_country_eligibility",
+      "breakpoints": true
     }
   ]
 }

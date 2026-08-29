@@ -61,7 +61,7 @@ import {
   supportTicketMessages,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
-import { eq, desc, and, or, isNull } from 'drizzle-orm';
+import { eq, desc, and, or, isNull, inArray } from 'drizzle-orm';
 import { requireAuth, AuthRequest } from './modules/auth/authMiddleware.js';
 import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
@@ -1417,6 +1417,50 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
       fieldsToUpdate.currency = resolvedStoreCurrency;
     }
 
+    // Melhoria pré-piloto (elegibilidade por país): permite ao vendedor
+    // alterar depois se um produto é nacional ou internacional, e para quais
+    // países. Mesma validação real usada na criação — nenhum país inventado.
+    if (updates.publishingScope !== undefined) {
+      const scope = updates.publishingScope === 'international' ? 'international' : 'national';
+      fieldsToUpdate.publishingScope = scope;
+      if (scope === 'national') {
+        fieldsToUpdate.targetCountriesJson = null;
+      } else if (updates.targetCountries !== undefined) {
+        const requested = Array.isArray(updates.targetCountries)
+          ? Array.from(new Set(updates.targetCountries.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean)))
+          : [];
+        if (requested.length === 0) {
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_TARGET_COUNTRIES_REQUIRED', message: 'Venda internacional exige ao menos um país de destino explicitamente selecionado.' } });
+        }
+        const realCountries = await db.select().from(countries).where(inArray(countries.code, requested as string[]));
+        const realActiveCodes = new Set(realCountries.filter((c: any) => c.isActive).map((c: any) => c.code));
+        const invalid = requested.filter((code) => !realActiveCodes.has(code));
+        if (invalid.length > 0) {
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_TARGET_COUNTRY_INVALID', message: `País(es) de destino inválido(s) ou não operacional(is): ${invalid.join(', ')}.` } });
+        }
+        fieldsToUpdate.targetCountriesJson = requested;
+      }
+    } else if (updates.targetCountries !== undefined) {
+      // Scope não mudou nesta chamada, mas a lista de destinos sim — só faz
+      // sentido se o produto já for internacional.
+      const currentScope = check.product.publishingScope === 'international' ? 'international' : 'national';
+      if (currentScope === 'international') {
+        const requested = Array.isArray(updates.targetCountries)
+          ? Array.from(new Set(updates.targetCountries.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean)))
+          : [];
+        if (requested.length === 0) {
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_TARGET_COUNTRIES_REQUIRED', message: 'Venda internacional exige ao menos um país de destino explicitamente selecionado.' } });
+        }
+        const realCountries = await db.select().from(countries).where(inArray(countries.code, requested as string[]));
+        const realActiveCodes = new Set(realCountries.filter((c: any) => c.isActive).map((c: any) => c.code));
+        const invalid = requested.filter((code) => !realActiveCodes.has(code));
+        if (invalid.length > 0) {
+          return res.status(400).json({ success: false, error: { code: 'PRODUCT_TARGET_COUNTRY_INVALID', message: `País(es) de destino inválido(s) ou não operacional(is): ${invalid.join(', ')}.` } });
+        }
+        fieldsToUpdate.targetCountriesJson = requested;
+      }
+    }
+
     if (Object.keys(fieldsToUpdate).length > 1) {
       await db.update(products).set(fieldsToUpdate).where(eq(products.id, id));
     }
@@ -1426,6 +1470,10 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     }
 
     await delCache('products_list_all');
+    // Sem isso, GET /products/:id (CatalogService.getProductById) continuava
+    // servindo o cache antigo por até 120s depois do vendedor mudar o
+    // escopo/países de destino — a mudança "não respeitava imediatamente".
+    await delCache(`product:${id}`);
     return res.json({ success: true, message: 'Produto atualizado com sucesso!' });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });

@@ -333,6 +333,15 @@ export const products = pgTable('products', {
   isActive: boolean('is_active').notNull().default(true),
   attributesJson: jsonb('attributes_json'),
   shippingJson: jsonb('shipping_json'),
+  // Melhoria pré-piloto (elegibilidade por país): antes, o wizard do vendedor
+  // já coletava "venda nacional vs. internacional" e os países de destino,
+  // mas NADA disso era persistido — productCreationService descartava os
+  // campos silenciosamente. NATIONAL (default, seguro para dados legados) =
+  // visível somente no próprio countryCode (mesmo comportamento de sempre).
+  // INTERNATIONAL = visível apenas nos países explicitamente listados em
+  // targetCountriesJson (nunca "todos os países" implícito).
+  publishingScope: varchar('publishing_scope', { length: 20 }).notNull().default('national'),
+  targetCountriesJson: jsonb('target_countries_json'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({

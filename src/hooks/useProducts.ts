@@ -13,11 +13,11 @@ export const useProducts = (filters?: Partial<FilterState>) => {
   });
 };
 
-export const useProduct = (id: string) => {
+export const useProduct = (id: string, destinationCountry?: string) => {
   return useQuery({
-    queryKey: ['product', id],
+    queryKey: ['product', id, destinationCountry],
     queryFn: async () => {
-      const res = await ProductService.getProductById(id);
+      const res = await ProductService.getProductById(id, destinationCountry);
       return res.data;
     },
     enabled: !!id,

@@ -193,6 +193,10 @@ export interface Product {
   publishingScope?: PublishingScope;
   targetCountries?: CountryCode[];
   originCountry?: CountryCode;
+  // Elegibilidade geográfica calculada pelo backend para um destino
+  // específico (nunca inferida no frontend) — ver productEligibilityService.ts.
+  availableForCountry?: boolean;
+  unavailabilityReason?: string;
   productKits?: ProductKit[];
   availableColors?: (ProductColor | string)[];
   availableSizes?: string[];
@@ -222,6 +226,7 @@ export interface Product {
 }
 
 export interface CartItem {
+  id?: string;
   product: Product;
   quantity: number;
   selectedColor?: string;
@@ -231,6 +236,10 @@ export interface CartItem {
   unitPriceOverride?: number;
   selectedVariantSku?: string;
   selectedVariantImage?: string;
+  // Elegibilidade geográfica calculada pelo backend para o destino atual do
+  // comprador — nunca calculada no frontend (ver productEligibilityService.ts).
+  isAvailableForDestination?: boolean;
+  unavailabilityReason?: string;
 }
 
 export interface DeliveryAddress {

@@ -54,14 +54,20 @@ export const ProductDetailView: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const isValidId = Boolean(id && id !== 'undefined' && id.trim() !== '');
-  const { data: fetchedProduct, isLoading, isError } = useProduct(isValidId ? id! : '');
+  const { selectedCountry, formatPrice, showToast } = usePreferences();
+  // Melhoria pré-piloto (elegibilidade por país): passa o destino real do
+  // comprador para o backend calcular disponibilidade — nunca inferida aqui.
+  // Cobre acesso via URL direta a um produto que não aparece mais no
+  // catálogo filtrado (seção 7): o backend continua mostrando os dados do
+  // produto, só marca availableForCountry=false para travar a compra.
+  const { data: fetchedProduct, isLoading, isError } = useProduct(isValidId ? id! : '', selectedCountry);
   const { data: allProducts = [] } = useProducts();
   const rawProduct = isValidId ? (fetchedProduct || allProducts.find((p) => p.id === id)) : null;
   const product = rawProduct ? normalizeProduct(rawProduct) : null;
+  const isUnavailableForDestination = product?.availableForCountry === false;
 
   const { addItem } = useCart();
   const { toggleFavorite, isFavorite } = useFavorites();
-  const { selectedCountry, formatPrice, showToast } = usePreferences();
   // Correção pré-piloto (race condition/duplicação): "Adicionar ao carrinho" e
   // "Comprar agora" navegavam ANTES do addItem() (assíncrono) terminar — a
   // tela seguinte lia o carrinho antes da mutação estar persistida no
@@ -412,7 +418,7 @@ export const ProductDetailView: React.FC = () => {
 
   useEffect(() => {
     let isMounted = true;
-    const hasShippableData = Boolean(product?.weightKg && product.weightKg > 0 && originCountry && selectedCountry);
+    const hasShippableData = Boolean(product?.weightKg && product.weightKg > 0 && originCountry && selectedCountry && product?.availableForCountry !== false);
     if (!hasShippableData) {
       setDeliveryQuote(null);
       return;
@@ -1065,23 +1071,29 @@ export const ProductDetailView: React.FC = () => {
                 </span>
               </div>
 
-              {!product.weightKg && (
+              {isUnavailableForDestination && (
+                <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold">
+                  {product.unavailabilityReason || 'Este produto não está disponível para entrega no seu país.'}
+                </p>
+              )}
+
+              {!isUnavailableForDestination && !product.weightKg && (
                 <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
                   Este produto ainda não tem peso cadastrado pelo vendedor — não é possível calcular o frete nem finalizar a compra até que isso seja corrigido.
                 </p>
               )}
 
-              {product.weightKg && !selectedCountry && (
+              {!isUnavailableForDestination && product.weightKg && !selectedCountry && (
                 <p className="text-[11px] text-gray-600">Informe seu destino para calcular a entrega.</p>
               )}
 
-              {product.weightKg && selectedCountry && deliveryQuote?.loading && (
+              {!isUnavailableForDestination && product.weightKg && selectedCountry && deliveryQuote?.loading && (
                 <p className="text-xs text-gray-500 flex items-center gap-1.5">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" /> Calculando frete...
                 </p>
               )}
 
-              {product.weightKg && selectedCountry && !deliveryQuote?.loading && deliveryQuote?.available && (
+              {!isUnavailableForDestination && product.weightKg && selectedCountry && !deliveryQuote?.loading && deliveryQuote?.available && (
                 <>
                   <div className="text-xs flex items-center justify-between">
                     <span className="text-gray-500">Frete:</span>
@@ -1100,7 +1112,7 @@ export const ProductDetailView: React.FC = () => {
                 </>
               )}
 
-              {product.weightKg && selectedCountry && !deliveryQuote?.loading && deliveryQuote && !deliveryQuote.available && (
+              {!isUnavailableForDestination && product.weightKg && selectedCountry && !deliveryQuote?.loading && deliveryQuote && !deliveryQuote.available && (
                 <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
                   {deliveryQuote.errorMessage || 'Frete indisponível para este destino no momento.'}
                 </p>
@@ -1156,12 +1168,14 @@ export const ProductDetailView: React.FC = () => {
             {/* Action Buttons */}
             <div className="space-y-2 pt-2">
               <button
-                disabled={isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null}
+                disabled={isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination}
                 onClick={handleBuyNow}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black py-3 px-4 rounded-xl shadow-xs transition transform active:scale-98 text-sm cursor-pointer"
               >
                 {cartActionPending === 'buy'
                   ? 'Preparando compra...'
+                  : isUnavailableForDestination
+                  ? 'Indisponível no seu país'
                   : isCurrentVariationOutOfStock
                   ? 'Variação Esgotada'
                   : !product.weightKg
@@ -1172,11 +1186,11 @@ export const ProductDetailView: React.FC = () => {
               </button>
 
               <button
-                disabled={isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null}
+                disabled={isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination}
                 onClick={handleAddToCart}
                 className="w-full bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed text-blue-700 font-extrabold py-3 px-4 rounded-xl transition text-sm border border-blue-200 cursor-pointer"
               >
-                {cartActionPending === 'add' ? 'Adicionando...' : 'Adicionar ao carrinho'}
+                {cartActionPending === 'add' ? 'Adicionando...' : isUnavailableForDestination ? 'Indisponível no seu país' : 'Adicionar ao carrinho'}
               </button>
 
               <div className="grid grid-cols-2 gap-2 pt-1">

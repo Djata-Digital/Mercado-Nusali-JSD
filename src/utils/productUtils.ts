@@ -120,9 +120,21 @@ export function normalizeProduct(p: any): Product {
       || (p.shippingJson && typeof p.shippingJson === 'object' && p.shippingJson.lengthCm && p.shippingJson.widthCm && p.shippingJson.heightCm
         ? { length: Number(p.shippingJson.lengthCm), width: Number(p.shippingJson.widthCm), height: Number(p.shippingJson.heightCm) }
         : undefined),
+    // Melhoria pré-piloto (elegibilidade por país): publishingScope/targetCountries
+    // agora são dados REAIS vindos do backend (products.publishing_scope /
+    // target_countries_json) — antes eram campos puramente decorativos, nunca
+    // persistidos. targetCountriesJson é o nome da coluna real; targetCountries
+    // continua aceito para compatibilidade com fontes já normalizadas.
     publishingScope: p.publishingScope || (p.shipping?.isInternational ? 'international' : 'national'),
-    targetCountries: Array.isArray(p.targetCountries) ? p.targetCountries : (p.shipping?.targetCountries || []),
+    targetCountries: Array.isArray(p.targetCountries)
+      ? p.targetCountries
+      : (Array.isArray(p.targetCountriesJson) ? p.targetCountriesJson : (p.shipping?.targetCountries || [])),
     originCountry: resolvedOriginCountry,
+    // Elegibilidade calculada pelo backend para um destinationCountry específico
+    // (GET /products/:id?destinationCountry=...) — nunca calculada no frontend,
+    // só repassada. undefined quando o backend não recebeu destino nenhum.
+    availableForCountry: p.availableForCountry,
+    unavailabilityReason: p.unavailabilityReason,
     productKits: Array.isArray(p.productKits) ? p.productKits : [],
     availableColors: Array.isArray(p.availableColors) ? p.availableColors : [],
     availableSizes: Array.isArray(p.availableSizes) ? p.availableSizes : [],

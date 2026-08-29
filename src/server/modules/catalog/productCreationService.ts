@@ -32,6 +32,11 @@ export interface CreateProductInput {
   full?: boolean;
   specs?: Record<string, any>;
   attributesJson?: Record<string, any>;
+  // Melhoria pré-piloto (elegibilidade por país): o wizard já coletava isso,
+  // mas nada era persistido. 'national' (default) = só o país da loja.
+  // 'international' = só os países explicitamente listados em targetCountries.
+  publishingScope?: 'national' | 'international';
+  targetCountries?: string[];
 }
 
 /**
@@ -251,6 +256,28 @@ export class ProductCreationService {
       throw new Error('PRODUCT_DIMENSIONS_REQUIRED: As dimensões do produto (comprimento, largura e altura, em cm) são obrigatórias e devem ser maiores que zero — são necessárias para o cálculo de frete.');
     }
 
+    // Elegibilidade geográfica (venda nacional vs. internacional). NACIONAL é
+    // o default seguro — nenhum país é assumido além do próprio da loja.
+    // INTERNACIONAL exige uma lista explícita e real de países operacionais
+    // (nunca "todos os países" implícito, nunca código inventado).
+    const publishingScope: 'national' | 'international' = input.publishingScope === 'international' ? 'international' : 'national';
+    let targetCountriesJson: string[] | null = null;
+    if (publishingScope === 'international') {
+      const requested = Array.isArray(input.targetCountries)
+        ? Array.from(new Set(input.targetCountries.map((c) => String(c).trim().toUpperCase()).filter(Boolean)))
+        : [];
+      if (requested.length === 0) {
+        throw new Error('PRODUCT_TARGET_COUNTRIES_REQUIRED: Venda internacional exige ao menos um país de destino explicitamente selecionado.');
+      }
+      const realCountries = await db.select().from(countries).where(inArray(countries.code, requested));
+      const realActiveCodes = new Set(realCountries.filter((c: any) => c.isActive).map((c: any) => c.code));
+      const invalid = requested.filter((code) => !realActiveCodes.has(code));
+      if (invalid.length > 0) {
+        throw new Error(`PRODUCT_TARGET_COUNTRY_INVALID: País(es) de destino inválido(s) ou não operacional(is): ${invalid.join(', ')}.`);
+      }
+      targetCountriesJson = requested;
+    }
+
     const newProduct = {
       id: productId,
       title: input.title.trim(),
@@ -272,6 +299,8 @@ export class ProductCreationService {
       isActive: true,
       attributesJson: specsMap,
       shippingJson: { weightKg: weightNum, lengthCm: lengthNum, widthCm: widthNum, heightCm: heightNum },
+      publishingScope,
+      targetCountriesJson,
       createdAt: new Date(),
       updatedAt: new Date(),
     };

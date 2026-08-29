@@ -45,6 +45,7 @@ import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, and, or, isNull } from 'drizzle-orm';
 import { createBuyerDispute, RefundValidationError } from './modules/payments/refundService.js';
 import { updateBuyerTaxId, BuyerProfileValidationError } from './modules/buyer/buyerProfileService.js';
+import { isProductAvailableForCountry, eligibilityReason } from './modules/catalog/productEligibilityService.js';
 
 export const buyerRouter = Router();
 buyerRouter.use(requireAuth);
@@ -807,7 +808,7 @@ return res.status(500).json({ success: false, error: { code: 'SET_DEFAULT_ADDRES
 // 3.5 SHOPPING CART (REAL DB - carts & cart_items)
 // ==========================================
 
-export async function getFormattedUserCart(db: any, userId: string) {
+export async function getFormattedUserCart(db: any, userId: string, destinationCountry?: string) {
   const userCarts = await db.select().from(carts).where(eq(carts.userId, userId)).limit(1);
   if (userCarts.length === 0) {
     return {
@@ -856,6 +857,12 @@ export async function getFormattedUserCart(db: any, userId: string) {
     totalAmount += itemSubtotal;
     totalQuantityCount += qty;
 
+    // Melhoria pré-piloto (elegibilidade por país): se o destino do
+    // comprador mudou desde que o item foi adicionado (ou o produto nunca
+    // foi elegível), o item NÃO é removido silenciosamente — fica marcado
+    // para a tela avisar e bloquear o checkout até o comprador resolver.
+    const isAvailableForDestination = destinationCountry ? isProductAvailableForCountry(prod, destinationCountry) : undefined;
+
     itemsFormatted.push({
       id: ci.id,
       cartId: ci.cartId,
@@ -867,6 +874,8 @@ export async function getFormattedUserCart(db: any, userId: string) {
       currency: prodCurrency,
       countryCode: prodCountry,
       selectedAttributes: ci.selectedAttributesJson || null,
+      isAvailableForDestination,
+      unavailabilityReason: isAvailableForDestination === false ? eligibilityReason(prod, destinationCountry) : undefined,
       product: {
         id: prod.id,
         title: prod.title,
@@ -888,6 +897,12 @@ export async function getFormattedUserCart(db: any, userId: string) {
         // que já retorna shippingJson completo — este é o endpoint do carrinho.
         storeId: prod.storeId,
         shippingJson: prod.shippingJson,
+        // Melhoria pré-piloto (elegibilidade por país): o checkout precisa
+        // saber o escopo/destinos permitidos de cada item para travar (ou
+        // filtrar) o seletor de país de entrega — nunca decidido só no
+        // frontend.
+        publishingScope: prod.publishingScope,
+        targetCountriesJson: prod.targetCountriesJson,
       },
     });
   }
@@ -909,7 +924,16 @@ export async function getFormattedUserCart(db: any, userId: string) {
     items: itemsFormatted,
     total: totalAmount,
     totalCount: totalQuantityCount,
+    hasIneligibleItems: itemsFormatted.some((i: any) => i.isAvailableForDestination === false),
   };
+}
+
+async function resolveCartDestinationCountry(db: any, userId: string, req: AuthRequest): Promise<string | undefined> {
+  const [defaultAddress] = await db.select().from(addresses).where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true))).limit(1);
+  if (defaultAddress?.countryCode) return defaultAddress.countryCode;
+  const header = req.headers['x-country-code'];
+  const headerVal = Array.isArray(header) ? header[0] : header;
+  return headerVal || undefined;
 }
 
 buyerRouter.get('/cart', requireAuth, async (req: AuthRequest, res: Response) => {
@@ -918,7 +942,8 @@ buyerRouter.get('/cart', requireAuth, async (req: AuthRequest, res: Response) =>
     if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
 
     const userId = req.user!.id;
-    const cartData = await getFormattedUserCart(db, userId);
+    const destinationCountry = await resolveCartDestinationCountry(db, userId, req);
+    const cartData = await getFormattedUserCart(db, userId, destinationCountry);
 
     return res.json({
       success: true,
@@ -935,7 +960,7 @@ buyerRouter.get('/cart', requireAuth, async (req: AuthRequest, res: Response) =>
 export async function addItemToCartForUser(
   db: any,
   userId: string,
-  payload: { productId?: string; variantId?: string; quantity?: number; selectedAttributes?: any; options?: any; color?: string; size?: string; storage?: string }
+  payload: { productId?: string; variantId?: string; quantity?: number; selectedAttributes?: any; options?: any; color?: string; size?: string; storage?: string; destinationCountry?: string }
 ): Promise<{ error: { status: number; code: string; message: string } } | { cart: Awaited<ReturnType<typeof getFormattedUserCart>> }> {
   const { productId, variantId, quantity, selectedAttributes, options, color, size, storage } = payload;
 
@@ -955,6 +980,34 @@ export async function addItemToCartForUser(
 
   const prodCurrency = prod.currency;
   const prodCountry = prod.countryCode;
+
+  // Melhoria pré-piloto (elegibilidade por país): backend revalida mesmo que
+  // o produto tenha "escapado" do catálogo filtrado (ex.: link direto, cache
+  // desatualizado). Prioridade do destino a validar: (1) endereço de entrega
+  // padrão do comprador — sinal mais real que existe; (2) destinationCountry
+  // explícito enviado pelo frontend; (3) país já em uso no carrinho atual
+  // (carrinho não pode misturar destinos, mesma lógica já aplicada à moeda).
+  // Sem nenhum desses (comprador novíssimo, sem endereço, carrinho vazio),
+  // não há como determinar o destino ainda — o checkout continua sendo o
+  // portão definitivo que nunca pode ser contornado.
+  const [defaultAddress] = await db.select().from(addresses).where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true))).limit(1);
+  const existingCartForDestination = (await db.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
+  const destinationCountry: string | undefined =
+    defaultAddress?.countryCode ||
+    payload.destinationCountry ||
+    (existingCartForDestination && (await db.select().from(cartItems).where(eq(cartItems.cartId, existingCartForDestination.id)).limit(1)).length > 0
+      ? existingCartForDestination.countryCode
+      : undefined);
+
+  if (destinationCountry && !isProductAvailableForCountry(prod, destinationCountry)) {
+    return {
+      error: {
+        status: 400,
+        code: 'PRODUCT_NOT_AVAILABLE_FOR_DESTINATION',
+        message: eligibilityReason(prod, destinationCountry),
+      },
+    };
+  }
 
   let realUnitPrice = Number(prod.price);
 
@@ -1053,7 +1106,7 @@ export async function addItemToCartForUser(
     });
   }
 
-  const updatedCart = await getFormattedUserCart(db, userId);
+  const updatedCart = await getFormattedUserCart(db, userId, destinationCountry);
   return { cart: updatedCart };
 }
 
@@ -1063,7 +1116,12 @@ buyerRouter.post('/cart/items', requireAuth, async (req: AuthRequest, res: Respo
     if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
 
     const userId = req.user!.id;
-    const result = await addItemToCartForUser(db, userId, req.body ?? {});
+    // Mesmo mecanismo do catálogo: X-Country-Code carrega o país realmente
+    // selecionado pelo comprador em toda requisição (ver PreferencesContext.tsx),
+    // usado aqui como sinal de destino quando o corpo não informa um explícito.
+    const headerCountry = req.headers['x-country-code'];
+    const destinationFromHeader = Array.isArray(headerCountry) ? headerCountry[0] : headerCountry;
+    const result = await addItemToCartForUser(db, userId, { ...(req.body ?? {}), destinationCountry: req.body?.destinationCountry || destinationFromHeader });
     if ('error' in result) {
       return res.status(result.error.status).json({ success: false, error: { code: result.error.code, message: result.error.message } });
     }
@@ -1121,7 +1179,7 @@ const handleUpdateCartItem = async (req: AuthRequest, res: Response) => {
       }).where(eq(cartItems.id, targetId));
     }
 
-    const updatedCart = await getFormattedUserCart(db, userId);
+    const updatedCart = await getFormattedUserCart(db, userId, await resolveCartDestinationCountry(db, userId, req));
 
     return res.json({
       success: true,
@@ -1154,7 +1212,7 @@ buyerRouter.delete('/cart/items/:id', requireAuth, async (req: AuthRequest, res:
     // Fallback if id was passed as productId
     await db.delete(cartItems).where(and(eq(cartItems.productId, id), eq(cartItems.cartId, userCart.id)));
 
-    const updatedCart = await getFormattedUserCart(db, userId);
+    const updatedCart = await getFormattedUserCart(db, userId, await resolveCartDestinationCountry(db, userId, req));
 
     return res.json({
       success: true,

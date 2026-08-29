@@ -11,6 +11,20 @@ import { ProductCreationService, getCategoryAttributesWithInheritance } from './
 
 export const catalogRouter = Router();
 
+// Melhoria pré-piloto (elegibilidade por país): toda requisição do apiClient
+// já envia o header X-Country-Code com o país realmente selecionado pelo
+// comprador (ver PreferencesContext.tsx). Usar isso como fallback de destino
+// quando a tela não passa "country"/"destinationCountry" explicitamente
+// cobre TODAS as rotas públicas (Home, busca, categoria, loja, relacionados)
+// sem precisar alterar cada uma individualmente — backend continua
+// autoridade mesmo que uma tela específica ainda não passe o filtro à mão.
+function resolveDestinationCountryFromRequest(req: Request, explicit?: string): string | undefined {
+  if (explicit && explicit !== 'ALL') return explicit;
+  const header = req.headers['x-country-code'];
+  const headerVal = Array.isArray(header) ? header[0] : header;
+  return headerVal || undefined;
+}
+
 // GET /api/v1/products
 catalogRouter.get('/products', async (req: Request, res: Response) => {
   try {
@@ -32,7 +46,7 @@ catalogRouter.get('/products', async (req: Request, res: Response) => {
     const result = await CatalogService.getProducts({
       q: q as string,
       category: category as string,
-      country: country as string,
+      country: resolveDestinationCountryFromRequest(req, country as string),
       storeId: storeId as string,
       brand: brand as string,
       minPrice: minPrice ? Number(minPrice) : undefined,
@@ -60,7 +74,9 @@ catalogRouter.get('/products', async (req: Request, res: Response) => {
 // GET /api/v1/products/:id
 catalogRouter.get('/products/:id', async (req: Request, res: Response) => {
   try {
-    const product = await CatalogService.getProductById(req.params.id);
+    const explicitDestination = typeof req.query.destinationCountry === 'string' ? req.query.destinationCountry : undefined;
+    const destinationCountry = resolveDestinationCountryFromRequest(req, explicitDestination);
+    const product = await CatalogService.getProductById(req.params.id, destinationCountry);
     if (!product) {
       return res.status(404).json({
         success: false,

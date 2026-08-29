@@ -166,10 +166,6 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     return '' as CountryCode;
   });
 
-  const hasExplicitTargetCountries = Boolean(
-    (initialProduct?.targetCountries && initialProduct.targetCountries.length > 0) ||
-    (initialProduct?.shipping?.targetCountries && initialProduct.shipping.targetCountries.length > 0)
-  );
   const [targetCountries, setTargetCountries] = useState<CountryCode[]>(
     initialProduct?.targetCountries && initialProduct.targetCountries.length > 0
       ? initialProduct.targetCountries
@@ -181,15 +177,14 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   // Países operacionais reais (GET /api/v1/countries) — nunca ALL_COUNTRY_CODES.
   const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
 
-  // Sem alcance internacional automático inventado: só preenche "todos os
-  // países" com dados REAIS assim que a lista carrega, e só quando não havia
-  // seleção explícita salva (produto novo, ou sem esse campo no histórico).
-  useEffect(() => {
-    if (!hasExplicitTargetCountries && operationalCountries && operationalCountries.length > 0 && targetCountries.length === 0) {
-      setTargetCountries(operationalCountries.map((c) => c.code));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [operationalCountries]);
+  // Melhoria pré-piloto (elegibilidade por país): ANTES, isto preenchia
+  // "todos os países operacionais" automaticamente assim que a lista
+  // carregava — violava diretamente a regra "INTERNATIONAL nunca é todos os
+  // países implícito". Como esse campo nunca era persistido de verdade, o
+  // bug nunca teve efeito real; agora que é persistido, o vendedor precisa
+  // escolher os países explicitamente (o botão "Selecionar todos" abaixo
+  // continua disponível para quem realmente quiser todos, mas é uma ação
+  // deliberada, não um default).
 
   // Bandeira/nome reais do país de origem (da loja) — getCountryFlag/getCountryName
   // caem para Guiné-Bissau quando o código não está no countriesConfig legado
@@ -881,9 +876,14 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     const cleanVideoUrl = shortVideoUrl && shortVideoUrl.startsWith('http') ? shortVideoUrl.trim() : undefined;
 
     const isInternationalProduct = publishingScope === 'international';
-    const effectiveTargetCountries = isInternationalProduct
-      ? (targetCountries.length > 0 ? targetCountries : (operationalCountries?.map((c) => c.code) || []))
-      : [originCountry];
+    // Melhoria pré-piloto (elegibilidade por país): nunca assumir "todos os
+    // países" quando o vendedor não selecionou nenhum — isso violaria a
+    // regra de negócio diretamente. Bloqueia o envio e pede seleção explícita.
+    if (isInternationalProduct && targetCountries.length === 0) {
+      showToast('Selecione ao menos um país de destino para venda internacional.');
+      return;
+    }
+    const effectiveTargetCountries = isInternationalProduct ? targetCountries : [originCountry];
 
     if (isEditing && initialProduct && onUpdateProduct) {
       const cleanEditSpecs: Record<string, any> = {

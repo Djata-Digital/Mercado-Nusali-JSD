@@ -10,6 +10,7 @@ import { CurrencyService } from '../services/currencyService';
 import { useAuth } from './AuthContext';
 import { useCountries } from '../hooks/useCountries';
 import { resolveCurrencyForCountry } from '../utils/countryResolution';
+import { storageService } from '../services/storage/storageService';
 
 export type HeaderThemeColor = 'green';
 
@@ -63,6 +64,17 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
     } catch (e) {}
     return (COUNTRY_TO_CURRENCY_MAP[selectedCountry] as CurrencyCode) || 'XOF';
   });
+
+  // Melhoria pré-piloto (elegibilidade por país): storageService.getSelectedCountry()
+  // alimenta o header X-Country-Code enviado em TODA requisição da API (apiClient.ts),
+  // mas usava uma chave de localStorage separada ('nusali_selected_country') que nunca
+  // era escrita por ninguém — o header sempre caía no fallback fixo ('GW'), nunca no
+  // país realmente selecionado aqui. Sincronizar os dois faz o backend enxergar o
+  // destino real do comprador em toda rota pública (catálogo, busca, produto, etc.)
+  // sem precisar alterar cada tela individualmente.
+  useEffect(() => {
+    storageService.setSelectedCountry(selectedCountry);
+  }, [selectedCountry]);
 
   // Track if user explicitly selected a preference in session or localStorage
   const [hasManualSelection, setHasManualSelection] = useState<boolean>(() => {

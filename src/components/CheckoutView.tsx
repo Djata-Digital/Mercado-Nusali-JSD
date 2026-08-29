@@ -40,6 +40,29 @@ export const CheckoutView: React.FC = () => {
   const { data: operationalCountries, isLoading: countriesLoading, isError: countriesError } = useCountries();
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Melhoria pré-piloto (elegibilidade por país): país de entrega não pode
+  // mais ser "qualquer país operacional" — precisa respeitar a venda
+  // nacional/internacional de CADA item do carrinho. UX apenas: o backend
+  // (OrderService.createOrderFromCart) revalida e é quem realmente barra o
+  // pedido, isto aqui só evita que o comprador escolha algo já sabido inválido.
+  const cartAllowedCountries = React.useMemo(() => {
+    if (cart.length === 0 || !operationalCountries) return null; // ainda não dá para calcular
+    const operationalCodes = new Set(operationalCountries.map((c) => c.code));
+    let allowedSet: Set<string> | null = null;
+    for (const item of cart) {
+      const p: any = item.product;
+      const scope = p?.publishingScope === 'international' ? 'international' : 'national';
+      const itemAllowed: string[] = scope === 'international'
+        ? (Array.isArray(p?.targetCountriesJson) ? p.targetCountriesJson : []).filter((c: string) => operationalCodes.has(c))
+        : (p?.originCountry || p?.countryCode ? [String(p.originCountry || p.countryCode).toUpperCase()] : []);
+      const itemSet = new Set(itemAllowed);
+      allowedSet = allowedSet === null ? itemSet : new Set([...allowedSet].filter((c) => itemSet.has(c)));
+    }
+    return allowedSet ? Array.from(allowedSet) : [];
+  }, [cart, operationalCountries]);
+  const isAllNationalCart = cart.length > 0 && cart.every((i: any) => (i.product?.publishingScope || 'national') !== 'international');
+  const isCountryLocked = cartAllowedCountries !== null && cartAllowedCountries.length <= 1;
+
   // Address State initialized with empty/default fields, filled from DB on mount
   const [address, setAddress] = useState<DeliveryAddress>({
     recipientName: '',
@@ -76,6 +99,19 @@ export const CheckoutView: React.FC = () => {
       }
     }).catch(() => {});
   }, [selectedCountry]);
+
+  // Se o destino atual não está mais entre os permitidos (ex.: carrinho
+  // mudou, ou o país padrão de navegação não é o único destino elegível),
+  // corrige para o único/primeiro país realmente permitido.
+  React.useEffect(() => {
+    if (!cartAllowedCountries || cartAllowedCountries.length === 0) return;
+    if (!cartAllowedCountries.includes(country)) {
+      const next = cartAllowedCountries[0] as CountryCode;
+      setCountry(next);
+      setAddress((prev) => ({ ...prev, country: next }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cartAllowedCountries]);
 
   const orderCurrency: CurrencyCode = cart[0]?.product?.currency || (cart[0] as any)?.currency || countriesConfig[country]?.currency || 'XOF';
   const isBrlCurrency = orderCurrency === 'BRL';
@@ -201,6 +237,16 @@ export const CheckoutView: React.FC = () => {
   const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isProcessing) return; // Prevent double clicks
+
+    // Melhoria pré-piloto (elegibilidade por país): checagem só de UX — evita
+    // uma ida ao servidor quando já sabemos que o destino é incompatível. O
+    // backend (OrderService.createOrderFromCart) sempre revalida de qualquer
+    // forma e é quem realmente decide.
+    if (cartAllowedCountries !== null && (cartAllowedCountries.length === 0 || !cartAllowedCountries.includes(country))) {
+      setErrorMessage('O país de entrega selecionado não está disponível para um ou mais itens deste carrinho.');
+      return;
+    }
+
     setIsProcessing(true);
     setErrorMessage(null);
 
@@ -345,35 +391,64 @@ export const CheckoutView: React.FC = () => {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
               <div>
                 <label className="block font-semibold text-gray-700 mb-1">País do Destinatário</label>
-                <select
-                  value={country}
-                  disabled={countriesLoading}
-                  onChange={(e) => {
-                    const newCountry = e.target.value as CountryCode;
-                    setCountry(newCountry);
-                    setAddress({ ...address, country: newCountry });
-                    // countriesConfig cobre só os 8 países legados — para um
-                    // país real fora dele (ex.: GM, SN) simplesmente não
-                    // reatribui o método de pagamento, em vez de quebrar.
-                    const newPayMethods = countriesConfig[newCountry]?.paymentMethods;
-                    if (newPayMethods && !newPayMethods.includes(paymentMethod) && paymentMethod !== 'pix') {
-                      setPaymentMethod(newPayMethods[0] as PaymentMethodType);
-                    }
-                  }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold bg-gray-50 disabled:opacity-60"
-                >
-                  {(!operationalCountries || !operationalCountries.some((c) => c.code === country)) && country && (
-                    <option value={country}>{country}</option>
-                  )}
-                  {operationalCountries?.map((c) => (
-                    <option key={c.code} value={c.code}>
-                      {c.flag} {c.name} ({c.currency})
-                    </option>
-                  ))}
-                </select>
+                {isCountryLocked ? (
+                  // Melhoria pré-piloto (elegibilidade por país): venda nacional (ou
+                  // carrinho cuja interseção de destinos permitidos já é um único
+                  // país) — não faz sentido oferecer um dropdown que o backend vai
+                  // rejeitar. Estado informativo/bloqueado, não editável.
+                  <div className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100 font-bold text-gray-800 flex items-center gap-2">
+                    <span>{operationalCountries?.find((c) => c.code === country)?.flag}</span>
+                    <span>{operationalCountries?.find((c) => c.code === country)?.name || country}</span>
+                  </div>
+                ) : (
+                  <select
+                    value={country}
+                    disabled={countriesLoading}
+                    onChange={(e) => {
+                      const newCountry = e.target.value as CountryCode;
+                      setCountry(newCountry);
+                      setAddress({ ...address, country: newCountry });
+                      // countriesConfig cobre só os 8 países legados — para um
+                      // país real fora dele (ex.: GM, SN) simplesmente não
+                      // reatribui o método de pagamento, em vez de quebrar.
+                      const newPayMethods = countriesConfig[newCountry]?.paymentMethods;
+                      if (newPayMethods && !newPayMethods.includes(paymentMethod) && paymentMethod !== 'pix') {
+                        setPaymentMethod(newPayMethods[0] as PaymentMethodType);
+                      }
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold bg-gray-50 disabled:opacity-60"
+                  >
+                    {(!operationalCountries || !operationalCountries.some((c) => c.code === country)) && country && (
+                      <option value={country}>{country}</option>
+                    )}
+                    {/* Melhoria pré-piloto (elegibilidade por país): só os destinos
+                        que o vendedor autorizou explicitamente para os itens do
+                        carrinho aparecem aqui — nunca todos os países operacionais. */}
+                    {(cartAllowedCountries
+                      ? operationalCountries?.filter((c) => cartAllowedCountries.includes(c.code))
+                      : operationalCountries
+                    )?.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.flag} {c.name} ({c.currency})
+                      </option>
+                    ))}
+                  </select>
+                )}
                 {countriesLoading && <p className="text-[11px] text-gray-500 mt-1">Carregando países...</p>}
                 {!countriesLoading && countriesError && (
                   <p className="text-[11px] text-red-600 mt-1">Não foi possível carregar a lista de países.</p>
+                )}
+                {isCountryLocked && (
+                  <p className="text-[11px] text-gray-600 mt-1">
+                    {isAllNationalCart
+                      ? `Venda nacional — entrega disponível somente em ${operationalCountries?.find((c) => c.code === country)?.name || country}.`
+                      : `Entrega disponível somente em ${operationalCountries?.find((c) => c.code === country)?.name || country} para os itens deste carrinho.`}
+                  </p>
+                )}
+                {cartAllowedCountries !== null && cartAllowedCountries.length === 0 && (
+                  <p className="text-[11px] text-red-600 mt-1 font-semibold">
+                    Os itens deste carrinho não têm nenhum destino de entrega em comum. Remova algum item para continuar.
+                  </p>
                 )}
               </div>
 

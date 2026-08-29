@@ -3,6 +3,7 @@ import { products, categories, brands, productVariants, productImages, productAt
 import { getCache, setCache, delCache } from '../../../db/redis.js';
 import { eq, and, ilike, or, gte, lte, desc, asc, sql } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
+import { isProductAvailableForCountry, eligibilityReason } from './productEligibilityService.js';
 
 export interface ProductQueryFilters {
   q?: string;
@@ -20,18 +21,24 @@ export interface ProductQueryFilters {
 }
 
 export class CatalogService {
-  static async getProducts(filters: ProductQueryFilters) {
+  // `executor` opcional: permite testar esta função contra um Postgres
+  // Docker isolado (mesmo padrão já usado em orderService/payoutService),
+  // sem depender do pool singleton getDb() (SSL fixo, incompatível com
+  // Docker) nem do cache Redis (que mascararia mudanças recém-gravadas).
+  static async getProducts(filters: ProductQueryFilters, executor?: any) {
     const page = Math.max(1, Number(filters.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(filters.limit) || 24));
     const offset = (page - 1) * limit;
 
     const cacheKey = `catalog:products:${JSON.stringify({ ...filters, page, limit })}`;
-    const cached = await getCache<any>(cacheKey);
-    if (cached) {
-      return cached;
+    if (!executor) {
+      const cached = await getCache<any>(cacheKey);
+      if (cached) {
+        return cached;
+      }
     }
 
-    const db = getDb();
+    const db = executor ?? getDb();
     if (!db) {
       // Return empty or cached structure
       return {
@@ -51,8 +58,19 @@ export class CatalogService {
       conditions.push(eq(products.categoryId, filters.category));
     }
 
+    // Melhoria pré-piloto (elegibilidade por país): "country" agora é o
+    // DESTINO do comprador, não mais uma igualdade ingênua com o país de
+    // origem — passa a respeitar venda nacional (só o próprio país) vs.
+    // internacional (só os países que o vendedor autorizou explicitamente).
+    // Produtos legados (sem publishingScope definido) são 'national' por
+    // default no schema, então o comportamento para eles não muda em nada.
     if (filters.country && filters.country !== 'ALL') {
-      conditions.push(eq(products.countryCode, filters.country.toUpperCase()));
+      const dest = filters.country.toUpperCase();
+      conditions.push(sql`(
+        (${products.publishingScope} = 'national' AND ${products.countryCode} = ${dest})
+        OR
+        (${products.publishingScope} = 'international' AND ${products.targetCountriesJson} @> ${JSON.stringify([dest])}::jsonb)
+      )`);
     }
 
     // Fase "Lojas oficiais reais": relacionamento real produto↔loja — nunca
@@ -119,18 +137,24 @@ export class CatalogService {
       },
     };
 
-    // Cache catalog result for 60 seconds
-    await setCache(cacheKey, result, 60);
+    if (!executor) {
+      // Cache catalog result for 60 seconds
+      await setCache(cacheKey, result, 60);
+    }
 
     return result;
   }
 
-  static async getProductById(id: string) {
+  static async getProductById(id: string, destinationCountry?: string, executor?: any) {
     const cacheKey = `product:${id}`;
-    const cached = await getCache<any>(cacheKey);
-    if (cached) return cached;
+    const cached = executor ? null : await getCache<any>(cacheKey);
+    if (cached) {
+      // Elegibilidade é calculada por requisição (depende do destinationCountry
+      // do chamador), nunca cacheada junto com o produto em si.
+      return this.attachEligibility(cached, destinationCountry);
+    }
 
-    const db = getDb();
+    const db = executor ?? getDb();
     if (!db) return null;
 
     const [productRes, variantsRes, imagesRes, reviewsRes, attrRes] = await Promise.all([
@@ -201,8 +225,27 @@ export class CatalogService {
       recentReviews: reviewsRes,
     };
 
-    await setCache(cacheKey, fullProduct, 120);
-    return fullProduct;
+    if (!executor) {
+      await setCache(cacheKey, fullProduct, 120);
+    }
+    return this.attachEligibility(fullProduct, destinationCountry);
+  }
+
+  /**
+   * Anexa a elegibilidade geográfica ao produto SEM nunca ocultá-lo — a
+   * página de produto pode continuar mostrando informações, só os botões de
+   * compra é que devem ficar indisponíveis quando availableForCountry=false.
+   * Sem destinationCountry (chamador não informou), não afirma nada — deixa
+   * availableForCountry undefined (o chamador decide o que fazer).
+   */
+  static attachEligibility(product: any, destinationCountry?: string) {
+    if (!destinationCountry) return product;
+    const available = isProductAvailableForCountry(product, destinationCountry);
+    return {
+      ...product,
+      availableForCountry: available,
+      unavailabilityReason: available ? undefined : eligibilityReason(product, destinationCountry),
+    };
   }
 
   static async invalidateProductCache(id?: string) {

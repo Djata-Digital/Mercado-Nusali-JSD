@@ -19,6 +19,12 @@ export const CartService = {
         selectedStorage: item.selectedAttributes?.storage,
         unitPriceOverride: Number(item.unitPrice),
         selectedVariantSku: item.variantId || undefined,
+        // Melhoria pré-piloto (elegibilidade por país): se o destino do
+        // comprador mudou desde que o item foi adicionado, ele continua no
+        // carrinho (nunca removido silenciosamente) mas marcado como
+        // indisponível — a tela avisa e bloqueia o checkout.
+        isAvailableForDestination: item.isAvailableForDestination,
+        unavailabilityReason: item.unavailabilityReason,
       }));
       return serverItems;
     }

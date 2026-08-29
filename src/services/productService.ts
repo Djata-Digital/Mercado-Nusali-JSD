@@ -13,8 +13,8 @@ export const ProductService = {
     };
   },
 
-  async getProductById(id: string): Promise<ApiResponse<Product | null>> {
-    return ProductsApi.getById(id);
+  async getProductById(id: string, destinationCountry?: string): Promise<ApiResponse<Product | null>> {
+    return ProductsApi.getById(id, destinationCountry);
   },
 
   async getCategories(): Promise<ApiResponse<Category[]>> {

@@ -6,8 +6,8 @@ export class ProductsApi {
     return apiClient.get('/products', { params });
   }
 
-  static async getById(id: string): Promise<ApiResponse<any>> {
-    return apiClient.get(`/products/${id}`);
+  static async getById(id: string, destinationCountry?: string): Promise<ApiResponse<any>> {
+    return apiClient.get(`/products/${id}`, destinationCountry ? { params: { destinationCountry } } : undefined);
   }
 
   static async create(data: any): Promise<ApiResponse<any>> {

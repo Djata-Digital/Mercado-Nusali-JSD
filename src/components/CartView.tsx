@@ -200,6 +200,16 @@ export const CartView: React.FC = () => {
                           ⚡ FRETE GRÁTIS
                         </span>
                       )}
+
+                      {/* Melhoria pré-piloto (elegibilidade por país): item
+                          nunca é removido silenciosamente quando o destino
+                          muda — fica marcado e bloqueia o checkout até o
+                          comprador resolver (trocar destino ou remover). */}
+                      {item.isAvailableForDestination === false && (
+                        <p className="mt-1.5 text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 rounded-md px-2 py-1 max-w-xs">
+                          {item.unavailabilityReason || 'Produto indisponível para o destino atual.'}
+                        </p>
+                      )}
                     </div>
                   </div>
 
@@ -344,12 +354,18 @@ export const CartView: React.FC = () => {
               );
             })()}
 
+            {cart.some((i) => i.isAvailableForDestination === false) && (
+              <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold text-center">
+                Um ou mais produtos não estão disponíveis para o destino atual. Remova-os ou troque o país selecionado para continuar.
+              </p>
+            )}
             <button
+              disabled={cart.some((i) => i.isAvailableForDestination === false)}
               onClick={() => {
                 navigate('/checkout');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-extrabold py-3 px-4 rounded-md shadow-md hover:shadow-lg transition flex items-center justify-center gap-2 text-sm"
+              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-extrabold py-3 px-4 rounded-md shadow-md hover:shadow-lg transition flex items-center justify-center gap-2 text-sm"
             >
               <span>Continuar a compra</span>
               <ArrowRight className="w-4 h-4" />
