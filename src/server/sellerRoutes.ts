@@ -1898,77 +1898,127 @@ sellerRouter.patch('/orders/:id/status', async (req: AuthRequest, res: Response)
 // 5. FINANCIALS, WALLET & PAYOUTS
 // ==========================================
 
+// Correção crítica (wallet multi-moeda): a arquitetura já documentada no
+// projeto é "uma wallet por (user_id, currency)" (ver
+// wallets_user_currency_uq em src/db/schema.ts) — mas GET /seller/wallet
+// buscava `WHERE user_id = ? LIMIT 1` SEM filtrar por moeda, e a soma de
+// escrow "retained" somava TODOS os status='held' do vendedor juntos,
+// misturando BRL + XOF + GMD como se fossem a mesma unidade. Nunca dava
+// erro visível com um vendedor de moeda única (por isso não foi isso que
+// causou o bug original relatado), mas quebraria silenciosamente assim que
+// um vendedor tivesse vendas em mais de uma moeda — bem provável num
+// marketplace CPLP/Brasil.
+//
+// Esta função SEMPRE recebe uma moeda explícita — nunca escolhe uma wallet
+// sem moeda. Cria a wallet sob demanda só quando o chamador pede
+// explicitamente aquela moeda (nunca mais hardcoded 'XOF').
+async function computeSellerWalletSnapshot(db: any, seller: { id: string; userId: string }, currency: string) {
+  const cur = currency.toUpperCase();
+
+  let walletRows = await db.select().from(wallets).where(and(eq(wallets.userId, seller.userId), eq(wallets.currency, cur))).limit(1);
+  let w = walletRows[0];
+  if (!w) {
+    const wId = `wlt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    await db.insert(wallets).values({
+      id: wId,
+      userId: seller.userId,
+      balance: '0.00',
+      cashbackBalance: '0.00',
+      pendingBalance: '0.00',
+      currency: cur,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }).onConflictDoNothing();
+    const createdW = await db.select().from(wallets).where(and(eq(wallets.userId, seller.userId), eq(wallets.currency, cur))).limit(1);
+    w = createdW[0];
+  }
+
+  // Retained: só escrow held NESTA moeda — nunca somado com outras.
+  const heldEscrow = await db
+    .select({ amount: escrowAccounts.amount })
+    .from(escrowAccounts)
+    .where(and(eq(escrowAccounts.sellerId, seller.id), eq(escrowAccounts.status, 'held'), eq(escrowAccounts.currency, cur)));
+  const retainedSum = heldEscrow.reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0);
+
+  const txs = w
+    ? await db.select().from(walletTransactions).where(eq(walletTransactions.walletId, w.id)).orderBy(desc(walletTransactions.createdAt))
+    : [];
+
+  const totalEarnedSum = txs
+    .filter((t: any) => (t.type === 'escrow_release' || t.type === 'deposit') && t.status === 'completed')
+    .reduce((sum: number, t: any) => sum + Math.abs(Number(t.amount || 0)), 0);
+
+  return {
+    currency: cur,
+    available: Number(w?.balance || 0),
+    retained: retainedSum,
+    totalEarned: totalEarnedSum,
+    transactions: txs.map((t: any) => ({
+      id: t.id,
+      type: t.type,
+      title: t.title,
+      date: t.createdAt,
+      amount: Number(t.amount),
+      currency: t.currency,
+      status: t.status,
+      balanceAfter: Number(t.balanceAfter),
+      referenceId: t.referenceId,
+      referenceType: t.referenceType,
+    })),
+  };
+}
+
 sellerRouter.get('/wallet', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     const seller = await resolveSeller(req);
+    const requestedCurrency = typeof req.query.currency === 'string' && req.query.currency.trim() ? req.query.currency.trim().toUpperCase() : null;
 
     if (!db || !seller) {
       return res.json({
         success: true,
-        data: { available: 0, retained: 0, totalEarned: 0, currency: 'XOF', transactions: [] },
+        data: requestedCurrency
+          ? { currency: requestedCurrency, available: 0, retained: 0, totalEarned: 0, transactions: [] }
+          : { wallets: [] },
       });
     }
 
-    // Get or auto-create wallet for seller
-    let walletRows = await db.select().from(wallets).where(eq(wallets.userId, seller.userId)).limit(1);
-    let w = walletRows[0];
-    if (!w) {
-      const wId = `wlt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      await db.insert(wallets).values({
-        id: wId,
-        userId: seller.userId,
-        balance: '0.00',
-        cashbackBalance: '0.00',
-        pendingBalance: '0.00',
-        currency: 'XOF',
-        status: 'active',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-      const createdW = await db.select().from(wallets).where(eq(wallets.id, wId)).limit(1);
-      w = createdW[0];
+    // Chamador pediu uma moeda explícita (fluxo normal do frontend: sempre
+    // passa a moeda que o vendedor está visualizando) -> retorna só essa,
+    // nunca uma escolhida arbitrariamente.
+    if (requestedCurrency) {
+      const snapshot = await computeSellerWalletSnapshot(db, seller, requestedCurrency);
+      return res.json({ success: true, data: snapshot });
     }
 
-    // Dynamic retained calculation: sum of held escrow accounts for this seller
-    const heldEscrow = await db
-      .select({ amount: escrowAccounts.amount })
-      .from(escrowAccounts)
-      .where(and(eq(escrowAccounts.sellerId, seller.id), eq(escrowAccounts.status, 'held')));
-    const retainedSum = heldEscrow.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    // Sem moeda explícita: retorna TODAS as moedas em que o vendedor tem
+    // saldo/escrow, cada uma calculada SEPARADAMENTE — nunca uma soma única
+    // misturando moedas diferentes. Inclui moedas com escrow held mas ainda
+    // sem wallet própria (ex.: primeira venda numa moeda nova).
+    const existingWalletCurrencies = await db.selectDistinct({ currency: wallets.currency }).from(wallets).where(eq(wallets.userId, seller.userId));
+    const escrowCurrencies = await db.selectDistinct({ currency: escrowAccounts.currency }).from(escrowAccounts).where(and(eq(escrowAccounts.sellerId, seller.id), eq(escrowAccounts.status, 'held')));
+    const currencySet = new Set<string>([
+      ...existingWalletCurrencies.map((r: any) => r.currency),
+      ...escrowCurrencies.map((r: any) => r.currency),
+    ]);
 
-    // Dynamic totalEarned calculation: sum of all completed sales credits (escrow_release / deposit)
-    const txs = await db
-      .select()
-      .from(walletTransactions)
-      .where(eq(walletTransactions.walletId, w.id))
-      .orderBy(desc(walletTransactions.createdAt));
+    const walletsByCurrency = [];
+    for (const cur of currencySet) {
+      // Modo "todas as moedas": nunca cria wallet nova aqui, só reporta o
+      // que já existe (evita criar linhas para toda moeda que já teve
+      // qualquer escrow histórico só por causa desta consulta).
+      const existing = await db.select().from(wallets).where(and(eq(wallets.userId, seller.userId), eq(wallets.currency, cur))).limit(1);
+      if (existing.length > 0) {
+        walletsByCurrency.push(await computeSellerWalletSnapshot(db, seller, cur));
+      } else {
+        const heldEscrow = await db.select({ amount: escrowAccounts.amount }).from(escrowAccounts).where(and(eq(escrowAccounts.sellerId, seller.id), eq(escrowAccounts.status, 'held'), eq(escrowAccounts.currency, cur)));
+        const retainedSum = heldEscrow.reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0);
+        walletsByCurrency.push({ currency: cur, available: 0, retained: retainedSum, totalEarned: 0, transactions: [] });
+      }
+    }
 
-    const totalEarnedSum = txs
-      .filter(t => (t.type === 'escrow_release' || t.type === 'deposit') && t.status === 'completed')
-      .reduce((sum, t) => sum + Math.abs(Number(t.amount || 0)), 0);
-
-    return res.json({
-      success: true,
-      data: {
-        available: Number(w.balance || 0),
-        retained: retainedSum,
-        totalEarned: totalEarnedSum,
-        currency: w.currency || 'XOF',
-        transactions: txs.map(t => ({
-          id: t.id,
-          type: t.type,
-          title: t.title,
-          date: t.createdAt,
-          amount: Number(t.amount),
-          currency: t.currency,
-          status: t.status,
-          balanceAfter: Number(t.balanceAfter),
-          referenceId: t.referenceId,
-          referenceType: t.referenceType,
-        })),
-      },
-    });
+    return res.json({ success: true, data: { wallets: walletsByCurrency } });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
   }

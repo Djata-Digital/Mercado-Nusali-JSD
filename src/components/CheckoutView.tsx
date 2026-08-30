@@ -357,6 +357,15 @@ export const CheckoutView: React.FC = () => {
           // currency para /payments/initiate), mas nunca expor o erro técnico
           // cru ao comprador se, por algum motivo, chegar aqui.
           msg = 'Não foi possível iniciar o pagamento porque a moeda do pagamento não corresponde à moeda do pedido.';
+        } else if (errCode === 'ASAAS_BRAZILIAN_TAX_ID_REQUIRED') {
+          // Correção crítica (CPF não chega ao Asaas): a mensagem crua do
+          // backend soa como se o cadastro estivesse quebrado; a orientação
+          // amigável diz exatamente o que o comprador precisa fazer. O
+          // pedido já criado é preservado — este erro só bloqueia o PIX,
+          // nunca desfaz confirmedOrder (ver PAYMENT_FAILURE_PRESERVES_ORDER).
+          msg = 'Informe um CPF ou CNPJ válido para realizar o pagamento.';
+        } else if (errCode === 'ASAAS_CUSTOMER_NAME_REQUIRED') {
+          msg = 'Seu cadastro está sem nome completo. Atualize seu perfil antes de pagar.';
         }
 
         setErrorMessage(msg);

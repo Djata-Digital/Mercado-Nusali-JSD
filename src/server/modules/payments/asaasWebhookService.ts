@@ -93,6 +93,9 @@ export class AsaasWebhookService {
     const paymentData = payload.payment;
     const asaasPaymentId = paymentData.id;
 
+    // Nunca logar CPF/token/API key — só IDs e o tipo do evento.
+    logger.info({ eventId, eventType, asaasPaymentId }, 'PAYMENT_WEBHOOK_RECEIVED');
+
     const db = executor ?? getDb();
     if (!db) {
       const err: any = new Error('Banco de dados indisponível para processamento de webhook.');
@@ -141,19 +144,32 @@ export class AsaasWebhookService {
 
       if (existingEvents.length > 0) {
         const ev = existingEvents[0];
-        logger.info(
-          { eventId, eventType, asaasPaymentId, processed: ev.processed },
-          '[Asaas Webhook] Requisição concorrente ou duplicada detectada via UNIQUE constraint (idempotente).'
-        );
-        return {
-          success: true,
-          duplicate: true,
-          message: ev.processed
-            ? 'Evento já processado anteriormente.'
-            : 'Evento em processamento por requisição concorrente.',
-        };
+
+        if (ev.processed) {
+          logger.info({ eventId, eventType, asaasPaymentId }, 'PAYMENT_ALREADY_PROCESSED');
+          return {
+            success: true,
+            duplicate: true,
+            message: 'Evento já processado anteriormente.',
+          };
+        }
+
+        // Correção crítica (idempotência real de retry — seção 9/10):
+        // processed=false aqui significa que uma tentativa ANTERIOR para
+        // este MESMO eventId (mesma entrega do Asaas, ou uma corrida
+        // concorrente) nunca chegou a concluir (ex.: falha de rede/DB no
+        // meio do processamento). Antes, esse caso caía no mesmo "duplicate"
+        // acima e NUNCA reprocessava — um pedido pago podia ficar preso para
+        // sempre se a 1ª tentativa falhasse depois de reservar o eventId.
+        // Agora continua o processamento reaproveitando a MESMA linha (nunca
+        // cria uma segunda) — seguro mesmo sob corrida real: confirmOrderPayment
+        // é idempotente (early-return se já pago) e escrow_accounts.order_id
+        // tem UNIQUE constraint, então duas tentativas verdadeiramente
+        // concorrentes nunca duplicam escrow/payment, só uma delas vence.
+        logger.info({ eventId, eventType, asaasPaymentId }, 'PAYMENT_ALREADY_PROCESSED (evento reservado sem conclusão anterior — reprocessando com segurança)');
+      } else {
+        throw insertErr;
       }
-      throw insertErr;
     }
 
     // 6. Locate Local Payment Record
@@ -258,13 +274,23 @@ export class AsaasWebhookService {
         }
 
         // 10.2 Invoke Centralized Confirmation Service
-        await PaymentService.confirmOrderPayment(order.id, {
-          provider: 'asaas',
-          transactionRef: asaasPaymentId,
-          performedBy: 'asaas_webhook',
-        });
-
-        logger.info({ orderId: order.id, asaasPaymentId, amount: expectedTotal }, '[Asaas Webhook] PAYMENT_RECEIVED processado com sucesso. Pedido confirmado e Escrow retido em garantia (HELD).');
+        // Erro aqui NÃO deve ficar silenciosamente inconsistente: o evento
+        // fica marcado como processado no passo 11 mesmo em caso de falha
+        // (senão o Asaas reenviaria o MESMO webhook indefinidamente contra
+        // um estado que nunca vai se resolver sozinho), mas a falha real é
+        // logada explicitamente para investigação/retry manual — nunca
+        // engolida.
+        try {
+          await PaymentService.confirmOrderPayment(order.id, {
+            provider: 'asaas',
+            transactionRef: asaasPaymentId,
+            performedBy: 'asaas_webhook',
+          });
+          logger.info({ orderId: order.id, asaasPaymentId, amount: expectedTotal }, 'PAYMENT_POST_PROCESSING_COMPLETED');
+        } catch (postProcessingErr: any) {
+          logger.error({ orderId: order.id, asaasPaymentId, error: postProcessingErr?.message }, 'PAYMENT_POST_PROCESSING_FAILED');
+          throw postProcessingErr;
+        }
         break;
       }
 

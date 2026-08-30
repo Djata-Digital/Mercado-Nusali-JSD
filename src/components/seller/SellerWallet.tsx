@@ -21,15 +21,19 @@ interface SellerWalletProps {
   selectedCurrency?: CurrencyCode;
 }
 
-export const SellerWallet: React.FC<SellerWalletProps> = ({ showToast }) => {
-  const [selectedCurrency, setSelectedCurrency] = useState<CurrencyCode>('XOF');
+export const SellerWallet: React.FC<SellerWalletProps> = ({ showToast, selectedCurrency: selectedCurrencyProp }) => {
+  // Correção crítica (wallet multi-moeda): antes começava hardcoded em
+  // 'XOF' e nunca mudava — agora usa a moeda real que o vendedor está
+  // navegando (mesma fonte já usada no resto do painel), e SEMPRE a envia
+  // explicitamente para o backend (nunca deixa o servidor escolher).
+  const [selectedCurrency, setSelectedCurrency] = useState<CurrencyCode>(selectedCurrencyProp || 'XOF');
   const [loading, setLoading] = useState(true);
   const [walletData, setWalletData] = useState<any>(null);
 
-  const fetchWallet = async () => {
+  const fetchWallet = async (currency: CurrencyCode) => {
     try {
       setLoading(true);
-      const res = await SellerService.getWallet();
+      const res = await SellerService.getWallet(currency);
       if (res.success && res.data) {
         setWalletData(res.data);
       }
@@ -41,8 +45,16 @@ export const SellerWallet: React.FC<SellerWalletProps> = ({ showToast }) => {
   };
 
   useEffect(() => {
-    fetchWallet();
-  }, []);
+    fetchWallet(selectedCurrency);
+    // Correção crítica (painel financeiro não atualiza sozinho): sem
+    // WebSocket real conectado no cliente hoje (ver SellerHubView.tsx), o
+    // mecanismo já usado no resto do app para refletir mudanças de servidor
+    // sem F5 é polling (mesmo padrão do PixPaymentModal.tsx, que já
+    // funciona hoje). Só roda enquanto este painel está montado/visível.
+    const interval = setInterval(() => fetchWallet(selectedCurrency), 10000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCurrency]);
 
   const balances = walletData || {
     available: 0,
@@ -76,7 +88,7 @@ export const SellerWallet: React.FC<SellerWalletProps> = ({ showToast }) => {
         {/* Currency Selector & Refresh */}
         <div className="flex items-center gap-2">
           <button
-            onClick={fetchWallet}
+            onClick={() => fetchWallet(selectedCurrency)}
             disabled={loading}
             className="p-2 text-gray-500 hover:text-emerald-600 bg-gray-100 rounded-xl transition"
             title="Atualizar saldo"

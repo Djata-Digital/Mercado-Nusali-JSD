@@ -68,8 +68,16 @@ export class AsaasPaymentProvider implements PaymentProvider {
   /**
    * Idempotent lookup or creation of Asaas Customer.
    * Maps buyer details safely (CPF/CNPJ if valid Brazilian document, foreignCustomer=true if foreign).
+   *
+   * `orderDocumentFallback` (correção crítica — CPF não chega ao Asaas): a
+   * fonte autoritativa do documento é sempre o perfil (userProfiles.taxId —
+   * OrderService já sincroniza esse campo a partir do checkout quando o
+   * perfil ainda está vazio). Este parâmetro é só uma segunda camada de
+   * defesa para pedidos criados antes dessa sincronização existir, ou caso
+   * ela falhe por algum motivo: nunca sobrescreve um taxId de perfil já
+   * presente, só é usado quando o perfil realmente não tem nada.
    */
-  async getOrCreateCustomer(userId: string): Promise<string> {
+  async getOrCreateCustomer(userId: string, orderDocumentFallback?: string | null): Promise<string> {
     const db = getDb();
     if (!db) throw new Error('DATABASE_NOT_AVAILABLE: Banco de dados indisponível.');
 
@@ -90,7 +98,7 @@ export class AsaasPaymentProvider implements PaymentProvider {
     }
 
     const profileRecord = (await db.select().from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1))[0];
-    const rawTaxId = profileRecord?.taxId || (userRecord as any).taxId || '';
+    const rawTaxId = profileRecord?.taxId || (userRecord as any).taxId || orderDocumentFallback || '';
     const cleanTaxId = String(rawTaxId).replace(/\D/g, '');
 
     const userCountry = (userRecord.countryCode || 'GW').toUpperCase();
@@ -257,7 +265,11 @@ export class AsaasPaymentProvider implements PaymentProvider {
     }
 
     // 5. Get or Create Asaas Customer
-    const providerCustomerId = await this.getOrCreateCustomer(order.buyerId);
+    // orderDocumentFallback: documento digitado no checkout desta compra
+    // (orders.shipping_address_json.cpfOrTaxId) — usado só se o perfil do
+    // comprador ainda não tiver um taxId registrado (ver getOrCreateCustomer).
+    const orderDocumentFallback = (order.shippingAddressJson as any)?.cpfOrTaxId || null;
+    const providerCustomerId = await this.getOrCreateCustomer(order.buyerId, orderDocumentFallback);
 
     // 6. Idempotency Check: Existing pending Asaas payment for this order
     const existingPayments = await db

@@ -24,6 +24,8 @@ import { ShipmentService } from '../logistics/shipmentService.js';
 import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor } from '../shipping/shippingCalculatorService.js';
 import { categories, platformSettings, countries } from '../../../db/schema.js';
 import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
+import { userProfiles } from '../../../db/schema.js';
+import { updateBuyerTaxId } from '../buyer/buyerProfileService.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -141,6 +143,40 @@ export class OrderService {
       }
       if (destinationCountryRow.isActive !== true) {
         throw new Error(`DESTINATION_COUNTRY_INACTIVE: O Mercado Nusali ainda não está disponível para entregas em ${destinationCountryRow.name}.`);
+      }
+
+      // Correção crítica (CPF/CNPJ não chega ao Asaas): o checkout captura o
+      // documento em shippingAddress.cpfOrTaxId (campo do ENDEREÇO de
+      // entrega), mas o pagamento (AsaasPaymentProvider.getOrCreateCustomer)
+      // sempre leu exclusivamente userProfiles.taxId — um campo do PERFIL da
+      // conta, preenchido só por uma tela de configurações separada. As duas
+      // fontes nunca eram sincronizadas: o comprador digitava um CPF válido
+      // no checkout e o Asaas mesmo assim recusava por "documento ausente".
+      // Nesta arquitetura (compra para si mesmo, sem fluxo de presentear
+      // terceiro) o documento do destinatário do checkout É o documento
+      // fiscal do comprador — então, para destino BR, se o perfil ainda não
+      // tem um documento registrado, aproveitamos o que o comprador acabou
+      // de digitar para preenchê-lo, usando o MESMO validador/normalizador
+      // já usado pela tela de perfil (updateBuyerTaxId), nunca um segundo
+      // critério divergente. Nunca sobrescreve um documento já registrado no
+      // perfil (esse continua sendo a fonte mais estável/autoritativa).
+      // Best-effort: um documento ausente/inválido aqui NUNCA bloqueia a
+      // criação do pedido — quem decide se o pagamento pode prosseguir é o
+      // AsaasPaymentProvider, no momento da cobrança.
+      if (destinationCountry === 'BR' && targetAddress?.cpfOrTaxId) {
+        try {
+          const existingProfile = await tx.select({ taxId: userProfiles.taxId }).from(userProfiles).where(eq(userProfiles.userId, userId)).limit(1);
+          const hasRegisteredTaxId = Boolean(existingProfile[0]?.taxId && String(existingProfile[0].taxId).trim());
+          if (!hasRegisteredTaxId) {
+            await updateBuyerTaxId({ userId, taxId: String(targetAddress.cpfOrTaxId), effectiveCountryCode: 'BR' }, tx);
+          }
+        } catch (syncErr: any) {
+          // Documento estruturalmente inválido (ex.: checksum de CPF errado)
+          // ou qualquer outra falha aqui não deve impedir o pedido — só não
+          // preenchemos o perfil, e o pagamento (se PIX) vai reportar o
+          // problema de forma clara na hora certa, sem expor o CPF no log.
+          logger.warn({ userId, code: syncErr?.code || 'UNKNOWN' }, 'Não foi possível sincronizar documento do checkout com o perfil do comprador');
+        }
       }
 
       // Correção crítica (PAYMENT_CURRENCY_MISMATCH): moeda autoritativa do

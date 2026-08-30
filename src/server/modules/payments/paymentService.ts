@@ -356,6 +356,7 @@ export class PaymentService {
           updatedAt: new Date(),
         });
       }
+      logger.info({ orderId: ord.id, paymentId, provider }, 'PAYMENT_MARKED_PAID');
 
       await tx.insert(paymentAttempts).values({
         id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -378,6 +379,7 @@ export class PaymentService {
           updatedAt: new Date(),
         })
         .where(eq(orders.id, ord.id));
+      logger.info({ orderId: ord.id, status: newOrderStatus }, 'ORDER_PAYMENT_CONFIRMED');
 
       // 5. Escrow Account & Ledger
       const existingEscrow = await tx
@@ -424,6 +426,16 @@ export class PaymentService {
         reference: transactionRef,
         createdAt: new Date(),
       });
+      logger.info({ orderId: ord.id, escrowAccountId, amount: Number(ord.totalAmount), currency: ord.currency }, 'ESCROW_CREATED');
+      // O valor líquido do vendedor (sellerNetAmount) e a comissão já foram
+      // calculados e persistidos na própria order no momento da criação do
+      // pedido (orderService.ts) — o escrow acima é o que torna essa venda
+      // "real" financeiramente (dinheiro de fato retido em garantia). Não há
+      // uma segunda tabela de "lançamento financeiro do vendedor" nesta
+      // arquitetura: o par (orders.sellerNetAmount, escrow_accounts held)
+      // JÁ É o lançamento — /seller/wallet e /admin/finance/overview leem
+      // exatamente esses dados. Log só para observabilidade do fluxo.
+      logger.info({ orderId: ord.id, sellerId: ord.sellerId, sellerNetAmount: ord.sellerNetAmount, currency: ord.currency }, 'SELLER_FINANCIAL_ENTRY_CREATED');
 
       // Audit Log (orderStatusHistory)
       await tx.insert(orderStatusHistory).values({
@@ -466,6 +478,40 @@ export class PaymentService {
         orderId: ord.id,
         amount: Number(ord.totalAmount),
       });
+
+      // Correção crítica (fluxo pós-pagamento): o pedido pago já ficava
+      // corretamente visível para o vendedor via GET /seller/orders (a query
+      // nunca filtrava por status) — o problema é que NENHUM evento avisava
+      // o vendedor de que isso aconteceu. O comprador recebia notificação +
+      // broadcast em tempo real; o vendedor não recebia nada, então só via a
+      // venda depois de recarregar o painel por conta própria, sem saber que
+      // precisava. Mesma tabela/mecanismo já usado para o comprador, nunca
+      // um pedido/cópia nova.
+      const sellerRow = ord.sellerId ? (await tx.select({ userId: sellers.userId }).from(sellers).where(eq(sellers.id, ord.sellerId)).limit(1))[0] : null;
+      if (sellerRow?.userId) {
+        await tx.insert(notifications).values({
+          id: `notif_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+          userId: sellerRow.userId,
+          title: 'Novo pedido pago!',
+          message: `O pagamento do pedido ${ord.orderNumber} foi confirmado. Prepare o produto para envio.`,
+          type: 'order',
+          link: `/seller/orders`,
+          isRead: false,
+          createdAt: new Date(),
+        });
+
+        broadcastToUser(sellerRow.userId, {
+          type: 'ORDER_PAID',
+          orderId: ord.id,
+          orderNumber: ord.orderNumber,
+          amount: Number(ord.sellerNetAmount ?? ord.totalAmount),
+          currency: ord.currency,
+        });
+
+        logger.info({ orderId: ord.id, sellerId: ord.sellerId }, 'ORDER_VISIBLE_TO_SELLER');
+      } else {
+        logger.warn({ orderId: ord.id, sellerId: ord.sellerId }, 'ORDER_VISIBLE_TO_SELLER falhou — não foi possível resolver o usuário do vendedor (não bloqueia o pagamento)');
+      }
 
       logger.info({ orderId: ord.id, provider }, 'Order payment confirmed atomically and escrow held');
 

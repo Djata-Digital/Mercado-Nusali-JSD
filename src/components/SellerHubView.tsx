@@ -93,6 +93,27 @@ export const SellerHubView: React.FC = () => {
     }
   };
 
+  // Correção crítica (pedido pago não aparece em "Pedidos de Venda" sem F5):
+  // não existe WebSocket real conectado no cliente hoje — broadcastToUser
+  // (backend) é enviado, mas src/services/socketService.ts nunca é
+  // instanciado/conectado em nenhum lugar do app (auditado: zero usos de
+  // socketService.connect()/.on() em todo o src/). O mecanismo que JÁ
+  // funciona hoje para refletir mudanças de servidor sem F5 é polling (o
+  // próprio PixPaymentModal.tsx do comprador já faz isso a cada 4s). Reusa
+  // o mesmo padrão aqui: refetch leve (só orders, não o dashboard inteiro)
+  // enquanto o vendedor está na aba "Pedidos de Venda". Sempre lê a API
+  // autoritativa de novo — nunca insere/edita o pedido no estado local.
+  const fetchSellerOrders = async () => {
+    try {
+      const res = await SellerService.getOrders();
+      if (res.success && Array.isArray(res.data)) {
+        setOrders(res.data);
+      }
+    } catch (err) {
+      console.error('Error polling seller orders:', err);
+    }
+  };
+
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [isOnboardingLoading, setIsOnboardingLoading] = useState(false);
 
@@ -139,6 +160,19 @@ export const SellerHubView: React.FC = () => {
 
   useEffect(() => {
     loadRealSellerData();
+  }, [activeSection]);
+
+  // Correção crítica: enquanto o vendedor está com "Pedidos de Venda"
+  // aberto (sem trocar de aba, sem F5), um pagamento confirmado pelo
+  // comprador precisa aparecer sozinho. loadRealSellerData() já roda uma
+  // vez ao entrar na aba (efeito acima); este intervalo mantém a lista
+  // atualizada enquanto o vendedor permanece nela. Para de rodar assim que
+  // ele sai da aba ou o componente desmonta.
+  useEffect(() => {
+    if (activeSection !== 'orders') return;
+    const interval = setInterval(fetchSellerOrders, 8000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSection]);
 
   const handleStartOnboarding = async () => {

@@ -32,13 +32,25 @@ export const SellerFinancialManager: React.FC<SellerFinancialManagerProps> = ({
   const [payoutAmount, setPayoutAmount] = useState('100000');
   const [walletData, setWalletData] = useState<any>(null);
 
+  const fetchWallet = async () => {
+    const res = await SellerService.getWallet(selectedCurrency);
+    if (res.success && res.data) {
+      setWalletData(res.data);
+    }
+  };
+
   useEffect(() => {
-    SellerService.getWallet().then(res => {
-      if (res.success && res.data) {
-        setWalletData(res.data);
-      }
-    });
-  }, []);
+    fetchWallet();
+    // Correção crítica (painel financeiro não atualiza sozinho quando o
+    // pagamento é confirmado): sem WebSocket real conectado no cliente hoje
+    // (ver SellerHubView.tsx), o mecanismo já usado no resto do app para
+    // refletir mudanças de servidor sem F5 é polling (mesmo padrão do
+    // PixPaymentModal.tsx). Refaz o fetch autoritativo — nunca insere/soma
+    // valor no estado local artificialmente.
+    const interval = setInterval(fetchWallet, 10000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCurrency]);
 
   const availableBalance = walletData?.available || 0;
   const escrowBalance = walletData?.retained || 0;
@@ -61,7 +73,7 @@ export const SellerFinancialManager: React.FC<SellerFinancialManagerProps> = ({
       if (res.success) {
         showToast(`Solicitação de saque de ${formatCurrency(amountNum, selectedCurrency)} enviada com sucesso!`);
         setIsPayoutModalOpen(false);
-        const fresh = await SellerService.getWallet();
+        const fresh = await SellerService.getWallet(selectedCurrency);
         if (fresh.success && fresh.data) setWalletData(fresh.data);
       } else {
         showToast(res.error?.message || res.message || 'Falha ao solicitar saque.');

@@ -124,12 +124,12 @@ export const SellerService = {
   },
 
   // Financials & Wallet
-  async getWallet(): Promise<ApiResponse<any>> {
-    return SellerApi.getWallet();
+  async getWallet(currency?: string): Promise<ApiResponse<any>> {
+    return SellerApi.getWallet(currency);
   },
 
-  async getFinancials(): Promise<ApiResponse<any>> {
-    return SellerApi.getWallet();
+  async getFinancials(currency?: string): Promise<ApiResponse<any>> {
+    return SellerApi.getWallet(currency);
   },
 
   async getPayouts(): Promise<ApiResponse<any[]>> {

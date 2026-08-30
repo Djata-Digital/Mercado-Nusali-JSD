@@ -365,6 +365,7 @@ export class ShipmentService {
       quantityReserved: newReserved,
       updatedAt: new Date(),
     }).where(eq(inventory.id, inv.id));
+    logger.info({ orderId: item.orderId, productId: item.productId, quantity: qty, newOnHand, newReserved }, 'STOCK_DECREMENTED');
 
     await tx.insert(inventoryMovements).values({
       id: `mov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -386,6 +387,7 @@ export class ShipmentService {
       eq(stockReservations.inventoryId, targetInventoryId),
     ];
     await tx.update(stockReservations).set({ status: 'confirmed' }).where(and(...resConditions));
+    logger.info({ orderId: item.orderId, productId: item.productId, inventoryId: targetInventoryId }, 'STOCK_RESERVATION_FINALIZED');
 
     // Sync stock summary
     await InventoryService.syncProductStockSummary(item.productId, tx);

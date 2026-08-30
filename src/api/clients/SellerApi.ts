@@ -125,8 +125,11 @@ export class SellerApi {
   static async removeBankAccount(id: string): Promise<ApiResponse<any>> {
     return apiClient.delete(`/seller/bank-accounts/${id}`);
   }
-  static async getWallet(): Promise<ApiResponse<any>> {
-    return apiClient.get('/seller/wallet');
+  // Correção crítica (wallet multi-moeda): `currency` agora é explícito —
+  // nunca deixamos o backend escolher uma wallet arbitrária quando o
+  // vendedor tem mais de uma moeda (ver sellerRoutes.ts, GET /seller/wallet).
+  static async getWallet(currency?: string): Promise<ApiResponse<any>> {
+    return apiClient.get('/seller/wallet', currency ? { params: { currency } } : undefined);
   }
 
   static async getPayouts(): Promise<ApiResponse<any[]>> {

@@ -1,9 +1,82 @@
 import { getDb } from '../../../db/index.js';
-import { products, categories, brands, productVariants, productImages, productAttributes, reviews, sellers, stores } from '../../../db/schema.js';
+import { products, categories, brands, productVariants, productImages, productAttributes, reviews, sellers, stores, inventory, orderItems, orders } from '../../../db/schema.js';
 import { getCache, setCache, delCache } from '../../../db/redis.js';
-import { eq, and, ilike, or, gte, lte, desc, asc, sql } from 'drizzle-orm';
+import { eq, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { isProductAvailableForCountry, eligibilityReason } from './productEligibilityService.js';
+
+/**
+ * Correção crítica (fluxo pós-pagamento — estoque/"vendidos" nunca
+ * atualizavam): products.stock é um resumo físico (soma de
+ * inventory.quantityOnHand), sincronizado só no despacho físico
+ * (InventoryService.syncProductStockSummary, chamado em shipmentService.ts) —
+ * isso está correto/intencional (estoque só "sai" de verdade quando o pacote
+ * realmente deixa o armazém). O bug real é que NENHUM lugar calculava
+ * "disponível para compra" (o que reservas de pedidos pendentes/pagos já
+ * consomem, mesmo antes do despacho) nem "quantos já foram vendidos" — o
+ * catálogo sempre mostrava o estoque físico bruto e um contador de vendas
+ * que nunca existiu (sempre 0 no frontend). Calculado em tempo de LEITURA,
+ * nunca grava nada — sem risco de dupla redução, sem migration.
+ */
+const SOLD_ORDER_STATUSES_EXCLUDED = ['cancelled', 'refunded'];
+
+async function computeLiveStockAndSales(productIds: string[], executor?: any): Promise<Map<string, { availableStock: number | null; salesCount: number }>> {
+  // availableStock = null quando o produto não tem NENHUMA linha em
+  // `inventory` (nunca deveria acontecer para produtos criados via
+  // ProductCreationService, que sempre cria uma — só protege dados legados
+  // fora desse caminho): o chamador deve then usar products.stock como
+  // estava antes, nunca fingir "0 disponível" para um produto que na
+  // verdade nunca teve controle de reserva.
+  const result = new Map<string, { availableStock: number | null; salesCount: number }>();
+  if (productIds.length === 0) return result;
+
+  const db = executor ?? getDb();
+  if (!db) return result;
+
+  const [invRows, salesRows] = await Promise.all([
+    db
+      .select({
+        productId: inventory.productId,
+        onHand: sql<string>`COALESCE(SUM(${inventory.quantityOnHand}), 0)`,
+        reserved: sql<string>`COALESCE(SUM(${inventory.quantityReserved}), 0)`,
+      })
+      .from(inventory)
+      .where(inArray(inventory.productId, productIds))
+      .groupBy(inventory.productId),
+    // "Vendidos" = soma de order_items.quantity de pedidos realmente PAGOS,
+    // excluindo cancelados/reembolsados (nunca conta pending_payment,
+    // abandonado, ou pagamento falhado — esses nunca chegam a paymentStatus='paid').
+    db
+      .select({
+        productId: orderItems.productId,
+        sold: sql<string>`COALESCE(SUM(${orderItems.quantity}), 0)`,
+      })
+      .from(orderItems)
+      .innerJoin(orders, eq(orderItems.orderId, orders.id))
+      .where(and(
+        inArray(orderItems.productId, productIds),
+        eq(orders.paymentStatus, 'paid'),
+        notInArray(orders.status, SOLD_ORDER_STATUSES_EXCLUDED)
+      ))
+      .groupBy(orderItems.productId),
+  ]);
+
+  const invMap = new Map<string, { onHand: number; reserved: number }>();
+  for (const row of invRows) {
+    invMap.set(row.productId, { onHand: Number(row.onHand), reserved: Number(row.reserved) });
+  }
+  const salesMap = new Map<string, number>();
+  for (const row of salesRows) {
+    salesMap.set(row.productId, Number(row.sold));
+  }
+
+  for (const id of productIds) {
+    const inv = invMap.get(id);
+    const availableStock = inv ? Math.max(0, inv.onHand - inv.reserved) : null;
+    result.set(id, { availableStock, salesCount: salesMap.get(id) || 0 });
+  }
+  return result;
+}
 
 export interface ProductQueryFilters {
   q?: string;
@@ -121,14 +194,23 @@ export class CatalogService {
     const total = totalResult[0]?.count || 0;
     const totalPages = Math.ceil(total / limit);
 
+    // Correção crítica (fluxo pós-pagamento): estoque disponível (descontando
+    // reservas ativas) e "vendidos" reais, calculados em lote para esta
+    // página de resultados — nunca grava nada, nunca duplica cálculo.
+    const liveStockMap = await computeLiveStockAndSales(items.map((p) => p.id), executor);
+
     const result = {
-      products: items.map((p) => ({
-        ...p,
-        price: Number(p.price),
-        originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
-        rating: Number(p.rating || 5.0),
-        stock: Number(p.stock),
-      })),
+      products: items.map((p) => {
+        const live = liveStockMap.get(p.id);
+        return {
+          ...p,
+          price: Number(p.price),
+          originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
+          rating: Number(p.rating || 5.0),
+          stock: live?.availableStock ?? Number(p.stock),
+          salesCount: live?.salesCount ?? 0,
+        };
+      }),
       pagination: {
         total,
         page,
@@ -150,8 +232,19 @@ export class CatalogService {
     const cached = executor ? null : await getCache<any>(cacheKey);
     if (cached) {
       // Elegibilidade é calculada por requisição (depende do destinationCountry
-      // do chamador), nunca cacheada junto com o produto em si.
-      return this.attachEligibility(cached, destinationCountry);
+      // do chamador), nunca cacheada junto com o produto em si. Correção
+      // crítica (fluxo pós-pagamento): estoque disponível e "vendidos"
+      // também NUNCA podem vir do cache — um pagamento confirmado precisa
+      // refletir imediatamente na página do produto, não só depois do TTL
+      // do cache expirar.
+      const liveCached = await computeLiveStockAndSales([id], executor);
+      const liveC = liveCached.get(id);
+      const withLiveStock = {
+        ...cached,
+        stock: liveC?.availableStock ?? Number(cached.stock),
+        salesCount: liveC?.salesCount ?? 0,
+      };
+      return this.attachEligibility(withLiveStock, destinationCountry);
     }
 
     const db = executor ?? getDb();
@@ -228,7 +321,18 @@ export class CatalogService {
     if (!executor) {
       await setCache(cacheKey, fullProduct, 120);
     }
-    return this.attachEligibility(fullProduct, destinationCountry);
+
+    // Correção crítica (fluxo pós-pagamento): mesmo no caminho "sem cache",
+    // o estoque/vendidos vêm da mesma computação em tempo de leitura (nunca
+    // do valor bruto cacheado em fullProduct.stock).
+    const liveFresh = await computeLiveStockAndSales([id], executor);
+    const liveF = liveFresh.get(id);
+    const productWithLiveStock = {
+      ...fullProduct,
+      stock: liveF?.availableStock ?? fullProduct.stock,
+      salesCount: liveF?.salesCount ?? 0,
+    };
+    return this.attachEligibility(productWithLiveStock, destinationCountry);
   }
 
   /**
