@@ -18,15 +18,28 @@ export const catalogRouter = Router();
 // cobre TODAS as rotas públicas (Home, busca, categoria, loja, relacionados)
 // sem precisar alterar cada uma individualmente — backend continua
 // autoridade mesmo que uma tela específica ainda não passe o filtro à mão.
-function resolveDestinationCountryFromRequest(req: Request, explicit?: string): string | undefined {
+export function resolveDestinationCountryFromRequest(req: Request, explicit?: string): string | undefined {
   if (explicit && explicit !== 'ALL') return explicit;
   const header = req.headers['x-country-code'];
   const headerVal = Array.isArray(header) ? header[0] : header;
   return headerVal || undefined;
 }
 
-// GET /api/v1/products
-catalogRouter.get('/products', async (req: Request, res: Response) => {
+// Correção crítica (rota duplicada de produtos): estes dois handlers eram
+// registrados aqui como catalogRouter.get('/products'|'/products/:id', ...),
+// mas catalogRouter é montado sob o prefixo /catalog (ver api.ts) — então o
+// caminho real que eles atendiam era /api/v1/catalog/products[...], nunca
+// /api/v1/products[...], que é o que o frontend realmente chama
+// (ProductsApi.ts). O frontend sempre caiu num handler legado e cru,
+// definido direto em api.ts (sem CatalogService, sem estoque
+// disponível/vendidos), tornando esta implementação correta inatingível.
+//
+// Correção: os handlers continuam definidos AQUI (única fonte, usando
+// CatalogService — nunca duplicar a lógica), mas exportados como funções
+// nomeadas para serem registrados diretamente em apiRouter (api.ts), na
+// raiz de /api/v1, sem o prefixo /catalog. Não ficam mais registrados em
+// catalogRouter — um recurso público, um único caminho reachable.
+export async function getProductsHandler(req: Request, res: Response) {
   try {
     const {
       q,
@@ -69,10 +82,9 @@ catalogRouter.get('/products', async (req: Request, res: Response) => {
       error: { code: 'CATALOG_ERROR', message: err.message },
     });
   }
-});
+}
 
-// GET /api/v1/products/:id
-catalogRouter.get('/products/:id', async (req: Request, res: Response) => {
+export async function getProductByIdHandler(req: Request, res: Response) {
   try {
     const explicitDestination = typeof req.query.destinationCountry === 'string' ? req.query.destinationCountry : undefined;
     const destinationCountry = resolveDestinationCountryFromRequest(req, explicitDestination);
@@ -94,7 +106,7 @@ catalogRouter.get('/products/:id', async (req: Request, res: Response) => {
       error: { code: 'SERVER_ERROR', message: err.message },
     });
   }
-});
+}
 
 // GET /api/v1/categories
 catalogRouter.get('/categories', async (req: Request, res: Response) => {

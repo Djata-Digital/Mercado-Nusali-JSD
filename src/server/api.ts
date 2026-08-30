@@ -5,7 +5,7 @@ import { buyerRouter } from './buyerRoutes.js';
 import { pixRouter } from './pixRoutes.js';
 import { ratesRouter } from './ratesRoutes.js';
 import { authRouter } from './modules/auth/authRoutes.js';
-import { catalogRouter } from './modules/catalog/catalogRoutes.js';
+import { catalogRouter, getProductsHandler, getProductByIdHandler } from './modules/catalog/catalogRoutes.js';
 import { orderRouter } from './modules/orders/orderRoutes.js';
 import { paymentRouter } from './modules/payments/paymentRoutes.js';
 import { walletRouter } from './modules/wallet/walletRoutes.js';
@@ -15,7 +15,7 @@ import { getDb, getDbPool, checkDbConnection } from '../db/index.js';
 import { products, regions, warehouses, users, orders, orderItems } from '../db/schema.js';
 import { getCache, setCache, delCache, getRedisHealth } from '../db/redis.js';
 import { runDatabaseInitAndSeed } from '../db/seed.js';
-import { eq, desc } from 'drizzle-orm';
+import { desc } from 'drizzle-orm';
 import { searchProductsIntelligent } from '../utils/searchEngine.js';
 import { ProductCreationService } from './modules/catalog/productCreationService.js';
 import { uploadRouter } from './uploadRoutes.js';
@@ -434,59 +434,14 @@ export const inMemoryStore = {
 };
 
 // 3. Products Endpoints (PostgreSQL + Redis Cache + In-Memory Fallback)
-apiRouter.get('/products', async (req: Request, res: Response) => {
-  await ensureDbInitialized();
-
-  // Fase "Lojas oficiais reais": relacionamento real produto↔loja via
-  // products.storeId (nunca heurística de texto no nome do seller). Só a
-  // consulta SEM filtro usa o cache global — uma consulta filtrada por loja
-  // teria que sujar um cache que outras páginas (sem filtro) também leem.
-  const { storeId } = req.query as Record<string, string>;
-  const cacheKey = 'products_list_all';
-
-  if (!storeId) {
-    const cachedProducts = await getCache(cacheKey);
-    if (cachedProducts) {
-      return res.json({
-        success: true,
-        source: 'redis_cache',
-        data: cachedProducts,
-      });
-    }
-  }
-
-  try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        const productList = storeId
-          ? await db.select().from(products).where(eq(products.storeId, storeId)).orderBy(desc(products.createdAt))
-          : await db.select().from(products).orderBy(desc(products.createdAt));
-
-        if (!storeId) {
-          await setCache(cacheKey, productList, 60);
-        }
-
-        return res.json({
-          success: true,
-          source: 'postgresql',
-          data: productList,
-        });
-      }
-    }
-  } catch {
-    // DB offline
-  }
-
-  // Sem fallback fictício quando a consulta é filtrada por loja — inMemoryStore
-  // não tem noção de storeId real; melhor retornar vazio do que produto errado.
-  return res.json({
-    success: true,
-    source: 'in_memory_fallback',
-    data: storeId ? [] : inMemoryStore.products,
-  });
-});
+// Correção crítica (rota duplicada de produtos): este handler cru
+// (inMemoryStore/db.select direto) foi REMOVIDO — era ele quem
+// silenciosamente atendia /api/v1/products no lugar do CatalogService
+// corrigido (que ficava, por engano, só sob /api/v1/catalog/products,
+// caminho que o frontend nunca chama). getProductsHandler é a MESMA
+// implementação usada anteriormente em catalogRoutes.ts — nenhuma lógica
+// duplicada, uma única fonte autoritativa (CatalogService).
+apiRouter.get('/products', getProductsHandler);
 
 apiRouter.get('/products/search', async (req: Request, res: Response) => {
   await ensureDbInitialized();
@@ -518,30 +473,11 @@ apiRouter.get('/products/search', async (req: Request, res: Response) => {
   });
 });
 
-apiRouter.get('/products/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const found = inMemoryStore.products.find((p) => p.id === id);
-  if (found) {
-    return res.json({ success: true, data: found });
-  }
-
-  try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        const [dbProduct] = await db.select().from(products).where(eq(products.id, id));
-        if (dbProduct) {
-          return res.json({ success: true, data: dbProduct });
-        }
-      }
-    }
-  } catch {
-    // DB fallback
-  }
-
-  return res.status(404).json({ success: false, message: 'Produto não encontrado' });
-});
+// Correção crítica (rota duplicada de produtos): mesmo motivo do GET
+// /products acima — handler cru removido, substituído pela MESMA
+// implementação de catalogRoutes.ts (CatalogService.getProductById), agora
+// finalmente reachable no caminho real que o frontend chama.
+apiRouter.get('/products/:id', getProductByIdHandler);
 
 apiRouter.patch('/products/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
