@@ -52,8 +52,8 @@
  *      liberar. Nunca somado ao heldEscrow como dinheiro extra.
  */
 import { getDb } from '../../../db/index.js';
-import { orderItems, orders, escrowAccounts, wallets, walletTransactions } from '../../../db/schema.js';
-import { eq, and, desc, inArray } from 'drizzle-orm';
+import { orderItems, orders, escrowAccounts, wallets, walletTransactions, shipments, users } from '../../../db/schema.js';
+import { eq, and, desc, inArray, ne } from 'drizzle-orm';
 import { SOLD_ORDER_STATUSES_EXCLUDED } from '../catalog/catalogService.js';
 import { logger } from '../../infra/logger.js';
 
@@ -83,9 +83,70 @@ export interface SellerOrderRow {
   sellerNetAmount: number | null;
   marketplaceCommission: number | null;
   commissionRateSnapshot: number | null;
+  shippingCost: number | null;
+  shippingChargedToBuyer: number | null;
   shippingSellerSubsidy: number | null;
+  shippingMarketplaceSubsidy: number | null;
   shippingAddressJson: any;
   createdAt: Date;
+  // Correção crítica (Fase 1 operacional — etiqueta bloqueada): dados do
+  // shipment já criado para este item (null antes de ensureFulfillmentCreated
+  // rodar, ou para itens legados anteriores a esta correção).
+  shipmentId: string | null;
+  shipmentStatus: string | null;
+  trackingNumber: string | null;
+}
+
+/**
+ * Correção crítica (Fase 1 operacional — fluxo SELLER_FULFILLMENT vs
+ * NUSALI_FULFILLMENT): rótulo operacional único, ciente do modo de
+ * fulfillment e do status real do shipment — nunca inventa evento, só
+ * traduz o que já está persistido (order_items.status + shipments.status).
+ * Reaproveitado por /seller/orders (exibição) — mapOperationalStatus acima
+ * continua existindo, inalterado, para os filtros de aba
+ * (todos/preparação/enviados/entregues), que não precisam mudar.
+ */
+export function deriveOperationalLabel(
+  fulfillmentMode: string,
+  paymentStatus: string,
+  itemStatus: string,
+  shipmentStatus: string | null
+): string {
+  if (paymentStatus !== 'paid') return 'Aguardando pagamento';
+  if (itemStatus === 'cancelled') return 'Cancelado';
+
+  switch (shipmentStatus) {
+    case 'DELIVERED': return 'Entregue';
+    case 'DELIVERY_FAILED': return 'Falha na entrega';
+    case 'RETURNING': return 'Em devolução';
+    case 'RETURNED': return 'Devolvido';
+    case 'OUT_FOR_DELIVERY': return 'Saiu para entrega';
+    case 'IN_TRANSIT': return 'Em trânsito';
+    case 'SHIPPED': return fulfillmentMode === 'NUSALI_FULFILLMENT' ? 'Despachado pelo HUB Nusali' : 'Coletado pela transportadora';
+    default: break;
+  }
+
+  if (itemStatus === 'ready_to_ship') {
+    return fulfillmentMode === 'NUSALI_FULFILLMENT' ? 'Preparado — aguardando coleta da transportadora' : 'Pronto para coleta';
+  }
+  if (itemStatus === 'preparing' || itemStatus === 'pending_preparation') {
+    return fulfillmentMode === 'NUSALI_FULFILLMENT' ? 'Em separação no HUB Nusali' : 'Venda confirmada — aguardando preparação';
+  }
+  return 'Venda confirmada';
+}
+
+/**
+ * Ação disponível para o VENDEDOR sobre este item (nunca para itens no
+ * HUB — o seller não interfere fisicamente no que está em NUSALI_FULFILLMENT).
+ * 'mark_ready_for_pickup' = o único botão físico do seller: embalar e
+ * avisar que está pronto para a coleta da logística (nunca "marcar
+ * enviado" — quem coleta/despacha é a transportadora/logística).
+ */
+export function sellerAvailableAction(fulfillmentMode: string, paymentStatus: string, itemStatus: string): 'mark_ready_for_pickup' | null {
+  if (fulfillmentMode === 'NUSALI_FULFILLMENT') return null;
+  if (paymentStatus !== 'paid') return null;
+  if (itemStatus === 'pending_preparation' || itemStatus === 'preparing') return 'mark_ready_for_pickup';
+  return null;
 }
 
 /** Mapeamento operacional único — reusado por /seller/orders e pelos contadores do Overview. */
@@ -115,6 +176,14 @@ export async function getSellerOrderRows(sellerId: string, executor?: any): Prom
   const db = executor ?? getDb();
   if (!db) return [];
 
+  // Correção crítica (fluxo NUSALI_FULFILLMENT — Fase 1 operacional): o
+  // filtro `fulfillmentMode = 'SELLER_FULFILLMENT'` excluía TODO item cujo
+  // estoque está no HUB Nusali — o vendedor nunca via essas vendas em
+  // /seller/orders, /seller/overview nem /seller/analytics, mesmo sendo
+  // produto/venda dele. order_items.sellerId já identifica corretamente o
+  // dono da venda independente de ONDE o estoque fisicamente está — o
+  // vendedor deve ver os dois modos (só não pode AGIR fisicamente sobre o
+  // que está no HUB; isso é decidido na UI/rota de ação, não aqui na leitura).
   const rows = await db
     .select({
       orderItemId: orderItems.id,
@@ -140,13 +209,20 @@ export async function getSellerOrderRows(sellerId: string, executor?: any): Prom
       sellerNetAmount: orders.sellerNetAmount,
       marketplaceCommission: orders.marketplaceCommission,
       commissionRateSnapshot: orders.commissionRateSnapshot,
+      shippingCost: orders.shippingCost,
+      shippingChargedToBuyer: orders.shippingChargedToBuyer,
       shippingSellerSubsidy: orders.shippingSellerSubsidy,
+      shippingMarketplaceSubsidy: orders.shippingMarketplaceSubsidy,
       shippingAddressJson: orders.shippingAddressJson,
       createdAt: orders.createdAt,
+      shipmentId: orderItems.shipmentId,
+      shipmentStatus: shipments.status,
+      trackingNumber: shipments.trackingNumber,
     })
     .from(orderItems)
     .innerJoin(orders, eq(orderItems.orderId, orders.id))
-    .where(and(eq(orderItems.sellerId, sellerId), eq(orderItems.fulfillmentMode, 'SELLER_FULFILLMENT')))
+    .leftJoin(shipments, eq(orderItems.shipmentId, shipments.id))
+    .where(eq(orderItems.sellerId, sellerId))
     .orderBy(desc(orders.createdAt));
 
   return rows.map((r: any) => ({
@@ -157,7 +233,10 @@ export async function getSellerOrderRows(sellerId: string, executor?: any): Prom
     sellerNetAmount: r.sellerNetAmount !== null && r.sellerNetAmount !== undefined ? Number(r.sellerNetAmount) : null,
     marketplaceCommission: r.marketplaceCommission !== null && r.marketplaceCommission !== undefined ? Number(r.marketplaceCommission) : null,
     commissionRateSnapshot: r.commissionRateSnapshot !== null && r.commissionRateSnapshot !== undefined ? Number(r.commissionRateSnapshot) : null,
+    shippingCost: r.shippingCost !== null && r.shippingCost !== undefined ? Number(r.shippingCost) : null,
+    shippingChargedToBuyer: r.shippingChargedToBuyer !== null && r.shippingChargedToBuyer !== undefined ? Number(r.shippingChargedToBuyer) : null,
     shippingSellerSubsidy: r.shippingSellerSubsidy !== null && r.shippingSellerSubsidy !== undefined ? Number(r.shippingSellerSubsidy) : null,
+    shippingMarketplaceSubsidy: r.shippingMarketplaceSubsidy !== null && r.shippingMarketplaceSubsidy !== undefined ? Number(r.shippingMarketplaceSubsidy) : null,
   }));
 }
 
@@ -265,13 +344,27 @@ export interface SellerOverviewMetrics {
   // estes dois campos tornam a omissão visível em vez de escondida.
   financialDataComplete: boolean;
   missingSellerNetAmountCount: number;
+  // Correção crítica (Fase 1 operacional — Desempenho de Vendas zerado):
+  // unidades e ticket médio reais, derivados dos mesmos pedidos pagos.
+  unitsSold: number;
+  averageTicket: number;
 }
+
+export interface SellerSalesHistoryPoint { date: string; grossRevenue: number; orders: number }
+export interface SellerCountrySales { country: string; grossRevenue: number; orders: number }
+export interface SellerTopProduct { productId: string; productTitle: string; unitsSold: number; grossRevenue: number }
 
 export interface SellerOverviewResult {
   currency: string;
   metrics: SellerOverviewMetrics;
   balances: { available: number; retained: number; future: number; currency: string };
   recentOrders: SellerOrderRow[];
+  // Todos derivados dos MESMOS pedidos reais acima — nunca inventados,
+  // nunca uma segunda fonte. Vazios quando não há pedido pago no período,
+  // nunca preenchidos com dado fictício.
+  salesHistory: SellerSalesHistoryPoint[];
+  salesByCountry: SellerCountrySales[];
+  topProducts: SellerTopProduct[];
 }
 
 /**
@@ -336,6 +429,54 @@ export async function computeSellerOverviewMetrics(
 
   const wallet = db ? await computeSellerWalletSnapshot(db, seller, cur) : { available: 0, retained: 0, pendingRelease: 0 };
 
+  // A partir daqui, tudo é derivado dos MESMOS pedidos pagos já calculados
+  // acima (paidOrders/curRows) — nunca uma segunda consulta/fonte.
+  const paidOrderIds = new Set(paidOrders.map((o) => o.orderId));
+  // curRows tem uma linha por order_item — necessário para unidades/produto
+  // (distinctOrders perde granularidade de item quando um pedido tem mais
+  // de um produto deste vendedor).
+  const paidItemRows = curRows.filter((r) => paidOrderIds.has(r.orderId));
+
+  const unitsSold = paidItemRows.reduce((sum, r) => sum + (r.quantity || 0), 0);
+  const averageTicket = paidOrders.length > 0 ? Math.round((grossRevenue / paidOrders.length) * 100) / 100 : 0;
+
+  const salesHistoryMap = new Map<string, { grossRevenue: number; orders: number }>();
+  for (const o of paidOrders) {
+    const day = o.createdAt.toISOString().slice(0, 10);
+    const acc = salesHistoryMap.get(day) || { grossRevenue: 0, orders: 0 };
+    acc.grossRevenue += o.totalAmount;
+    acc.orders += 1;
+    salesHistoryMap.set(day, acc);
+  }
+  const salesHistory: SellerSalesHistoryPoint[] = Array.from(salesHistoryMap.entries())
+    .map(([date, v]) => ({ date, grossRevenue: v.grossRevenue, orders: v.orders }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const countryMap = new Map<string, { grossRevenue: number; orders: number }>();
+  for (const o of paidOrders) {
+    const addr = (o.shippingAddressJson as any) || {};
+    const country = addr.countryCode || addr.country || 'Não informado';
+    const acc = countryMap.get(country) || { grossRevenue: 0, orders: 0 };
+    acc.grossRevenue += o.totalAmount;
+    acc.orders += 1;
+    countryMap.set(country, acc);
+  }
+  const salesByCountry: SellerCountrySales[] = Array.from(countryMap.entries())
+    .map(([country, v]) => ({ country, grossRevenue: v.grossRevenue, orders: v.orders }))
+    .sort((a, b) => b.grossRevenue - a.grossRevenue);
+
+  const productMap = new Map<string, { productTitle: string; unitsSold: number; grossRevenue: number }>();
+  for (const r of paidItemRows) {
+    const acc = productMap.get(r.productId) || { productTitle: r.productTitle, unitsSold: 0, grossRevenue: 0 };
+    acc.unitsSold += r.quantity || 0;
+    acc.grossRevenue += r.subtotal;
+    productMap.set(r.productId, acc);
+  }
+  const topProducts: SellerTopProduct[] = Array.from(productMap.entries())
+    .map(([productId, v]) => ({ productId, ...v }))
+    .sort((a, b) => b.unitsSold - a.unitsSold)
+    .slice(0, 10);
+
   return {
     currency: cur,
     metrics: {
@@ -351,6 +492,8 @@ export async function computeSellerOverviewMetrics(
       disputeOrders,
       financialDataComplete,
       missingSellerNetAmountCount,
+      unitsSold,
+      averageTicket,
     },
     balances: {
       available: wallet.available,
@@ -359,5 +502,87 @@ export async function computeSellerOverviewMetrics(
       currency: cur,
     },
     recentOrders: distinctOrders.slice(0, 5),
+    salesHistory,
+    salesByCountry,
+    topProducts,
   };
+}
+
+export interface SellerCustomer {
+  buyerId: string;
+  displayName: string;
+  country: string;
+  totalOrders: number;
+  totalSpent: number;
+  currency: string;
+  lastPurchaseAt: string;
+}
+
+/**
+ * Correção crítica (Fase 1 operacional — "Meus Clientes" vazio): GET
+ * /seller/customers. Deriva clientes EXCLUSIVAMENTE de pedidos reais do
+ * vendedor — nunca um cadastro de cliente separado, nunca dado fake.
+ *
+ * Regra documentada (mesma semântica de "venda paga" usada em todo o
+ * resto do painel — nunca uma segunda regra divergente):
+ *   - pending_payment NUNCA cria "cliente" — comprador que nunca pagou não
+ *     é cliente da loja ainda.
+ *   - cancelled/refunded (SOLD_ORDER_STATUSES_EXCLUDED) são EXCLUÍDOS de
+ *     totalOrders/totalSpent, pela mesma razão que não contam como "vendido"
+ *     no catálogo nem como receita no Overview — não é venda efetiva.
+ *   - Múltiplas moedas: se o comprador já comprou em BRL e XOF do mesmo
+ *     seller, isso gera DUAS linhas de cliente (uma por moeda) — nunca soma
+ *     valores de moedas diferentes num único totalSpent.
+ *
+ * PRIVACIDADE: retorna só buyerId, nome (necessário operacionalmente — o
+ * vendedor precisa saber quem comprou, como em qualquer painel de vendas),
+ * país e agregados. NUNCA e-mail, telefone, CPF/documento ou endereço
+ * completo — esses continuam restritos à tela de pedido específico
+ * (GET /seller/orders já traz endereço de entrega só por pedido).
+ */
+export async function computeSellerCustomers(sellerId: string, executor?: any): Promise<SellerCustomer[]> {
+  const db = executor ?? getDb();
+  if (!db) return [];
+
+  const allRows = await getSellerOrderRows(sellerId, executor);
+
+  const byOrder = new Map<string, SellerOrderRow>();
+  for (const r of allRows) {
+    if (!byOrder.has(r.orderId)) byOrder.set(r.orderId, r);
+  }
+  const qualifyingOrders = Array.from(byOrder.values()).filter(
+    (o) => o.paymentStatus === 'paid' && !SOLD_ORDER_STATUSES_EXCLUDED.includes(o.orderStatus)
+  );
+
+  if (qualifyingOrders.length === 0) return [];
+
+  const buyerIds = Array.from(new Set(qualifyingOrders.map((o) => o.buyerId)));
+  const buyerRows = await db.select({ id: users.id, fullName: users.fullName, countryCode: users.countryCode }).from(users).where(inArray(users.id, buyerIds));
+  const buyerMap = new Map(buyerRows.map((b: any) => [b.id, b]));
+
+  // Chave (buyerId + currency): nunca soma moedas diferentes no mesmo cliente.
+  const grouped = new Map<string, { buyerId: string; currency: string; totalOrders: number; totalSpent: number; lastPurchaseAt: Date }>();
+  for (const o of qualifyingOrders) {
+    const key = `${o.buyerId}:${o.currency}`;
+    const acc = grouped.get(key) || { buyerId: o.buyerId, currency: o.currency, totalOrders: 0, totalSpent: 0, lastPurchaseAt: o.createdAt };
+    acc.totalOrders += 1;
+    acc.totalSpent += o.totalAmount;
+    if (o.createdAt > acc.lastPurchaseAt) acc.lastPurchaseAt = o.createdAt;
+    grouped.set(key, acc);
+  }
+
+  return Array.from(grouped.values())
+    .map((g) => {
+      const buyer: any = buyerMap.get(g.buyerId);
+      return {
+        buyerId: g.buyerId,
+        displayName: buyer?.fullName || 'Comprador',
+        country: buyer?.countryCode || 'Não informado',
+        totalOrders: g.totalOrders,
+        totalSpent: g.totalSpent,
+        currency: g.currency,
+        lastPurchaseAt: g.lastPurchaseAt.toISOString(),
+      };
+    })
+    .sort((a, b) => b.totalSpent - a.totalSpent);
 }

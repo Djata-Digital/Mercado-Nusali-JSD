@@ -19,7 +19,7 @@ import {
   auditLogs,
 } from '../../../db/schema.js';
 import { PaymentService } from '../payments/paymentService.js';
-import { eq, and, desc, ne, or } from 'drizzle-orm';
+import { eq, and, desc, ne, or, sql } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser, broadcastAdminEvent } from '../../infra/websocket.js';
 import { InventoryService } from '../inventory/inventoryService.js';
@@ -44,6 +44,19 @@ export class ShipmentService {
     performedBy: string,
     options?: CreateShipmentOptions
   ) {
+    // Correção crítica (idempotência sob concorrência — Fase 1 operacional):
+    // o "if (item.shipmentId) return existing" abaixo, sozinho, é um
+    // check-then-act clássico — duas transações concorrentes podem ler
+    // shipmentId=NULL antes de qualquer uma escrever, e ambas criariam um
+    // shipment (shipments.id é gerado, sem UNIQUE em order_item_id hoje).
+    // pg_advisory_xact_lock(hashtext(orderItemId)) serializa QUALQUER
+    // chamada concorrente para o MESMO order_item — a segunda só prossegue
+    // depois que a primeira já commitou (ou fez rollback), e nesse ponto o
+    // "if (item.shipmentId)" enxerga o valor real e correto. Mesmo padrão
+    // já usado em PaymentService (idempotência de payment por orderId) —
+    // nenhuma migration necessária, lock é só de sessão/transação.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${orderItemId}))`);
+
     // 1. Fetch Order Item
     const items = await tx.select().from(orderItems).where(eq(orderItems.id, orderItemId)).limit(1);
     if (items.length === 0) throw new Error(`ORDER_ITEM_NOT_FOUND: Item "${orderItemId}" não encontrado.`);
@@ -307,6 +320,80 @@ export class ShipmentService {
     });
 
     return createdShipment;
+  }
+
+  /**
+   * Correção crítica (Fase 1 operacional — etiqueta bloqueada): pós-
+   * processamento logístico do pagamento. Chamado DEPOIS que
+   * confirmOrderPayment já commitou a transação financeira (nunca de
+   * dentro dela) — uma falha aqui NUNCA reverte nem invalida pagamento,
+   * escrow ou pedido, que já estão persistidos e corretos quando esta
+   * função roda.
+   *
+   * Para cada order_item pago (não cancelado) do pedido, garante um
+   * shipment + shippingLabel — reaproveitando 100% de
+   * createOrGetShipmentForOrderItem (idempotente, com advisory lock por
+   * order_item). Cada item roda na SUA PRÓPRIA transação: uma falha num
+   * item (ex.: endereço do vendedor incompleto) nunca impede os demais
+   * itens do mesmo pedido, e nunca precisa de fila (BullMQ) — uma nova
+   * chamada desta mesma função (retry, ou reconciliação futura) completa o
+   * que faltou, sem duplicar o que já existe.
+   *
+   * NÃO marca nada como despachado/enviado — o shipment nasce em
+   * READY_TO_SHIP, shippedAt=null, e order_items.status não é tocado aqui.
+   */
+  static async ensureFulfillmentCreated(orderId: string, performedBy?: string, executor?: any) {
+    const db = executor ?? getDb();
+    if (!db) {
+      logger.error({ orderId }, 'FULFILLMENT_CREATION_FAILED: banco de dados indisponível');
+      return { orderId, succeeded: [] as string[], failed: [] as { orderItemId: string; error: string }[] };
+    }
+
+    const ordRows = await db.select({ id: orders.id, paymentStatus: orders.paymentStatus, buyerId: orders.buyerId }).from(orders).where(eq(orders.id, orderId)).limit(1);
+    const ord = ordRows[0];
+    if (!ord) {
+      logger.error({ orderId }, 'FULFILLMENT_CREATION_FAILED: pedido não encontrado');
+      return { orderId, succeeded: [], failed: [] };
+    }
+    if (ord.paymentStatus !== 'paid') {
+      // Nunca cria shipment para pedido não pago — chamado defensivamente
+      // (ex.: reconciliação futura pode iterar pedidos indiscriminadamente).
+      return { orderId, succeeded: [], failed: [] };
+    }
+
+    const items = await db
+      .select({ id: orderItems.id, status: orderItems.status, shipmentId: orderItems.shipmentId })
+      .from(orderItems)
+      .where(and(eq(orderItems.orderId, orderId), ne(orderItems.status, 'cancelled')));
+
+    const succeeded: string[] = [];
+    const failed: { orderItemId: string; error: string }[] = [];
+
+    logger.info({ orderId, itemCount: items.length }, 'FULFILLMENT_ENSURE_STARTED');
+
+    for (const item of items) {
+      try {
+        const alreadyHad = Boolean(item.shipmentId);
+        const shp = await db.transaction(async (tx: any) => {
+          return this.createOrGetShipmentForOrderItem(tx, item.id, performedBy || ord.buyerId);
+        });
+        succeeded.push(item.id);
+        logger.info(
+          { orderId, orderItemId: item.id, shipmentId: shp.id, reused: alreadyHad },
+          alreadyHad ? 'FULFILLMENT_ALREADY_EXISTED' : 'FULFILLMENT_CREATED'
+        );
+      } catch (err: any) {
+        failed.push({ orderItemId: item.id, error: err?.message || String(err) });
+        logger.error(
+          { orderId, orderItemId: item.id, error: err?.message },
+          'FULFILLMENT_CREATION_FAILED'
+        );
+      }
+    }
+
+    logger.info({ orderId, succeededCount: succeeded.length, failedCount: failed.length }, 'FULFILLMENT_ENSURE_COMPLETED');
+
+    return { orderId, succeeded, failed };
   }
 
   /**

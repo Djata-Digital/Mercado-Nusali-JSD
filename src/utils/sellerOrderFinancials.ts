@@ -17,6 +17,13 @@ export interface SellerOrderFinancialInput {
   marketplaceCommission?: number | string | null;
   shippingSellerSubsidy?: number | string | null;
   sellerNetAmount?: number | string | null;
+  // Composição do frete (Fase 1 Operacional — seção 8): dados reais
+  // persistidos em orders.shipping_cost/shipping_charged_to_buyer/
+  // shipping_marketplace_subsidy. Nunca recalculados, sempre exibidos como
+  // vieram do pedido histórico.
+  shippingCost?: number | string | null;
+  shippingChargedToBuyer?: number | string | null;
+  shippingMarketplaceSubsidy?: number | string | null;
 }
 
 export interface SellerOrderFinancialBreakdown {
@@ -26,6 +33,16 @@ export interface SellerOrderFinancialBreakdown {
   commission: number | null; // null = desconhecido, exibir "—"
   sellerSubsidy: number;
   sellerNet: number | null; // null = desconhecido, exibir "—"
+  // Composição do frete — nenhum desses três participa do cálculo de
+  // sellerNet além do que shippingSellerSubsidy já fazia (a subvenção da
+  // Nusali NUNCA é deduzida do vendedor).
+  shippingCost: number | null;
+  shippingChargedToBuyer: number | null;
+  shippingMarketplaceSubsidy: number;
+  // true quando a Nusali absorveu parte/todo o frete operacional sem
+  // repassar o custo ao vendedor (subsídio Nusali > 0 e subsídio do
+  // vendedor = 0) — usado só para destacar a frase na UI, nunca para mudar valores.
+  nusaliAbsorbedShipping: boolean;
 }
 
 function toNumberOrNull(v: number | string | null | undefined): number | null {
@@ -62,5 +79,21 @@ export function computeSellerOrderFinancialBreakdown(order: SellerOrderFinancial
     sellerNet = null;
   }
 
-  return { subtotal, commissionRate, commissionRateLabel, commission, sellerSubsidy, sellerNet };
+  const shippingCost = toNumberOrNull(order.shippingCost);
+  const shippingChargedToBuyer = toNumberOrNull(order.shippingChargedToBuyer);
+  const shippingMarketplaceSubsidy = toNumberOrNull(order.shippingMarketplaceSubsidy) ?? 0;
+  const nusaliAbsorbedShipping = shippingMarketplaceSubsidy > 0 && sellerSubsidy === 0;
+
+  return {
+    subtotal,
+    commissionRate,
+    commissionRateLabel,
+    commission,
+    sellerSubsidy,
+    sellerNet,
+    shippingCost,
+    shippingChargedToBuyer,
+    shippingMarketplaceSubsidy,
+    nusaliAbsorbedShipping,
+  };
 }

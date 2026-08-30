@@ -45,6 +45,7 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
   const [selectedOrder, setSelectedOrder] = useState<SellerOrderData | null>(null);
   const [activeLabelData, setActiveLabelData] = useState<ShippingLabelData | null>(null);
   const [isUpdatingStatus, setIsUpdatingStatus] = useState<string | null>(null);
+  const [isLoadingLabel, setIsLoadingLabel] = useState(false);
 
   const handleUpdateStatus = async (orderId: string, newStatus: string) => {
     setIsUpdatingStatus(orderId);
@@ -78,44 +79,64 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
     return formatCurrency(value, selectedCurrency);
   };
 
-  const getOrderLabelData = (ord: SellerOrderData): ShippingLabelData | null => {
-    if (!ord.trackingCode) return null;
-    const recipientAddr = typeof (ord as any).shippingAddressJson === 'object'
-      ? (ord as any).shippingAddressJson
-      : null;
+  // Correção crítica (Fase 1 Operacional — seção 6): a etiqueta NUNCA é mais
+  // reconstruída no cliente a partir de campos soltos do pedido. Ela é
+  // consultada na fonte única compartilhada (GET /shipments/:id/label,
+  // mesma linha usada pela logística) e só complementada com dados de
+  // exibição do produto que o endpoint de shipment não carrega.
+  const openShipmentLabel = async (ord: SellerOrderData) => {
+    if (!ord.shipmentId) {
+      showToast('Etiqueta disponível após criação do envio.');
+      return;
+    }
+    setIsLoadingLabel(true);
+    try {
+      const res = await SellerService.getShipmentLabel(ord.shipmentId);
+      if (!res.success || !res.data) {
+        showToast(res.message || res.error?.message || 'Não foi possível carregar a etiqueta.');
+        return;
+      }
+      const d = res.data;
+      const recipientAddr = d.recipientAddress || {};
+      const senderAddr = d.senderAddress || {};
 
-    return {
-      shipmentId: (ord as any).shipmentId || `shp_${ord.id}`,
-      trackingNumber: ord.trackingCode,
-      orderNumber: ord.orderNumber,
-      carrier: ord.shippingCarrier || null,
-      fulfillmentMode: (ord as any).fulfillmentMode || 'SELLER_FULFILLMENT',
-      productTitle: `${ord.productTitle}${
-        ord.selectedColor || ord.selectedSize
-          ? ` (${[ord.selectedColor && `Cor: ${ord.selectedColor}`, ord.selectedSize && `Tam/Cap: ${ord.selectedSize}`].filter(Boolean).join(', ')})`
-          : ''
-      }`,
-      quantity: ord.quantity,
-      weight: (ord as any).weightKg ? `${(ord as any).weightKg} kg` : null,
-      recipientName: recipientAddr?.recipientName || recipientAddr?.fullName || ord.buyerName || 'Não informado',
-      recipientAddress: {
-        street: recipientAddr?.street || ord.deliveryAddress || null,
-        number: recipientAddr?.number || null,
-        complement: recipientAddr?.complement || null,
-        neighborhood: recipientAddr?.neighborhood || null,
-        city: recipientAddr?.city || ord.deliveryCity || null,
-        state: recipientAddr?.state || null,
-        countryCode: recipientAddr?.countryCode || ord.buyerCountry || null,
-        phone: recipientAddr?.phone || ord.buyerPhone || null,
-      },
-      senderName: ord.storeName || 'Loja Vendedor',
-      senderAddress: {
-        street: (ord as any).senderAddress?.street || null,
-        city: (ord as any).senderAddress?.city || null,
-        countryCode: (ord as any).senderAddress?.countryCode || null,
-        phone: (ord as any).senderAddress?.phone || null,
-      },
-    };
+      setActiveLabelData({
+        shipmentId: d.shipmentId,
+        trackingNumber: d.trackingNumber || d.label?.trackingCode,
+        orderNumber: ord.orderNumber,
+        carrier: d.carrier || null,
+        fulfillmentMode: d.fulfillmentMode || ord.fulfillmentMode || 'SELLER_FULFILLMENT',
+        productTitle: `${ord.productTitle}${
+          ord.selectedColor || ord.selectedSize
+            ? ` (${[ord.selectedColor && `Cor: ${ord.selectedColor}`, ord.selectedSize && `Tam/Cap: ${ord.selectedSize}`].filter(Boolean).join(', ')})`
+            : ''
+        }`,
+        quantity: ord.quantity,
+        weight: null,
+        recipientName: d.recipientName || recipientAddr.recipientName || ord.buyerName || 'Não informado',
+        recipientAddress: {
+          street: recipientAddr.street || ord.deliveryAddress || null,
+          number: recipientAddr.number || null,
+          complement: recipientAddr.complement || null,
+          neighborhood: recipientAddr.neighborhood || null,
+          city: recipientAddr.city || ord.deliveryCity || null,
+          state: recipientAddr.state || null,
+          countryCode: recipientAddr.countryCode || ord.buyerCountry || null,
+          phone: recipientAddr.phone || ord.buyerPhone || null,
+        },
+        senderName: d.senderName || ord.storeName || 'Loja Vendedor',
+        senderAddress: {
+          street: senderAddr.street || null,
+          city: senderAddr.city || null,
+          countryCode: senderAddr.countryCode || null,
+          phone: senderAddr.phone || null,
+        },
+      });
+    } catch (err: any) {
+      showToast(err?.message || 'Erro ao carregar etiqueta de envio.');
+    } finally {
+      setIsLoadingLabel(false);
+    }
   };
 
   const filteredOrders = orders.filter((o) => {
@@ -274,26 +295,30 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                     Repasse Líquido: {formatSellerNet(ord)}
                   </span>
 
+                  {/* Correção crítica (Fase 1 Operacional — seções 4/5): a ação
+                      física exposta ao seller depende do fulfillmentMode e da
+                      availableAction calculada no backend. Para itens no HUB
+                      Nusali (NUSALI_FULFILLMENT) o seller NUNCA recebe um botão
+                      de ação — apenas o status operacional real. */}
+                  <p className="text-[10px] text-gray-500 font-semibold">{ord.operationalLabel}</p>
+
                   <div className="pt-2 flex flex-wrap items-center justify-end gap-2">
-                    {ord.status !== 'shipped' && ord.status !== 'delivered' && (
+                    {ord.availableAction === 'mark_ready_for_pickup' && (
                       <button
-                        onClick={() => handleUpdateStatus(ord.id, 'shipped')}
-                        disabled={ord.paymentStatus !== 'paid' || isUpdatingStatus === ord.id}
+                        onClick={() => handleUpdateStatus(ord.id, 'ready_to_ship')}
+                        disabled={isUpdatingStatus === ord.id}
                         className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition flex items-center gap-1.5 shadow-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                        title={ord.paymentStatus !== 'paid' ? 'Aguardando confirmação do pagamento' : 'Marcar item como enviado'}
+                        title="Confirma que o produto está pronto e embalado para a transportadora coletar"
                       >
-                        <Truck className="w-3.5 h-3.5" /> Marcar Enviado
+                        <Truck className="w-3.5 h-3.5" /> Produto Pronto para Coleta
                       </button>
                     )}
 
-                    {ord.trackingCode ? (
+                    {ord.labelAvailable ? (
                       <button
-                        onClick={() => {
-                          const data = getOrderLabelData(ord);
-                          if (data) setActiveLabelData(data);
-                          else showToast('Etiqueta disponível após criação do envio.');
-                        }}
-                        className="p-2 bg-gray-100 hover:bg-emerald-50 hover:text-emerald-700 text-gray-800 font-bold rounded-xl text-xs transition flex items-center gap-1 cursor-pointer"
+                        onClick={() => openShipmentLabel(ord)}
+                        disabled={isLoadingLabel}
+                        className="p-2 bg-gray-100 hover:bg-emerald-50 hover:text-emerald-700 text-gray-800 font-bold rounded-xl text-xs transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
                         title="Visualizar e Imprimir Etiqueta"
                       >
                         <Printer className="w-3.5 h-3.5 text-emerald-600" /> Etiqueta
@@ -417,8 +442,10 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                 <DollarSign className="w-4 h-4 text-emerald-600" /> Detalhamento Financeiro da Venda
               </h4>
               {(() => {
-                const { subtotal, commissionRateLabel, commission, sellerSubsidy, sellerNet } =
-                  computeSellerOrderFinancialBreakdown(selectedOrder as any);
+                const {
+                  subtotal, commissionRateLabel, commission, sellerSubsidy, sellerNet,
+                  shippingCost, shippingChargedToBuyer, shippingMarketplaceSubsidy, nusaliAbsorbedShipping,
+                } = computeSellerOrderFinancialBreakdown(selectedOrder as any);
 
                 return (
                   <div className="space-y-1.5 pt-1">
@@ -430,14 +457,42 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                       <span>Comissão Nusali ({commissionRateLabel}):</span>
                       <span>{commission !== null ? `- ${formatCurrency(commission, selectedCurrency)}` : '—'}</span>
                     </div>
+
+                    {/* Composição do frete (Fase 1 Operacional — seção 8):
+                        dados reais persistidos no pedido, nunca recalculados. */}
+                    {shippingCost !== null && (
+                      <div className="flex justify-between text-gray-600 font-medium">
+                        <span>Frete Operacional:</span>
+                        <span>{formatCurrency(shippingCost, selectedCurrency)}</span>
+                      </div>
+                    )}
+                    {shippingChargedToBuyer !== null && (
+                      <div className="flex justify-between text-gray-600 font-medium">
+                        <span>Frete Pago pelo Comprador:</span>
+                        <span>{formatCurrency(shippingChargedToBuyer, selectedCurrency)}</span>
+                      </div>
+                    )}
                     {sellerSubsidy > 0 && (
                       <div className="flex justify-between text-amber-700 font-medium">
-                        <span>Frete Subsidiado pela Loja:</span>
+                        <span>Subsídio de Frete do Vendedor:</span>
                         <span>- {formatCurrency(sellerSubsidy, selectedCurrency)}</span>
                       </div>
                     )}
+                    {shippingMarketplaceSubsidy > 0 && (
+                      <div className="flex justify-between text-blue-700 font-medium">
+                        <span>Subsídio de Frete Nusali:</span>
+                        <span>{formatCurrency(shippingMarketplaceSubsidy, selectedCurrency)}</span>
+                      </div>
+                    )}
+                    {nusaliAbsorbedShipping && (
+                      <p className="text-[10px] text-blue-700 font-semibold bg-blue-50 border border-blue-100 rounded-lg px-2 py-1">
+                        ℹ A Nusali absorveu {formatCurrency(shippingMarketplaceSubsidy, selectedCurrency)} de frete
+                        nesta venda — este valor não foi descontado do seu repasse.
+                      </p>
+                    )}
+
                     <div className="flex justify-between items-baseline pt-2 border-t border-gray-100 font-extrabold text-sm text-emerald-800">
-                      <span>Líquido do Vendedor (Recebível):</span>
+                      <span>Repasse Líquido do Vendedor:</span>
                       <span>{sellerNet !== null ? formatCurrency(sellerNet, selectedCurrency) : '—'}</span>
                     </div>
                   </div>
@@ -463,15 +518,12 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
             </div>
 
             <div className="pt-4 border-t border-gray-100 flex items-center justify-between">
-              {selectedOrder.trackingCode ? (
+              {selectedOrder.labelAvailable ? (
                 <button
                   type="button"
-                  onClick={() => {
-                    const data = getOrderLabelData(selectedOrder);
-                    if (data) setActiveLabelData(data);
-                    else showToast('Etiqueta disponível após criação do envio.');
-                  }}
-                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  onClick={() => openShipmentLabel(selectedOrder)}
+                  disabled={isLoadingLabel}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
                 >
                   <Printer className="w-4 h-4" /> Visualizar & Imprimir Etiqueta
                 </button>

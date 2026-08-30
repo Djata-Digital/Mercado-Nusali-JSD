@@ -549,6 +549,25 @@ export class PaymentService {
       logger.error({ orderId, error: shadowErr?.message }, '[ShadowLedger] recordPaymentReceived falhou — fluxo real não afetado');
     }
 
+    // ------------------------------------------------------------------------
+    // FULFILLMENT PÓS-PAGAMENTO (Fase 1 operacional — etiqueta bloqueada):
+    // roda DEPOIS que a transação financeira acima já commitou. Uma falha
+    // aqui NUNCA reverte nem invalida pagamento/escrow, que já estão
+    // persistidos e corretos neste ponto — só é logada. Import dinâmico de
+    // propósito: evita import circular no topo do arquivo (shipmentService.ts
+    // já importa PaymentService para releaseEscrowForOrder); o import()
+    // só resolve em runtime, quando ambos os módulos já terminaram de
+    // carregar, então o ciclo nunca é um problema real.
+    try {
+      const { ShipmentService } = await import('../logistics/shipmentService.js');
+      const fulfillmentResult = await ShipmentService.ensureFulfillmentCreated(orderId, options?.performedBy);
+      if (fulfillmentResult.failed.length > 0) {
+        logger.warn({ orderId, failed: fulfillmentResult.failed }, '[Fulfillment] ensureFulfillmentCreated terminou com pendências — recuperável em nova execução');
+      }
+    } catch (fulfillmentErr: any) {
+      logger.error({ orderId, error: fulfillmentErr?.message }, '[Fulfillment] ensureFulfillmentCreated falhou — pagamento/escrow não afetados');
+    }
+
     return result;
   }
 

@@ -2737,7 +2737,13 @@ adminRouter.get('/settings', async (req: Request, res: Response) => {
       platformName: settingsMap.platformName || 'Mercado Nusali CPLP',
       escrowHoldingHours: settingsMap.escrowHoldingHours || 48,
       defaultBuyerProtectionFeePercent: settingsMap.defaultBuyerProtectionFeePercent || 1.5,
-      defaultSellerCommissionPercent: settingsMap.defaultSellerCommissionPercent || 5.0,
+      // Correção crítica (comissão default do Admin): "|| 5.0" fingia que
+      // 5% já estava configurado mesmo quando NENHUMA linha existe em
+      // platformSettings — orderService.ts (cadeia real de comissão) não
+      // usa esse fallback, então um admin via "5.0" aqui enquanto o
+      // checkout real bloqueava com COMMISSION_NOT_CONFIGURED. Agora
+      // reflete o estado real: null = genuinamente não configurado ainda.
+      defaultSellerCommissionPercent: settingsMap.defaultSellerCommissionPercent ?? null,
       maintenanceMode: !!settingsMap.maintenanceMode,
       supportedCurrencies: settingsMap.supportedCurrencies || ['XOF', 'BRL', 'EUR', 'AOA', 'MZN', 'CVE', 'STN', 'USD'],
     };

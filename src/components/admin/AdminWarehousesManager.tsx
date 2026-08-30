@@ -188,6 +188,18 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
     fetchHubOrders();
   }, [fetchWarehouses, fetchTransfers, fetchHubOrders]);
 
+  // Correção crítica (Fase 1 Operacional — seção 12): sem WebSocket real
+  // integrado ao frontend e com BullMQ desabilitado, a fila do HUB Nusali
+  // (itens aguardando separação/preparação após pagamento confirmado) só
+  // reflete pagamentos novos com polling controlado — nunca globalmente,
+  // apenas enquanto o operador está de fato com a aba "Pedidos do HUB"
+  // aberta. PostgreSQL continua sendo a fonte de verdade; isto é só refresh.
+  useEffect(() => {
+    if (activeTab !== 'hub_orders') return;
+    const interval = setInterval(fetchHubOrders, 8000);
+    return () => clearInterval(interval);
+  }, [activeTab, fetchHubOrders]);
+
   // Counters for Transfers Header
   const transferCounters = useMemo(() => {
     let pending = 0;

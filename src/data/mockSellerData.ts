@@ -133,6 +133,28 @@ export interface SellerOrderData {
   createdAt: string;
   /** Histórico estruturado de eventos — o backend real nunca envia isso hoje. Sempre trate como [] quando ausente, nunca invente eventos. */
   timeline?: { title: string; date: string; done: boolean }[];
+
+  // --- Fase 1 Operacional (logística/frete) ---
+  /** order_items.fulfillment_mode real: SELLER_FULFILLMENT | NUSALI_FULFILLMENT. Determinado na criação do pedido a partir de inventory.locationType — nunca escolhido pelo seller. */
+  fulfillmentMode?: 'SELLER_FULFILLMENT' | 'NUSALI_FULFILLMENT';
+  /** Custo operacional real do frete (orders.shipping_cost). */
+  shippingCost?: number | null;
+  /** Parcela do frete cobrada do comprador (orders.shipping_charged_to_buyer). */
+  shippingChargedToBuyer?: number | null;
+  /** Parcela do frete absorvida pela Nusali (orders.shipping_marketplace_subsidy) — nunca deduzida do vendedor. */
+  shippingMarketplaceSubsidy?: number | null;
+  /** order_items.shipment_id — presença determina se a etiqueta já existe. */
+  shipmentId?: string | null;
+  /** shipments.status do envio vinculado a este item, quando existir. */
+  shipmentStatus?: string | null;
+  /** shipments.tracking_number do envio vinculado a este item. */
+  trackingNumber?: string | null;
+  /** true quando já existe shipment+etiqueta para este item (independente do status físico). */
+  labelAvailable?: boolean;
+  /** Rótulo operacional já ciente do fulfillmentMode (ver deriveOperationalLabel no backend). */
+  operationalLabel?: string;
+  /** Única ação física que o PRÓPRIO seller pode executar neste item, ou null se nenhuma (ex.: item em HUB Nusali). */
+  availableAction?: 'mark_ready_for_pickup' | null;
 }
 
 export interface SellerQuestion {

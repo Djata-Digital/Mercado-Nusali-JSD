@@ -44,7 +44,6 @@ import {
   initialWarehouses,
   initialSellerOrders,
   initialSellerQuestions,
-  initialSellerCustomers,
   SellerStoreData,
   SellerTeamMember,
   SellerProfileData,
@@ -68,7 +67,6 @@ export const SellerHubView: React.FC = () => {
   const [warehouses, setWarehouses] = useState(initialWarehouses);
   const [orders, setOrders] = useState<any[]>(initialSellerOrders);
   const [questions, setQuestions] = useState<SellerQuestion[]>(initialSellerQuestions);
-  const [customers, setCustomers] = useState(initialSellerCustomers);
   const [sellerProducts, setSellerProducts] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -609,7 +607,6 @@ export const SellerHubView: React.FC = () => {
         {activeSection === 'customers' && (
           <SellerCustomers
             showToast={showToast}
-            customers={customers}
           />
         )}
 

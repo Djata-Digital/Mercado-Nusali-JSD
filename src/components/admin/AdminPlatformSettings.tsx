@@ -9,7 +9,13 @@ interface AdminPlatformSettingsProps {
 export const AdminPlatformSettings: React.FC<AdminPlatformSettingsProps> = ({ showToast }) => {
   const [platformName, setPlatformName] = useState('Mercado Nusali CPLP');
   const [escrowHours, setEscrowHours] = useState(48);
-  const [commissionRate, setCommissionRate] = useState('5.0%');
+  // Correção crítica (comissão default do Admin — Fase 1 operacional):
+  // string vazia = genuinamente não configurado ainda. Nunca mais um "5.0%"
+  // fingido só pra preencher o campo — o admin precisa digitar
+  // conscientemente antes de qualquer coisa ser salva (nunca configuramos
+  // um valor automaticamente).
+  const [commissionRate, setCommissionRate] = useState('');
+  const [commissionConfigured, setCommissionConfigured] = useState(false);
   const [supportEmail, setSupportEmail] = useState('suporte@nusali.com');
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -23,7 +29,9 @@ export const AdminPlatformSettings: React.FC<AdminPlatformSettingsProps> = ({ sh
         if (res.success && res.data) {
           setPlatformName(res.data.platformName || 'Mercado Nusali CPLP');
           setEscrowHours(res.data.escrowHoldingHours || 48);
-          setCommissionRate(`${res.data.defaultSellerCommissionPercent || 5.0}%`);
+          const real = res.data.defaultSellerCommissionPercent;
+          setCommissionConfigured(real !== null && real !== undefined);
+          setCommissionRate(real !== null && real !== undefined ? `${real}%` : '');
           setMaintenanceMode(!!res.data.maintenanceMode);
         }
       } catch {
@@ -38,15 +46,26 @@ export const AdminPlatformSettings: React.FC<AdminPlatformSettingsProps> = ({ sh
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    const parsedCommission = parseFloat(commissionRate);
+    if (commissionRate.trim() !== '' && (isNaN(parsedCommission) || parsedCommission < 0)) {
+      showToast('Informe um percentual de comissão default válido (ex.: 8) antes de salvar.');
+      return;
+    }
     setIsSaving(true);
     try {
-      const res = await AdminService.updateSettings({
+      const payload: Record<string, any> = {
         platformName,
         escrowHoldingHours: escrowHours,
-        defaultSellerCommissionPercent: parseFloat(commissionRate) || 5.0,
         maintenanceMode,
-      });
+      };
+      // Só envia a comissão default se o admin realmente digitou algo —
+      // nunca escreve um valor "adivinhado" no lugar de um campo vazio.
+      if (commissionRate.trim() !== '') {
+        payload.defaultSellerCommissionPercent = parsedCommission;
+      }
+      const res = await AdminService.updateSettings(payload);
       if (res.success) {
+        setCommissionConfigured(commissionRate.trim() !== '');
         showToast(res.message || 'Configurações globais atualizadas com sucesso!');
       } else {
         showToast(res.error?.message || 'Erro ao atualizar configurações.');
@@ -110,8 +129,14 @@ export const AdminPlatformSettings: React.FC<AdminPlatformSettingsProps> = ({ sh
                 type="text"
                 value={commissionRate}
                 onChange={e => setCommissionRate(e.target.value)}
+                placeholder="Não configurado — obrigatório para vendedores novos"
                 className="w-full p-2.5 border border-gray-300 rounded-xl font-bold focus:ring-2 focus:ring-purple-500 outline-hidden"
               />
+              {!commissionConfigured && (
+                <p className="text-xs text-amber-700 font-semibold mt-1">
+                  ⚠ Nenhuma comissão default foi configurada ainda. Vendedores sem comissão própria nem categoria com taxa definida terão o checkout bloqueado (COMMISSION_NOT_CONFIGURED) até que você defina e salve um valor aqui.
+                </p>
+              )}
             </div>
 
             <div>

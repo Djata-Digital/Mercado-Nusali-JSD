@@ -6,6 +6,7 @@ import { pixRouter } from './pixRoutes.js';
 import { ratesRouter } from './ratesRoutes.js';
 import { authRouter } from './modules/auth/authRoutes.js';
 import { catalogRouter, getProductsHandler, getProductByIdHandler } from './modules/catalog/catalogRoutes.js';
+import { shipmentRouter } from './modules/logistics/shipmentRoutes.js';
 import { orderRouter } from './modules/orders/orderRoutes.js';
 import { paymentRouter } from './modules/payments/paymentRoutes.js';
 import { walletRouter } from './modules/wallet/walletRoutes.js';
@@ -36,6 +37,8 @@ apiRouter.use('/wallet', walletRouter);
 apiRouter.use('/webhooks', asaasWebhookRouter);
 apiRouter.use('/admin', adminRouter);
 apiRouter.use('/seller', sellerRouter);
+// Etiqueta única do shipment — compartilhada entre seller e logística/HUB/admin
+apiRouter.use('/shipments', shipmentRouter);
 apiRouter.use('/buyer', buyerRouter);
 apiRouter.use('/pix', pixRouter);
 apiRouter.use('/rates', ratesRouter);

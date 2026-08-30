@@ -395,17 +395,18 @@ export class OrderService {
       // Se NENHUM dos três existir para um item: bloqueia o pedido com
       // COMMISSION_NOT_CONFIGURED. Nunca um percentual inventado.
       //
-      // RESSALVA AUDITADA (instrução explícita desta fase): sellers.commissionRate
-      // NÃO é preenchido por negociação real por vendedor — authService.ts
-      // (cadastro público como SELLER) e adminRoutes.ts/createRealAccount
-      // (cadastro pelo admin) gravam '8.00' explicitamente no INSERT para
-      // TODO seller novo, sempre o mesmo valor. Ou seja, na prática, hoje
-      // isso funciona como um segundo default técnico global, não uma
-      // configuração por seller genuinamente negociada — mas é uma coluna
-      // real do banco (não um literal inventado aqui no orderService), e
-      // continua podendo ser editada por vendedor/admin depois da criação.
-      // Reportado explicitamente, não alterado nesta fase (mudar a origem
-      // desse valor é redesenho de arquitetura, fora do escopo pedido).
+      // CORREÇÃO (Fase 1 Operacional, item 2 — comentário estava desatualizado):
+      // um relatório anterior desta mesma fase citou esta ressalva para
+      // afirmar que sellers.commissionRate ainda era gravado como '8.00' no
+      // cadastro — isso foi verificado (git log -S) e é FALSO desde o commit
+      // ae3b4bd ("Corrige comissao percentual e logistica com frete
+      // gratis"): tanto authService.ts (cadastro público como SELLER) quanto
+      // sellerRoutes.ts (onboarding) já gravam commissionRate: null no
+      // INSERT — nenhum default técnico é copiado para o vendedor na
+      // criação. sellers.commissionRate só é preenchido quando alguém
+      // explicitamente grava um valor ali depois (hoje não há tela
+      // admin/seller para isso — se uma for construída no futuro, vazio deve
+      // continuar significando NULL, nunca um percentual "de fábrica").
       let globalDefaultCommissionRate: number | null = null;
       const defaultCommissionRows = await tx.select().from(platformSettings).where(eq(platformSettings.key, 'defaultSellerCommissionPercent')).limit(1);
       if (defaultCommissionRows.length > 0) {

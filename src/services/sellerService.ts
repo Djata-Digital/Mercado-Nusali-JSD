@@ -123,6 +123,16 @@ export const SellerService = {
     return SellerApi.updateOrderStatus(id, data);
   },
 
+  // Etiqueta de envio (Fase 1 Operacional) — fonte única compartilhada com a logística.
+  async getShipmentLabel(shipmentId: string): Promise<ApiResponse<any>> {
+    return SellerApi.getShipmentLabel(shipmentId);
+  },
+
+  // Meus Clientes (Fase 1 Operacional) — CRM mínimo real.
+  async getCustomers(): Promise<ApiResponse<any[]>> {
+    return SellerApi.getCustomers();
+  },
+
   // Financials & Wallet
   async getWallet(currency?: string): Promise<ApiResponse<any>> {
     return SellerApi.getWallet(currency);

@@ -71,8 +71,11 @@ import { computeLiveStockAndSales } from './modules/catalog/catalogService.js';
 import {
   getSellerOrderRows,
   mapOperationalStatus,
+  deriveOperationalLabel,
+  sellerAvailableAction,
   computeSellerOverviewMetrics,
   computeSellerWalletSnapshot,
+  computeSellerCustomers,
 } from './modules/seller/sellerFinancialsService.js';
 
 export const sellerRouter = Router();
@@ -360,12 +363,13 @@ sellerRouter.get('/overview', async (req: AuthRequest, res: Response) => {
           averageRating: currentSellerProfile.reputationScore,
         },
         recentOrders: result.recentOrders,
-        // topProducts/salesHistory/countryDistribution: nenhuma infraestrutura
-        // real de série temporal/ranking existe hoje — melhor honestamente
-        // vazio do que inventar dado (princípio: nunca mock financeiro/negócio).
-        topProducts: [],
-        salesHistory: [],
-        countryDistribution: [],
+        // Correção crítica (Fase 1 operacional): derivados dos mesmos
+        // pedidos reais acima (ver sellerFinancialsService.ts) — nunca mais
+        // vazio hardcoded.
+        topProducts: result.topProducts,
+        salesHistory: result.salesHistory,
+        salesByCountry: result.salesByCountry,
+        countryDistribution: result.salesByCountry,
       },
     });
   } catch (err: any) {
@@ -381,7 +385,15 @@ sellerRouter.get('/analytics', async (req: AuthRequest, res: Response) => {
     const currency = (typeof req.query.currency === 'string' && req.query.currency.trim()) ? req.query.currency.trim().toUpperCase() : 'XOF';
 
     if (!db || !seller) {
-      return res.json({ success: true, data: { period, grossRevenue: 0, netRevenue: 0, totalOrders: 0, averageTicket: 0, conversionRate: '0.0%', viewsCount: 0, salesByDay: [] } });
+      return res.json({
+        success: true,
+        data: {
+          period, currency, grossRevenue: 0, netRevenue: 0, totalOrders: 0, unitsSold: 0, averageTicket: 0,
+          financialDataComplete: true, missingSellerNetAmountCount: 0,
+          salesHistory: [], salesByCountry: [], topProducts: [],
+          conversionRate: '0.0%', viewsCount: 0, salesByDay: [],
+        },
+      });
     }
 
     const sinceDate = new Date();
@@ -391,33 +403,57 @@ sellerRouter.get('/analytics', async (req: AuthRequest, res: Response) => {
     else sinceDate.setDate(sinceDate.getDate() - 30); // '30days' (default)
 
     const result = await computeSellerOverviewMetrics(seller, currency, db, sinceDate);
-    const { grossRevenue, netRevenue, totalOrders, financialDataComplete, missingSellerNetAmountCount } = result.metrics;
-    const averageTicket = totalOrders > 0 ? Math.round(grossRevenue / totalOrders) : 0;
+    const { grossRevenue, netRevenue, totalOrders, unitsSold, averageTicket, financialDataComplete, missingSellerNetAmountCount } = result.metrics;
 
     return res.json({
       success: true,
       data: {
         period,
+        currency,
         grossRevenue,
         netRevenue,
         totalOrders,
+        unitsSold,
         averageTicket,
         // Mesma correção do Overview: netRevenue nunca esconde
         // sellerNetAmount ausente dentro de um "R$0" silencioso.
         financialDataComplete,
         missingSellerNetAmountCount,
+        // Correção crítica (Fase 1 operacional — Desempenho de Vendas
+        // zerado): derivados dos mesmos pedidos reais do período/moeda
+        // pedidos — nunca inventados, nunca uma segunda fonte.
+        salesHistory: result.salesHistory,
+        salesByCountry: result.salesByCountry,
+        topProducts: result.topProducts,
         // conversionRate/viewsCount/salesByDay: não é dado financeiro — é
         // rastreamento de visualizações, que este projeto nunca implementou.
-        // Honestamente vazio/zero (não é o princípio "nunca mock financeiro"
-        // que se aplica aqui, mas o mesmo espírito: nunca fingir que existe
-        // uma infraestrutura de analytics de visitas que não existe).
+        // Honestamente vazio/zero (mesmo espírito de "nunca mock
+        // financeiro": nunca fingir que existe uma infraestrutura de
+        // analytics de visitas que não existe).
         conversionRate: '0.0%',
         viewsCount: 0,
-        salesByDay: [],
+        salesByDay: result.salesHistory,
       },
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar analytics.' });
+  }
+});
+
+// Correção crítica (Fase 1 operacional — "Meus Clientes" vazio): deriva
+// clientes exclusivamente de pedidos reais do vendedor (ver
+// computeSellerCustomers em sellerFinancialsService.ts). Nunca retorna
+// e-mail/telefone/CPF/endereço — só o necessário para o CRM geral.
+sellerRouter.get('/customers', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const seller = await resolveSeller(req);
+    if (!db || !seller) return res.json({ success: true, data: [] });
+
+    const customers = await computeSellerCustomers(seller.id, db);
+    return res.json({ success: true, data: customers });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar clientes.' });
   }
 });
 
@@ -1824,7 +1860,25 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
         sellerNetAmount: item.sellerNetAmount,
         marketplaceCommission: item.marketplaceCommission,
         commissionRateSnapshot: item.commissionRateSnapshot,
+        // Composição de frete real do pedido (nunca inventada — já
+        // persistida em orders desde a criação do pedido).
+        shippingCost: item.shippingCost,
+        shippingChargedToBuyer: item.shippingChargedToBuyer,
         shippingSellerSubsidy: item.shippingSellerSubsidy,
+        shippingMarketplaceSubsidy: item.shippingMarketplaceSubsidy,
+        // Correção crítica (Fase 1 operacional): shipment/etiqueta já criados
+        // no pós-processamento do pagamento (ensureFulfillmentCreated) —
+        // nunca mais null só porque o vendedor ainda não clicou em nada.
+        shipmentId: item.shipmentId,
+        shipmentStatus: item.shipmentStatus,
+        trackingNumber: item.trackingNumber,
+        labelAvailable: Boolean(item.shipmentId),
+        // Rótulo ciente de SELLER_FULFILLMENT vs NUSALI_FULFILLMENT — nunca
+        // inventa evento, só traduz order_items.status + shipments.status reais.
+        operationalLabel: deriveOperationalLabel(item.fulfillmentMode, item.paymentStatus, currentStatus, item.shipmentStatus),
+        // Única ação física que o vendedor pode executar — null para
+        // NUSALI_FULFILLMENT (o seller nunca interfere no que está no HUB).
+        availableAction: sellerAvailableAction(item.fulfillmentMode, item.paymentStatus, currentStatus),
         createdAt: item.createdAt ? new Date(item.createdAt).toISOString() : new Date().toISOString(),
       };
     });
@@ -1850,10 +1904,23 @@ sellerRouter.patch('/orders/:id/status', async (req: AuthRequest, res: Response)
     const { id } = req.params;
     const { status } = req.body;
 
-    if (status === 'delivered' || status === 'entregue') {
+    // Correção complementar (Fase 1 Operacional): a regra de que o vendedor
+    // não pode declarar unilateralmente que a transportadora coletou/entregou
+    // precisa existir NO BACKEND, não só esconder o botão no frontend — um
+    // request HTTP manual precisa ser rejeitado do mesmo jeito. Para itens
+    // SELLER_FULFILLMENT, a única transição que a rota do vendedor aceita é
+    // até "ready_to_ship" (produto pronto para coleta) — reaproveita o
+    // estado já existente em order_items.status, nenhuma state machine nova.
+    // "shipped"/"enviado"/"picked_up"/"in_transit"/"delivered"/"entregue" (ou
+    // qualquer outro valor) pertencem à autoridade operacional da
+    // logística/transportadora/admin, que continuam avançando o pedido pelas
+    // próprias rotas (adminRoutes.ts), nunca por aqui.
+    const SELLER_ALLOWED_ORDER_ITEM_STATUSES = ['preparing', 'ready_to_ship'];
+    if (!SELLER_ALLOWED_ORDER_ITEM_STATUSES.includes(status)) {
       return res.status(403).json({
         success: false,
-        message: 'VENDEDOR_NAO_AUTORIZADO: O vendedor não tem permissão para marcar um pedido como entregue.',
+        error: { code: 'SELLER_STATUS_TRANSITION_FORBIDDEN' },
+        message: `VENDEDOR_NAO_AUTORIZADO: O vendedor só pode avançar o item até "ready_to_ship" (produto pronto para coleta). O status "${status}" pertence à logística/transportadora/admin.`,
       });
     }
 
@@ -1914,26 +1981,24 @@ sellerRouter.patch('/orders/:id/status', async (req: AuthRequest, res: Response)
     }
 
     const previousStatus = targetItem.status;
-    const newStatus = status === 'shipped' || status === 'enviado' ? 'shipped' : status || 'preparing';
+    // newStatus só pode ser 'preparing' ou 'ready_to_ship' neste ponto — já
+    // validado pelo allowlist acima. O caminho que despachava fisicamente
+    // (executePhysicalDispatch em "shipped") foi removido desta rota: essa
+    // ação pertence à logística/transportadora/admin (adminRoutes.ts).
+    const newStatus = status;
 
-    if (newStatus === 'shipped') {
-      await db.transaction(async (tx) => {
-        await ShipmentService.executePhysicalDispatch(tx, targetItem.id, req.user!.id);
-      });
-    } else {
-      await db.transaction(async (tx) => {
-        await tx
-          .update(orderItems)
-          .set({ status: newStatus })
-          .where(eq(orderItems.id, targetItem.id));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(orderItems)
+        .set({ status: newStatus })
+        .where(eq(orderItems.id, targetItem.id));
 
-        if (newStatus === 'ready_to_ship') {
-          await ShipmentService.createOrGetShipmentForOrderItem(tx, targetItem.id, req.user!.id);
-        }
+      if (newStatus === 'ready_to_ship') {
+        await ShipmentService.createOrGetShipmentForOrderItem(tx, targetItem.id, req.user!.id);
+      }
 
-        await syncOrderFulfillmentStatus(targetItem.orderId, tx);
-      });
-    }
+      await syncOrderFulfillmentStatus(targetItem.orderId, tx);
+    });
 
     return res.json({
       success: true,

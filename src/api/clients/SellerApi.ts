@@ -109,6 +109,19 @@ export class SellerApi {
     return apiClient.get('/seller/orders', { params });
   }
 
+  // Etiqueta de envio (Fase 1 Operacional) — fonte única compartilhada entre
+  // vendedor e logística: NUNCA cria uma etiqueta nova, apenas consulta a
+  // já existente (1:1 com o shipment) via GET /shipments/:shipmentId/label.
+  static async getShipmentLabel(shipmentId: string): Promise<ApiResponse<any>> {
+    return apiClient.get(`/shipments/${shipmentId}/label`);
+  }
+
+  // Meus Clientes (Fase 1 Operacional) — CRM mínimo real, agregado a partir
+  // dos pedidos pagos do próprio vendedor (ver computeSellerCustomers no backend).
+  static async getCustomers(): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/customers');
+  }
+
   static async updateOrderStatus(
     id: string,
     data: { status?: string; trackingCode?: string; shippingCarrier?: string }
