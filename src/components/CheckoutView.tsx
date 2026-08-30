@@ -149,6 +149,14 @@ export const CheckoutView: React.FC = () => {
   const [isPixModalOpen, setIsPixModalOpen] = useState(false);
   const [activeOrderId, setActiveOrderId] = useState<string>('');
   const [pixInitiateData, setPixInitiateData] = useState<any>(null);
+  // Correção crítica (checkout "carrinho vazio" depois de gerar PIX):
+  // createOrderFromCart APAGA cartItems na mesma transação que cria o
+  // pedido — assim que o pedido existe, o carrinho real já está vazio no
+  // backend. Uma vez que confirmedOrder existe, o checkout passa de CART
+  // MODE para ORDER MODE: nunca mais decide "carrinho vazio" olhando para
+  // `cart` (que pode legitimamente já estar vazio), e um clique
+  // repetido/retry reaproveita o MESMO pedido em vez de criar outro.
+  const [confirmedOrder, setConfirmedOrder] = useState<any>(null);
 
   const [freightQuote, setFreightQuote] = useState<{
     shippingCost: number;
@@ -242,8 +250,10 @@ export const CheckoutView: React.FC = () => {
   const grandTotal = cartTotal + shippingFee;
   const grandTotalBrl = convertToBRL(grandTotal, orderCurrency);
 
-  const handleSubmitOrder = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Aceita tanto o submit do formulário (CART MODE) quanto o clique do botão
+  // "Tentar gerar o PIX novamente" (ORDER MODE, sem <form> em volta).
+  const handleSubmitOrder = async (e: React.FormEvent | React.MouseEvent) => {
+    e.preventDefault?.();
     if (isProcessing) return; // Prevent double clicks
 
     // Melhoria pré-piloto (elegibilidade por país): checagem só de UX — evita
@@ -259,39 +269,54 @@ export const CheckoutView: React.FC = () => {
     setErrorMessage(null);
 
     try {
-      // 1. Create Order in PostgreSQL
-      // Correção crítica de checkout: DeliveryAddress (types.ts) só tem o
-      // campo `country`, não `countryCode` — o backend (OrderService) lê
-      // primeiro `countryCode`, depois `country`, então já funcionava por
-      // fallback, mas enviar `countryCode` explicitamente aqui também
-      // (mesma convenção usada quando o endereço vem de addressId/endereço
-      // padrão, que sempre preenche as duas chaves) deixa o payload
-      // inequívoco, sem depender só do fallback.
-      const res = await OrdersApi.create({
-        shippingAddress: { ...address, countryCode: country },
-        paymentMethod: paymentMethod,
-        currency: orderCurrency,
-        countryCode: country,
-      });
+      // Correção crítica (evitar pedido duplicado em retry): se um pedido já
+      // foi criado nesta tentativa (ex.: geração de PIX falhou depois da
+      // criação do pedido, e o comprador clicou de novo), reaproveita o
+      // MESMO pedido em vez de chamar OrdersApi.create outra vez — o
+      // carrinho real já foi consumido/apagado pela criação anterior, então
+      // uma segunda chamada de criação falharia com "carrinho vazio" (uma
+      // mensagem enganosa para o que na verdade é "esse pedido já existe").
+      let createdOrder = confirmedOrder;
 
-      if (!res.success || !res.data) {
-        // Nunca deixar o comprador ver um erro técnico com "undefined" —
-        // esses ficam nos logs/API; a UI mostra uma mensagem amigável.
-        const code = res.error?.code || '';
-        const friendlyMessages: Record<string, string> = {
-          DESTINATION_COUNTRY_REQUIRED: 'Informe o país do endereço de entrega.',
-          DESTINATION_COUNTRY_NOT_FOUND: 'O país informado no endereço de entrega não é reconhecido pelo Mercado Nusali.',
-          DESTINATION_COUNTRY_INACTIVE: 'O Mercado Nusali ainda não está disponível para entregas neste país.',
-          CART_CURRENCY_MISMATCH: 'Os produtos deste carrinho usam moedas diferentes e não podem ser pagos juntos.',
-        };
-        const rawMsg = res.error?.message || res.message || 'Erro ao processar checkout.';
-        const msg = friendlyMessages[code] || (rawMsg.includes('undefined') ? 'Não foi possível confirmar o país de entrega. Verifique o endereço e tente novamente.' : rawMsg);
-        setErrorMessage(msg);
-        setIsProcessing(false);
-        return;
+      if (!createdOrder) {
+        // 1. Create Order in PostgreSQL
+        // Correção crítica de checkout: DeliveryAddress (types.ts) só tem o
+        // campo `country`, não `countryCode` — o backend (OrderService) lê
+        // primeiro `countryCode`, depois `country`, então já funcionava por
+        // fallback, mas enviar `countryCode` explicitamente aqui também
+        // (mesma convenção usada quando o endereço vem de addressId/endereço
+        // padrão, que sempre preenche as duas chaves) deixa o payload
+        // inequívoco, sem depender só do fallback.
+        const res = await OrdersApi.create({
+          shippingAddress: { ...address, countryCode: country },
+          paymentMethod: paymentMethod,
+          currency: orderCurrency,
+          countryCode: country,
+        });
+
+        if (!res.success || !res.data) {
+          // Nunca deixar o comprador ver um erro técnico com "undefined" —
+          // esses ficam nos logs/API; a UI mostra uma mensagem amigável.
+          const code = res.error?.code || '';
+          const friendlyMessages: Record<string, string> = {
+            DESTINATION_COUNTRY_REQUIRED: 'Informe o país do endereço de entrega.',
+            DESTINATION_COUNTRY_NOT_FOUND: 'O país informado no endereço de entrega não é reconhecido pelo Mercado Nusali.',
+            DESTINATION_COUNTRY_INACTIVE: 'O Mercado Nusali ainda não está disponível para entregas neste país.',
+            CART_CURRENCY_MISMATCH: 'Os produtos deste carrinho usam moedas diferentes e não podem ser pagos juntos.',
+          };
+          const rawMsg = res.error?.message || res.message || 'Erro ao processar checkout.';
+          const msg = friendlyMessages[code] || (rawMsg.includes('undefined') ? 'Não foi possível confirmar o país de entrega. Verifique o endereço e tente novamente.' : rawMsg);
+          setErrorMessage(msg);
+          setIsProcessing(false);
+          return;
+        }
+
+        createdOrder = res.data;
+        // A partir daqui o checkout entra em ORDER MODE: o pedido (não o
+        // carrinho, que o backend já apagou) é a fonte de verdade para o
+        // restante desta tentativa.
+        setConfirmedOrder(createdOrder);
       }
-
-      const createdOrder = res.data;
 
       // 2. Non-PIX payment: navigate directly to confirmation
       if (paymentMethod !== 'pix') {
@@ -302,6 +327,9 @@ export const CheckoutView: React.FC = () => {
       }
 
       // 3. PIX payment: Initiate Asaas Payment via POST /api/v1/payments/initiate
+      // (idempotente no backend: uma segunda chamada para o mesmo
+      // orderId+provider reaproveita o payment pendente existente, nunca
+      // cria um segundo — ver paymentService.ts)
       const payRes = await PaymentsApi.initiate({
         orderId: createdOrder.id,
         method: 'pix',
@@ -360,7 +388,13 @@ export const CheckoutView: React.FC = () => {
   // navegava direto para o checkout via a mesma janela de corrida (ou mesmo
   // um refresh normal da página) mostrava esta mensagem antes do GET /cart
   // real terminar, mesmo com o item já persistido no backend.
-  if (isCartLoading) {
+  //
+  // Correção crítica (checkout "carrinho vazio" depois de gerar PIX): as
+  // duas checagens abaixo NUNCA disparam quando confirmedOrder já existe —
+  // createOrderFromCart apaga os cartItems reais assim que o pedido é
+  // criado, então `cart` fica vazio LEGITIMAMENTE nesse momento; isso não
+  // significa que o comprador não tinha itens.
+  if (!confirmedOrder && isCartLoading) {
     return (
       <div className="max-w-4xl mx-auto px-4 py-12 text-center flex flex-col items-center gap-3">
         <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" />
@@ -369,7 +403,7 @@ export const CheckoutView: React.FC = () => {
     );
   }
 
-  if (cart.length === 0) {
+  if (!confirmedOrder && cart.length === 0) {
     return (
       <div className="max-w-4xl mx-auto px-4 py-12 text-center">
         <p className="text-gray-600 font-medium">Não há itens no carrinho para finalizar a compra.</p>
@@ -379,6 +413,55 @@ export const CheckoutView: React.FC = () => {
         >
           Voltar às Compras
         </button>
+      </div>
+    );
+  }
+
+  // ORDER MODE: o pedido já foi criado nesta tentativa (o carrinho real já
+  // foi consumido pelo backend) — o resumo usa os dados REAIS do pedido
+  // criado, nunca o carrinho (que legitimamente já está vazio). Cobre tanto
+  // "aguardando o PIX abrir" quanto "PIX falhou, oferecer retry" — em ambos
+  // os casos nunca mostra "carrinho vazio".
+  if (confirmedOrder) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-12 space-y-6">
+        <PixPaymentModal
+          isOpen={isPixModalOpen}
+          onClose={() => setIsPixModalOpen(false)}
+          orderId={activeOrderId}
+          paymentData={pixInitiateData}
+          onPaymentSuccess={handlePixPaymentSuccess}
+        />
+
+        {!isPixModalOpen && (
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-6 text-center space-y-4">
+            <ShieldCheck className="w-10 h-10 text-emerald-600 mx-auto" />
+            <div>
+              <h2 className="text-lg font-black text-gray-900">Pedido criado com sucesso</h2>
+              <p className="text-xs text-gray-500 mt-1">Pedido Nº {confirmedOrder.orderNumber || confirmedOrder.id}</p>
+            </div>
+            <div className="text-2xl font-black text-gray-900">
+              {formatPrice(Number(confirmedOrder.totalAmount), confirmedOrder.currency).formatted}
+            </div>
+
+            {errorMessage ? (
+              <>
+                <p className="text-red-700 bg-red-50 border border-red-200 rounded-xl p-3 text-sm font-medium">{errorMessage}</p>
+                <button
+                  onClick={handleSubmitOrder}
+                  disabled={isProcessing}
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-extrabold py-3 rounded-xl transition"
+                >
+                  {isProcessing ? 'Tentando novamente...' : 'Tentar gerar o PIX novamente'}
+                </button>
+              </>
+            ) : (
+              <p className="text-gray-500 text-sm flex items-center justify-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin" /> Preparando o pagamento PIX...
+              </p>
+            )}
+          </div>
+        )}
       </div>
     );
   }
