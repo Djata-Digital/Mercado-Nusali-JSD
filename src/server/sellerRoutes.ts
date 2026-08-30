@@ -67,6 +67,13 @@ import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { storageService } from './infra/storage.js';
 import { requestSellerPayout, PayoutValidationError } from './modules/wallet/payoutService.js';
+import { computeLiveStockAndSales } from './modules/catalog/catalogService.js';
+import {
+  getSellerOrderRows,
+  mapOperationalStatus,
+  computeSellerOverviewMetrics,
+  computeSellerWalletSnapshot,
+} from './modules/seller/sellerFinancialsService.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -277,18 +284,12 @@ let currentSellerProfile: SellerProfileData = {
 let currentStores: SellerStoreData[] = [];
 let currentTeamMembers: SellerTeamMember[] = [];
 let currentSellerProducts: any[] = [];
-let currentSellerOrders: SellerOrderData[] = [];
 
-let currentWallet: SellerWalletData = {
-  available: 0,
-  retained: 0,
-  future: 0,
-  blocked: 0,
-  cashbackEarned: 0,
-  refundsProcessed: 0,
-  currency: 'XOF',
-  transactions: [],
-};
+// Correção crítica (Visão Geral zerada): currentSellerOrders/currentWallet
+// (variáveis em memória, nunca reatribuídas em nenhum lugar do arquivo)
+// foram REMOVIDAS como fonte de /seller/overview e /seller/analytics — os
+// dois agora consultam o banco real via sellerFinancialsService.ts, a MESMA
+// fonte já usada por /seller/orders e /seller/wallet.
 
 let currentQuestions: SellerQuestion[] = [];
 let currentReviews: SellerReviewItem[] = [];
@@ -310,62 +311,114 @@ let currentSettings = {
 // 1. OVERVIEW & ANALYTICS ENDPOINTS
 // ==========================================
 
-sellerRouter.get('/overview', async (req: Request, res: Response) => {
-  const grossRevenue = currentSellerOrders.reduce((acc, o) => acc + o.totalAmount, 0);
-  const netRevenue = currentSellerOrders.reduce((acc, o) => acc + o.netPayout, 0);
-  const totalOrders = currentSellerOrders.length;
-  const pendingOrders = currentSellerOrders.filter(o => o.status === 'preparing' || o.status === 'pending').length;
-  const pendingQuestions = currentQuestions.filter(q => q.status === 'pending').length;
+// Correção crítica (Visão Geral do vendedor zerada): consulta o banco real
+// via sellerFinancialsService.ts — MESMA query/cálculo já usado por
+// /seller/orders e /seller/wallet, nunca uma terceira implementação. SEMPRE
+// escopado a UMA moeda explícita (?currency=BRL) — nunca mistura BRL/XOF/
+// GMD na mesma soma. Sem ?currency, usa 'XOF' (mesmo default do schema de
+// wallets) só para não quebrar chamadas antigas; o frontend agora sempre
+// envia a moeda que está visualizando.
+sellerRouter.get('/overview', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const seller = await resolveSeller(req);
+    const currency = (typeof req.query.currency === 'string' && req.query.currency.trim()) ? req.query.currency.trim().toUpperCase() : 'XOF';
 
-  return res.json({
-    success: true,
-    data: {
-      profile: currentSellerProfile,
-      store: currentStores[0],
-      balances: {
-        available: currentWallet.available,
-        retained: currentWallet.retained,
-        future: currentWallet.future,
-        blocked: currentWallet.blocked,
-        currency: currentWallet.currency,
+    if (!db || !seller) {
+      return res.json({
+        success: true,
+        data: {
+          profile: currentSellerProfile,
+          store: currentStores[0],
+          balances: { available: 0, retained: 0, future: 0, currency },
+          metrics: {
+            grossRevenue: 0, netRevenue: 0, totalOrders: 0, pendingOrders: 0, paidOrders: 0,
+            preparingOrders: 0, shippedOrders: 0, deliveredOrders: 0, returnOrders: 0, disputes: 0,
+            pendingQuestions: 0, totalProducts: 0, averageRating: 0,
+          },
+          recentOrders: [],
+          topProducts: [],
+          salesHistory: [],
+          countryDistribution: [],
+        },
+      });
+    }
+
+    const result = await computeSellerOverviewMetrics(seller, currency, db);
+    const pendingQuestions = currentQuestions.filter(q => q.status === 'pending').length;
+
+    return res.json({
+      success: true,
+      data: {
+        profile: currentSellerProfile,
+        store: currentStores[0],
+        balances: result.balances,
+        metrics: {
+          ...result.metrics,
+          pendingQuestions,
+          totalProducts: currentSellerProducts.length,
+          averageRating: currentSellerProfile.reputationScore,
+        },
+        recentOrders: result.recentOrders,
+        // topProducts/salesHistory/countryDistribution: nenhuma infraestrutura
+        // real de série temporal/ranking existe hoje — melhor honestamente
+        // vazio do que inventar dado (princípio: nunca mock financeiro/negócio).
+        topProducts: [],
+        salesHistory: [],
+        countryDistribution: [],
       },
-      metrics: {
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar visão geral.' });
+  }
+});
+
+sellerRouter.get('/analytics', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const seller = await resolveSeller(req);
+    const { period = '30days' } = req.query;
+    const currency = (typeof req.query.currency === 'string' && req.query.currency.trim()) ? req.query.currency.trim().toUpperCase() : 'XOF';
+
+    if (!db || !seller) {
+      return res.json({ success: true, data: { period, grossRevenue: 0, netRevenue: 0, totalOrders: 0, averageTicket: 0, conversionRate: '0.0%', viewsCount: 0, salesByDay: [] } });
+    }
+
+    const sinceDate = new Date();
+    if (period === 'today') sinceDate.setHours(0, 0, 0, 0);
+    else if (period === '7days') sinceDate.setDate(sinceDate.getDate() - 7);
+    else if (period === '90days') sinceDate.setDate(sinceDate.getDate() - 90);
+    else sinceDate.setDate(sinceDate.getDate() - 30); // '30days' (default)
+
+    const result = await computeSellerOverviewMetrics(seller, currency, db, sinceDate);
+    const { grossRevenue, netRevenue, totalOrders, financialDataComplete, missingSellerNetAmountCount } = result.metrics;
+    const averageTicket = totalOrders > 0 ? Math.round(grossRevenue / totalOrders) : 0;
+
+    return res.json({
+      success: true,
+      data: {
+        period,
         grossRevenue,
         netRevenue,
         totalOrders,
-        pendingOrders,
-        pendingQuestions,
-        totalProducts: currentSellerProducts.length,
-        averageRating: currentSellerProfile.reputationScore,
+        averageTicket,
+        // Mesma correção do Overview: netRevenue nunca esconde
+        // sellerNetAmount ausente dentro de um "R$0" silencioso.
+        financialDataComplete,
+        missingSellerNetAmountCount,
+        // conversionRate/viewsCount/salesByDay: não é dado financeiro — é
+        // rastreamento de visualizações, que este projeto nunca implementou.
+        // Honestamente vazio/zero (não é o princípio "nunca mock financeiro"
+        // que se aplica aqui, mas o mesmo espírito: nunca fingir que existe
+        // uma infraestrutura de analytics de visitas que não existe).
+        conversionRate: '0.0%',
+        viewsCount: 0,
+        salesByDay: [],
       },
-      recentOrders: currentSellerOrders.slice(0, 5),
-      topProducts: currentSellerProducts.slice(0, 4),
-      salesHistory: [],
-      countryDistribution: [],
-    },
-  });
-});
-
-sellerRouter.get('/analytics', async (req: Request, res: Response) => {
-  const { period = '30days' } = req.query;
-  const grossRevenue = currentSellerOrders.reduce((acc, o) => acc + o.totalAmount, 0);
-  const netRevenue = currentSellerOrders.reduce((acc, o) => acc + o.netPayout, 0);
-  const totalOrders = currentSellerOrders.length;
-  const averageTicket = totalOrders > 0 ? Math.round(grossRevenue / totalOrders) : 0;
-
-  return res.json({
-    success: true,
-    data: {
-      period,
-      grossRevenue,
-      netRevenue,
-      totalOrders,
-      averageTicket,
-      conversionRate: '0.0%',
-      viewsCount: 0,
-      salesByDay: [],
-    },
-  });
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar analytics.' });
+  }
 });
 
 function canSellerOperate(seller: any): boolean {
@@ -1176,17 +1229,36 @@ sellerRouter.get('/products', async (req: AuthRequest, res: Response) => {
         conditions.push(eq(products.status, status));
       }
       const dbProducts = await db.select().from(products).where(and(...conditions)).orderBy(desc(products.createdAt));
-      let list = dbProducts.map(p => ({
-        ...p,
-        price: Number(p.price),
-        originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
-        rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
-        stock: Number(p.stock),
-        weightKg: (p.shippingJson && typeof p.shippingJson === 'object') ? (p.shippingJson as any).weightKg : undefined,
-        dimensionsCm: (p.shippingJson && typeof p.shippingJson === 'object' && (p.shippingJson as any).lengthCm)
-          ? { length: (p.shippingJson as any).lengthCm, width: (p.shippingJson as any).widthCm, height: (p.shippingJson as any).heightCm }
-          : undefined,
-      }));
+
+      // Correção crítica ("Meus Produtos" mostrando estoque físico em vez de
+      // disponível): reaproveita a MESMA função já usada pelo catálogo
+      // público (computeLiveStockAndSales) — nunca uma segunda fórmula de
+      // estoque disponível. products.stock continua existindo como resumo
+      // físico (onHand), mas a coluna principal "Estoque" passa a mostrar o
+      // disponível real (onHand - reserved), igual ao que o catálogo já
+      // mostra. Nunca altera quantityOnHand — cálculo em tempo de leitura.
+      const liveStockMap = await computeLiveStockAndSales(dbProducts.map((p) => p.id), db);
+
+      let list = dbProducts.map(p => {
+        const live = liveStockMap.get(p.id);
+        return {
+          ...p,
+          price: Number(p.price),
+          originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
+          rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
+          // "stock" continua presente por compatibilidade, mas agora É o
+          // disponível (não mais o físico bruto) — mesma decisão já tomada
+          // no catálogo público.
+          stock: live?.availableStock ?? Number(p.stock),
+          quantityOnHand: live?.onHand ?? Number(p.stock),
+          quantityReserved: live?.reserved ?? 0,
+          availableStock: live?.availableStock ?? Number(p.stock),
+          weightKg: (p.shippingJson && typeof p.shippingJson === 'object') ? (p.shippingJson as any).weightKg : undefined,
+          dimensionsCm: (p.shippingJson && typeof p.shippingJson === 'object' && (p.shippingJson as any).lengthCm)
+            ? { length: (p.shippingJson as any).lengthCm, width: (p.shippingJson as any).widthCm, height: (p.shippingJson as any).heightCm }
+            : undefined,
+        };
+      });
       if (q && typeof q === 'string') {
         const term = q.toLowerCase();
         list = list.filter(p => p.title?.toLowerCase().includes(term) || p.brand?.toLowerCase().includes(term));
@@ -1697,6 +1769,15 @@ sellerRouter.get('/warehouses', async (req: AuthRequest, res: Response) => {
 // 4. ORDERS & FULFILLMENT
 // ==========================================
 
+// Correção crítica (Pedidos de Venda quebrando a página): contrato
+// reescrito para nunca fabricar campos que o backend não tem
+// (storeName/trackingCode/shippingCarrier/variant/timeline removidos — a UI
+// já trata a ausência deles com segurança) e para incluir os campos
+// financeiros REAIS do pedido (sellerNetAmount, marketplaceCommission,
+// commissionRateSnapshot, shippingSellerSubsidy, escrowStatus, currency),
+// única nomenclatura canônica (sellerNetAmount — nunca "netPayout"). Query e
+// mapeamento de status agora vêm de sellerFinancialsService.ts, a MESMA
+// fonte usada por /seller/overview — nunca uma segunda implementação.
 sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -1706,60 +1787,19 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
 
     const { status } = req.query;
 
-    const items = await db
-      .select({
-        orderItemId: orderItems.id,
-        orderId: orders.id,
-        orderNumber: orders.orderNumber,
-        buyerId: orders.buyerId,
-        productId: orderItems.productId,
-        productTitle: orderItems.productTitle,
-        productSku: orderItems.productSku,
-        variantTitle: orderItems.variantTitle,
-        productImage: orderItems.productImage,
-        quantity: orderItems.quantity,
-        unitPrice: orderItems.unitPrice,
-        subtotal: orderItems.subtotal,
-        fulfillmentMode: orderItems.fulfillmentMode,
-        itemStatus: orderItems.status,
-        orderStatus: orders.status,
-        paymentMethod: orders.paymentMethod,
-        paymentStatus: orders.paymentStatus,
-        shippingAddressJson: orders.shippingAddressJson,
-        createdAt: orders.createdAt,
-      })
-      .from(orderItems)
-      .innerJoin(orders, eq(orderItems.orderId, orders.id))
-      .where(
-        and(
-          eq(orderItems.sellerId, seller.id),
-          eq(orderItems.fulfillmentMode, 'SELLER_FULFILLMENT')
-        )
-      )
-      .orderBy(desc(orders.createdAt));
+    const rows = await getSellerOrderRows(seller.id, db);
 
-    const mapped = items.map((item) => {
+    const mapped = rows.map((item) => {
       const addr = (item.shippingAddressJson as any) || {};
-      const statusMap: Record<string, string> = {
-        pending_payment: 'pending_payment',
-        paid: 'preparing',
-        pending_preparation: 'preparing',
-        preparing: 'preparing',
-        ready_to_ship: 'preparing',
-        shipped: 'shipped',
-        delivered: 'delivered',
-        cancelled: 'cancelled',
-      };
-
-      const currentStatus = item.itemStatus || item.orderStatus;
-      const isPendingPayment = item.orderStatus === 'pending_payment' || item.paymentStatus === 'pending';
-      const mappedStatus = isPendingPayment ? 'pending_payment' : (statusMap[currentStatus] || currentStatus);
+      const { status: mappedStatus, rawStatus: currentStatus } = mapOperationalStatus(item.orderStatus, item.paymentStatus, item.itemStatus);
 
       return {
         id: item.orderItemId,
         orderItemId: item.orderItemId,
         orderId: item.orderId,
         orderNumber: item.orderNumber,
+        sellerId: seller.id,
+        productId: item.productId,
         buyerName: addr.recipientName || 'Não informado',
         buyerPhone: addr.phone || 'Não informado',
         buyerCountry: addr.countryCode || addr.country || 'Não informado',
@@ -1770,11 +1810,21 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
         productImage: item.productImage,
         variantTitle: item.variantTitle,
         quantity: item.quantity,
-        unitPrice: Number(item.unitPrice),
-        totalAmount: Number(item.subtotal),
+        unitPrice: item.unitPrice,
+        totalAmount: item.totalAmount,
+        currency: item.currency,
         fulfillmentMode: item.fulfillmentMode,
         status: mappedStatus,
         rawStatus: currentStatus,
+        // Status financeiro/operacional distintos e explícitos (nunca
+        // confundir um com o outro — ver documentação em
+        // sellerFinancialsService.ts).
+        paymentStatus: item.paymentStatus,
+        escrowStatus: item.escrowStatus,
+        sellerNetAmount: item.sellerNetAmount,
+        marketplaceCommission: item.marketplaceCommission,
+        commissionRateSnapshot: item.commissionRateSnapshot,
+        shippingSellerSubsidy: item.shippingSellerSubsidy,
         createdAt: item.createdAt ? new Date(item.createdAt).toISOString() : new Date().toISOString(),
       };
     });
@@ -1909,66 +1959,9 @@ sellerRouter.patch('/orders/:id/status', async (req: AuthRequest, res: Response)
 // um vendedor tivesse vendas em mais de uma moeda — bem provável num
 // marketplace CPLP/Brasil.
 //
-// Esta função SEMPRE recebe uma moeda explícita — nunca escolhe uma wallet
-// sem moeda. Cria a wallet sob demanda só quando o chamador pede
-// explicitamente aquela moeda (nunca mais hardcoded 'XOF').
-async function computeSellerWalletSnapshot(db: any, seller: { id: string; userId: string }, currency: string) {
-  const cur = currency.toUpperCase();
-
-  let walletRows = await db.select().from(wallets).where(and(eq(wallets.userId, seller.userId), eq(wallets.currency, cur))).limit(1);
-  let w = walletRows[0];
-  if (!w) {
-    const wId = `wlt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    await db.insert(wallets).values({
-      id: wId,
-      userId: seller.userId,
-      balance: '0.00',
-      cashbackBalance: '0.00',
-      pendingBalance: '0.00',
-      currency: cur,
-      status: 'active',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    }).onConflictDoNothing();
-    const createdW = await db.select().from(wallets).where(and(eq(wallets.userId, seller.userId), eq(wallets.currency, cur))).limit(1);
-    w = createdW[0];
-  }
-
-  // Retained: só escrow held NESTA moeda — nunca somado com outras.
-  const heldEscrow = await db
-    .select({ amount: escrowAccounts.amount })
-    .from(escrowAccounts)
-    .where(and(eq(escrowAccounts.sellerId, seller.id), eq(escrowAccounts.status, 'held'), eq(escrowAccounts.currency, cur)));
-  const retainedSum = heldEscrow.reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0);
-
-  const txs = w
-    ? await db.select().from(walletTransactions).where(eq(walletTransactions.walletId, w.id)).orderBy(desc(walletTransactions.createdAt))
-    : [];
-
-  const totalEarnedSum = txs
-    .filter((t: any) => (t.type === 'escrow_release' || t.type === 'deposit') && t.status === 'completed')
-    .reduce((sum: number, t: any) => sum + Math.abs(Number(t.amount || 0)), 0);
-
-  return {
-    currency: cur,
-    available: Number(w?.balance || 0),
-    retained: retainedSum,
-    totalEarned: totalEarnedSum,
-    transactions: txs.map((t: any) => ({
-      id: t.id,
-      type: t.type,
-      title: t.title,
-      date: t.createdAt,
-      amount: Number(t.amount),
-      currency: t.currency,
-      status: t.status,
-      balanceAfter: Number(t.balanceAfter),
-      referenceId: t.referenceId,
-      referenceType: t.referenceType,
-    })),
-  };
-}
-
+// computeSellerWalletSnapshot agora vive em sellerFinancialsService.ts
+// (importado no topo do arquivo) — reaproveitada também por
+// /seller/overview, nunca uma segunda implementação divergente.
 sellerRouter.get('/wallet', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();

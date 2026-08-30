@@ -2,12 +2,15 @@ import { apiClient, ApiResponse } from '../apiClient';
 
 export class SellerApi {
   // Overview & Analytics
-  static async getOverview(): Promise<ApiResponse<any>> {
-    return apiClient.get('/seller/overview');
+  // Correção crítica (Visão Geral zerada / mistura de moedas): currency
+  // agora explícito — nunca deixamos o backend escolher uma moeda arbitrária
+  // (mesmo padrão já aplicado a getWallet()).
+  static async getOverview(currency?: string): Promise<ApiResponse<any>> {
+    return apiClient.get('/seller/overview', currency ? { params: { currency } } : undefined);
   }
 
-  static async getAnalytics(period: string = '30days'): Promise<ApiResponse<any>> {
-    return apiClient.get('/seller/analytics', { params: { period } });
+  static async getAnalytics(period: string = '30days', currency?: string): Promise<ApiResponse<any>> {
+    return apiClient.get('/seller/analytics', { params: currency ? { period, currency } : { period } });
   }
 
   // Profile & Verification

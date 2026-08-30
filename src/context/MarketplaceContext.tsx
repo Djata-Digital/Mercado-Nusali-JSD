@@ -253,7 +253,7 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
       },
       status: 'shipped',
       escrow: {
-        status: 'retained',
+        status: 'held',
         amountRetained: 19000,
         currency: 'XOF',
         retainedAt: '2026-07-29',

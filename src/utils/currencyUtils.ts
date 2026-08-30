@@ -215,11 +215,21 @@ export const formatCurrency = (
   currency: CurrencyCode = 'XOF',
   isBaseUSD: boolean = false
 ): string => {
-  let finalAmount = amountInUSDOrLocal;
+  // Correção crítica (Pedidos de Venda derrubando a página inteira):
+  // formatCurrency(undefined, 'BRL') lançava "Cannot read properties of
+  // undefined (reading 'toLocaleString')" e o Error Boundary capturava a
+  // tela inteira. Nunca deve derrubar a UI — mas isso é só a rede de
+  // segurança de ÚLTIMO nível: o chamador que tem um valor financeiro
+  // OBRIGATÓRIO ausente (ex.: sellerNetAmount de um pedido pago) deve
+  // detectar isso ANTES de chamar formatCurrency e mostrar uma mensagem de
+  // inconsistência — nunca deixar cair aqui para virar um "R$ 0,00" que
+  // pareceria um valor real.
+  const safeAmount = typeof amountInUSDOrLocal === 'number' && Number.isFinite(amountInUSDOrLocal) ? amountInUSDOrLocal : 0;
+  let finalAmount = safeAmount;
 
   if (isBaseUSD) {
     const rate = getLiveExchangeRate(currency);
-    finalAmount = amountInUSDOrLocal * rate;
+    finalAmount = safeAmount * rate;
   }
 
   const symbol =

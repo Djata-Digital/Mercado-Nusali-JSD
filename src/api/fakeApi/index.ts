@@ -522,7 +522,7 @@ export const fakeApi = {
       paymentDetails: orderData.paymentDetails || ({} as any),
       status: 'confirmed',
       escrow: {
-        status: 'retained',
+        status: 'held',
         amountRetained: orderData.total || 0,
         currency: orderData.currency || 'XOF',
         retainedAt: new Date().toISOString(),

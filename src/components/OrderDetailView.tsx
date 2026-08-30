@@ -98,7 +98,7 @@ export const OrderDetailView: React.FC = () => {
               <div className="flex items-center gap-2">
                 <h3 className="text-lg font-bold">Nusali Proteção Escrow</h3>
                 <span className="bg-yellow-400 text-blue-950 font-black text-[10px] px-2 py-0.5 rounded">
-                  {activeOrder.escrow.status === 'retained' ? 'VALOR RETIDO' : 'PAGAMENTO LIBERADO'}
+                  {activeOrder.escrow.status === 'held' ? 'VALOR RETIDO' : 'PAGAMENTO LIBERADO'}
                 </span>
               </div>
               <p className="text-xs text-gray-200 mt-1 max-w-xl">
@@ -110,7 +110,7 @@ export const OrderDetailView: React.FC = () => {
             </div>
           </div>
 
-          {activeOrder.escrow.status === 'retained' && (
+          {activeOrder.escrow.status === 'held' && (
             <button
               onClick={() => confirmOrderReceipt(activeOrder.id)}
               className="bg-yellow-400 hover:bg-yellow-300 text-blue-950 font-black px-5 py-3 rounded-xl text-xs shadow-md transition whitespace-nowrap shrink-0"

@@ -18,16 +18,22 @@ import { isProductAvailableForCountry, eligibilityReason } from './productEligib
  * que nunca existiu (sempre 0 no frontend). Calculado em tempo de LEITURA,
  * nunca grava nada — sem risco de dupla redução, sem migration.
  */
-const SOLD_ORDER_STATUSES_EXCLUDED = ['cancelled', 'refunded'];
+// Exportado (single source of truth): reutilizado também por
+// /seller/products (mesma definição de "vendido" que o catálogo público —
+// nunca uma segunda regra divergente).
+export const SOLD_ORDER_STATUSES_EXCLUDED = ['cancelled', 'refunded'];
 
-async function computeLiveStockAndSales(productIds: string[], executor?: any): Promise<Map<string, { availableStock: number | null; salesCount: number }>> {
-  // availableStock = null quando o produto não tem NENHUMA linha em
-  // `inventory` (nunca deveria acontecer para produtos criados via
+// Exportado (single source of truth): GET /seller/products reaproveita esta
+// MESMA função para distinguir quantityOnHand/quantityReserved/
+// availableStock — nunca uma segunda fórmula de estoque disponível.
+export async function computeLiveStockAndSales(productIds: string[], executor?: any): Promise<Map<string, { onHand: number | null; reserved: number | null; availableStock: number | null; salesCount: number }>> {
+  // availableStock/onHand/reserved = null quando o produto não tem NENHUMA
+  // linha em `inventory` (nunca deveria acontecer para produtos criados via
   // ProductCreationService, que sempre cria uma — só protege dados legados
   // fora desse caminho): o chamador deve then usar products.stock como
   // estava antes, nunca fingir "0 disponível" para um produto que na
   // verdade nunca teve controle de reserva.
-  const result = new Map<string, { availableStock: number | null; salesCount: number }>();
+  const result = new Map<string, { onHand: number | null; reserved: number | null; availableStock: number | null; salesCount: number }>();
   if (productIds.length === 0) return result;
 
   const db = executor ?? getDb();
@@ -73,7 +79,12 @@ async function computeLiveStockAndSales(productIds: string[], executor?: any): P
   for (const id of productIds) {
     const inv = invMap.get(id);
     const availableStock = inv ? Math.max(0, inv.onHand - inv.reserved) : null;
-    result.set(id, { availableStock, salesCount: salesMap.get(id) || 0 });
+    result.set(id, {
+      onHand: inv ? inv.onHand : null,
+      reserved: inv ? inv.reserved : null,
+      availableStock,
+      salesCount: salesMap.get(id) || 0,
+    });
   }
   return result;
 }

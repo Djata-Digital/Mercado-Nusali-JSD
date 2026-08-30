@@ -3,12 +3,12 @@ import { SellerApi } from '../api/clients/SellerApi';
 
 export const SellerService = {
   // Overview & Analytics
-  async getOverview(): Promise<ApiResponse<any>> {
-    return SellerApi.getOverview();
+  async getOverview(currency?: string): Promise<ApiResponse<any>> {
+    return SellerApi.getOverview(currency);
   },
 
-  async getAnalytics(period: string = '30days'): Promise<ApiResponse<any>> {
-    return SellerApi.getAnalytics(period);
+  async getAnalytics(period: string = '30days', currency?: string): Promise<ApiResponse<any>> {
+    return SellerApi.getAnalytics(period, currency);
   },
 
   // Profile & KYC

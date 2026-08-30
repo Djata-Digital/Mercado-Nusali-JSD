@@ -59,9 +59,12 @@ export const SellerOverview: React.FC<SellerOverviewProps> = ({
   const fetchOverview = async () => {
     try {
       setLoading(true);
+      // Correção crítica (Visão Geral zerada / mistura de moedas): moeda
+      // sempre explícita, a mesma que o vendedor está navegando — nunca
+      // deixamos o backend escolher/misturar.
       const [resOverview, resAnalytics] = await Promise.all([
-        SellerService.getOverview(),
-        SellerService.getAnalytics(period),
+        SellerService.getOverview(selectedCurrency),
+        SellerService.getAnalytics(period, selectedCurrency),
       ]);
 
       if (resOverview.success && resOverview.data) {
@@ -79,7 +82,8 @@ export const SellerOverview: React.FC<SellerOverviewProps> = ({
 
   useEffect(() => {
     fetchOverview();
-  }, [period]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period, selectedCurrency]);
 
   const grossRevenue = analyticsData?.grossRevenue ?? overviewData?.metrics?.grossRevenue ?? 0;
   const netRevenue = analyticsData?.netRevenue ?? overviewData?.metrics?.netRevenue ?? 0;

@@ -63,6 +63,21 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
     }
   };
 
+  // Correção crítica (Pedidos de Venda quebrando a página): sellerNetAmount
+  // é a nomenclatura financeira canônica única (antes a UI lia "netPayout",
+  // um campo que o backend real nunca enviou). Para um pedido PAGO, esse
+  // valor é obrigatório — se vier ausente, isso é uma inconsistência real
+  // (pedido pago sem valor líquido calculado) e precisa aparecer como tal,
+  // nunca virar silenciosamente "R$ 0,00" (formatCurrency é só a rede de
+  // segurança contra crash, não uma forma de esconder dado ausente).
+  const formatSellerNet = (ord: SellerOrderData): string => {
+    const value = (ord as any).sellerNetAmount;
+    if (value === null || value === undefined) {
+      return ord.paymentStatus === 'paid' ? '⚠ Valor indisponível' : '—';
+    }
+    return formatCurrency(value, selectedCurrency);
+  };
+
   const getOrderLabelData = (ord: SellerOrderData): ShippingLabelData | null => {
     if (!ord.trackingCode) return null;
     const recipientAddr = typeof (ord as any).shippingAddressJson === 'object'
@@ -192,7 +207,12 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                     Pagamento: {ord.paymentStatus === 'paid' ? 'Pago' : 'Aguardando Pagamento'}
                   </span>
                   <span className="bg-blue-50 text-blue-800 border border-blue-200 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1">
-                    <Lock className="w-3 h-3 text-blue-600" /> Escrow: {ord.escrowStatus === 'retained' || ord.escrowStatus === 'held' ? 'Saldo Retido' : 'Liberando'}
+                    {/* Correção crítica: valores reais de orders.escrow_status
+                        são 'pending'|'held'|'released'|'disputed'|'refunded'
+                        — 'retained' nunca existiu no banco, era só um valor
+                        do tipo mock antigo. */}
+                    <Lock className="w-3 h-3 text-blue-600" />
+                    Escrow: {ord.escrowStatus === 'held' ? 'Saldo Retido' : ord.escrowStatus === 'released' ? 'Liberado' : ord.escrowStatus === 'refunded' ? 'Estornado' : ord.escrowStatus === 'disputed' ? 'Em Disputa' : 'Aguardando Pagamento'}
                   </span>
                 </div>
               </div>
@@ -251,7 +271,7 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                     {formatCurrency(ord.totalAmount, selectedCurrency)}
                   </span>
                   <span className="text-[10px] text-gray-500 font-semibold block">
-                    Repasse Líquido: {formatCurrency(ord.netPayout, selectedCurrency)}
+                    Repasse Líquido: {formatSellerNet(ord)}
                   </span>
 
                   <div className="pt-2 flex flex-wrap items-center justify-end gap-2">
@@ -360,28 +380,36 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
             </div>
 
             {/* Operational Timeline */}
-            <div className="space-y-3 bg-gray-50 p-4 rounded-2xl border border-gray-200">
-              <h4 className="font-bold text-gray-900 flex items-center gap-2">
-                <Truck className="w-4 h-4 text-emerald-700" /> Linha do Tempo da Operação
-              </h4>
-              <div className="space-y-2">
-                {selectedOrder.timeline.map((tl, idx) => (
-                  <div key={idx} className="flex items-center gap-3">
-                    <div
-                      className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                        tl.done ? 'bg-emerald-600 text-white' : 'bg-gray-300 text-gray-600'
-                      }`}
-                    >
-                      ✓
+            {/* Correção crítica (Pedidos de Venda quebrando a página): o
+                backend real nunca envia "timeline" (nunca foi implementado
+                como histórico estruturado) — antes .map() direto em
+                undefined lançava e derrubava a página assim que o modal
+                abria. Nunca inventamos eventos: sem dado real, o bloco
+                inteiro é omitido em vez de mostrar uma timeline fictícia. */}
+            {(selectedOrder.timeline?.length ?? 0) > 0 && (
+              <div className="space-y-3 bg-gray-50 p-4 rounded-2xl border border-gray-200">
+                <h4 className="font-bold text-gray-900 flex items-center gap-2">
+                  <Truck className="w-4 h-4 text-emerald-700" /> Linha do Tempo da Operação
+                </h4>
+                <div className="space-y-2">
+                  {(selectedOrder.timeline ?? []).map((tl, idx) => (
+                    <div key={idx} className="flex items-center gap-3">
+                      <div
+                        className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                          tl.done ? 'bg-emerald-600 text-white' : 'bg-gray-300 text-gray-600'
+                        }`}
+                      >
+                        ✓
+                      </div>
+                      <div>
+                        <span className="font-bold text-gray-900 block">{tl.title}</span>
+                        <span className="text-[10px] text-gray-400 font-mono">{tl.date}</span>
+                      </div>
                     </div>
-                    <div>
-                      <span className="font-bold text-gray-900 block">{tl.title}</span>
-                      <span className="text-[10px] text-gray-400 font-mono">{tl.date}</span>
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Financial Breakdown for Seller (Requirement 24) */}
             <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-xs space-y-2 text-xs">

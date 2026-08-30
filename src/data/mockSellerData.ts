@@ -84,13 +84,21 @@ export interface SellerWarehouseStock {
   monthlyStorageFee: number;
 }
 
+// Correção crítica (Pedidos de Venda quebrando a página): este tipo
+// descrevia um shape que GET /seller/orders nunca devolveu de verdade
+// (netPayout/commissionFee/storeName/trackingCode/shippingCarrier/timeline
+// nunca existiram na resposta real — .map()/.toLocaleString() em undefined
+// derrubava a página inteira). Campos que o backend realmente NUNCA envia
+// agora são opcionais; nomenclatura financeira alinhada com o banco real
+// (sellerNetAmount/marketplaceCommission, nunca dois nomes para a mesma
+// coisa); campos financeiros novos e reais adicionados.
 export interface SellerOrderData {
   id: string;
   orderNumber: string;
-  storeId: string;
-  storeName: string;
+  storeId?: string;
+  storeName?: string; // nunca enviado pelo backend hoje — sempre trate como ausente
   buyerName: string;
-  buyerEmail: string;
+  buyerEmail?: string;
   buyerPhone: string;
   buyerCountry: CountryCode;
   deliveryCity: string;
@@ -105,17 +113,26 @@ export interface SellerOrderData {
   quantity: number;
   unitPrice: number;
   totalAmount: number;
-  commissionFee: number;
-  netPayout: number;
+  /** Comissão real do marketplace sobre o pedido (orders.marketplace_commission). Nomenclatura canônica — nunca "commissionFee". */
+  marketplaceCommission?: number | null;
+  /** Percentual de comissão aplicado no momento do pedido (orders.commission_rate_snapshot). null = não registrado (pedido legado). */
+  commissionRateSnapshot?: number | null;
+  /** Subsídio de frete pago pelo vendedor (orders.shipping_seller_subsidy). */
+  shippingSellerSubsidy?: number | null;
+  /** Valor líquido real do vendedor (orders.seller_net_amount). Nomenclatura canônica única — nunca "netPayout". */
+  sellerNetAmount?: number | null;
   currency: CurrencyCode;
   paymentMethod: string;
+  /** orders.payment_status real: pending | paid | failed | refunded. Nunca confundir com `status` (operacional). */
+  paymentStatus?: string;
   status: OrderStatus;
   escrowStatus: EscrowStatus;
-  escrowReleaseDate: string;
-  shippingCarrier: string;
-  trackingCode: string;
+  escrowReleaseDate?: string; // nunca enviado pelo backend hoje
+  shippingCarrier?: string; // nunca enviado pelo backend hoje
+  trackingCode?: string;
   createdAt: string;
-  timeline: { title: string; date: string; done: boolean }[];
+  /** Histórico estruturado de eventos — o backend real nunca envia isso hoje. Sempre trate como [] quando ausente, nunca invente eventos. */
+  timeline?: { title: string; date: string; done: boolean }[];
 }
 
 export interface SellerQuestion {

@@ -290,7 +290,10 @@ export type OrderStatus =
   | 'disputed'
   | 'cancelled';
 
-export type EscrowStatus = 'retained' | 'releasing_soon' | 'released' | 'disputed' | 'refunded';
+// Correção crítica (Pedidos de Venda quebrando a página): valores reais de
+// orders.escrow_status no banco são pending|held|released|disputed|refunded
+// — 'retained'/'releasing_soon' nunca existiram, eram só valores de mock.
+export type EscrowStatus = 'pending' | 'held' | 'released' | 'disputed' | 'refunded';
 
 export interface EscrowDetails {
   status: EscrowStatus;

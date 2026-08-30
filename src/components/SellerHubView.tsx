@@ -371,7 +371,12 @@ export const SellerHubView: React.FC = () => {
         pendingQuestionsCount={pendingQuestionsCount}
         unreadMessagesCount={0}
         openDisputesCount={0}
-        ordersCount={0}
+        // Correção crítica (badge "Pedidos de Venda" sempre 0): antes era um
+        // literal hardcoded, nunca derivado dos pedidos reais. `orders`
+        // aqui é uma linha por order_item (mesma granularidade da API) — o
+        // badge deve contar PEDIDOS distintos, nunca itens: um pedido com 3
+        // produtos deste vendedor conta como 1, não 3.
+        ordersCount={new Set(orders.map((o: any) => o.orderId)).size}
         taxId={profile?.taxId}
       />
 
