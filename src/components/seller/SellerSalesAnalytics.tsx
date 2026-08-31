@@ -33,6 +33,11 @@ interface AnalyticsData {
   grossRevenue: number;
   netRevenue: number;
   totalOrders: number;
+  // Correção crítica (Fase 1 Operacional — card "Pedidos Pagos" mostrando
+  // pending_payment): totalOrders conta TODOS os pedidos distintos no
+  // período (pagos ou não) — nunca deve alimentar um card rotulado "Pagos".
+  // paidOrders é o campo correto para isso.
+  paidOrders: number;
   unitsSold: number;
   averageTicket: number;
   financialDataComplete: boolean;
@@ -46,6 +51,7 @@ const EMPTY_DATA: AnalyticsData = {
   grossRevenue: 0,
   netRevenue: 0,
   totalOrders: 0,
+  paidOrders: 0,
   unitsSold: 0,
   averageTicket: 0,
   financialDataComplete: true,
@@ -154,7 +160,7 @@ export const SellerSalesAnalytics: React.FC<SellerSalesAnalyticsProps> = ({ show
             <span>Receita Bruta</span>
           </div>
           <p className="text-2xl font-black text-gray-900">{formatCurrency(data.grossRevenue, selectedCurrency as CurrencyCode)}</p>
-          <p className="text-[10px] text-gray-400">Total acumulado no período · {data.totalOrders} pedido(s)</p>
+          <p className="text-[10px] text-gray-400">Total acumulado no período · {data.paidOrders} pedido(s) pago(s)</p>
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-xs space-y-2">
@@ -179,7 +185,7 @@ export const SellerSalesAnalytics: React.FC<SellerSalesAnalyticsProps> = ({ show
           <div className="flex items-center justify-between text-gray-500 text-xs font-bold uppercase">
             <span>Pedidos Pagos</span>
           </div>
-          <p className="text-2xl font-black text-gray-900">{data.totalOrders}</p>
+          <p className="text-2xl font-black text-gray-900">{data.paidOrders}</p>
           <p className="text-[10px] text-gray-400">No período selecionado</p>
         </div>
       </div>

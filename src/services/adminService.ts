@@ -32,6 +32,14 @@ export const AdminService = {
     return AdminApi.toggleUserStatus(id, status);
   },
 
+  async getSellerCommission(sellerId: string): Promise<ApiResponse<any>> {
+    return AdminApi.getSellerCommission(sellerId);
+  },
+
+  async updateSellerCommission(sellerId: string, commissionRate: number | null): Promise<ApiResponse<any>> {
+    return AdminApi.updateSellerCommission(sellerId, commissionRate);
+  },
+
   async resetUserPassword(id: string, newPassword?: string): Promise<ApiResponse<any>> {
     return AdminApi.resetUserPassword(id, newPassword);
   },
@@ -64,6 +72,10 @@ export const AdminService = {
 
   async getFinanceOverview(): Promise<ApiResponse<any>> {
     return AdminApi.getFinanceOverview();
+  },
+
+  async getFinanceTransactions(params?: { currency?: string; limit?: number }): Promise<ApiResponse<any[]>> {
+    return AdminApi.getFinanceTransactions(params);
   },
 
   async getPayoutsList(): Promise<ApiResponse<any[]>> {

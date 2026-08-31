@@ -35,6 +35,14 @@ export class AdminApi {
     return apiClient.patch(`/admin/users/${id}/status`, { status });
   }
 
+  static async getSellerCommission(sellerId: string): Promise<ApiResponse<any>> {
+    return apiClient.get(`/admin/sellers/${sellerId}/commission`);
+  }
+
+  static async updateSellerCommission(sellerId: string, commissionRate: number | null): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/sellers/${sellerId}/commission`, { commissionRate });
+  }
+
   static async resetUserPassword(id: string, newPassword?: string): Promise<ApiResponse<any>> {
     return apiClient.post(`/admin/users/${id}/reset-password`, { newPassword });
   }
@@ -67,6 +75,10 @@ export class AdminApi {
 
   static async getFinanceOverview(): Promise<ApiResponse<any>> {
     return apiClient.get('/admin/finance/overview');
+  }
+
+  static async getFinanceTransactions(params?: { currency?: string; limit?: number }): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/finance/transactions', { params });
   }
 
   static async getPayoutsList(): Promise<ApiResponse<any[]>> {
@@ -116,7 +128,7 @@ export class AdminApi {
     return apiClient.post(`/admin/inventory/transfers/${id}/cancel`);
   }
 
-  static async getHubFulfillmentOrders(params?: { warehouseId?: string; status?: string }): Promise<ApiResponse<any>> {
+  static async getHubFulfillmentOrders(params?: { warehouseId?: string; status?: string; fulfillmentMode?: 'NUSALI_FULFILLMENT' | 'SELLER_FULFILLMENT' }): Promise<ApiResponse<any>> {
     return apiClient.get('/admin/logistics/fulfillment/orders', { params });
   }
 

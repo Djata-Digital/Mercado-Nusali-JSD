@@ -50,7 +50,7 @@ interface AdminWarehousesManagerProps {
 }
 
 export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ showToast }) => {
-  const [activeTab, setActiveTab] = useState<'warehouses' | 'transfers' | 'hub_orders'>('transfers');
+  const [activeTab, setActiveTab] = useState<'warehouses' | 'transfers' | 'hub_orders' | 'seller_pickup'>('transfers');
 
   // Warehouses state
   const [warehouses, setWarehouses] = useState<WarehouseRecord[]>([]);
@@ -67,6 +67,14 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
   const [hubOrders, setHubOrders] = useState<any[]>([]);
   const [isLoadingHubOrders, setIsLoadingHubOrders] = useState(false);
   const [updatingHubItemId, setUpdatingHubItemId] = useState<string | null>(null);
+
+  // Correção crítica (Fase 1 Operacional — item 4/5: logística não via venda
+  // SELLER_FULFILLMENT antes do vendedor clicar "Produto Pronto para
+  // Coleta"): fila SEPARADA da do HUB — mesma rota, filtrada por
+  // fulfillmentMode=SELLER_FULFILLMENT — nunca misturada com hubOrders.
+  const [sellerPickupOrders, setSellerPickupOrders] = useState<any[]>([]);
+  const [isLoadingSellerPickup, setIsLoadingSellerPickup] = useState(false);
+  const [updatingSellerPickupId, setUpdatingSellerPickupId] = useState<string | null>(null);
 
   // Filters state
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
@@ -182,11 +190,49 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
     }
   };
 
+  // Fila de coleta no vendedor (SELLER_FULFILLMENT) — SEPARADA da fila do
+  // HUB (mesma rota, filtrada por fulfillmentMode). Pedido pago já aparece
+  // aqui imediatamente, sem depender do vendedor clicar em nada.
+  const fetchSellerPickupOrders = useCallback(async () => {
+    setIsLoadingSellerPickup(true);
+    try {
+      const res = await AdminApi.getHubFulfillmentOrders({ fulfillmentMode: 'SELLER_FULFILLMENT' });
+      if (res.success && Array.isArray(res.data)) {
+        setSellerPickupOrders(res.data);
+      }
+    } catch (err: any) {
+      showToast('Erro ao carregar pedidos aguardando coleta no vendedor.');
+    } finally {
+      setIsLoadingSellerPickup(false);
+    }
+  }, [showToast]);
+
+  // Única ação da logística sobre um item SELLER_FULFILLMENT por esta tela:
+  // registrar que a coleta no vendedor aconteceu (status="shipped" — o
+  // backend rejeita qualquer outro valor para este fluxo, ver adminRoutes.ts).
+  const handleConfirmSellerPickup = async (orderItemId: string) => {
+    setUpdatingSellerPickupId(orderItemId);
+    try {
+      const res = await AdminApi.updateHubFulfillmentOrderStatus(orderItemId, { status: 'shipped' });
+      if (res.success) {
+        showToast('Coleta registrada com sucesso!');
+        fetchSellerPickupOrders();
+      } else {
+        showToast(res.message || 'Erro ao registrar coleta.');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Falha de conexão ao registrar coleta.');
+    } finally {
+      setUpdatingSellerPickupId(null);
+    }
+  };
+
   useEffect(() => {
     fetchWarehouses();
     fetchTransfers();
     fetchHubOrders();
-  }, [fetchWarehouses, fetchTransfers, fetchHubOrders]);
+    fetchSellerPickupOrders();
+  }, [fetchWarehouses, fetchTransfers, fetchHubOrders, fetchSellerPickupOrders]);
 
   // Correção crítica (Fase 1 Operacional — seção 12): sem WebSocket real
   // integrado ao frontend e com BullMQ desabilitado, a fila do HUB Nusali
@@ -199,6 +245,13 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
     const interval = setInterval(fetchHubOrders, 8000);
     return () => clearInterval(interval);
   }, [activeTab, fetchHubOrders]);
+
+  // Mesmo padrão de polling controlado para a fila de coleta no vendedor.
+  useEffect(() => {
+    if (activeTab !== 'seller_pickup') return;
+    const interval = setInterval(fetchSellerPickupOrders, 8000);
+    return () => clearInterval(interval);
+  }, [activeTab, fetchSellerPickupOrders]);
 
   // Counters for Transfers Header
   const transferCounters = useMemo(() => {
@@ -424,6 +477,23 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
           {hubOrders.length > 0 && (
             <span className="bg-purple-100 text-purple-800 text-[10px] px-2 py-0.5 rounded-full font-black">
               {hubOrders.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('seller_pickup')}
+          className={`pb-3 px-4 font-extrabold text-xs flex items-center gap-2 border-b-2 transition cursor-pointer ${
+            activeTab === 'seller_pickup'
+              ? 'border-purple-600 text-purple-700'
+              : 'border-transparent text-gray-500 hover:text-gray-900'
+          }`}
+        >
+          <Store className="w-4 h-4" />
+          Coletas no Vendedor
+          {sellerPickupOrders.length > 0 && (
+            <span className="bg-emerald-100 text-emerald-800 text-[10px] px-2 py-0.5 rounded-full font-black">
+              {sellerPickupOrders.length}
             </span>
           )}
         </button>
@@ -1017,6 +1087,152 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                               <span className="text-xs font-bold text-emerald-700">Concluído</span>
                             )}
                           </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: COLETAS NO VENDEDOR (SELLER_FULFILLMENT) — fila SEPARADA da
+          do HUB: origem é o estabelecimento do vendedor, ação inicial da
+          logística é a COLETA (nunca picking/packing, isso é exclusivo do
+          HUB). Item aparece aqui IMEDIATAMENTE após o pagamento ser
+          confirmado — nunca depende do vendedor clicar em nada. */}
+      {activeTab === 'seller_pickup' && (
+        <div className="bg-white rounded-3xl border border-gray-100 shadow-xl p-6 space-y-4">
+          <div className="flex justify-between items-center border-b border-gray-100 pb-4">
+            <div>
+              <h2 className="text-base font-black text-gray-900 flex items-center gap-2">
+                <Store className="w-5 h-5 text-emerald-600" /> Coletas Pendentes no Estabelecimento do Vendedor
+              </h2>
+              <p className="text-xs text-gray-500 font-medium">
+                Vendas pagas com fulfillment do próprio vendedor (SELLER_FULFILLMENT) — a origem é a loja do vendedor,
+                não um HUB Nusali. A logística confirma aqui quando a coleta física acontecer.
+              </p>
+            </div>
+            <span className="text-xs font-mono font-bold bg-emerald-100 text-emerald-900 px-3 py-1 rounded-full">
+              {sellerPickupOrders.length} pedido(s) aguardando/coletado(s)
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200 text-gray-600 font-bold uppercase tracking-wider">
+                  <th className="p-3">Data / Pedido</th>
+                  <th className="p-3">Produto</th>
+                  <th className="p-3">Vendedor / Origem</th>
+                  <th className="p-3">Endereço de Coleta</th>
+                  <th className="p-3">Comprador & Entrega</th>
+                  <th className="p-3 text-center">Status</th>
+                  <th className="p-3 text-right">Ação Operacional</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 font-medium">
+                {isLoadingSellerPickup ? (
+                  <tr>
+                    <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
+                      Carregando pedidos aguardando coleta...
+                    </td>
+                  </tr>
+                ) : sellerPickupOrders.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
+                      Nenhum pedido pago de fulfillment do vendedor aguardando coleta no momento.
+                    </td>
+                  </tr>
+                ) : (
+                  sellerPickupOrders.map((so) => {
+                    const dateStr = so.createdAt
+                      ? new Date(so.createdAt).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+                      : '-';
+
+                    let statusBadge = (
+                      <span className="bg-amber-100 text-amber-900 border border-amber-200 text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center justify-center gap-1">
+                        <Clock className="w-3 h-3" /> Aguardando preparação/coleta no vendedor
+                      </span>
+                    );
+                    if (so.status === 'ready_to_ship') {
+                      statusBadge = (
+                        <span className="bg-blue-100 text-blue-900 border border-blue-200 text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center justify-center gap-1">
+                          <PackageCheck className="w-3 h-3 text-blue-700" /> Pronto para coleta
+                        </span>
+                      );
+                    } else if (so.status === 'shipped') {
+                      statusBadge = (
+                        <span className="bg-emerald-100 text-emerald-900 border border-emerald-200 text-[10px] font-bold px-2.5 py-1 rounded-full flex items-center justify-center gap-1">
+                          <Truck className="w-3 h-3 text-emerald-700" /> Coletado
+                        </span>
+                      );
+                    }
+
+                    return (
+                      <tr key={so.id} className="hover:bg-gray-50/50">
+                        <td className="p-3">
+                          <span className="font-mono text-gray-500 text-[11px] block">{dateStr}</span>
+                          <span className="text-[11px] font-bold text-gray-900 block">{so.orderNumber || so.orderId}</span>
+                          {so.trackingNumber && (
+                            <span className="text-[10px] font-mono text-gray-400 block">Rastreio: {so.trackingNumber}</span>
+                          )}
+                        </td>
+
+                        <td className="p-3">
+                          <div className="flex items-center gap-2.5">
+                            {so.productImage ? (
+                              <img src={so.productImage} alt={so.productTitle} className="w-9 h-9 rounded-xl object-cover border border-gray-200 shrink-0" />
+                            ) : (
+                              <div className="w-9 h-9 rounded-xl bg-gray-100 flex items-center justify-center text-gray-400 shrink-0">
+                                <Package className="w-4 h-4" />
+                              </div>
+                            )}
+                            <div>
+                              <span className="font-bold text-gray-900 block text-xs">{so.productTitle}</span>
+                              <span className="text-[10px] font-mono text-gray-400">SKU: {so.productSku} · {so.quantityReservedAtHub}x</span>
+                            </div>
+                          </div>
+                        </td>
+
+                        <td className="p-3 text-gray-900 font-bold text-xs">
+                          <div className="flex items-center gap-1">
+                            <Store className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span>{so.sellerName}</span>
+                          </div>
+                          {so.sellerPhone && (
+                            <span className="text-[10px] text-gray-500 flex items-center gap-1 mt-0.5">
+                              <Phone className="w-3 h-3" /> {so.sellerPhone}
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="p-3 text-[11px] text-gray-700">
+                          {so.pickupAddress}
+                        </td>
+
+                        <td className="p-3">
+                          <span className="font-bold text-gray-900 block text-xs">{so.buyerName}</span>
+                          <span className="text-[10px] text-gray-500 block">{so.buyerAddress}</span>
+                        </td>
+
+                        <td className="p-3 text-center">{statusBadge}</td>
+
+                        <td className="p-3 text-right">
+                          {so.status === 'shipped' ? (
+                            <span className="text-xs font-bold text-emerald-700">Concluído</span>
+                          ) : (
+                            <button
+                              onClick={() => handleConfirmSellerPickup(so.id)}
+                              disabled={updatingSellerPickupId === so.id}
+                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition cursor-pointer shadow-xs disabled:opacity-50"
+                              title="Confirma que a transportadora coletou o produto no vendedor"
+                            >
+                              Confirmar Coleta
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );

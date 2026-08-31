@@ -388,7 +388,7 @@ sellerRouter.get('/analytics', async (req: AuthRequest, res: Response) => {
       return res.json({
         success: true,
         data: {
-          period, currency, grossRevenue: 0, netRevenue: 0, totalOrders: 0, unitsSold: 0, averageTicket: 0,
+          period, currency, grossRevenue: 0, netRevenue: 0, totalOrders: 0, paidOrders: 0, unitsSold: 0, averageTicket: 0,
           financialDataComplete: true, missingSellerNetAmountCount: 0,
           salesHistory: [], salesByCountry: [], topProducts: [],
           conversionRate: '0.0%', viewsCount: 0, salesByDay: [],
@@ -403,7 +403,14 @@ sellerRouter.get('/analytics', async (req: AuthRequest, res: Response) => {
     else sinceDate.setDate(sinceDate.getDate() - 30); // '30days' (default)
 
     const result = await computeSellerOverviewMetrics(seller, currency, db, sinceDate);
-    const { grossRevenue, netRevenue, totalOrders, unitsSold, averageTicket, financialDataComplete, missingSellerNetAmountCount } = result.metrics;
+    // Correção crítica (Fase 1 Operacional — "Pedidos Pagos" mostrando 11 em
+    // vez de 5): totalOrders SEMPRE incluiu pending_payment (é a contagem de
+    // TODOS os pedidos distintos no período, pagos ou não — métrica
+    // legítima, mas nunca deveria ter sido usada para rotular um card
+    // "Pedidos Pagos"). paidOrders é o campo correto para isso — já
+    // calculado por computeSellerOverviewMetrics, só nunca tinha sido
+    // exposto por este endpoint.
+    const { grossRevenue, netRevenue, totalOrders, paidOrders, unitsSold, averageTicket, financialDataComplete, missingSellerNetAmountCount } = result.metrics;
 
     return res.json({
       success: true,
@@ -413,6 +420,7 @@ sellerRouter.get('/analytics', async (req: AuthRequest, res: Response) => {
         grossRevenue,
         netRevenue,
         totalOrders,
+        paidOrders,
         unitsSold,
         averageTicket,
         // Mesma correção do Overview: netRevenue nunca esconde
@@ -1823,7 +1831,16 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
 
     const { status } = req.query;
 
-    const rows = await getSellerOrderRows(seller.id, db);
+    // Correção crítica (Fase 1 Operacional — "Pedidos de Venda" mostrando
+    // pending_payment): paymentStatus !== 'paid' NUNCA é uma venda do
+    // vendedor (pode ser abandono de checkout, PIX nunca pago, etc.) —
+    // continua existindo no banco para auditoria/checkout, mas é invisível
+    // aqui. paymentStatus nunca é reatribuído para 'refunded'/'failed' neste
+    // código depois de 'paid' (confirmado por auditoria: só orders.status
+    // muda para cancelled/refunded/refund_requested) — logo este filtro
+    // continua mostrando normalmente pedidos pagos que depois foram
+    // cancelados/reembolsados, exatamente como já acontecia antes.
+    const rows = (await getSellerOrderRows(seller.id, db)).filter((r) => r.paymentStatus === 'paid');
 
     const mapped = rows.map((item) => {
       const addr = (item.shippingAddressJson as any) || {};

@@ -91,9 +91,17 @@ export const SellerOverview: React.FC<SellerOverviewProps> = ({
   const escrowBalance = overviewData?.balances?.retained ?? 0;
   const pendingRelease = overviewData?.balances?.future ?? 0;
 
+  // Correção crítica (Fase 1 Operacional — gráficos da Visão Geral vazios):
+  // o backend (GET /seller/overview) já enviava salesHistory/salesByCountry
+  // REAIS, derivados das MESMAS séries de sellerFinancialsService.ts usadas
+  // por "Desempenho de Vendas" — mas este componente lia campos que nunca
+  // existiram no payload real (overviewData.countryOrders, e dataKeys
+  // "label"/"receita" no gráfico em vez de "date"/"grossRevenue"), então os
+  // gráficos ficavam sempre vazios mesmo com dado real disponível. Nunca
+  // criamos uma segunda lógica — só corrigimos o contrato para ler os
+  // mesmos campos reais.
   const salesHistory = overviewData?.salesHistory || [];
-
-  const countryOrders = overviewData?.countryOrders || [];
+  const countryOrders = overviewData?.salesByCountry || overviewData?.countryDistribution || [];
 
   return (
     <div className="space-y-8 animate-fadeIn">
@@ -268,12 +276,13 @@ export const SellerOverview: React.FC<SellerOverviewProps> = ({
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={salesHistory}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={(d: string) => (d || '').slice(5)} />
                 <YAxis tick={{ fontSize: 11 }} />
                 <Tooltip
+                  labelFormatter={(d: string) => d}
                   formatter={(val: any) => [formatCurrency(val, selectedCurrency), 'Receita']}
                 />
-                <Area type="monotone" dataKey="receita" stroke="#059669" fill="#059669" fillOpacity={0.15} strokeWidth={3} />
+                <Area type="monotone" dataKey="grossRevenue" stroke="#059669" fill="#059669" fillOpacity={0.15} strokeWidth={3} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -295,8 +304,8 @@ export const SellerOverview: React.FC<SellerOverviewProps> = ({
                 <div key={idx} className="p-3 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between text-xs font-bold">
                   <span className="text-gray-900">{co.country}</span>
                   <div className="text-right">
-                    <span className="text-gray-900 block">{co.valor}</span>
-                    <span className="text-[10px] text-gray-500 font-mono">{co.pedidos} pedidos</span>
+                    <span className="text-gray-900 block">{formatCurrency(co.grossRevenue, selectedCurrency)}</span>
+                    <span className="text-[10px] text-gray-500 font-mono">{co.orders} pedido(s)</span>
                   </div>
                 </div>
               ))

@@ -11,6 +11,7 @@ import {
   products,
   orders,
   orderItems,
+  payments,
   shipments,
   roles,
   permissions,
@@ -1692,6 +1693,134 @@ adminRouter.get('/sellers', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /admin/sellers/:id/commission
+//
+// Correção crítica (Fase 1 Operacional — item 8: "novas vendas continuam
+// mostrando 8% mesmo o admin tendo configurado outro default"): a cadeia
+// categoria > seller > platform default > COMMISSION_NOT_CONFIGURED
+// (orderService.ts) NUNCA foi alterada aqui — ela já está correta. O que
+// faltava era VISIBILIDADE: um seller com commissionRate específico
+// gravado (ex.: um cadastro anterior à correção que zerava esse default
+// técnico) sobrescreve silenciosamente qualquer default global que o admin
+// configure depois — por design (override específico > default), mas sem
+// nenhuma tela para o admin enxergar que isso está acontecendo. Esta rota
+// mostra os 3 níveis + qual venceu, por categoria (um seller pode vender em
+// mais de uma categoria, cada uma com sua própria comissão efetiva).
+adminRouter.get('/sellers/:id/commission', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { id } = req.params;
+    const sellerRows = await db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
+    if (sellerRows.length === 0) throw new AdminRequestError(404, 'Vendedor não encontrado.');
+    const seller = sellerRows[0];
+
+    const platformRows = await db.select().from(platformSettings).where(eq(platformSettings.key, 'defaultSellerCommissionPercent')).limit(1);
+    const platformDefault = platformRows.length > 0 ? Number(platformRows[0].valueJson) : null;
+
+    const sellerOverride = seller.commissionRate !== null && seller.commissionRate !== undefined ? Number(seller.commissionRate) : null;
+
+    // Categorias reais que este seller efetivamente vende (nunca todas as
+    // categorias da plataforma — só as que importam para este vendedor).
+    const productRows = await db
+      .select({ categoryId: products.categoryId, categoryName: categories.name, categoryCommissionRate: categories.commissionRate })
+      .from(products)
+      .leftJoin(categories, eq(products.categoryId, categories.id))
+      .where(eq(products.sellerId, id));
+
+    const categoryMap = new Map<string, { categoryId: string; categoryName: string; categoryRate: number | null }>();
+    for (const p of productRows) {
+      if (!p.categoryId || categoryMap.has(p.categoryId)) continue;
+      categoryMap.set(p.categoryId, {
+        categoryId: p.categoryId,
+        categoryName: p.categoryName || p.categoryId,
+        categoryRate: p.categoryCommissionRate !== null && p.categoryCommissionRate !== undefined ? Number(p.categoryCommissionRate) : null,
+      });
+    }
+
+    const categories_: any[] = Array.from(categoryMap.values()).map((c) => {
+      let effectiveRate: number | null;
+      let source: string;
+      if (c.categoryRate !== null) {
+        effectiveRate = c.categoryRate;
+        source = 'category';
+      } else if (sellerOverride !== null) {
+        effectiveRate = sellerOverride;
+        source = 'seller_override';
+      } else if (platformDefault !== null) {
+        effectiveRate = platformDefault;
+        source = 'platform_default';
+      } else {
+        effectiveRate = null;
+        source = 'not_configured';
+      }
+      return { ...c, effectiveRate, source };
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        sellerId: seller.id,
+        sellerName: seller.companyName,
+        sellerOverride,
+        platformDefault,
+        categories: categories_,
+      },
+    });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// PATCH /admin/sellers/:id/commission — GLOBAL_ADMIN only.
+//
+// Único jeito de alterar sellers.commissionRate hoje: uma ação CONSCIENTE
+// do GLOBAL_ADMIN, nunca automática. Aceita explicitamente commissionRate:
+// null para REMOVER um override específico (o seller volta a herdar o
+// default da plataforma/categoria) — nunca grava um número "de fábrica"
+// sozinho. Pedidos/commissionRateSnapshot históricos NUNCA são alterados
+// por esta rota (ela só afeta a resolução de comissão de vendas FUTURAS).
+adminRouter.patch('/sellers/:id/commission', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { id } = req.params;
+    const sellerRows = await db.select().from(sellers).where(eq(sellers.id, id)).limit(1);
+    if (sellerRows.length === 0) throw new AdminRequestError(404, 'Vendedor não encontrado.');
+
+    const body = req.body ?? {};
+    if (!('commissionRate' in body)) {
+      throw new AdminRequestError(400, 'Informe commissionRate (número) ou commissionRate: null para remover o override específico deste vendedor.');
+    }
+
+    let newRate: string | null;
+    if (body.commissionRate === null) {
+      newRate = null;
+    } else {
+      const parsed = Number(body.commissionRate);
+      if (isNaN(parsed) || parsed < 0) {
+        throw new AdminRequestError(400, 'commissionRate deve ser um número maior ou igual a zero, ou null para remover o override.');
+      }
+      newRate = String(parsed);
+    }
+
+    await db.update(sellers).set({ commissionRate: newRate as any, updatedAt: new Date() }).where(eq(sellers.id, id));
+    await writeRealAudit(req, 'admin.seller.commission_updated', 'sellers', id, { commissionRate: newRate });
+
+    return res.json({
+      success: true,
+      message: newRate === null
+        ? 'Override de comissão específico removido — este vendedor volta a herdar o default da plataforma/categoria em vendas futuras.'
+        : `Comissão específica deste vendedor definida para ${newRate}% (vale a partir de vendas futuras; pedidos já existentes não são alterados).`,
+      data: { sellerId: id, commissionRate: newRate !== null ? Number(newRate) : null },
+    });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
 adminRouter.get('/stores', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -2031,6 +2160,92 @@ adminRouter.get('/finance/overview', requireFinanceApproval, async (req: AuthReq
         byCurrency,
       },
     });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// GET /admin/finance/transactions
+//
+// Correção crítica (Fase 1 Operacional — item 7: "registros financeiros
+// ainda não aparecem no painel Admin"): o Dashboard Financeiro só mostrava
+// cards agregados (GMV/escrow/wallet totais) — não existia NENHUMA tela com
+// o extrato por pedido. Fonte autoritativa: orders + payments +
+// escrow_accounts (o shadow ledger continua DESLIGADO — nunca ligado aqui;
+// nenhum lançamento contábil é inventado). Cada linha é um pedido PAGO real,
+// nunca um lançamento sintético.
+adminRouter.get('/finance/transactions', requireFinanceApproval, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.json({ success: true, data: [] });
+
+    const scope = resolveAdministrativeScope(req.user);
+    const isGlobal = scope.kind === 'GLOBAL';
+    const { currency, limit } = req.query;
+
+    const conditions = [eq(orders.paymentStatus, 'paid')];
+    if (!isGlobal) conditions.push(eq(orders.countryCode, scope.countryCode));
+    if (typeof currency === 'string' && currency.trim()) conditions.push(eq(orders.currency, currency.trim().toUpperCase()));
+
+    const rowLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+
+    const rows = await db
+      .select({
+        orderId: orders.id,
+        orderNumber: orders.orderNumber,
+        buyerId: orders.buyerId,
+        sellerId: orders.sellerId,
+        sellerCompanyName: sellers.companyName,
+        currency: orders.currency,
+        totalAmount: orders.totalAmount,
+        commissionRateSnapshot: orders.commissionRateSnapshot,
+        marketplaceCommission: orders.marketplaceCommission,
+        sellerNetAmount: orders.sellerNetAmount,
+        shippingCost: orders.shippingCost,
+        shippingChargedToBuyer: orders.shippingChargedToBuyer,
+        shippingSellerSubsidy: orders.shippingSellerSubsidy,
+        shippingMarketplaceSubsidy: orders.shippingMarketplaceSubsidy,
+        paymentStatus: orders.paymentStatus,
+        escrowStatus: orders.escrowStatus,
+        orderStatus: orders.status,
+        paymentMethod: orders.paymentMethod,
+        paymentProvider: payments.provider,
+        paymentTransactionRef: payments.transactionRef,
+        paidAt: payments.paidAt,
+        createdAt: orders.createdAt,
+      })
+      .from(orders)
+      .leftJoin(sellers, eq(orders.sellerId, sellers.id))
+      .leftJoin(payments, eq(payments.orderId, orders.id))
+      .where(and(...conditions))
+      .orderBy(desc(orders.createdAt))
+      .limit(rowLimit);
+
+    const data = rows.map((r) => ({
+      orderId: r.orderId,
+      orderNumber: r.orderNumber,
+      buyerId: r.buyerId,
+      sellerId: r.sellerId,
+      sellerName: r.sellerCompanyName || 'Vendedor não identificado',
+      currency: r.currency,
+      grossAmount: Number(r.totalAmount),
+      commissionRateSnapshot: r.commissionRateSnapshot !== null && r.commissionRateSnapshot !== undefined ? Number(r.commissionRateSnapshot) : null,
+      marketplaceCommission: r.marketplaceCommission !== null && r.marketplaceCommission !== undefined ? Number(r.marketplaceCommission) : null,
+      sellerNetAmount: r.sellerNetAmount !== null && r.sellerNetAmount !== undefined ? Number(r.sellerNetAmount) : null,
+      shippingCost: r.shippingCost !== null && r.shippingCost !== undefined ? Number(r.shippingCost) : null,
+      shippingChargedToBuyer: r.shippingChargedToBuyer !== null && r.shippingChargedToBuyer !== undefined ? Number(r.shippingChargedToBuyer) : null,
+      shippingSellerSubsidy: r.shippingSellerSubsidy !== null && r.shippingSellerSubsidy !== undefined ? Number(r.shippingSellerSubsidy) : null,
+      shippingMarketplaceSubsidy: r.shippingMarketplaceSubsidy !== null && r.shippingMarketplaceSubsidy !== undefined ? Number(r.shippingMarketplaceSubsidy) : null,
+      paymentStatus: r.paymentStatus,
+      escrowStatus: r.escrowStatus,
+      orderStatus: r.orderStatus,
+      paymentMethod: r.paymentMethod || r.paymentProvider || null,
+      paymentTransactionRef: r.paymentTransactionRef || null,
+      paidAt: r.paidAt ? new Date(r.paidAt).toISOString() : null,
+      createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : null,
+    }));
+
+    return res.json({ success: true, data });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
   }
@@ -3227,16 +3442,40 @@ adminRouter.delete('/category-attributes/:id', requireAuth, async (req: AuthRequ
 // ==========================================
 
 // GET /admin/logistics/fulfillment/orders
+//
+// Correção crítica (Fase 1 Operacional — logística não via venda
+// SELLER_FULFILLMENT antes do vendedor clicar "Produto Pronto para
+// Coleta"): esta rota SEMPRE filtrou hard-coded para
+// fulfillmentMode='NUSALI_FULFILLMENT' — a logística nunca enxergava
+// pedidos pagos alocados ao vendedor, mesmo já com shipment/etiqueta
+// criados automaticamente pelo pós-pagamento (ensureFulfillmentCreated).
+// Agora aceita ?fulfillmentMode=NUSALI_FULFILLMENT|SELLER_FULFILLMENT
+// (default NUSALI_FULFILLMENT, mantendo compatibilidade com a aba "Pedidos
+// do HUB" já existente) — os dois fluxos continuam SEPARADOS (nunca
+// misturados na mesma resposta), cada um com sua própria semântica: HUB =
+// origem é o armazém, ação inicial é picking/packing; SELLER_FULFILLMENT =
+// origem é o estabelecimento do vendedor, ação inicial é aguardar
+// preparação/coleta.
 adminRouter.get('/logistics/fulfillment/orders', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.json({ success: true, data: [] });
 
     const { warehouseId, status } = req.query;
+    const fulfillmentMode = (typeof req.query.fulfillmentMode === 'string' && req.query.fulfillmentMode.toUpperCase() === 'SELLER_FULFILLMENT')
+      ? 'SELLER_FULFILLMENT'
+      : 'NUSALI_FULFILLMENT';
 
-    const conditions = [eq(orderItems.fulfillmentMode, 'NUSALI_FULFILLMENT')];
-    if (warehouseId && String(warehouseId) !== 'ALL') {
+    const conditions = [eq(orderItems.fulfillmentMode, fulfillmentMode)];
+    if (fulfillmentMode === 'NUSALI_FULFILLMENT' && warehouseId && String(warehouseId) !== 'ALL') {
       conditions.push(eq(orderItems.warehouseId, String(warehouseId)));
+    }
+    // SELLER_FULFILLMENT só faz sentido para a logística DEPOIS do
+    // pagamento confirmado — é só nesse ponto que o shipment/etiqueta já
+    // existem (ver ensureFulfillmentCreated em paymentService.ts). Itens
+    // ainda não pagos não têm nada operacional para a logística ver aqui.
+    if (fulfillmentMode === 'SELLER_FULFILLMENT') {
+      conditions.push(eq(orders.paymentStatus, 'paid'));
     }
 
     const items = await db
@@ -3255,6 +3494,8 @@ adminRouter.get('/logistics/fulfillment/orders', requireLogisticsStaff, async (r
         subtotal: orderItems.subtotal,
         inventoryId: orderItems.inventoryId,
         warehouseId: orderItems.warehouseId,
+        sellerId: orderItems.sellerId,
+        shipmentId: orderItems.shipmentId,
         fulfillmentMode: orderItems.fulfillmentMode,
         itemStatus: orderItems.status,
         orderStatus: orders.status,
@@ -3263,9 +3504,17 @@ adminRouter.get('/logistics/fulfillment/orders', requireLogisticsStaff, async (r
         paymentMethod: orders.paymentMethod,
         shippingAddressJson: orders.shippingAddressJson,
         createdAt: orders.createdAt,
+        sellerCompanyName: sellers.companyName,
+        sellerPhone: sellers.phone,
+        storeAddressJson: stores.addressJson,
+        shipmentStatus: shipments.status,
+        trackingNumber: shipments.trackingNumber,
       })
       .from(orderItems)
       .innerJoin(orders, eq(orderItems.orderId, orders.id))
+      .leftJoin(sellers, eq(orderItems.sellerId, sellers.id))
+      .leftJoin(stores, eq(orderItems.storeId, stores.id))
+      .leftJoin(shipments, eq(orderItems.shipmentId, shipments.id))
       .where(and(...conditions))
       .orderBy(desc(orders.createdAt));
 
@@ -3275,8 +3524,9 @@ adminRouter.get('/logistics/fulfillment/orders', requireLogisticsStaff, async (r
     const mapped = items.map((item) => {
       const addr = (item.shippingAddressJson as any) || {};
       const wh = item.warehouseId ? whMap.get(item.warehouseId) : null;
+      const storeAddr = (item.storeAddressJson as any) || {};
 
-      return {
+      const base = {
         id: item.orderItemId,
         orderItemId: item.orderItemId,
         orderId: item.orderId,
@@ -3290,15 +3540,42 @@ adminRouter.get('/logistics/fulfillment/orders', requireLogisticsStaff, async (r
         productImage: item.productImage,
         variantTitle: item.variantTitle,
         quantityReservedAtHub: item.quantity,
-        warehouseId: item.warehouseId,
-        warehouseName: wh?.name || item.warehouseId || 'Não informado',
-        warehouseCity: wh?.city || null,
         fulfillmentMode: item.fulfillmentMode,
         paymentStatus: item.paymentStatus,
         escrowStatus: item.escrowStatus,
         paymentMethod: item.paymentMethod || null,
         status: item.itemStatus || item.orderStatus,
+        shipmentId: item.shipmentId,
+        shipmentStatus: item.shipmentStatus,
+        trackingNumber: item.trackingNumber,
+        labelAvailable: Boolean(item.shipmentId),
         createdAt: item.createdAt ? new Date(item.createdAt).toISOString() : new Date().toISOString(),
+      };
+
+      if (fulfillmentMode === 'SELLER_FULFILLMENT') {
+        return {
+          ...base,
+          // Origem = estabelecimento do vendedor (nunca um armazém Nusali).
+          originLabel: 'Estabelecimento do vendedor',
+          sellerName: item.sellerCompanyName || 'Vendedor',
+          sellerPhone: item.sellerPhone || null,
+          pickupAddress: storeAddr && (storeAddr.street || storeAddr.city)
+            ? `${storeAddr.street || ''}, ${storeAddr.number || ''} - ${storeAddr.city || ''}${storeAddr.countryCode ? ` (${storeAddr.countryCode})` : ''}`.trim()
+            : 'Endereço de coleta não cadastrado pelo vendedor',
+          // Ação inicial da logística para este fluxo é a COLETA no
+          // vendedor — nunca picking/packing (isso é exclusivo do HUB).
+          initialAction: 'collect',
+        };
+      }
+
+      return {
+        ...base,
+        originLabel: 'HUB Nusali',
+        warehouseId: item.warehouseId,
+        warehouseName: wh?.name || item.warehouseId || 'Não informado',
+        warehouseCity: wh?.city || null,
+        // Ação inicial da logística para este fluxo é picking/packing no HUB.
+        initialAction: 'pick_pack',
       };
     });
 
@@ -3356,8 +3633,23 @@ adminRouter.post('/logistics/fulfillment/orders/:orderItemId/status', requireLog
     }
 
     const item = items[0];
-    if (item.fulfillmentMode !== 'NUSALI_FULFILLMENT') {
-      throw new AdminRequestError(400, 'Este item não é de fulfillment NUSALI_HUB.');
+
+    // Correção crítica (Fase 1 Operacional — item 6: "Admin deve conseguir
+    // operar SELLER_FULFILLMENT"): esta rota bloqueava TODO item que não
+    // fosse NUSALI_FULFILLMENT, mesmo para a única ação que a logística
+    // realmente precisa poder fazer num item SELLER_FULFILLMENT: registrar
+    // que a COLETA no vendedor aconteceu (equivalente a "shipped" — o mesmo
+    // executePhysicalDispatch já usado pelo HUB, sem state machine nova).
+    // Ações de picking/packing ("preparing") continuam exclusivas do HUB —
+    // no fluxo do vendedor, quem prepara/embala é o PRÓPRIO vendedor (rota
+    // /seller/orders/:id/status), nunca a logística.
+    const isNusaliHub = item.fulfillmentMode === 'NUSALI_FULFILLMENT';
+    const requestedStatus = status === 'shipped' || status === 'enviado' ? 'shipped' : (status || 'preparing');
+    if (!isNusaliHub && requestedStatus !== 'shipped') {
+      throw new AdminRequestError(
+        400,
+        'Para itens SELLER_FULFILLMENT, a logística só pode registrar a coleta (status "shipped") por esta rota. Ações de separação/picking pertencem exclusivamente ao fluxo NUSALI_FULFILLMENT (HUB); "ready_to_ship" é responsabilidade do próprio vendedor.'
+      );
     }
 
     // Requirement 3: BLOQUEAR HUB SEM PAGAMENTO CONFIRMADO
@@ -3383,7 +3675,7 @@ adminRouter.post('/logistics/fulfillment/orders/:orderItemId/status', requireLog
     }
 
     const previousStatus = item.status;
-    const newStatus = status === 'shipped' || status === 'enviado' ? 'shipped' : status || 'preparing';
+    const newStatus = requestedStatus;
 
     if (newStatus === 'shipped') {
       await db.transaction(async (tx) => {
@@ -3406,7 +3698,9 @@ adminRouter.post('/logistics/fulfillment/orders/:orderItemId/status', requireLog
 
     return res.json({
       success: true,
-      message: 'Status do item de fulfillment do HUB atualizado com sucesso!',
+      message: isNusaliHub
+        ? 'Status do item de fulfillment do HUB atualizado com sucesso!'
+        : 'Coleta registrada com sucesso — item despachado do estabelecimento do vendedor.',
     });
   } catch (error) {
     return sendAdminError(res, error);
