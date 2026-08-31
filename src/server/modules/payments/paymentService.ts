@@ -1,7 +1,7 @@
 import { getDb } from '../../../db/index.js';
-import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions, ledgerEntries, ledgerAccounts } from '../../../db/schema.js';
+import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions, ledgerEntries, ledgerAccounts, disputes } from '../../../db/schema.js';
 import { syncOrderFulfillmentStatus } from '../orders/orderService.js';
-import { eq, and, ne, sql } from 'drizzle-orm';
+import { eq, and, ne, sql, inArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser, broadcastAdminEvent } from '../../infra/websocket.js';
 import { AsaasPaymentProvider } from './providers/asaasPaymentProvider.js';
@@ -591,6 +591,14 @@ export class PaymentService {
    */
   static async releaseEscrowForOrder(orderId: string, options?: { performedBy?: string; reason?: string }, executor?: any) {
     const runInTx = async (tx: any) => {
+      // Fase "Proteção pós-entrega" (correção do GAP CRÍTICO da auditoria): serializa
+      // qualquer operação crítica sobre este orderId (release e abertura de disputa
+      // concorrente) usando o MESMO advisory lock já usado por initiatePayment.
+      // Garante que "disputa aberta com sucesso" e "release concluído" nunca produzam
+      // um estado contraditório — ver createBuyerDispute, que agora adquire o mesmo
+      // lock antes de decidir se pode inserir a disputa.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`);
+
       const ordRows = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1);
       if (ordRows.length === 0) throw new Error('Pedido não encontrado.');
       const ord = ordRows[0];
@@ -612,9 +620,45 @@ export class PaymentService {
         };
       }
 
+      // Fase "Proteção pós-entrega": uma disputa aberta ou em mediação bloqueia
+      // QUALQUER liberação de escrow, não importa quem chama releaseEscrowForOrder
+      // (confirmação do comprador, liberação manual do admin, ou o futuro
+      // auto-release). Verificação DIRETA na tabela disputes — nunca dependemos de
+      // escrow_accounts.status='disputed' porque createBuyerDispute não marca esse
+      // status hoje (auditado; não alterado nesta fase para não quebrar
+      // processRefund/resolveDispute, que não suportam esse valor de status).
+      const activeDisputes = await tx
+        .select({ id: disputes.id, status: disputes.status })
+        .from(disputes)
+        .where(and(eq(disputes.orderId, orderId), inArray(disputes.status, ['open', 'in_mediation'])))
+        .limit(1);
+      if (activeDisputes.length > 0) {
+        throw new Error(
+          `ESCROW_BLOCKED_BY_ACTIVE_DISPUTE: Existe uma disputa em aberto (status "${activeDisputes[0].status}") para o pedido ${orderId} — a liberação do escrow está bloqueada até a disputa ser resolvida.`
+        );
+      }
+
       // Validate payment status
       if (ord.paymentStatus !== 'paid') {
         throw new Error('PAYMENT_NOT_CONFIRMED: O pagamento do pedido ainda não foi confirmado.');
+      }
+
+      // Fase "Proteção pós-entrega", item 6 da auditoria: orders.paymentStatus é só
+      // um espelho — a fonte real é payments.status. Os webhooks PAYMENT_OVERDUE e
+      // PAYMENT_DELETED já conseguem marcar payments.status como 'expired'/
+      // 'cancelled' sem nunca tocar orders.paymentStatus (achado real, não
+      // hipotético). Exigir aqui que exista um payment com status='paid' de fato
+      // fecha essa divergência sem inventar nenhum estado novo — 'paid' já é o
+      // único valor que confirmOrderPayment sempre grava nos dois lugares juntos.
+      const paidPayments = await tx
+        .select({ id: payments.id })
+        .from(payments)
+        .where(and(eq(payments.orderId, orderId), eq(payments.status, 'paid')))
+        .limit(1);
+      if (paidPayments.length === 0) {
+        throw new Error(
+          `PAYMENT_NOT_ELIGIBLE_FOR_RELEASE: Nenhum pagamento com status "paid" encontrado para o pedido ${orderId} — liberação recusada.`
+        );
       }
 
       // Multi-Shipment Validation: ALL non-cancelled shipments must be DELIVERED

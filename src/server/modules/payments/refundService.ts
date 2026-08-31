@@ -16,7 +16,7 @@
  */
 import { getDb } from '../../../db/index.js';
 import { orders, payments, escrowAccounts, escrowTransactions, users, sellers, wallets, walletTransactions, refunds, disputes, disputeMessages } from '../../../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 
 export class RefundValidationError extends Error {
   code: string;
@@ -266,6 +266,16 @@ export interface CreateBuyerDisputeInput {
  */
 export async function createBuyerDispute(input: CreateBuyerDisputeInput, executor?: any) {
   const runInTx = async (tx: any) => {
+    // Fase "Proteção pós-entrega": MESMO advisory lock usado por
+    // releaseEscrowForOrder — serializa "abrir disputa" contra "liberar escrow"
+    // para o mesmo pedido, para que as duas operações concorrentes nunca produzam
+    // um estado contraditório. Se o release ganhar a corrida e já tiver concluído
+    // (escrow released) quando a disputa for criada, a disputa continua sendo
+    // permitida normalmente (auditoria item 5) — resolveDispute -> processRefund já
+    // sabe debitar proporcionalmente a wallet do vendedor num escrow 'released'.
+    // Nenhuma regra nova de bloqueio pós-release foi adicionada aqui de propósito.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${input.orderId}))`);
+
     const orderRows = await tx.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
     const order = orderRows[0];
     if (!order) {

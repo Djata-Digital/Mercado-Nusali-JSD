@@ -104,6 +104,14 @@ orderRouter.post(['/:id/confirm-delivery', '/orders/:id/confirm-delivery'], requ
         error: { code: 'BUYER_NAME_REQUIRED_FOR_DELIVERY_CONFIRMATION', message: cleanMessage },
       });
     }
+    if (msg.includes('ESCROW_BLOCKED_BY_ACTIVE_DISPUTE') || msg.includes('PAYMENT_NOT_ELIGIBLE_FOR_RELEASE')) {
+      const code = msg.includes('ESCROW_BLOCKED_BY_ACTIVE_DISPUTE') ? 'ESCROW_BLOCKED_BY_ACTIVE_DISPUTE' : 'PAYMENT_NOT_ELIGIBLE_FOR_RELEASE';
+      const cleanMessage = msg.includes(': ') ? msg.split(': ')[1] : msg;
+      return res.status(409).json({
+        success: false,
+        error: { code, message: cleanMessage },
+      });
+    }
     if (msg.includes('UNAUTHORIZED')) {
       return res.status(403).json({
         success: false,
