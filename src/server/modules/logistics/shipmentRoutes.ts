@@ -5,10 +5,11 @@
  * NUNCA geram uma segunda etiqueta — ambos só consultam esta mesma linha.
  */
 import { Router, Response } from 'express';
-import { requireAuth, AuthRequest, LOGISTICS_AUTHORIZED_ROLES } from '../auth/authMiddleware.js';
+import { requireAuth, requireLogisticsStaff, AuthRequest, LOGISTICS_AUTHORIZED_ROLES } from '../auth/authMiddleware.js';
 import { getDb } from '../../../db/index.js';
-import { shipments, shippingLabels, sellers } from '../../../db/schema.js';
+import { shipments, shippingLabels, sellers, carriers } from '../../../db/schema.js';
 import { eq } from 'drizzle-orm';
+import { ShipmentService } from './shipmentService.js';
 
 export const shipmentRouter = Router();
 shipmentRouter.use(requireAuth);
@@ -51,6 +52,15 @@ shipmentRouter.get('/:shipmentId/label', async (req: AuthRequest, res: Response)
     }
     const label = labelRows[0];
 
+    // Fase "Transportadoras Persistentes": nome real da carrier quando o
+    // shipment já tem carrierId (FK) — nunca inventado, nunca apaga o texto
+    // livre histórico (shipment.carrier) para shipments antigos sem carrierId.
+    let carrierName: string | null = shipment.carrier || null;
+    if (shipment.carrierId) {
+      const carrierRows = await db.select({ name: carriers.name }).from(carriers).where(eq(carriers.id, shipment.carrierId)).limit(1);
+      carrierName = carrierRows[0]?.name || carrierName;
+    }
+
     // Só dados operacionais necessários para imprimir/exibir a etiqueta —
     // nunca PII do comprador além do estritamente necessário para a entrega
     // física (já presente em shipments.recipientAddressJson, não duplicado aqui).
@@ -62,7 +72,8 @@ shipmentRouter.get('/:shipmentId/label', async (req: AuthRequest, res: Response)
         orderItemId: shipment.orderItemId,
         fulfillmentMode: shipment.fulfillmentMode,
         shipmentStatus: shipment.status,
-        carrier: shipment.carrier,
+        carrier: carrierName,
+        carrierId: shipment.carrierId,
         trackingNumber: shipment.trackingNumber,
         serviceType: shipment.serviceType,
         recipientName: shipment.recipientName,
@@ -81,5 +92,31 @@ shipmentRouter.get('/:shipmentId/label', async (req: AuthRequest, res: Response)
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: err?.message } });
+  }
+});
+
+// PATCH /api/v1/shipments/:shipmentId/carrier
+//
+// Fase "Transportadoras Persistentes" (item 7): associação de uma
+// transportadora ATIVA e persistente a um shipment. Só logística/admin
+// (nunca o seller — "seller não administra carrier"). Carrier precisa
+// existir e estar ACTIVE no momento da atribuição (item 8: nunca decide
+// fulfillmentMode a partir disso — são conceitos independentes).
+shipmentRouter.patch('/:shipmentId/carrier', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const { shipmentId } = req.params;
+    const { carrierId } = req.body ?? {};
+    if (!carrierId || typeof carrierId !== 'string') {
+      return res.status(400).json({ success: false, error: { code: 'CARRIER_ID_REQUIRED', message: 'Informe carrierId.' } });
+    }
+
+    const result = await ShipmentService.assignCarrierToShipment(shipmentId, carrierId, req.user!.id);
+    return res.json({ success: true, message: `Transportadora "${result.carrierName}" atribuída ao envio.`, data: result });
+  } catch (err: any) {
+    const message: string = err?.message || 'Erro ao atribuir transportadora.';
+    if (message.startsWith('SHIPMENT_NOT_FOUND')) return res.status(404).json({ success: false, error: { code: 'SHIPMENT_NOT_FOUND', message } });
+    if (message.startsWith('CARRIER_NOT_FOUND')) return res.status(404).json({ success: false, error: { code: 'CARRIER_NOT_FOUND', message } });
+    if (message.startsWith('CARRIER_INACTIVE')) return res.status(400).json({ success: false, error: { code: 'CARRIER_INACTIVE', message } });
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message } });
   }
 });

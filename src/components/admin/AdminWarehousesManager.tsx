@@ -76,6 +76,107 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
   const [isLoadingSellerPickup, setIsLoadingSellerPickup] = useState(false);
   const [updatingSellerPickupId, setUpdatingSellerPickupId] = useState<string | null>(null);
 
+  // Fase "Transportadoras Persistentes" (item 7): atribuição de
+  // transportadora ATIVA a um shipment, direto das filas de fulfillment.
+  // Fulfillment (quem prepara/coleta) e carrier (quem transporta) são
+  // conceitos independentes — este modal nunca decide fulfillmentMode.
+  const [carrierModalShipment, setCarrierModalShipment] = useState<{ shipmentId: string; orderNumber: string; currentCarrierName: string | null } | null>(null);
+  const [activeCarriers, setActiveCarriers] = useState<any[]>([]);
+  const [isLoadingActiveCarriers, setIsLoadingActiveCarriers] = useState(false);
+  const [isAssigningCarrier, setIsAssigningCarrier] = useState(false);
+
+  // Rastreio manual (item 9): mesma state machine já existente em
+  // ShipmentService.updateShipmentStatus — nunca uma segunda timeline. O
+  // shipment já chega a SHIPPED pelas ações de coleta/despacho das filas
+  // acima; daqui pra frente (IN_TRANSIT/OUT_FOR_DELIVERY/DELIVERED/
+  // DELIVERY_FAILED) não existia NENHUMA tela — esta é a primeira.
+  const [shipmentDetail, setShipmentDetail] = useState<any | null>(null);
+  const [isLoadingShipmentDetail, setIsLoadingShipmentDetail] = useState(false);
+  const [isUpdatingShipmentStatus, setIsUpdatingShipmentStatus] = useState(false);
+  const [failureReason, setFailureReason] = useState('OTHER');
+
+  const SHIPMENT_VALID_TRANSITIONS: Record<string, string[]> = {
+    READY_TO_SHIP: ['SHIPPED', 'CANCELLED'],
+    SHIPPED: ['IN_TRANSIT', 'DELIVERY_FAILED', 'CANCELLED'],
+    IN_TRANSIT: ['OUT_FOR_DELIVERY', 'DELIVERY_FAILED', 'RETURNING'],
+    OUT_FOR_DELIVERY: ['DELIVERED', 'DELIVERY_FAILED', 'RETURNING'],
+    DELIVERY_FAILED: ['OUT_FOR_DELIVERY', 'RETURNING', 'CANCELLED'],
+    RETURNING: ['RETURNED'],
+    DELIVERED: [],
+    RETURNED: [],
+    CANCELLED: [],
+  };
+
+  const fetchShipmentDetail = async (shipmentId: string) => {
+    setIsLoadingShipmentDetail(true);
+    try {
+      const res = await AdminService.getShipmentDetails(shipmentId);
+      if (res.success && res.data) setShipmentDetail(res.data);
+    } catch (err: any) {
+      showToast('Erro ao carregar detalhes do envio.');
+    } finally {
+      setIsLoadingShipmentDetail(false);
+    }
+  };
+
+  const openCarrierModal = async (shipmentId: string, orderNumber: string, currentCarrierName: string | null) => {
+    setCarrierModalShipment({ shipmentId, orderNumber, currentCarrierName });
+    setIsLoadingActiveCarriers(true);
+    fetchShipmentDetail(shipmentId);
+    try {
+      const res = await AdminService.getCarriers({ status: 'ACTIVE' });
+      if (res.success && Array.isArray(res.data)) setActiveCarriers(res.data);
+    } catch (err: any) {
+      showToast('Erro ao carregar transportadoras ativas.');
+    } finally {
+      setIsLoadingActiveCarriers(false);
+    }
+  };
+
+  const handleAssignCarrier = async (carrierId: string) => {
+    if (!carrierModalShipment) return;
+    setIsAssigningCarrier(true);
+    try {
+      const res = await AdminService.assignShipmentCarrier(carrierModalShipment.shipmentId, carrierId);
+      if (res.success) {
+        showToast(res.message || 'Transportadora atribuída com sucesso!');
+        setCarrierModalShipment((prev) => (prev ? { ...prev, currentCarrierName: res.data?.carrierName || prev.currentCarrierName } : prev));
+        await fetchShipmentDetail(carrierModalShipment.shipmentId);
+        fetchHubOrders();
+        fetchSellerPickupOrders();
+      } else {
+        showToast(res.message || 'Erro ao atribuir transportadora.');
+      }
+    } catch (err: any) {
+      showToast(err?.response?.data?.error?.message || err?.message || 'Erro ao atribuir transportadora.');
+    } finally {
+      setIsAssigningCarrier(false);
+    }
+  };
+
+  const handleAdvanceShipmentStatus = async (newStatus: string) => {
+    if (!carrierModalShipment) return;
+    setIsUpdatingShipmentStatus(true);
+    try {
+      const res = await AdminService.updateShipmentStatus(carrierModalShipment.shipmentId, {
+        status: newStatus,
+        failureReason: newStatus === 'DELIVERY_FAILED' ? failureReason : undefined,
+      });
+      if (res.success) {
+        showToast(res.message || `Status do envio atualizado para ${newStatus}.`);
+        await fetchShipmentDetail(carrierModalShipment.shipmentId);
+        fetchHubOrders();
+        fetchSellerPickupOrders();
+      } else {
+        showToast(res.message || 'Erro ao atualizar status do envio.');
+      }
+    } catch (err: any) {
+      showToast(err?.response?.data?.error?.message || err?.message || 'Erro ao atualizar status do envio.');
+    } finally {
+      setIsUpdatingShipmentStatus(false);
+    }
+  };
+
   // Filters state
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -898,6 +999,7 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                   <th className="p-3 text-center">Qtd Reservada HUB</th>
                   <th className="p-3">HUB Logístico</th>
                   <th className="p-3">Comprador & Entrega</th>
+                  <th className="p-3">Transportadora</th>
                   <th className="p-3 text-center">Status</th>
                   <th className="p-3 text-right">Ação Operacional</th>
                 </tr>
@@ -905,13 +1007,13 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
               <tbody className="divide-y divide-gray-100 font-medium">
                 {isLoadingHubOrders ? (
                   <tr>
-                    <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
+                    <td colSpan={8} className="p-8 text-center text-gray-400 font-bold">
                       Carregando pedidos do HUB Nusali...
                     </td>
                   </tr>
                 ) : hubOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
+                    <td colSpan={8} className="p-8 text-center text-gray-400 font-bold">
                       Nenhum item de pedido alocado aos HUBs Nusali no momento.
                     </td>
                   </tr>
@@ -1025,6 +1127,21 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                           <span className="text-[10px] text-emerald-700 font-semibold">{ho.buyerPhone}</span>
                         </td>
 
+                        <td className="p-3">
+                          {ho.shipmentId ? (
+                            <button
+                              onClick={() => openCarrierModal(ho.shipmentId, ho.orderNumber, ho.carrierName)}
+                              className={`text-[11px] font-bold px-2 py-1 rounded-lg border cursor-pointer transition inline-flex items-center gap-1 ${
+                                ho.carrierName ? 'text-emerald-800 bg-emerald-50 border-emerald-200 hover:bg-emerald-100' : 'text-amber-800 bg-amber-50 border-amber-200 hover:bg-amber-100'
+                              }`}
+                            >
+                              <Truck className="w-3 h-3" /> {ho.carrierName || 'Não definida'}
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-gray-400 italic">Sem envio ainda</span>
+                          )}
+                        </td>
+
                         <td className="p-3 text-center space-y-1">
                           {statusBadge}
                           <div className="flex flex-col items-center gap-1 mt-1">
@@ -1129,6 +1246,7 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                   <th className="p-3">Vendedor / Origem</th>
                   <th className="p-3">Endereço de Coleta</th>
                   <th className="p-3">Comprador & Entrega</th>
+                  <th className="p-3">Transportadora</th>
                   <th className="p-3 text-center">Status</th>
                   <th className="p-3 text-right">Ação Operacional</th>
                 </tr>
@@ -1136,13 +1254,13 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
               <tbody className="divide-y divide-gray-100 font-medium">
                 {isLoadingSellerPickup ? (
                   <tr>
-                    <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
+                    <td colSpan={8} className="p-8 text-center text-gray-400 font-bold">
                       Carregando pedidos aguardando coleta...
                     </td>
                   </tr>
                 ) : sellerPickupOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
+                    <td colSpan={8} className="p-8 text-center text-gray-400 font-bold">
                       Nenhum pedido pago de fulfillment do vendedor aguardando coleta no momento.
                     </td>
                   </tr>
@@ -1216,6 +1334,21 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                         <td className="p-3">
                           <span className="font-bold text-gray-900 block text-xs">{so.buyerName}</span>
                           <span className="text-[10px] text-gray-500 block">{so.buyerAddress}</span>
+                        </td>
+
+                        <td className="p-3">
+                          {so.shipmentId ? (
+                            <button
+                              onClick={() => openCarrierModal(so.shipmentId, so.orderNumber, so.carrierName)}
+                              className={`text-[11px] font-bold px-2 py-1 rounded-lg border cursor-pointer transition inline-flex items-center gap-1 ${
+                                so.carrierName ? 'text-emerald-800 bg-emerald-50 border-emerald-200 hover:bg-emerald-100' : 'text-amber-800 bg-amber-50 border-amber-200 hover:bg-amber-100'
+                              }`}
+                            >
+                              <Truck className="w-3 h-3" /> {so.carrierName || 'Não definida'}
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-gray-400 italic">Sem envio ainda</span>
+                          )}
                         </td>
 
                         <td className="p-3 text-center">{statusBadge}</td>
@@ -1613,6 +1746,136 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Atribuir Transportadora ao Shipment (Fase "Transportadoras
+          Persistentes" — item 7). Só transportadoras ACTIVE aparecem para
+          seleção; o backend também revalida isso na atribuição. */}
+      {carrierModalShipment && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+              <div>
+                <h3 className="font-black text-base text-gray-900 flex items-center gap-2">
+                  <Truck className="w-5 h-5 text-purple-600" /> Detalhes do Envio
+                </h3>
+                <span className="text-xs text-gray-500">Pedido {carrierModalShipment.orderNumber}</span>
+              </div>
+              <button
+                onClick={() => { setCarrierModalShipment(null); setShipmentDetail(null); }}
+                className="p-1 text-gray-400 hover:text-gray-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Transportadora */}
+            <div className="space-y-2">
+              <h4 className="font-extrabold text-gray-900 text-xs">Transportadora</h4>
+              <p className="text-xs text-gray-500">
+                Atual: <strong className="text-gray-800">{carrierModalShipment.currentCarrierName || 'Transportadora não definida'}</strong>
+              </p>
+
+              {isLoadingActiveCarriers ? (
+                <div className="p-6 text-center text-gray-400">
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" /> Carregando transportadoras ativas...
+                </div>
+              ) : activeCarriers.length === 0 ? (
+                <div className="p-4 text-center text-gray-400 text-xs font-bold bg-gray-50 rounded-xl border border-gray-200">
+                  Nenhuma transportadora ativa cadastrada. Cadastre uma em "Transportadoras" antes de atribuir.
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  {activeCarriers.map((c) => (
+                    <button
+                      key={c.id}
+                      onClick={() => handleAssignCarrier(c.id)}
+                      disabled={isAssigningCarrier}
+                      className="w-full flex items-center justify-between p-2.5 border border-gray-200 rounded-xl hover:border-purple-400 hover:bg-purple-50 transition text-left disabled:opacity-50 cursor-pointer"
+                    >
+                      <div>
+                        <span className="font-bold text-gray-900 text-xs block">{c.name}</span>
+                        <span className="text-[10px] text-gray-500">{c.countryCode} · {c.integrationMode === 'API_INTEGRATED' ? 'API' : 'Manual'}</span>
+                      </div>
+                      {isAssigningCarrier ? <Loader2 className="w-4 h-4 animate-spin text-purple-600" /> : <Check className="w-4 h-4 text-gray-300" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Rastreio manual — mesma state machine de ShipmentService.updateShipmentStatus */}
+            <div className="space-y-2 pt-4 border-t border-gray-100">
+              <h4 className="font-extrabold text-gray-900 text-xs">Rastreio do Envio</h4>
+              {isLoadingShipmentDetail ? (
+                <div className="p-6 text-center text-gray-400">
+                  <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" /> Carregando envio...
+                </div>
+              ) : shipmentDetail ? (
+                <>
+                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-200">
+                    <div>
+                      <span className="text-[10px] text-gray-500 block">Status atual</span>
+                      <span className="font-black text-sm text-gray-900">{shipmentDetail.status}</span>
+                    </div>
+                    <span className="text-[10px] font-mono text-gray-400">{shipmentDetail.trackingNumber}</span>
+                  </div>
+
+                  {(SHIPMENT_VALID_TRANSITIONS[shipmentDetail.status] || []).length === 0 ? (
+                    <p className="text-[11px] text-gray-400 italic">Status terminal — nenhuma transição disponível.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {(SHIPMENT_VALID_TRANSITIONS[shipmentDetail.status] || []).includes('DELIVERY_FAILED') && (
+                        <select
+                          value={failureReason}
+                          onChange={(e) => setFailureReason(e.target.value)}
+                          className="w-full p-2 border border-gray-300 rounded-lg text-[11px] font-bold bg-white"
+                        >
+                          <option value="RECIPIENT_ABSENT">Destinatário ausente</option>
+                          <option value="ADDRESS_NOT_FOUND">Endereço não encontrado</option>
+                          <option value="RECIPIENT_REFUSED">Destinatário recusou</option>
+                          <option value="OTHER">Outro motivo</option>
+                        </select>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        {(SHIPMENT_VALID_TRANSITIONS[shipmentDetail.status] || []).map((nextStatus) => (
+                          <button
+                            key={nextStatus}
+                            onClick={() => handleAdvanceShipmentStatus(nextStatus)}
+                            disabled={isUpdatingShipmentStatus}
+                            className="px-3 py-1.5 bg-gray-900 hover:bg-black text-white text-[11px] font-bold rounded-lg transition cursor-pointer disabled:opacity-50"
+                          >
+                            {nextStatus}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="pt-2">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase block mb-1">Linha do Tempo (Eventos Reais)</span>
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                      {(shipmentDetail.trackingEvents || []).length === 0 ? (
+                        <p className="text-[11px] text-gray-400 italic">Nenhum evento registrado ainda.</p>
+                      ) : (
+                        shipmentDetail.trackingEvents.map((ev: any) => (
+                          <div key={ev.id} className="text-[11px] p-2 bg-gray-50 rounded-lg border border-gray-100">
+                            <span className="font-bold text-gray-900">{ev.status}</span> — {ev.description}
+                            <span className="block text-[10px] text-gray-400 font-mono">
+                              {ev.eventTime ? new Date(ev.eventTime).toLocaleString('pt-BR') : ''}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-gray-400 p-4 text-center">Não foi possível carregar o envio.</p>
+              )}
+            </div>
           </div>
         </div>
       )}

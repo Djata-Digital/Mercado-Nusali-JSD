@@ -565,6 +565,35 @@ export const storeShippingPolicies = pgTable('store_shipping_policies', {
   store_shipping_policies_seller_idx: index('store_shipping_policies_seller_idx').on(table.sellerId),
 }));
 
+// Fase "Transportadoras Persistentes": entidade real de transportadora,
+// substitui a tela mock/in-memory (AdminCarriersManager.tsx) e o texto
+// livre de shipments.carrier para NOVOS shipments. shipments.carrier
+// continua existindo, sem alteração, por compatibilidade com registros
+// históricos (nunca convertido/backfillado automaticamente).
+export const carriers = pgTable('carriers', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  slug: varchar('slug', { length: 255 }).notNull().unique(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().default('GW'),
+  status: varchar('status', { length: 50 }).notNull().default('ACTIVE'), // ACTIVE, INACTIVE
+  integrationMode: varchar('integration_mode', { length: 50 }).notNull().default('MANUAL'), // MANUAL, API_INTEGRATED
+  // Referência para um futuro adaptador de integração (ex.: 'dhl',
+  // 'correios') — NUNCA um segredo/API key. Credenciais reais ficam em
+  // env/secret/config, jamais em coluna de banco.
+  providerKey: varchar('provider_key', { length: 100 }),
+  contactName: varchar('contact_name', { length: 255 }),
+  contactPhone: varchar('contact_phone', { length: 50 }),
+  contactEmail: varchar('contact_email', { length: 255 }),
+  website: text('website'),
+  serviceAreasJson: jsonb('service_areas_json'),
+  metadataJson: jsonb('metadata_json'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  carriers_status_idx: index('carriers_status_idx').on(table.status),
+  carriers_country_idx: index('carriers_country_idx').on(table.countryCode),
+}));
+
 export const shippingZones = pgTable('shipping_zones', {
   id: varchar('id', { length: 255 }).primaryKey(),
   countryCode: varchar('country_code', { length: 10 }).notNull(),
@@ -592,7 +621,12 @@ export const shippingRates = pgTable('shipping_rates', {
   currency: varchar('currency', { length: 10 }).notNull(),
   estimatedMinDays: integer('estimated_min_days').notNull().default(1),
   estimatedMaxDays: integer('estimated_max_days').notNull().default(5),
-  carrierId: varchar('carrier_id', { length: 255 }),
+  // Correção (Fase "Transportadoras Persistentes"): coluna já existia como
+  // texto livre sem FK e nunca era lida por ShippingCalculatorService (só
+  // gravada pelo admin) — auditado em produção: as 2 linhas reais têm
+  // carrier_id NULL, então virar FK real é seguro (nenhuma conversão de
+  // dado, nenhuma tarifa quebrada).
+  carrierId: varchar('carrier_id', { length: 255 }).references(() => carriers.id, { onDelete: 'set null' }),
   serviceType: varchar('service_type', { length: 100 }).notNull().default('standard'),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -893,7 +927,11 @@ export const shipments = pgTable('shipments', {
   sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'set null' }),
   buyerId: varchar('buyer_id', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
   fulfillmentMode: varchar('fulfillment_mode', { length: 50 }).notNull().default('SELLER_FULFILLMENT'),
+  // carrier (texto livre) é preservado por compatibilidade com os 26
+  // shipments históricos já existentes (nenhuma conversão/backfill
+  // automático) — novos shipments devem preferir carrierId (FK real).
   carrier: varchar('carrier', { length: 100 }),
+  carrierId: varchar('carrier_id', { length: 255 }).references(() => carriers.id, { onDelete: 'set null' }),
   trackingNumber: varchar('tracking_number', { length: 100 }).notNull().unique(),
   serviceType: varchar('service_type', { length: 50 }).default('standard'), // standard, express, full
   status: varchar('status', { length: 50 }).notNull().default('READY_TO_SHIP'), // READY_TO_SHIP, SHIPPED, IN_TRANSIT, OUT_FOR_DELIVERY, DELIVERED, DELIVERY_FAILED, RETURNING, RETURNED, CANCELLED

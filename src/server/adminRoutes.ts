@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import { randomBytes } from 'crypto';
 import { getDb, checkDbConnection } from '../db/index.js';
-import { validateCountryAgainstReference } from './modules/countries/isoCountryReference.js';
+import { validateCountryAgainstReference, ISO_COUNTRY_REFERENCE } from './modules/countries/isoCountryReference.js';
 import {
   users,
   userProfiles,
@@ -45,6 +45,7 @@ import {
   stockReservations,
   shippingRates,
   shippingZones,
+  carriers,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull, or, gte, lte, ne, inArray } from 'drizzle-orm';
@@ -3438,6 +3439,184 @@ adminRouter.delete('/category-attributes/:id', requireAuth, async (req: AuthRequ
 });
 
 // ==========================================
+// TRANSPORTADORAS PERSISTENTES (carriers)
+// ==========================================
+// Substitui a tela mock/in-memory de AdminCarriersManager.tsx por uma
+// entidade real em PostgreSQL. RBAC: GLOBAL_ADMIN/ADMIN/LOGISTICS
+// (requireLogisticsStaff, mesma autorização já usada pelo resto da
+// logística admin — "conforme arquitetura atual"). Fulfillment (quem
+// prepara/coleta) e carrier (quem transporta) são conceitos
+// independentes — nenhuma rota aqui decide fulfillmentMode.
+
+const CARRIER_STATUSES = ['ACTIVE', 'INACTIVE'];
+const CARRIER_INTEGRATION_MODES = ['MANUAL', 'API_INTEGRATED'];
+
+function carrierSlugFrom(name: string): string {
+  return String(name)
+    .trim()
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '') // remove acentos
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || `carrier-${Date.now()}`;
+}
+
+function validateCarrierInput(body: any, isPartial: boolean) {
+  const errors: string[] = [];
+  const out: any = {};
+
+  if (body.name !== undefined || !isPartial) {
+    const name = String(body.name || '').trim();
+    if (!name) errors.push('Nome da transportadora é obrigatório.');
+    else out.name = name;
+  }
+  if (body.countryCode !== undefined || !isPartial) {
+    const code = String(body.countryCode || '').trim().toUpperCase();
+    if (!code || !ISO_COUNTRY_REFERENCE.some((c) => c.code === code)) {
+      errors.push('countryCode inválido — informe um código de país ISO reconhecido (ex.: GW, BR, PT).');
+    } else out.countryCode = code;
+  }
+  if (body.status !== undefined) {
+    const status = String(body.status || '').trim().toUpperCase();
+    if (!CARRIER_STATUSES.includes(status)) errors.push(`status inválido — use um de: ${CARRIER_STATUSES.join(', ')}.`);
+    else out.status = status;
+  }
+  if (body.integrationMode !== undefined) {
+    const mode = String(body.integrationMode || '').trim().toUpperCase();
+    if (!CARRIER_INTEGRATION_MODES.includes(mode)) errors.push(`integrationMode inválido — use um de: ${CARRIER_INTEGRATION_MODES.join(', ')}.`);
+    else out.integrationMode = mode;
+  }
+  if (body.providerKey !== undefined) out.providerKey = body.providerKey ? String(body.providerKey).trim() : null;
+  if (body.contactName !== undefined) out.contactName = body.contactName ? String(body.contactName).trim() : null;
+  if (body.contactPhone !== undefined) out.contactPhone = body.contactPhone ? String(body.contactPhone).trim() : null;
+  if (body.contactEmail !== undefined) out.contactEmail = body.contactEmail ? String(body.contactEmail).trim() : null;
+  if (body.website !== undefined) out.website = body.website ? String(body.website).trim() : null;
+  if (body.serviceAreasJson !== undefined) out.serviceAreasJson = body.serviceAreasJson ?? null;
+  if (body.metadataJson !== undefined) out.metadataJson = body.metadataJson ?? null;
+
+  return { errors, out };
+}
+
+// GET /admin/carriers — lista todas (opcionalmente filtra por status), para
+// a tela de gestão E para os seletores de atribuição no painel de logística.
+adminRouter.get('/carriers', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.json({ success: true, data: [] });
+
+    const { status } = req.query;
+    const rows = status && typeof status === 'string' && status.trim()
+      ? await db.select().from(carriers).where(eq(carriers.status, status.trim().toUpperCase())).orderBy(desc(carriers.createdAt))
+      : await db.select().from(carriers).orderBy(desc(carriers.createdAt));
+
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// POST /admin/carriers
+adminRouter.post('/carriers', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { errors, out } = validateCarrierInput(req.body ?? {}, false);
+    if (errors.length > 0) throw new AdminRequestError(400, errors.join(' '));
+
+    const id = `car_${Date.now()}_${randomBytes(3).toString('hex')}`;
+    let slug = carrierSlugFrom(out.name);
+    const existingSlug = await db.select({ id: carriers.id }).from(carriers).where(eq(carriers.slug, slug)).limit(1);
+    if (existingSlug.length > 0) slug = `${slug}-${randomBytes(2).toString('hex')}`;
+
+    const row = {
+      id,
+      name: out.name,
+      slug,
+      countryCode: out.countryCode,
+      status: out.status || 'ACTIVE',
+      integrationMode: out.integrationMode || 'MANUAL',
+      providerKey: out.providerKey ?? null,
+      contactName: out.contactName ?? null,
+      contactPhone: out.contactPhone ?? null,
+      contactEmail: out.contactEmail ?? null,
+      website: out.website ?? null,
+      serviceAreasJson: out.serviceAreasJson ?? null,
+      metadataJson: out.metadataJson ?? null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await db.insert(carriers).values(row as any);
+    await writeRealAudit(req, 'admin.carrier.created', 'carriers', id, { name: out.name, countryCode: out.countryCode });
+
+    return res.status(201).json({ success: true, message: `Transportadora "${out.name}" cadastrada com sucesso.`, data: row });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// PATCH /admin/carriers/:id
+adminRouter.patch('/carriers/:id', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { id } = req.params;
+    const existing = await db.select().from(carriers).where(eq(carriers.id, id)).limit(1);
+    if (existing.length === 0) throw new AdminRequestError(404, 'Transportadora não encontrada.');
+
+    const { errors, out } = validateCarrierInput(req.body ?? {}, true);
+    if (errors.length > 0) throw new AdminRequestError(400, errors.join(' '));
+
+    if (Object.keys(out).length === 0) throw new AdminRequestError(400, 'Nenhum campo válido informado para atualização.');
+
+    await db.update(carriers).set({ ...out, updatedAt: new Date() }).where(eq(carriers.id, id));
+    await writeRealAudit(req, 'admin.carrier.updated', 'carriers', id, out);
+
+    const updated = await db.select().from(carriers).where(eq(carriers.id, id)).limit(1);
+    return res.json({ success: true, message: 'Transportadora atualizada com sucesso.', data: updated[0] });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// DELETE /admin/carriers/:id
+//
+// Nunca deleta fisicamente uma transportadora já usada por shipment/tarifa
+// — marca INACTIVE nesse caso (histórico continua íntegro, FK preservada).
+// Só remove de fato a linha se ela nunca foi referenciada por nada.
+adminRouter.delete('/carriers/:id', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { id } = req.params;
+    const existing = await db.select().from(carriers).where(eq(carriers.id, id)).limit(1);
+    if (existing.length === 0) throw new AdminRequestError(404, 'Transportadora não encontrada.');
+
+    const [shipmentUse, rateUse] = await Promise.all([
+      db.select({ id: shipments.id }).from(shipments).where(eq(shipments.carrierId, id)).limit(1),
+      db.select({ id: shippingRates.id }).from(shippingRates).where(eq(shippingRates.carrierId, id)).limit(1),
+    ]);
+
+    if (shipmentUse.length > 0 || rateUse.length > 0) {
+      await db.update(carriers).set({ status: 'INACTIVE', updatedAt: new Date() }).where(eq(carriers.id, id));
+      await writeRealAudit(req, 'admin.carrier.deactivated', 'carriers', id, { reason: 'already_in_use' });
+      return res.json({
+        success: true,
+        message: 'Esta transportadora já está em uso por envios ou tarifas — foi marcada como INACTIVE em vez de removida (histórico preservado).',
+        data: { id, status: 'INACTIVE' },
+      });
+    }
+
+    await db.delete(carriers).where(eq(carriers.id, id));
+    await writeRealAudit(req, 'admin.carrier.deleted', 'carriers', id, {});
+    return res.json({ success: true, message: 'Transportadora removida com sucesso (nunca havia sido usada).' });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// ==========================================
 // NUSALI HUB FULFILLMENT LOGISTICS
 // ==========================================
 
@@ -3509,12 +3688,16 @@ adminRouter.get('/logistics/fulfillment/orders', requireLogisticsStaff, async (r
         storeAddressJson: stores.addressJson,
         shipmentStatus: shipments.status,
         trackingNumber: shipments.trackingNumber,
+        carrierId: shipments.carrierId,
+        carrierName: carriers.name,
+        carrierLegacyText: shipments.carrier,
       })
       .from(orderItems)
       .innerJoin(orders, eq(orderItems.orderId, orders.id))
       .leftJoin(sellers, eq(orderItems.sellerId, sellers.id))
       .leftJoin(stores, eq(orderItems.storeId, stores.id))
       .leftJoin(shipments, eq(orderItems.shipmentId, shipments.id))
+      .leftJoin(carriers, eq(shipments.carrierId, carriers.id))
       .where(and(...conditions))
       .orderBy(desc(orders.createdAt));
 
@@ -3549,6 +3732,11 @@ adminRouter.get('/logistics/fulfillment/orders', requireLogisticsStaff, async (r
         shipmentStatus: item.shipmentStatus,
         trackingNumber: item.trackingNumber,
         labelAvailable: Boolean(item.shipmentId),
+        // Fase "Transportadoras Persistentes" (item D): nome real quando já
+        // atribuída (carrierId FK) — "Transportadora não definida" enquanto
+        // isso não acontece, nunca inventa nem usa o texto livre sozinho.
+        carrierId: item.carrierId,
+        carrierName: item.carrierName || (item.carrierId ? null : (item.carrierLegacyText || null)),
         createdAt: item.createdAt ? new Date(item.createdAt).toISOString() : new Date().toISOString(),
       };
 

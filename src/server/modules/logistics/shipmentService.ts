@@ -17,6 +17,7 @@ import {
   inventory,
   inventoryMovements,
   auditLogs,
+  carriers,
 } from '../../../db/schema.js';
 import { PaymentService } from '../payments/paymentService.js';
 import { eq, and, desc, ne, or, sql } from 'drizzle-orm';
@@ -886,11 +887,61 @@ export class ShipmentService {
       .from(proofOfDelivery)
       .where(eq(proofOfDelivery.shipmentId, shp.id));
 
+    // Fase "Transportadoras Persistentes": nome real da transportadora
+    // quando o shipment já tem carrierId — nunca inventa, e nunca apaga o
+    // texto livre histórico (shp.carrier) quando não há carrierId ainda.
+    let carrierName: string | null = null;
+    if (shp.carrierId) {
+      const carrierRows = await db.select().from(carriers).where(eq(carriers.id, shp.carrierId)).limit(1);
+      carrierName = carrierRows[0]?.name || null;
+    }
+
     return {
       ...shp,
+      carrierName: carrierName || shp.carrier || null,
       trackingEvents: events,
       shippingLabel: labels.length > 0 ? labels[0] : null,
       proofOfDelivery: pods,
     };
+  }
+
+  /**
+   * Associa uma transportadora persistente (carriers.id) a um shipment já
+   * existente — fase "Transportadoras Persistentes", item 7. Só aceita
+   * carrier com status ACTIVE (uma vez atribuída, se a carrier for
+   * desativada depois, o shipment continua referenciando-a normalmente —
+   * a checagem de ACTIVE só vale no momento da atribuição). Nunca decide
+   * fulfillmentMode a partir do carrier (item 8 — são conceitos
+   * independentes: fulfillment = quem prepara/coleta, carrier = quem
+   * transporta).
+   */
+  static async assignCarrierToShipment(shipmentId: string, carrierId: string, performedBy: string) {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível.');
+
+    const shpRows = await db.select().from(shipments).where(eq(shipments.id, shipmentId)).limit(1);
+    if (shpRows.length === 0) throw new Error('SHIPMENT_NOT_FOUND: Envio não encontrado.');
+
+    const carrierRows = await db.select().from(carriers).where(eq(carriers.id, carrierId)).limit(1);
+    if (carrierRows.length === 0) throw new Error('CARRIER_NOT_FOUND: Transportadora não encontrada.');
+    const carrier = carrierRows[0];
+    if (carrier.status !== 'ACTIVE') {
+      throw new Error('CARRIER_INACTIVE: Esta transportadora está inativa e não pode ser atribuída a novos envios.');
+    }
+
+    await db.update(shipments).set({ carrierId, updatedAt: new Date() }).where(eq(shipments.id, shipmentId));
+
+    await db.insert(trackingEvents).values({
+      id: `tke_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      shipmentId,
+      status: shpRows[0].status,
+      description: `Transportadora definida: ${carrier.name}.`,
+      location: null,
+      performedBy,
+      eventTime: new Date(),
+      createdAt: new Date(),
+    });
+
+    return { shipmentId, carrierId, carrierName: carrier.name };
   }
 }

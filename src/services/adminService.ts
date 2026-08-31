@@ -78,6 +78,35 @@ export const AdminService = {
     return AdminApi.getFinanceTransactions(params);
   },
 
+  // Transportadoras (carriers) — Fase "Transportadoras Persistentes"
+  async getCarriers(params?: { status?: string }): Promise<ApiResponse<any[]>> {
+    return AdminApi.getCarriers(params);
+  },
+
+  async createCarrier(data: any): Promise<ApiResponse<any>> {
+    return AdminApi.createCarrier(data);
+  },
+
+  async updateCarrier(id: string, data: any): Promise<ApiResponse<any>> {
+    return AdminApi.updateCarrier(id, data);
+  },
+
+  async deleteCarrier(id: string): Promise<ApiResponse<any>> {
+    return AdminApi.deleteCarrier(id);
+  },
+
+  async assignShipmentCarrier(shipmentId: string, carrierId: string): Promise<ApiResponse<any>> {
+    return AdminApi.assignShipmentCarrier(shipmentId, carrierId);
+  },
+
+  async getShipmentDetails(shipmentId: string): Promise<ApiResponse<any>> {
+    return AdminApi.getShipmentDetails(shipmentId);
+  },
+
+  async updateShipmentStatus(shipmentId: string, data: { status: string; location?: string; description?: string; failureReason?: string; receivedBy?: string }): Promise<ApiResponse<any>> {
+    return AdminApi.updateShipmentStatus(shipmentId, data);
+  },
+
   async getPayoutsList(): Promise<ApiResponse<any[]>> {
     return AdminApi.getPayoutsList();
   },

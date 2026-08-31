@@ -156,6 +156,27 @@ export class AdminApi {
     return apiClient.get(`/admin/logistics/shipments/${shipmentId}/details`);
   }
 
+  // Transportadoras (carriers) — Fase "Transportadoras Persistentes"
+  static async getCarriers(params?: { status?: string }): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/carriers', { params });
+  }
+
+  static async createCarrier(data: any): Promise<ApiResponse<any>> {
+    return apiClient.post('/admin/carriers', data);
+  }
+
+  static async updateCarrier(id: string, data: any): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/carriers/${id}`, data);
+  }
+
+  static async deleteCarrier(id: string): Promise<ApiResponse<any>> {
+    return apiClient.delete(`/admin/carriers/${id}`);
+  }
+
+  static async assignShipmentCarrier(shipmentId: string, carrierId: string): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/shipments/${shipmentId}/carrier`, { carrierId });
+  }
+
   // Country Reps & Supervisors
   static async getCountryReps(): Promise<ApiResponse<any[]>> {
     return apiClient.get('/admin/country-reps');
