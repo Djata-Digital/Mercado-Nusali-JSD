@@ -25,6 +25,7 @@ import { logger } from '../../infra/logger.js';
 import { broadcastToUser, broadcastAdminEvent } from '../../infra/websocket.js';
 import { InventoryService } from '../inventory/inventoryService.js';
 import { syncOrderFulfillmentStatus } from '../orders/orderService.js';
+import { resolveCarrierNames, pickCarrierName } from './carrierResolver.js';
 
 export interface CreateShipmentOptions {
   carrier?: string | null;
@@ -837,18 +838,13 @@ export class ShipmentService {
 
     const recipientAddr = (shp.recipientAddressJson as any) || {};
 
-    // Correção (rastreio público mostrando carrier=null): esta rota lia só
-    // o texto livre legado (shipments.carrier), nunca resolvia a
-    // transportadora persistente (shipments.carrierId -> carriers.id). A
-    // transportadora persistente tem PRIORIDADE quando existe; o texto
-    // legado continua servindo de fallback para shipments antigos que
-    // nunca receberam carrierId — nunca alterado/apagado aqui. Timeline
-    // (trackingEvents) não é tocada por esta correção.
-    let carrierName: string | null = shp.carrier || null;
-    if (shp.carrierId) {
-      const carrierRows = await db.select({ name: carriers.name }).from(carriers).where(eq(carriers.id, shp.carrierId)).limit(1);
-      carrierName = carrierRows[0]?.name || carrierName;
-    }
+    // Correção (rastreio público mostrando carrier=null): resolução central
+    // via carrierResolver.ts — carrierId (persistente) tem prioridade,
+    // texto legado é fallback, nunca filtra por status (histórico não some
+    // se a carrier for desativada depois). Timeline (trackingEvents) não é
+    // tocada por esta correção.
+    const carrierMap = await resolveCarrierNames(db, [shp.carrierId]);
+    const carrierName = pickCarrierName(shp.carrierId, shp.carrier, carrierMap);
 
     return {
       trackingNumber: shp.trackingNumber,
@@ -901,18 +897,14 @@ export class ShipmentService {
       .from(proofOfDelivery)
       .where(eq(proofOfDelivery.shipmentId, shp.id));
 
-    // Fase "Transportadoras Persistentes": nome real da transportadora
-    // quando o shipment já tem carrierId — nunca inventa, e nunca apaga o
-    // texto livre histórico (shp.carrier) quando não há carrierId ainda.
-    let carrierName: string | null = null;
-    if (shp.carrierId) {
-      const carrierRows = await db.select().from(carriers).where(eq(carriers.id, shp.carrierId)).limit(1);
-      carrierName = carrierRows[0]?.name || null;
-    }
+    // Fase "Transportadoras Persistentes": resolução central via
+    // carrierResolver.ts (mesma regra em todo lugar).
+    const carrierMap = await resolveCarrierNames(db, [shp.carrierId]);
+    const carrierName = pickCarrierName(shp.carrierId, shp.carrier, carrierMap);
 
     return {
       ...shp,
-      carrierName: carrierName || shp.carrier || null,
+      carrierName,
       trackingEvents: events,
       shippingLabel: labels.length > 0 ? labels[0] : null,
       proofOfDelivery: pods,

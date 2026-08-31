@@ -68,6 +68,7 @@ import { InventoryService } from './modules/inventory/inventoryService.js';
 import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { PaymentService } from './modules/payments/paymentService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
+import { resolveCarrierNames, pickCarrierName } from './modules/logistics/carrierResolver.js';
 import { processPayoutStatusChange } from './modules/wallet/payoutService.js';
 import { resolveDispute, RefundValidationError } from './modules/payments/refundService.js';
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
@@ -3931,6 +3932,11 @@ adminRouter.get('/logistics/shipments', requireLogisticsStaff, async (req: AuthR
     const whMap = new Map(allWarehouses.map(w => [w.id, w]));
     const userMap = new Map(allUsers.map(u => [u.id, u]));
 
+    // Correção (fechamento da fase de logística — item 4): resolução em
+    // lote da transportadora persistente para toda a lista, mesma regra
+    // central de carrierResolver.ts — nunca um lookup paralelo no frontend.
+    const carrierMap = await resolveCarrierNames(db, allShipments.map(s => s.carrierId));
+
     const mapped = allShipments.map(shp => {
       const parentOrder = orderMap.get(shp.orderId);
       const item = shp.orderItemId ? itemMap.get(shp.orderItemId) : null;
@@ -3959,7 +3965,8 @@ adminRouter.get('/logistics/shipments', requireLogisticsStaff, async (req: AuthR
         orderNumber: parentOrder?.orderNumber || `PED-${shp.orderId.slice(-6)}`,
         orderItemId: shp.orderItemId,
         trackingNumber: shp.trackingNumber,
-        carrier: shp.carrier || null,
+        carrier: pickCarrierName(shp.carrierId, shp.carrier, carrierMap),
+        carrierId: shp.carrierId || null,
         status: shp.status,
         fulfillmentMode: shp.fulfillmentMode,
         productTitle: item?.productTitle || product?.title || 'Produto não informado',

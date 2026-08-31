@@ -26,6 +26,7 @@ import { categories, platformSettings, countries } from '../../../db/schema.js';
 import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
 import { userProfiles } from '../../../db/schema.js';
 import { updateBuyerTaxId } from '../buyer/buyerProfileService.js';
+import { resolveCarrierNames, pickCarrierName } from '../logistics/carrierResolver.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -700,6 +701,14 @@ export class OrderService {
     const items = await db.select().from(orderItems).where(eq(orderItems.orderId, ord.id));
     const shpList = await db.select().from(shipments).where(eq(shipments.orderId, ord.id));
 
+    // Correção (fechamento da fase de logística — item 2): a transportadora
+    // persistente (carrierId -> carriers.name) nunca era resolvida aqui,
+    // então GET /buyer/orders/:id e GET /orders/:id sempre mostravam o
+    // texto legado (quase sempre null para shipments novos). Resolução
+    // central via carrierResolver.ts — mesma regra usada por
+    // shipmentService.ts, nunca reimplementada aqui.
+    const carrierMap = await resolveCarrierNames(db, shpList.map((s: any) => s.carrierId));
+
     const shpWithEvents = await Promise.all(
       shpList.map(async (s: any) => {
         const events = await db
@@ -709,6 +718,7 @@ export class OrderService {
           .orderBy(asc(trackingEvents.eventTime));
         return {
           ...s,
+          carrier: pickCarrierName(s.carrierId, s.carrier, carrierMap),
           trackingEvents: events,
         };
       })
@@ -741,7 +751,10 @@ export class OrderService {
       shipment: primaryShipment,
       shipments: shpWithEvents,
       trackingCode: primaryShipment?.trackingNumber || ord.trackingCode || null,
+      // primaryShipment.carrier já vem resolvido (carrierId -> carriers.name,
+      // fallback texto legado) — ver bloco acima, nunca uma segunda lógica.
       carrier: primaryShipment?.carrier || null,
+      carrierId: primaryShipment?.carrierId || null,
       logisticsStatus: derivedLogisticsStatus,
       items: items.map((i: any) => ({
         ...i,
@@ -903,13 +916,19 @@ export class OrderService {
     const country = addressJson.country || addressJson.countryCode || null;
     const destination = city && country ? `${city}, ${country}` : city || country || null;
 
+    // Correção (fechamento da fase de logística — item 3): mesma resolução
+    // central de carrierResolver.ts — nunca uma segunda lógica divergente.
+    // trackingEvents (events/shpEvents abaixo) não é tocado por esta correção.
+    const carrierMap = await resolveCarrierNames(db, shipmentRows.map((s: any) => s.carrierId));
+
     const packages = shipmentRows.map(shp => {
       const shpEvents = events.filter(e => e.shipmentId === shp.id);
       const matchedItem = items.find(i => i.id === shp.orderItemId || i.shipmentId === shp.id);
       return {
         id: shp.id,
         trackingNumber: shp.trackingNumber,
-        carrier: shp.carrier,
+        carrier: pickCarrierName(shp.carrierId, shp.carrier, carrierMap),
+        carrierId: shp.carrierId || null,
         status: shp.status,
         fulfillmentMode: shp.fulfillmentMode,
         productTitle: matchedItem?.productTitle || null,
