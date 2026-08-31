@@ -1920,7 +1920,7 @@ adminRouter.post('/escrow/:id/freeze', requireFinanceApproval, async (req: AuthR
     if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
 
     const escRows = await db
-      .select({ sellerCountry: sellers.countryCode })
+      .select({ orderId: escrowAccounts.orderId, sellerCountry: sellers.countryCode })
       .from(escrowAccounts)
       .innerJoin(sellers, eq(escrowAccounts.sellerId, sellers.id))
       .where(eq(escrowAccounts.id, id))
@@ -1931,8 +1931,32 @@ adminRouter.post('/escrow/:id/freeze', requireFinanceApproval, async (req: AuthR
 
     const scope = resolveAdministrativeScope(req.user);
     assertCountryAccess(scope, escRows[0].sellerCountry);
+    const orderId = escRows[0].orderId;
 
-    await db.update(escrowAccounts).set({ status: 'disputed', disputedAt: new Date(), updatedAt: new Date() }).where(eq(escrowAccounts.id, id));
+    // Auditoria de concorrência (correção do achado "ADMIN FREEZE sem
+    // proteção"): este era um terceiro caminho capaz de escrever
+    // escrow_accounts.status por fora de qualquer lock — agora participa do
+    // MESMO protocolo (pg_advisory_xact_lock(hashtext(orderId))) usado por
+    // releaseEscrowForOrder/processRefund/createBuyerDispute, e o UPDATE é
+    // compare-and-set (só bloqueia held/eligible — nunca sobrescreve
+    // released/refunded silenciosamente).
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`);
+
+      const freezeResult = await tx
+        .update(escrowAccounts)
+        .set({ status: 'disputed', disputedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(escrowAccounts.id, id), inArray(escrowAccounts.status, ['held', 'eligible'])))
+        .returning({ id: escrowAccounts.id });
+
+      if (freezeResult.length === 0) {
+        const [reReadEsc] = await tx.select({ status: escrowAccounts.status }).from(escrowAccounts).where(eq(escrowAccounts.id, id)).limit(1);
+        const err: any = new Error(`ESCROW_NOT_FREEZABLE: Custódia #${id} está em status "${reReadEsc?.status}" — só é possível bloquear custódias em "held" ou "eligible".`);
+        err.status = 409;
+        throw err;
+      }
+    });
+
     return res.json({
       success: true,
       message: `Custódia #${id} bloqueada para auditoria.`,
@@ -1941,7 +1965,7 @@ adminRouter.post('/escrow/:id/freeze', requireFinanceApproval, async (req: AuthR
     if (err instanceof ScopeError) {
       return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
     }
-    return res.status(500).json({ success: false, message: err?.message });
+    return res.status(err?.status || 500).json({ success: false, message: err?.message });
   }
 });
 

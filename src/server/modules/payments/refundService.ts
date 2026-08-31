@@ -70,6 +70,18 @@ export interface ProcessRefundInput {
  */
 export async function processRefund(input: ProcessRefundInput, executor?: any) {
   const runInTx = async (tx: any) => {
+    // Auditoria de concorrência (correção do ACHADO CRÍTICO REAL "RELEASE x
+    // REFUND"): processRefund usava SOMENTE `SELECT escrow_accounts ... FOR
+    // UPDATE` para se proteger — um mecanismo de lock INDEPENDENTE do
+    // pg_advisory_xact_lock(hashtext(orderId)) que releaseEscrowForOrder já
+    // usava. Provado deterministicamente que os dois nunca se bloqueiam entre
+    // si. Agora processRefund adquire o MESMO advisory lock, ANTES de decidir
+    // qualquer coisa sobre o estado do escrow — release e refund do MESMO
+    // pedido ficam serializados um atrás do outro, nunca mais concorrentes de
+    // verdade. O `SELECT ... FOR UPDATE` abaixo é mantido como segunda camada
+    // de proteção (defesa em profundidade), nunca removido.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${input.orderId}))`);
+
     const idempotencyKey = typeof input.idempotencyKey === 'string' ? input.idempotencyKey.trim() : '';
     if (!idempotencyKey) {
       throw new RefundValidationError('IDEMPOTENCY_KEY_REQUIRED', 'Informe idempotencyKey — necessária para que um retry/webhook duplicado não reverta o dinheiro duas vezes.');

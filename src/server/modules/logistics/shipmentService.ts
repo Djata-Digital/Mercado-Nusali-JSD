@@ -18,6 +18,8 @@ import {
   inventoryMovements,
   auditLogs,
   carriers,
+  escrowAccounts,
+  platformSettings,
 } from '../../../db/schema.js';
 import { PaymentService } from '../payments/paymentService.js';
 import { eq, and, desc, ne, or, sql } from 'drizzle-orm';
@@ -32,6 +34,44 @@ export interface CreateShipmentOptions {
   trackingNumber?: string | null;
   estimatedDeliveryDate?: string | null;
   notes?: string | null;
+}
+
+/**
+ * Fase "Janela de proteção pós-entrega": lê platformSettings.escrowHoldingHours
+ * (reaproveitado — já existia, exposto em GET/POST /admin/settings, mas nunca
+ * lido por nenhuma lógica de negócio até agora). NÃO cria configuração nova.
+ *
+ * Contrato explícito, nunca silencioso:
+ *   - chave ausente em platformSettings -> usa o default documentado (48h),
+ *     que é o MESMO valor já usado como fallback em GET /admin/settings.
+ *   - chave presente mas fora de [1, 168] ou não numérica -> INVÁLIDA. O
+ *     chamador NUNCA deve usar um valor inválido silenciosamente; a decisão
+ *     de "o que fazer" (não definir releaseEligibleAt, e logar bem alto) fica
+ *     a cargo do chamador.
+ */
+const ESCROW_HOLDING_HOURS_DEFAULT = 48;
+const ESCROW_HOLDING_HOURS_MIN = 1;
+const ESCROW_HOLDING_HOURS_MAX = 168;
+
+export async function resolveEscrowHoldingHours(
+  tx: any
+): Promise<{ hours: number; source: 'default' | 'configured' } | { invalid: true; rawValue: any }> {
+  const rows = await tx
+    .select({ valueJson: platformSettings.valueJson })
+    .from(platformSettings)
+    .where(eq(platformSettings.key, 'escrowHoldingHours'))
+    .limit(1);
+
+  if (rows.length === 0) {
+    return { hours: ESCROW_HOLDING_HOURS_DEFAULT, source: 'default' };
+  }
+
+  const raw = rows[0].valueJson;
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num < ESCROW_HOLDING_HOURS_MIN || num > ESCROW_HOLDING_HOURS_MAX) {
+    return { invalid: true, rawValue: raw };
+  }
+  return { hours: num, source: 'configured' };
 }
 
 export class ShipmentService {
@@ -668,6 +708,47 @@ export class ShipmentService {
           notes: options.description || null,
           createdAt: new Date(),
         });
+
+        // Fase "Janela de proteção pós-entrega": só quando ESTA transição real faz o
+        // ÚLTIMO shipment não-cancelado do pedido chegar a DELIVERED, calcula
+        // escrow_accounts.releaseEligibleAt = MAX(deliveredAt) + escrowHoldingHours.
+        // Nunca recalculado ao simplesmente ler o pedido depois — só neste ponto
+        // exato da transição real (o early-return de idempotência acima já garante
+        // que uma repetição do MESMO status não chega até aqui). Se ainda existir
+        // shipment não entregue, releaseEligibleAt permanece NULL (= não inscrito
+        // no auto-release) — nunca preenchido cedo demais.
+        const siblingShipments = await tx
+          .select({ id: shipments.id, status: shipments.status, deliveredAt: shipments.deliveredAt })
+          .from(shipments)
+          .where(and(eq(shipments.orderId, shp.orderId), ne(shipments.status, 'CANCELLED')));
+
+        const allSiblingsDelivered = siblingShipments.length > 0 && siblingShipments.every((s: any) => (s.status || '').toUpperCase() === 'DELIVERED');
+
+        if (allSiblingsDelivered) {
+          const maxDeliveredAtMs = siblingShipments.reduce((max: number, s: any) => {
+            const t = s.deliveredAt ? new Date(s.deliveredAt).getTime() : 0;
+            return t > max ? t : max;
+          }, 0);
+
+          const hoursResult = await resolveEscrowHoldingHours(tx);
+          if ('invalid' in hoursResult) {
+            // Comportamento seguro e explícito (nunca silencioso): configuração
+            // fora do intervalo permitido (1-168h) ou não numérica -> NÃO define
+            // releaseEligibleAt (permanece NULL = não inscrito no auto-release até
+            // a configuração ser corrigida). A entrega em si NUNCA é bloqueada por
+            // um problema de configuração administrativa.
+            logger.error(
+              { orderId: shp.orderId, rawValue: hoursResult.rawValue },
+              'ESCROW_HOLDING_HOURS_INVALID: platformSettings.escrowHoldingHours fora do intervalo permitido (1-168h) ou não numérico — releaseEligibleAt NÃO definido para este pedido.'
+            );
+          } else {
+            const releaseEligibleAt = new Date(maxDeliveredAtMs + hoursResult.hours * 3600 * 1000);
+            await tx
+              .update(escrowAccounts)
+              .set({ releaseEligibleAt, updatedAt: new Date() })
+              .where(and(eq(escrowAccounts.orderId, shp.orderId), eq(escrowAccounts.status, 'held')));
+          }
+        }
       }
 
       // Log audit
@@ -750,68 +831,16 @@ export class ShipmentService {
         }
       }
 
-      // 4. Fetch all non-cancelled shipments for the order
-      const nonCancelledShipments = await tx
-        .select()
-        .from(shipments)
-        .where(and(eq(shipments.orderId, orderId), ne(shipments.status, 'CANCELLED')));
-
-      if (nonCancelledShipments.length === 0) {
-        throw new Error('ORDER_NOT_FULLY_DELIVERED: Não é possível confirmar o recebimento pois o pedido não possui envios registrados.');
-      }
-
-      const undelivered = nonCancelledShipments.filter(s => (s.status || '').toUpperCase() !== 'DELIVERED');
-      if (undelivered.length > 0) {
-        throw new Error('ORDER_NOT_FULLY_DELIVERED: Não é possível confirmar o recebimento pois nem todos os pacotes do pedido foram entregues.');
-      }
-
-      // 5. Idempotent proof_of_delivery insertion (Requirement 3: Check BUYER_CONFIRMATION uniqueness)
-      for (const shp of nonCancelledShipments) {
-        const existingPod = await tx
-          .select()
-          .from(proofOfDelivery)
-          .where(and(eq(proofOfDelivery.shipmentId, shp.id), eq(proofOfDelivery.proofType, 'BUYER_CONFIRMATION')))
-          .limit(1);
-
-        if (existingPod.length === 0) {
-          await tx.insert(proofOfDelivery).values({
-            id: `pod_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-            shipmentId: shp.id,
-            receivedBy: realBuyerName,
-            deliveredAt: shp.deliveredAt || new Date(),
-            proofType: 'BUYER_CONFIRMATION',
-            notes: 'Recebimento confirmado pelo comprador.',
-            createdAt: new Date(),
-          });
-        }
-      }
-
-      // 6. Release Escrow inside the SAME atomic transaction (Requirement 2)
-      const escrowResult = await PaymentService.releaseEscrowForOrder(
+      // 4-7. Entrega completa + prova BUYER_CONFIRMATION + release do escrow +
+      // audit log: TUDO isso agora é orquestrado por PaymentService.finalizeDelivery
+      // (Fase "Janela de proteção pós-entrega") — nunca duplicado aqui. A checagem
+      // de propriedade/nome real do comprador (passos 1-3 acima) continua exclusiva
+      // desta função, específica do fluxo BUYER.
+      return await PaymentService.finalizeDelivery(
         orderId,
-        {
-          performedBy: buyerId,
-          reason: 'ENTREGA_CONFIRMADA_PELO_COMPRADOR: O comprador confirmou o recebimento de todos os pacotes.',
-        },
+        { source: 'BUYER', performedBy: buyerId, buyerDisplayName: realBuyerName },
         tx
       );
-
-      // 7. Log Audit
-      await tx.insert(auditLogs).values({
-        id: `aud_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        actorUserId: buyerId,
-        action: 'BUYER_CONFIRMED_DELIVERY',
-        resource: 'orders',
-        resourceId: orderId,
-        detailsJson: { orderId, buyerId, shipmentId: shipmentId || null },
-        createdAt: new Date(),
-      });
-
-      return {
-        success: true,
-        message: 'Recebimento de todos os pacotes confirmado com sucesso! O pagamento foi liberado ao vendedor.',
-        data: escrowResult.data,
-      };
     });
   }
 

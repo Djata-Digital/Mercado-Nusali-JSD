@@ -1,5 +1,5 @@
 import { getDb } from '../../../db/index.js';
-import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions, ledgerEntries, ledgerAccounts, disputes } from '../../../db/schema.js';
+import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions, ledgerEntries, ledgerAccounts, disputes, proofOfDelivery, auditLogs } from '../../../db/schema.js';
 import { syncOrderFulfillmentStatus } from '../orders/orderService.js';
 import { eq, and, ne, sql, inArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -820,15 +820,33 @@ export class PaymentService {
         }
       }
 
-      // 3. Update Escrow Account
-      await tx
+      // 3. Update Escrow Account — compare-and-set (defesa em profundidade, além
+      // do advisory lock): auditoria de concorrência encontrou que este UPDATE
+      // era "cego" (só filtrava por id, nunca pelo status atual), então um
+      // processRefund concorrente que tivesse escrito 'refunded' um instante
+      // antes seria silenciosamente sobrescrito de volta para 'released'. Com
+      // o WHERE abaixo, o UPDATE só afeta a linha se ela ainda estiver
+      // 'held'/'eligible' no exato momento da escrita — se 0 linhas forem
+      // afetadas, alguma outra transação já mudou o estado (mesmo que
+      // improvável agora que processRefund/createBuyerDispute/admin-freeze
+      // também usam o mesmo advisory lock), e nós paramos e relemos o estado
+      // real em vez de assumir sucesso.
+      const releaseUpdateResult = await tx
         .update(escrowAccounts)
         .set({
           status: 'released',
           releasedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(escrowAccounts.id, esc.id));
+        .where(and(eq(escrowAccounts.id, esc.id), inArray(escrowAccounts.status, ['held', 'eligible'])))
+        .returning({ id: escrowAccounts.id });
+
+      if (releaseUpdateResult.length === 0) {
+        const [reReadEsc] = await tx.select({ status: escrowAccounts.status }).from(escrowAccounts).where(eq(escrowAccounts.id, esc.id)).limit(1);
+        throw new Error(
+          `ESCROW_STATE_CHANGED_CONCURRENTLY: O estado do escrow do pedido ${orderId} mudou para "${reReadEsc?.status}" durante o processamento — liberação abortada com segurança, nenhuma alteração aplicada.`
+        );
+      }
 
       // 4. Update Order
       await tx
@@ -954,5 +972,197 @@ export class PaymentService {
       delete (result as any)._releasedAmount;
     }
     return result;
+  }
+
+  /**
+   * Fase "Janela de proteção pós-entrega" — orquestração central de finalização
+   * de entrega, usada tanto pela confirmação manual do comprador (BUYER, via
+   * ShipmentService.confirmDeliveryByBuyer) quanto pelo futuro auto-release
+   * (AUTO — ainda NÃO acionado por nenhum cron/endpoint nesta fase, só
+   * implementado e testado isoladamente).
+   *
+   * NUNCA duplica a lógica financeira de releaseEscrowForOrder — só decide
+   * QUANDO é permitido chamá-la e grava a prova de entrega correspondente
+   * (proof_of_delivery) na MESMA transação. Se releaseEscrowForOrder lançar
+   * (disputa ativa, payment não elegível, escrow já revertido, etc.), a
+   * transação inteira sofre rollback — nunca sobra um BUYER_CONFIRMATION/
+   * AUTO_CONFIRMATION "órfão" sem o release correspondente ter de fato
+   * acontecido.
+   *
+   * Concorrência (correção do achado real "AUTO_CONFIRMATION duplicada" da
+   * auditoria de atomicidade): esta função adquire o MESMO
+   * pg_advisory_xact_lock(hashtext(orderId)) que releaseEscrowForOrder usa —
+   * mas como a PRIMEIRA operação de runInTx, antes de qualquer leitura
+   * (order, shipments, releaseEligibleAt, prova operacional) e antes do
+   * INSERT de proof_of_delivery. Isso fecha a janela que antes permitia duas
+   * execuções concorrentes (AUTO x AUTO, ou BUYER x AUTO) inserirem a mesma
+   * prova duas vezes antes de qualquer lock existir. Quando
+   * releaseEscrowForOrder é chamado mais abaixo (mesmo `tx`), ele readquire o
+   * MESMO lock — reentrante e seguro por design do Postgres (uma transação
+   * que já detém um advisory lock nunca bloqueia a si mesma pedindo o mesmo
+   * lock de novo), então não há necessidade de nenhuma flag
+   * "lockAlreadyHeld" nem de duas variantes da função.
+   */
+  static async finalizeDelivery(
+    orderId: string,
+    options: { source: 'BUYER' | 'AUTO'; performedBy?: string; buyerDisplayName?: string },
+    executor?: any
+  ) {
+    const runInTx = async (tx: any) => {
+      // Auditoria de concorrência (correção do ACHADO REAL "AUTO_CONFIRMATION
+      // duplicada"): o MESMO pg_advisory_xact_lock(hashtext(orderId)) que
+      // releaseEscrowForOrder usa é adquirido AQUI, como a primeiríssima
+      // operação — ANTES de qualquer leitura (order, shipments,
+      // releaseEligibleAt, prova operacional) e ANTES do INSERT de
+      // proof_of_delivery (BUYER_CONFIRMATION/AUTO_CONFIRMATION). Isso fecha a
+      // janela que permitia duas execuções concorrentes (AUTO x AUTO, ou
+      // BUYER x AUTO) inserirem a mesma prova duas vezes antes de qualquer
+      // lock real existir.
+      //
+      // Quando releaseEscrowForOrder for chamado mais abaixo (mesmo `tx`), ele
+      // readquire o MESMO lock — reentrante e seguro por design do Postgres
+      // (pg_advisory_xact_lock: uma transação que já detém um lock nunca
+      // bloqueia a si mesma pedindo o mesmo lock de novo; o contador interno
+      // só é liberado no COMMIT/ROLLBACK). Não há necessidade de nenhuma flag
+      // "lockAlreadyHeld" nem de duas variantes da função — a reentrância do
+      // Postgres já resolve isso com zero complexidade adicional.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`);
+
+      const ordRows = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      if (ordRows.length === 0) {
+        throw new Error('ORDER_NOT_FOUND: Pedido não encontrado.');
+      }
+      const ord = ordRows[0];
+
+      // Entrega completa: MESMA regra já usada por confirmDeliveryByBuyer/
+      // releaseEscrowForOrder (todos os shipments não-cancelados DELIVERED) —
+      // única implementação, reutilizada, nunca duplicada.
+      const nonCancelledShipments = await tx
+        .select()
+        .from(shipments)
+        .where(and(eq(shipments.orderId, orderId), ne(shipments.status, 'CANCELLED')));
+
+      if (nonCancelledShipments.length === 0) {
+        throw new Error('ORDER_NOT_FULLY_DELIVERED: Não é possível confirmar o recebimento pois o pedido não possui envios registrados.');
+      }
+      const undelivered = nonCancelledShipments.filter((s: any) => (s.status || '').toUpperCase() !== 'DELIVERED');
+      if (undelivered.length > 0) {
+        throw new Error('ORDER_NOT_FULLY_DELIVERED: Não é possível confirmar o recebimento pois nem todos os pacotes do pedido foram entregues.');
+      }
+
+      const proofType = options.source === 'BUYER' ? 'BUYER_CONFIRMATION' : 'AUTO_CONFIRMATION';
+      let receivedByLabel: string;
+
+      if (options.source === 'AUTO') {
+        // AUTO exige releaseEligibleAt NOT NULL e <= NOW() — NULL nunca é
+        // interpretado como "já venceu" (histórico/fluxo incompleto = NUNCA
+        // elegível, ver auditoria da fase anterior).
+        const escRows = await tx.select().from(escrowAccounts).where(eq(escrowAccounts.orderId, orderId)).limit(1);
+        if (escRows.length === 0) {
+          throw new Error('ESCROW_NOT_FOUND: Conta escrow não encontrada para este pedido.');
+        }
+        const esc = escRows[0];
+        if (!esc.releaseEligibleAt) {
+          throw new Error(
+            `AUTO_RELEASE_NOT_ELIGIBLE: releaseEligibleAt não definido para o pedido ${orderId} — não está inscrito no auto-release (histórico ou fluxo incompleto). NULL nunca significa "já venceu".`
+          );
+        }
+        if (new Date(esc.releaseEligibleAt).getTime() > Date.now()) {
+          throw new Error(
+            `AUTO_RELEASE_WINDOW_NOT_EXPIRED: A janela de proteção do comprador para o pedido ${orderId} ainda não expirou (releaseEligibleAt=${new Date(esc.releaseEligibleAt).toISOString()}).`
+          );
+        }
+
+        // Prova operacional obrigatória para TODOS os shipments não-cancelados —
+        // status DELIVERED sozinho NUNCA é suficiente para AUTO.
+        for (const shp of nonCancelledShipments) {
+          const proof = await tx
+            .select({ id: proofOfDelivery.id })
+            .from(proofOfDelivery)
+            .where(and(eq(proofOfDelivery.shipmentId, shp.id), eq(proofOfDelivery.proofType, 'OPERATOR_CONFIRMATION')))
+            .limit(1);
+          if (proof.length === 0) {
+            throw new Error(
+              `AUTO_RELEASE_MISSING_OPERATIONAL_PROOF: Envio ${shp.id} do pedido ${orderId} não possui prova operacional de entrega (proof_of_delivery OPERATOR_CONFIRMATION) — auto-release recusado.`
+            );
+          }
+        }
+        receivedByLabel = 'Confirmação automática do sistema (prazo de proteção do comprador expirado)';
+      } else {
+        // BUYER: não exige prazo expirado, só entrega completa (já checado acima)
+        // e nome real do comprador (auditado: a própria confirmação autenticada do
+        // comprador já é evidência suficiente — não exige OPERATOR_CONFIRMATION
+        // adicional, comportamento manual pré-existente preservado).
+        if (!options.buyerDisplayName || !options.buyerDisplayName.trim()) {
+          throw new Error(
+            'BUYER_NAME_REQUIRED_FOR_DELIVERY_CONFIRMATION: Para confirmar o recebimento, é necessário ter o seu nome completo cadastrado no perfil.'
+          );
+        }
+        receivedByLabel = options.buyerDisplayName.trim();
+      }
+
+      // Prova de entrega idempotente (um registro por shipment por proofType) —
+      // gravada ANTES do release, na MESMA transação: se releaseEscrowForOrder
+      // lançar logo abaixo, este insert é desfeito junto (rollback), nunca fica
+      // uma confirmação "falsa" sem o release ter realmente acontecido.
+      for (const shp of nonCancelledShipments) {
+        const existingProof = await tx
+          .select({ id: proofOfDelivery.id })
+          .from(proofOfDelivery)
+          .where(and(eq(proofOfDelivery.shipmentId, shp.id), eq(proofOfDelivery.proofType, proofType)))
+          .limit(1);
+        if (existingProof.length === 0) {
+          await tx.insert(proofOfDelivery).values({
+            id: `pod_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            shipmentId: shp.id,
+            receivedBy: receivedByLabel,
+            deliveredAt: shp.deliveredAt || new Date(),
+            proofType,
+            notes: options.source === 'BUYER'
+              ? 'Recebimento confirmado pelo comprador.'
+              : 'Recebimento confirmado automaticamente pelo sistema após expiração do prazo de proteção, sem confirmação manual nem disputa.',
+            createdAt: new Date(),
+          });
+        }
+      }
+
+      // A liberação financeira é SEMPRE feita por releaseEscrowForOrder — nunca
+      // reimplementada aqui. Ela já protege (disputa open/in_mediation, payment
+      // elegível, escrow.status, idempotência via unique constraint) — nenhuma
+      // dessas proteções é duplicada nesta função.
+      const escrowResult: any = await this.releaseEscrowForOrder(
+        orderId,
+        {
+          performedBy: options.performedBy || ord.buyerId,
+          reason: options.source === 'BUYER'
+            ? 'ENTREGA_CONFIRMADA_PELO_COMPRADOR: O comprador confirmou o recebimento de todos os pacotes.'
+            : 'AUTO_CONFIRMADO_PRAZO_EXPIRADO: Prazo de proteção do comprador expirado sem confirmação manual nem disputa — confirmação automática.',
+        },
+        tx
+      );
+
+      await tx.insert(auditLogs).values({
+        id: `aud_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        actorUserId: options.performedBy || null,
+        action: options.source === 'BUYER' ? 'BUYER_CONFIRMED_DELIVERY' : 'AUTO_CONFIRMED_DELIVERY',
+        resource: 'orders',
+        resourceId: orderId,
+        detailsJson: { orderId, source: options.source },
+        createdAt: new Date(),
+      });
+
+      return {
+        success: true,
+        message: options.source === 'BUYER'
+          ? 'Recebimento de todos os pacotes confirmado com sucesso! O pagamento foi liberado ao vendedor.'
+          : 'Confirmação automática processada com sucesso — pagamento liberado ao vendedor.',
+        data: escrowResult.data,
+      };
+    };
+
+    if (executor) return runInTx(executor);
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível.');
+    return db.transaction(runInTx);
   }
 }
