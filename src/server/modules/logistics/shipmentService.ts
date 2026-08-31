@@ -837,10 +837,24 @@ export class ShipmentService {
 
     const recipientAddr = (shp.recipientAddressJson as any) || {};
 
+    // Correção (rastreio público mostrando carrier=null): esta rota lia só
+    // o texto livre legado (shipments.carrier), nunca resolvia a
+    // transportadora persistente (shipments.carrierId -> carriers.id). A
+    // transportadora persistente tem PRIORIDADE quando existe; o texto
+    // legado continua servindo de fallback para shipments antigos que
+    // nunca receberam carrierId — nunca alterado/apagado aqui. Timeline
+    // (trackingEvents) não é tocada por esta correção.
+    let carrierName: string | null = shp.carrier || null;
+    if (shp.carrierId) {
+      const carrierRows = await db.select({ name: carriers.name }).from(carriers).where(eq(carriers.id, shp.carrierId)).limit(1);
+      carrierName = carrierRows[0]?.name || carrierName;
+    }
+
     return {
       trackingNumber: shp.trackingNumber,
       status: shp.status,
-      carrier: shp.carrier || null,
+      carrier: carrierName,
+      carrierId: shp.carrierId || null,
       fulfillmentMode: shp.fulfillmentMode,
       productTitle: itemRows.length > 0 ? itemRows[0].productTitle : null,
       quantity: itemRows.length > 0 ? itemRows[0].quantity : 1,
