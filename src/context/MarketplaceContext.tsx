@@ -446,25 +446,15 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
     throw new Error('LEGACY_CHECKOUT_DISABLED: O checkout local foi desativado. Utilize o CheckoutView com OrdersApi.');
   };
 
-  const confirmOrderReceipt = (orderId: string) => {
-    setOrders(prev =>
-      prev.map(o => {
-        if (o.id === orderId) {
-          return {
-            ...o,
-            status: 'delivered',
-            escrow: {
-              ...o.escrow,
-              status: 'released',
-              releasedAt: new Date().toISOString().slice(0, 10),
-              notes: 'Pagamento liberado ao vendedor após confirmação do comprador.',
-            },
-          };
-        }
-        return o;
-      })
-    );
-    showToast('Recebimento confirmado! Pagamento liberado com sucesso ao vendedor.');
+  // Fase "Experiência real do comprador pós-entrega" (auditoria): esta função
+  // mexia em orders/escrow SOMENTE em memória local, nunca chamando a API
+  // real — a única implementação real e usada hoje é
+  // services/orderService.ts::confirmOrderReceipt (via
+  // OrderConfirmationView.tsx -> POST /buyer/orders/:id/confirm-delivery).
+  // Desativada com o mesmo padrão já usado por placeOrder logo acima, para
+  // nunca coexistirem duas implementações concorrentes de confirmação.
+  const confirmOrderReceipt = (_orderId: string) => {
+    throw new Error('LEGACY_CONFIRM_RECEIPT_DISABLED: Confirmação local desativada. Utilize OrderConfirmationView com OrderService.confirmOrderReceipt (API real).');
   };
 
   const addNewProduct = (
@@ -533,39 +523,15 @@ export const MarketplaceProvider: React.FC<{ children: React.ReactNode }> = ({ c
     showToast(`Loja "${newStore.name}" criada com sucesso!`);
   };
 
-  const openDispute = (orderId: string, reason: any, description: string): Dispute => {
-    const targetOrder = orders.find(o => o.id === orderId);
-    const newDispute: Dispute = {
-      id: `disp-${Math.floor(100 + Math.random() * 900)}`,
-      orderId,
-      buyerName: targetOrder?.deliveryAddress.recipientName || 'Comprador Nusali',
-      sellerName: targetOrder?.items[0]?.product.seller.name || 'Vendedor',
-      productTitle: targetOrder?.items[0]?.product.title || 'Produto em disputa',
-      productImage: targetOrder?.items[0]?.product.image || '',
-      amount: targetOrder?.total || 0,
-      currency: targetOrder?.currency || selectedCurrency,
-      reason,
-      description,
-      evidenceUrls: [],
-      createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
-      status: 'opened',
-      messages: [
-        {
-          id: `msg-${Date.now()}`,
-          sender: 'buyer',
-          senderName: targetOrder?.deliveryAddress.recipientName || 'Comprador',
-          text: description,
-          timestamp: 'Agora',
-        },
-      ],
-    };
-
-    setDisputes(prev => [newDispute, ...prev]);
-    setOrders(prev =>
-      prev.map(o => (o.id === orderId ? { ...o, status: 'disputed', escrow: { ...o.escrow, status: 'disputed' } } : o))
-    );
-    showToast('Disputa aberta! O dinheiro permanecerá retido até a resolução.');
-    return newDispute;
+  // Fase "Experiência real do comprador pós-entrega" (auditoria): esta função
+  // criava uma disputa e mudava status de escrow SOMENTE em memória local,
+  // nunca chamando a API real — a única implementação real e usada hoje é
+  // BuyerService.createDispute (via OrderConfirmationView.tsx e
+  // DisputesEscrowView.tsx -> POST /buyer/disputes). Desativada com o mesmo
+  // padrão já usado por placeOrder, para nunca coexistirem duas
+  // implementações concorrentes de abertura de disputa.
+  const openDispute = (_orderId: string, _reason: any, _description: string): Dispute => {
+    throw new Error('LEGACY_OPEN_DISPUTE_DISABLED: Abertura de disputa local desativada. Utilize BuyerService.createDispute (API real).');
   };
 
   const addDisputeMessage = (disputeId: string, text: string) => {

@@ -16,6 +16,8 @@ import {
   addresses,
   sellers,
   stores,
+  escrowAccounts,
+  disputes,
 } from '../../../db/schema.js';
 import { eq, and, desc, asc, sql, inArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -724,6 +726,26 @@ export class OrderService {
       })
     );
 
+    // Fase "Experiência real do comprador pós-entrega": releaseEligibleAt é do
+    // escrow do PEDIDO (nunca duplicado por shipment) — backend é a única
+    // fonte de verdade, o frontend nunca calcula "deliveredAt + 48h" sozinho.
+    // Só expõe o que já existe: nenhum valor é inventado se releaseEligibleAt
+    // ainda for NULL (histórico ou pedido não inscrito no auto-release).
+    const [escrowRow] = await db.select({
+      status: escrowAccounts.status,
+      releaseEligibleAt: escrowAccounts.releaseEligibleAt,
+    }).from(escrowAccounts).where(eq(escrowAccounts.orderId, ord.id)).limit(1);
+
+    // Disputa ativa (open/in_mediation) — mesma regra de bloqueio já usada por
+    // releaseEscrowForOrder. Só os campos necessários para a UI acompanhar a
+    // disputa; nunca expõe dados de outros usuários.
+    const [activeDisputeRow] = await db.select({
+      id: disputes.id,
+      status: disputes.status,
+      reason: disputes.reason,
+      createdAt: disputes.createdAt,
+    }).from(disputes).where(and(eq(disputes.orderId, ord.id), inArray(disputes.status, ['open', 'in_mediation']))).limit(1);
+
     const primaryShipment = shpWithEvents[0] || null;
 
     let derivedLogisticsStatus = (primaryShipment?.status || ord.status || 'PREPARING').toUpperCase();
@@ -756,6 +778,19 @@ export class OrderService {
       carrier: primaryShipment?.carrier || null,
       carrierId: primaryShipment?.carrierId || null,
       logisticsStatus: derivedLogisticsStatus,
+      // releaseEligibleAt é do escrow/pedido — nunca duplicado por shipment.
+      // NULL continua sendo NULL (histórico ou não inscrito no auto-release);
+      // o frontend nunca deve tratar NULL como "vencido" nem calcular um
+      // prazo por conta própria.
+      releaseEligibleAt: escrowRow?.releaseEligibleAt || null,
+      activeDispute: activeDisputeRow
+        ? {
+            id: activeDisputeRow.id,
+            status: activeDisputeRow.status,
+            reason: activeDisputeRow.reason,
+            createdAt: activeDisputeRow.createdAt,
+          }
+        : null,
       items: items.map((i: any) => ({
         ...i,
         unitPrice: Number(i.unitPrice),

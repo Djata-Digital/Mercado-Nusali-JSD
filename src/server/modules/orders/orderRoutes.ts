@@ -104,8 +104,19 @@ orderRouter.post(['/:id/confirm-delivery', '/orders/:id/confirm-delivery'], requ
         error: { code: 'BUYER_NAME_REQUIRED_FOR_DELIVERY_CONFIRMATION', message: cleanMessage },
       });
     }
-    if (msg.includes('ESCROW_BLOCKED_BY_ACTIVE_DISPUTE') || msg.includes('PAYMENT_NOT_ELIGIBLE_FOR_RELEASE')) {
-      const code = msg.includes('ESCROW_BLOCKED_BY_ACTIVE_DISPUTE') ? 'ESCROW_BLOCKED_BY_ACTIVE_DISPUTE' : 'PAYMENT_NOT_ELIGIBLE_FOR_RELEASE';
+    if (
+      msg.includes('ESCROW_BLOCKED_BY_ACTIVE_DISPUTE') ||
+      msg.includes('PAYMENT_NOT_ELIGIBLE_FOR_RELEASE') ||
+      msg.includes('ESCROW_ALREADY_REVERSED') ||
+      msg.includes('ESCROW_STATE_CHANGED_CONCURRENTLY')
+    ) {
+      const code = msg.includes('ESCROW_BLOCKED_BY_ACTIVE_DISPUTE')
+        ? 'ESCROW_BLOCKED_BY_ACTIVE_DISPUTE'
+        : msg.includes('PAYMENT_NOT_ELIGIBLE_FOR_RELEASE')
+        ? 'PAYMENT_NOT_ELIGIBLE_FOR_RELEASE'
+        : msg.includes('ESCROW_ALREADY_REVERSED')
+        ? 'ESCROW_ALREADY_REVERSED'
+        : 'ESCROW_STATE_CHANGED_CONCURRENTLY';
       const cleanMessage = msg.includes(': ') ? msg.split(': ')[1] : msg;
       return res.status(409).json({
         success: false,

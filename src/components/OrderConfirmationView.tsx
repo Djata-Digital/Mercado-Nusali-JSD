@@ -3,6 +3,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useOrder } from '../hooks/useOrders';
 import { OrderService } from '../services/orderService';
+import { BuyerService } from '../services/buyerService';
 import { usePreferences } from '../context/PreferencesContext';
 import { formatCurrency } from '../utils/currencyUtils';
 import { PixPaymentModal } from './PixPaymentModal';
@@ -19,7 +20,60 @@ import {
   RefreshCw,
   AlertCircle,
   QrCode,
+  Lock,
+  Undo2,
+  MessageSquareWarning,
 } from 'lucide-react';
+
+/**
+ * Fase "Experiência real do comprador pós-entrega" — mapeamento amigável dos
+ * códigos de erro REAIS já lançados pelo backend (releaseEscrowForOrder /
+ * finalizeDelivery / confirmDeliveryByBuyer). Nunca mostra "sucesso" quando o
+ * backend falhou — cada código aqui corresponde exatamente a um erro real já
+ * auditado, nenhum foi inventado.
+ */
+export type PostDeliveryState = 'NOT_DELIVERED' | 'RELEASED' | 'REFUNDED' | 'DISPUTED' | 'HELD_PROTECTED';
+
+/**
+ * Estados A-E da auditoria — extraída como função pura (sem JSX/hooks) para
+ * poder ser testada diretamente, sem precisar renderizar o componente.
+ * Prioridade: released/refunded são estados TERMINAIS e vencem qualquer
+ * disputa histórica; disputa ativa só é considerada quando o escrow ainda
+ * está held/eligible.
+ */
+export function computePostDeliveryState(input: {
+  isDeliveredDone: boolean;
+  escrowStatus: string | null | undefined;
+  hasActiveDispute: boolean;
+}): PostDeliveryState {
+  if (!input.isDeliveredDone) return 'NOT_DELIVERED';
+  if (input.escrowStatus === 'released') return 'RELEASED';
+  if (input.escrowStatus === 'refunded') return 'REFUNDED';
+  if (input.hasActiveDispute) return 'DISPUTED';
+  return 'HELD_PROTECTED';
+}
+
+export function getConfirmDeliveryErrorMessage(code: string | undefined, fallback: string): string {
+  switch (code) {
+    case 'ORDER_NOT_FULLY_DELIVERED':
+    case 'SHIPMENT_NOT_DELIVERED':
+      return 'Ainda há pacotes deste pedido que não chegaram ao destino — a confirmação só é possível depois que todos forem entregues.';
+    case 'ESCROW_BLOCKED_BY_ACTIVE_DISPUTE':
+      return 'Este pedido está com uma disputa em andamento — o pagamento permanece protegido até ela ser resolvida.';
+    case 'PAYMENT_NOT_ELIGIBLE_FOR_RELEASE':
+      return 'Não foi possível confirmar porque o pagamento deste pedido não está mais em um estado válido para liberação. Fale com o suporte se isso não fizer sentido.';
+    case 'ESCROW_ALREADY_REVERSED':
+      return 'O valor deste pedido já foi reembolsado — não é mais possível confirmar o recebimento.';
+    case 'ESCROW_STATE_CHANGED_CONCURRENTLY':
+      return 'O estado deste pedido mudou durante o processamento. Atualize a página e confira a situação atual antes de tentar novamente.';
+    case 'BUYER_NAME_REQUIRED_FOR_DELIVERY_CONFIRMATION':
+      return 'Complete seu nome completo no perfil antes de confirmar o recebimento.';
+    case 'UNAUTHORIZED':
+      return 'Você não tem permissão para confirmar este pedido.';
+    default:
+      return fallback || 'Não foi possível confirmar o recebimento agora. Tente novamente em instantes.';
+  }
+}
 
 export const OrderConfirmationView: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -28,6 +82,22 @@ export const OrderConfirmationView: React.FC = () => {
   const queryClient = useQueryClient();
   const { showToast } = usePreferences();
   const [isConfirming, setIsConfirming] = React.useState(false);
+  const [isConfirmModalOpen, setIsConfirmModalOpen] = React.useState(false);
+  // Guarda de reentrância SÍNCRONA (useRef, não useState): setState no React
+  // 18 é em lote e não atualiza a variável isConfirming dentro do mesmo
+  // handler/tick, então dois cliques disparados antes do primeiro re-render
+  // (o `disabled` do botão só é pintado depois) poderiam ambos passar por um
+  // `if (isConfirming) return`. Um ref muda de valor IMEDIATAMENTE, fechando
+  // essa janela por completo.
+  const isConfirmingRef = React.useRef(false);
+
+  // "Tenho um problema" — fluxo REAL de disputa (POST /buyer/disputes),
+  // nunca uma disputa fake/local.
+  const [isDisputeModalOpen, setIsDisputeModalOpen] = React.useState(false);
+  const [disputeReason, setDisputeReason] = React.useState('Produto divergente ou com defeito de fábrica');
+  const [disputeDescription, setDisputeDescription] = React.useState('');
+  const [isSubmittingDispute, setIsSubmittingDispute] = React.useState(false);
+  const isSubmittingDisputeRef = React.useRef(false);
 
   // PIX Modal state for pending orders
   const [isPixModalOpen, setIsPixModalOpen] = React.useState(false);
@@ -74,22 +144,81 @@ export const OrderConfirmationView: React.FC = () => {
     queryClient.invalidateQueries({ queryKey: ['orders'] });
   };
 
+  // Confirmação de recebimento — SEMPRE via API real (POST /buyer/orders/:id/
+  // confirm-delivery). Nunca altera wallet/escrow localmente, nunca simula
+  // sucesso: só reflete o que o backend realmente retornou, e SEMPRE refaz o
+  // fetch do pedido para exibir o estado real após a chamada.
   const handleConfirmDelivery = async () => {
-    if (!activeOrder?.id) return;
+    // Proteção real contra clique duplo: checagem+trava SÍNCRONA via ref,
+    // fecha a janela que um `if (isConfirming) return` sozinho deixaria
+    // aberta (ver comentário na declaração do ref acima).
+    if (!activeOrder?.id || isConfirmingRef.current) return;
+    isConfirmingRef.current = true;
     setIsConfirming(true);
     try {
       const res = await OrderService.confirmOrderReceipt(activeOrder.id);
       if (res.success) {
+        setIsConfirmModalOpen(false);
         showToast('Recebimento confirmado e garantia Escrow liberada com sucesso!');
-        queryClient.invalidateQueries({ queryKey: ['order', activeOrder.id] });
-        queryClient.invalidateQueries({ queryKey: ['orders'] });
+        await queryClient.invalidateQueries({ queryKey: ['order', activeOrder.id] });
+        await queryClient.invalidateQueries({ queryKey: ['orders'] });
       } else {
-        showToast(res.message || 'Falha ao confirmar recebimento.');
+        // O backend retornou success:false explicitamente (200) — nunca
+        // tratado como sucesso.
+        showToast(getConfirmDeliveryErrorMessage(res.error?.code, res.message || ''));
       }
     } catch (err: any) {
-      showToast(err?.message || 'Erro ao comunicar com o servidor.');
+      // A maioria dos erros de negócio (disputa ativa, payment inelegível,
+      // escrow já revertido/mudou concorrentemente, etc.) chega como resposta
+      // HTTP não-2xx — axios rejeita a promise, então o código/mensagem real
+      // do backend está em err.response.data.error, nunca em err.message
+      // (que seria só "Request failed with status code 409").
+      const code = err?.response?.data?.error?.code;
+      const backendMessage = err?.response?.data?.error?.message;
+      showToast(getConfirmDeliveryErrorMessage(code, backendMessage));
     } finally {
+      isConfirmingRef.current = false;
       setIsConfirming(false);
+    }
+  };
+
+  // "Tenho um problema" — fluxo REAL de disputa (POST /buyer/disputes via
+  // BuyerService.createDispute), nunca uma disputa fake/local. Depois do
+  // sucesso, refaz o fetch do pedido para a UI mudar para o estado de disputa
+  // (banner de proteção por disputa, botão de confirmação desaparece).
+  const handleCreateDispute = async () => {
+    if (!activeOrder?.id || isSubmittingDisputeRef.current) return;
+    if (!disputeDescription.trim()) {
+      showToast('Descreva o problema antes de enviar.');
+      return;
+    }
+    isSubmittingDisputeRef.current = true;
+    setIsSubmittingDispute(true);
+    try {
+      const res = await BuyerService.createDispute({
+        orderId: activeOrder.id,
+        reason: disputeReason,
+        description: disputeDescription.trim(),
+      });
+      if (res.success) {
+        setIsDisputeModalOpen(false);
+        setDisputeDescription('');
+        showToast(
+          (res.data as any)?.alreadyOpen
+            ? 'Já existe uma disputa em aberto para este pedido.'
+            : 'Disputa aberta com sucesso! O pagamento permanece protegido em custódia Escrow.'
+        );
+        await queryClient.invalidateQueries({ queryKey: ['order', activeOrder.id] });
+        await queryClient.invalidateQueries({ queryKey: ['orders'] });
+      } else {
+        showToast(res.error?.message || res.message || 'Não foi possível abrir a disputa agora.');
+      }
+    } catch (err: any) {
+      const backendMessage = err?.response?.data?.error?.message;
+      showToast(backendMessage || err?.message || 'Erro ao comunicar com o servidor.');
+    } finally {
+      isSubmittingDisputeRef.current = false;
+      setIsSubmittingDispute(false);
     }
   };
 
@@ -186,6 +315,49 @@ export const OrderConfirmationView: React.FC = () => {
 
   const isDeliveredDone = logisticsStatusUpper === 'DELIVERED' || activeOrder.status === 'delivered';
 
+  // Fase "Experiência real do comprador pós-entrega" — estado da proteção
+  // Escrow após a entrega. TUDO aqui vem do backend (buildEnrichedOrder):
+  // escrowStatus, releaseEligibleAt e activeDispute nunca são calculados no
+  // frontend. releaseEligibleAt é do escrow/pedido (nunca por shipment).
+  const escrowStatus: string | null = activeOrder.escrowStatus || null;
+  const releaseEligibleAt: string | null = activeOrder.releaseEligibleAt || null;
+  const activeDispute: { id: string; status: string; reason?: string; createdAt?: string } | null =
+    activeOrder.activeDispute || null;
+  const hasActiveDispute = !!activeDispute && (activeDispute.status === 'open' || activeDispute.status === 'in_mediation');
+
+  // Estados A-E (auditoria da fase) — lógica pura extraída e testável em
+  // computePostDeliveryState (ver topo do arquivo).
+  const postDeliveryState = computePostDeliveryState({ isDeliveredDone, escrowStatus, hasActiveDispute });
+
+  // Formatação de data/hora LOCAL do usuário — nunca um cálculo de prazo
+  // (48h/qualquer valor) feito no frontend. Só formata o valor já persistido.
+  let releaseEligibleAtLabel: string | null = null;
+  let releaseEligibleAtRemaining: string | null = null;
+  if (releaseEligibleAt) {
+    const releaseDate = new Date(releaseEligibleAt);
+    if (!isNaN(releaseDate.getTime())) {
+      const dateStr = releaseDate.toLocaleDateString('pt-BR', { day: 'numeric', month: 'long' });
+      const timeStr = releaseDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      releaseEligibleAtLabel = `${dateStr} às ${timeStr}`;
+
+      // Tempo restante — SOMENTE informação visual, calculado uma vez no
+      // render (nenhum setInterval/setTimeout). Chegar a zero aqui NUNCA
+      // libera dinheiro; é só texto.
+      const diffMs = releaseDate.getTime() - Date.now();
+      if (diffMs > 0) {
+        const diffHours = Math.floor(diffMs / (3600 * 1000));
+        const diffDays = Math.floor(diffHours / 24);
+        if (diffDays >= 1) {
+          releaseEligibleAtRemaining = `faltam ${diffDays} dia${diffDays > 1 ? 's' : ''}`;
+        } else if (diffHours >= 1) {
+          releaseEligibleAtRemaining = `faltam ${diffHours}h`;
+        } else {
+          releaseEligibleAtRemaining = 'faltam menos de 1h';
+        }
+      }
+    }
+  }
+
   let transitStepTitle = 'Em Trânsito';
   let transitStepDesc = carrierName || 'Operação logística';
   if (logisticsStatusUpper === 'SHIPPED') {
@@ -242,6 +414,111 @@ export const OrderConfirmationView: React.FC = () => {
         paymentData={pixData}
         onPaymentSuccess={handlePixSuccess}
       />
+
+      {/* Modal obrigatório de confirmação de recebimento (antes de liberar) */}
+      {isConfirmModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl animate-scaleUp">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2.5 bg-emerald-50 rounded-xl text-emerald-600 shrink-0">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <h3 className="text-base font-bold text-gray-900">Confirmar recebimento</h3>
+            </div>
+            <p className="text-sm text-gray-700 leading-relaxed mb-6">
+              Confirme apenas se você recebeu o pedido corretamente.
+              Ao confirmar, o pagamento poderá ser liberado ao vendedor.
+            </p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setIsConfirmModalOpen(false)}
+                disabled={isConfirming}
+                className="flex-1 py-2.5 rounded-xl border border-gray-200 text-xs font-bold text-gray-600 hover:bg-gray-50 transition cursor-pointer disabled:opacity-50"
+              >
+                Voltar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelivery}
+                disabled={isConfirming}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50"
+              >
+                {isConfirming ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Sim, recebi o pedido'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal "Tenho um problema" — abre disputa REAL (POST /buyer/disputes) */}
+      {isDisputeModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl animate-scaleUp">
+            <div className="flex items-center justify-between mb-4 border-b border-gray-100 pb-3">
+              <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                <AlertCircle className="w-5 h-5 text-red-600" /> Informar um problema
+              </h3>
+              <button
+                type="button"
+                onClick={() => setIsDisputeModalOpen(false)}
+                disabled={isSubmittingDispute}
+                className="text-gray-400 hover:text-gray-600 text-xs font-bold cursor-pointer disabled:opacity-50"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">Motivo do problema</label>
+                <select
+                  value={disputeReason}
+                  onChange={(e) => setDisputeReason(e.target.value)}
+                  disabled={isSubmittingDispute}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold text-gray-800 focus:ring-2 focus:ring-red-500 focus:outline-hidden"
+                >
+                  <option value="Produto divergente ou com defeito de fábrica">Produto divergente ou com defeito de fábrica</option>
+                  <option value="Pedido não entregue corretamente">Pedido não entregue corretamente</option>
+                  <option value="Embalagem violada ou item faltante">Embalagem violada ou item faltante</option>
+                  <option value="Outros problemas com o vendedor">Outros problemas com o vendedor</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">Descrição do problema</label>
+                <textarea
+                  value={disputeDescription}
+                  onChange={(e) => setDisputeDescription(e.target.value)}
+                  rows={4}
+                  disabled={isSubmittingDispute}
+                  placeholder="Explique detalhadamente o ocorrido com o produto ou entrega..."
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-xs text-gray-800 focus:ring-2 focus:ring-red-500 focus:outline-hidden resize-none"
+                />
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsDisputeModalOpen(false)}
+                  disabled={isSubmittingDispute}
+                  className="flex-1 py-2.5 rounded-xl border border-gray-200 text-xs font-bold text-gray-600 hover:bg-gray-50 transition cursor-pointer disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreateDispute}
+                  disabled={isSubmittingDispute}
+                  className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50"
+                >
+                  {isSubmittingDispute ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Enviar'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Banner Component (State Dependent) */}
       {isCancelled ? (
@@ -373,23 +650,67 @@ export const OrderConfirmationView: React.FC = () => {
             </div>
           )}
 
-          {/* Buyer Confirm Receipt Banner (Requirement 5) */}
-          {isDeliveredDone && activeOrder.escrowStatus !== 'released' && (
+          {/* Proteção pós-entrega (Estados A-E) — TUDO vem do backend real. */}
+          {postDeliveryState === 'HELD_PROTECTED' && (
             <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 mt-4">
               <div className="space-y-1 text-center sm:text-left">
-                <p className="font-extrabold text-emerald-950 text-sm">Seu pedido já foi entregue!</p>
+                <p className="font-extrabold text-emerald-950 text-sm flex items-center gap-1.5 justify-center sm:justify-start">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" /> Pedido entregue
+                </p>
                 <p className="text-xs text-emerald-800">
-                  Confirme o recebimento para que o valor retido em garantia Escrow seja liberado ao vendedor.
+                  {releaseEligibleAtLabel
+                    ? <>Seu pagamento continua protegido até <strong>{releaseEligibleAtLabel}</strong>{releaseEligibleAtRemaining ? ` (${releaseEligibleAtRemaining})` : ''}.</>
+                    : 'Seu pagamento continua protegido.'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setIsDisputeModalOpen(true)}
+                  className="bg-white hover:bg-red-50 text-red-700 border border-red-200 font-bold px-4 py-2.5 rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MessageSquareWarning className="w-4 h-4" /> Tenho um problema
+                </button>
+                <button
+                  onClick={() => setIsConfirmModalOpen(true)}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-5 py-2.5 rounded-xl text-xs shadow-md transition flex items-center gap-2 cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4" /> Confirmar recebimento
+                </button>
+              </div>
+            </div>
+          )}
+
+          {postDeliveryState === 'DISPUTED' && (
+            <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 mt-4">
+              <div className="space-y-1 text-center sm:text-left">
+                <p className="font-extrabold text-amber-950 text-sm flex items-center gap-1.5 justify-center sm:justify-start">
+                  <Lock className="w-4 h-4 text-amber-600" /> Pagamento protegido devido a uma disputa
+                </p>
+                <p className="text-xs text-amber-800">
+                  {activeDispute?.reason ? <>Motivo: {activeDispute.reason}. </> : null}
+                  Enquanto a disputa estiver em análise, o pagamento não pode ser liberado.
                 </p>
               </div>
               <button
-                onClick={handleConfirmDelivery}
-                disabled={isConfirming}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-6 py-2.5 rounded-xl text-xs shadow-md transition flex items-center gap-2 cursor-pointer disabled:opacity-50 shrink-0"
+                onClick={() => navigate('/disputes')}
+                className="bg-white hover:bg-amber-100 text-amber-800 border border-amber-300 font-bold px-4 py-2.5 rounded-xl text-xs transition flex items-center gap-1.5 shrink-0 cursor-pointer"
               >
-                <CheckCircle2 className="w-4 h-4" />
-                {isConfirming ? 'Confirmando...' : 'Confirmar Recebimento'}
+                <AlertCircle className="w-4 h-4" /> Acompanhar disputa
               </button>
+            </div>
+          )}
+
+          {postDeliveryState === 'RELEASED' && (
+            <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl flex items-center gap-3 mt-4">
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+              <p className="text-xs font-bold text-emerald-900">Recebimento confirmado — pagamento liberado ao vendedor.</p>
+            </div>
+          )}
+
+          {postDeliveryState === 'REFUNDED' && (
+            <div className="bg-gray-100 border border-gray-200 p-4 rounded-2xl flex items-center gap-3 mt-4">
+              <Undo2 className="w-5 h-5 text-gray-600 shrink-0" />
+              <p className="text-xs font-bold text-gray-800">Pagamento reembolsado.</p>
             </div>
           )}
         </div>
