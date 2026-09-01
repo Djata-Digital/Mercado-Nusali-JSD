@@ -23,6 +23,7 @@ import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
+import { internalJobsRouter } from './modules/jobs/internalJobsRoutes.js';
 import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
 import { storesPublicRouter } from './modules/stores/storesRoutes.js';
 
@@ -35,6 +36,10 @@ apiRouter.use('/orders', orderRouter);
 apiRouter.use('/payments', paymentRouter);
 apiRouter.use('/wallet', walletRouter);
 apiRouter.use('/webhooks', asaasWebhookRouter);
+// Fase 1 do AUTO-RELEASE de escrow: endpoint interno protegido por segredo de
+// ambiente (INTERNAL_JOBS_SECRET), nunca por JWT — mesmo padrão de /webhooks.
+// Não é chamado por nenhum scheduler nesta fase.
+apiRouter.use('/internal/jobs', internalJobsRouter);
 apiRouter.use('/admin', adminRouter);
 apiRouter.use('/seller', sellerRouter);
 // Etiqueta única do shipment — compartilhada entre seller e logística/HUB/admin
