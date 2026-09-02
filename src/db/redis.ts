@@ -65,6 +65,23 @@ export function getRedisClient(): Redis | null {
       connectTimeout: 10_000,
 
       /**
+       * Correção (Fase 3 do AUTO-RELEASE — investigação de timeout): sem
+       * commandTimeout, um comando enviado numa conexão que o cliente ainda
+       * reporta como 'ready' mas cujo socket já está morto do lado do
+       * servidor (comum em quedas silenciosas de conexões ociosas do
+       * Upstash) pode ficar aguardando resposta indefinidamente — nenhum dos
+       * outros timeouts acima (connectTimeout é só para abrir conexão;
+       * maxRetriesPerRequest só se aplica enquanto NÃO conectado) cobre esse
+       * caso. Isso arrastava qualquer requisição que passasse por
+       * createRateLimiter (rateLimiter.ts) — inclusive endpoints que não têm
+       * nada a ver com cache. commandTimeout limita cada comando individual;
+       * ao estourar, ioredis rejeita a promise (o catch já existente em
+       * createRateLimiter cai para o limitador em memória) e força a
+       * reconexão do socket morto.
+       */
+      commandTimeout: 5_000,
+
+      /**
        * Upstash uses TLS when REDIS_URL starts with rediss://.
        */
       ...(isTls
