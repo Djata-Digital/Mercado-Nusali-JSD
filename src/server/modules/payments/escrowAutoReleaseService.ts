@@ -159,8 +159,8 @@ async function processOneCandidate(db: any, orderId: string): Promise<AutoReleas
  * entre duas execuções, o comportamento reflete o estado ATUAL, nunca um
  * valor obtido em execução anterior.
  */
-export async function runEscrowAutoReleaseOnce(options?: { batchSize?: number }): Promise<AutoReleaseRunResult> {
-  const db = getDb();
+export async function runEscrowAutoReleaseOnce(options?: { batchSize?: number; db?: any }): Promise<AutoReleaseRunResult> {
+  const db = options?.db ?? getDb();
   if (!db) throw new Error('Banco de dados indisponível.');
 
   logger.info({}, 'ESCROW_AUTO_RELEASE_JOB_STARTED');
