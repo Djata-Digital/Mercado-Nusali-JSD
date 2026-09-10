@@ -133,6 +133,16 @@ export const SellerService = {
     return SellerApi.getCustomers();
   },
 
+  // Disputas reais do vendedor (correção da auditoria — antes era mock).
+  async getDisputes(): Promise<ApiResponse<any[]>> {
+    return SellerApi.getDisputes();
+  },
+
+  // Fase M1-C — resposta REAL do vendedor numa disputa.
+  async sendDisputeMessage(disputeId: string, message: string): Promise<ApiResponse<any>> {
+    return SellerApi.sendDisputeMessage(disputeId, message);
+  },
+
   // Financials & Wallet
   async getWallet(currency?: string): Promise<ApiResponse<any>> {
     return SellerApi.getWallet(currency);

@@ -43,16 +43,28 @@
  *   em nenhum lugar do código real — releaseEscrowForOrder() libera
  *   diretamente held -> released na confirmação de entrega, sem estado
  *   intermediário. Não inventamos esse estado aqui.)
- *   -> heldEscrow = soma de escrow 'held' (dinheiro comprador já pagou,
- *      ainda retido em garantia).
- *   -> pendingRelease = subconjunto do held cujo pedido já está
- *      orders.status === 'delivered' (entrega já confirmada, aguardando o
- *      processamento de liberação) — não é um saldo adicional, é um
- *      destaque informativo de QUANTO do held já deveria estar prestes a
- *      liberar. Nunca somado ao heldEscrow como dinheiro extra.
+ *   -> heldEscrow ("Retido em Escrow") = soma do AMOUNT (valor bruto
+ *      efetivamente em custódia) de todo escrow 'held' — dinheiro comprador
+ *      já pagou, ainda retido em garantia, independente de estar ou não no
+ *      caminho de liberação.
+ *   -> pendingRelease ("Aguardando Liberação") = CORREÇÃO (auditoria "painel
+ *      do vendedor" — sempre mostrava R$0,00): a condição antiga
+ *      (orders.status === 'delivered') é uma impossibilidade estrutural —
+ *      orders.status só vira 'delivered' NA MESMA transação em que
+ *      releaseEscrowForOrder() já também vira escrow.status para 'released'
+ *      (ver paymentService.ts) — held+delivered nunca coexistem no banco.
+ *      Sinal real usado agora: escrow.status='held' E releaseEligibleAt IS
+ *      NOT NULL (setado quando o shipment chega a DELIVERED, independente do
+ *      release em si — ver shipmentService.ts/resolveEscrowHoldingHours) E
+ *      SEM disputa ativa (status IN ('open','in_mediation')) para o pedido —
+ *      a mesma proteção que releaseEscrowForOrder já aplica antes de liberar
+ *      de verdade, nunca duplicada como regra nova. O valor somado é
+ *      orders.sellerNetAmount (o que realmente pertence ao vendedor), NUNCA
+ *      o amount bruto do escrow — é um destaque informativo, nunca somado ao
+ *      heldEscrow como dinheiro extra.
  */
 import { getDb } from '../../../db/index.js';
-import { orderItems, orders, escrowAccounts, wallets, walletTransactions, shipments, users } from '../../../db/schema.js';
+import { orderItems, orders, escrowAccounts, wallets, walletTransactions, shipments, users, disputes } from '../../../db/schema.js';
 import { eq, and, desc, inArray, ne } from 'drizzle-orm';
 import { SOLD_ORDER_STATUSES_EXCLUDED } from '../catalog/catalogService.js';
 import { logger } from '../../infra/logger.js';
@@ -149,8 +161,20 @@ export function sellerAvailableAction(fulfillmentMode: string, paymentStatus: st
   return null;
 }
 
-/** Mapeamento operacional único — reusado por /seller/orders e pelos contadores do Overview. */
-export function mapOperationalStatus(orderStatus: string, paymentStatus: string, itemStatus: string): { status: string; rawStatus: string } {
+/**
+ * Mapeamento operacional único — reusado por /seller/orders e pelos
+ * contadores do Overview.
+ *
+ * Correção (auditoria "painel do vendedor" — "Entregues" sempre 0, "Enviados"
+ * nunca decrescia): order_items.status NUNCA alcança 'delivered' — o domínio
+ * real da coluna (ver schema.ts) é só pending_preparation/preparing/
+ * ready_to_ship/shipped/cancelled. A fonte real de entrega é
+ * shipments.status='DELIVERED' (mesmo sinal que deriveOperationalLabel, logo
+ * acima neste arquivo, já usa corretamente para /seller/orders). shipmentStatus
+ * é opcional para não quebrar nenhum chamador que ainda não o repassa —
+ * omitido, o comportamento é idêntico ao de antes desta correção.
+ */
+export function mapOperationalStatus(orderStatus: string, paymentStatus: string, itemStatus: string, shipmentStatus?: string | null): { status: string; rawStatus: string } {
   const statusMap: Record<string, string> = {
     pending_payment: 'pending_payment',
     paid: 'preparing',
@@ -163,7 +187,13 @@ export function mapOperationalStatus(orderStatus: string, paymentStatus: string,
   };
   const currentStatus = itemStatus || orderStatus;
   const isPendingPayment = orderStatus === 'pending_payment' || paymentStatus === 'pending';
-  const mappedStatus = isPendingPayment ? 'pending_payment' : (statusMap[currentStatus] || currentStatus);
+  if (isPendingPayment) {
+    return { status: 'pending_payment', rawStatus: currentStatus };
+  }
+  if (shipmentStatus === 'DELIVERED') {
+    return { status: 'delivered', rawStatus: currentStatus };
+  }
+  const mappedStatus = statusMap[currentStatus] || currentStatus;
   return { status: mappedStatus, rawStatus: currentStatus };
 }
 
@@ -276,25 +306,39 @@ export async function computeSellerWalletSnapshot(db: any, seller: { id: string;
     w = createdW[0];
   }
 
-  // heldEscrow: TODO escrow retido nesta moeda, independente do status de entrega.
+  // heldEscrow ("Retido em Escrow"): TODO escrow retido nesta moeda,
+  // independente do status de entrega — valor BRUTO em custódia.
   const heldEscrowRows = await db
-    .select({ amount: escrowAccounts.amount, orderId: escrowAccounts.orderId })
+    .select({ amount: escrowAccounts.amount, orderId: escrowAccounts.orderId, releaseEligibleAt: escrowAccounts.releaseEligibleAt })
     .from(escrowAccounts)
     .where(and(eq(escrowAccounts.sellerId, seller.id), eq(escrowAccounts.status, 'held'), eq(escrowAccounts.currency, cur)));
   const retainedSum = heldEscrowRows.reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0);
 
-  // pendingRelease: subconjunto do held cujo PEDIDO já foi entregue (destaque
-  // informativo — nunca somado por cima do heldEscrow, ver documentação no
-  // topo do arquivo).
+  // pendingRelease ("Aguardando Liberação") — CORREÇÃO (auditoria "painel do
+  // vendedor"): sinal real é releaseEligibleAt IS NOT NULL (setado na entrega,
+  // nunca no release em si — ver topo do arquivo), excluindo pedidos com
+  // disputa ativa (mesma proteção de releaseEscrowForOrder, nunca duplicada
+  // como regra nova). Soma orders.sellerNetAmount — o valor que pertence ao
+  // vendedor — nunca o amount bruto do escrow. sellerNetAmount em si não é
+  // recalculado nem alterado aqui, só lido.
   let pendingRelease = 0;
-  if (heldEscrowRows.length > 0) {
-    const orderIds = heldEscrowRows.map((r: any) => r.orderId);
-    const deliveredOrders = await db.select({ id: orders.id }).from(orders)
-      .where(and(inArray(orders.id, orderIds), eq(orders.status, 'delivered')));
-    const deliveredIdSet = new Set(deliveredOrders.map((o: any) => o.id));
-    pendingRelease = heldEscrowRows
-      .filter((r: any) => deliveredIdSet.has(r.orderId))
-      .reduce((sum: number, r: any) => sum + Number(r.amount || 0), 0);
+  const eligibleOrderIds = heldEscrowRows
+    .filter((r: any) => r.releaseEligibleAt !== null && r.releaseEligibleAt !== undefined)
+    .map((r: any) => r.orderId);
+  if (eligibleOrderIds.length > 0) {
+    const [sellerNetRows, activeDisputeRows] = await Promise.all([
+      db.select({ id: orders.id, sellerNetAmount: orders.sellerNetAmount }).from(orders).where(inArray(orders.id, eligibleOrderIds)),
+      // Correção: em pedido multi-vendedor, uma disputa contra OUTRO seller
+      // (disputes.sellerId diferente) nunca pode bloquear o pendingRelease
+      // deste seller — o filtro por sellerId é obrigatório aqui, não só por
+      // orderId.
+      db.select({ orderId: disputes.orderId }).from(disputes)
+        .where(and(eq(disputes.sellerId, seller.id), inArray(disputes.orderId, eligibleOrderIds), inArray(disputes.status, ['open', 'in_mediation']))),
+    ]);
+    const activeDisputeOrderIds = new Set(activeDisputeRows.map((r: any) => r.orderId));
+    pendingRelease = sellerNetRows
+      .filter((o: any) => !activeDisputeOrderIds.has(o.id))
+      .reduce((sum: number, o: any) => sum + Number(o.sellerNetAmount ?? 0), 0);
   }
 
   const txs = w
@@ -420,12 +464,27 @@ export async function computeSellerOverviewMetrics(
     );
   }
 
-  const pendingOrders = distinctOrders.filter((o) => mapOperationalStatus(o.orderStatus, o.paymentStatus, o.itemStatus).status === 'pending_payment').length;
-  const preparingOrders = distinctOrders.filter((o) => mapOperationalStatus(o.orderStatus, o.paymentStatus, o.itemStatus).status === 'preparing').length;
-  const shippedOrders = distinctOrders.filter((o) => mapOperationalStatus(o.orderStatus, o.paymentStatus, o.itemStatus).status === 'shipped').length;
-  const deliveredOrders = distinctOrders.filter((o) => mapOperationalStatus(o.orderStatus, o.paymentStatus, o.itemStatus).status === 'delivered').length;
+  // Correção (auditoria "painel do vendedor" — "Entregues" sempre 0,
+  // "Enviados" nunca decrescia): repassa o shipmentStatus real de cada
+  // pedido (já vem de getSellerOrderRows/shipments.status) — ver
+  // mapOperationalStatus acima para a causa raiz completa.
+  const pendingOrders = distinctOrders.filter((o) => mapOperationalStatus(o.orderStatus, o.paymentStatus, o.itemStatus, o.shipmentStatus).status === 'pending_payment').length;
+  const preparingOrders = distinctOrders.filter((o) => mapOperationalStatus(o.orderStatus, o.paymentStatus, o.itemStatus, o.shipmentStatus).status === 'preparing').length;
+  const shippedOrders = distinctOrders.filter((o) => mapOperationalStatus(o.orderStatus, o.paymentStatus, o.itemStatus, o.shipmentStatus).status === 'shipped').length;
+  const deliveredOrders = distinctOrders.filter((o) => mapOperationalStatus(o.orderStatus, o.paymentStatus, o.itemStatus, o.shipmentStatus).status === 'delivered').length;
   const returnOrders = distinctOrders.filter((o) => o.orderStatus === 'refund_requested' || o.orderStatus === 'refunded').length;
-  const disputeOrders = distinctOrders.filter((o) => o.orderStatus === 'disputed').length;
+
+  // Correção (auditoria "painel do vendedor" — "Disputas" sempre 0):
+  // createBuyerDispute nunca escreve orders.status='disputed' (auditado) — a
+  // fonte real é a tabela disputes. Conta pedidos DISTINTOS deste vendedor
+  // com disputa ativa (open/in_mediation), nunca duplicando se por algum
+  // motivo existir mais de um registro de disputa para o mesmo pedido.
+  const distinctOrderIdsForDisputes = [...new Set(distinctOrders.map((o) => o.orderId))];
+  const activeDisputeRowsForCounter = distinctOrderIdsForDisputes.length > 0
+    ? await db.select({ orderId: disputes.orderId }).from(disputes)
+        .where(and(eq(disputes.sellerId, seller.id), inArray(disputes.orderId, distinctOrderIdsForDisputes), inArray(disputes.status, ['open', 'in_mediation'])))
+    : [];
+  const disputeOrders = new Set(activeDisputeRowsForCounter.map((r: any) => r.orderId)).size;
 
   const wallet = db ? await computeSellerWalletSnapshot(db, seller, cur) : { available: 0, retained: 0, pendingRelease: 0 };
 

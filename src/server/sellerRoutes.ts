@@ -61,12 +61,13 @@ import {
   supportTicketMessages,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
-import { eq, desc, and, or, isNull, inArray } from 'drizzle-orm';
+import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
 import { requireAuth, AuthRequest } from './modules/auth/authMiddleware.js';
 import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { storageService } from './infra/storage.js';
 import { requestSellerPayout, PayoutValidationError } from './modules/wallet/payoutService.js';
+import { postSellerDisputeMessage, DisputeMessageValidationError } from './modules/disputes/disputeMessageService.js';
 import { computeLiveStockAndSales } from './modules/catalog/catalogService.js';
 import {
   getSellerOrderRows,
@@ -462,6 +463,134 @@ sellerRouter.get('/customers', async (req: AuthRequest, res: Response) => {
     return res.json({ success: true, data: customers });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar clientes.' });
+  }
+});
+
+// Correção (auditoria "painel do vendedor" — disputas nunca apareciam): não
+// existia NENHUM endpoint real de disputas para o vendedor —
+// SellerDisputesManager.tsx era 100% mock (useState([]) nunca preenchido).
+// Mesmo padrão de segurança já usado por GET /admin/disputes: sellerId
+// SEMPRE vem de resolveSeller(req) (autenticação), NUNCA de query/body — um
+// vendedor nunca consegue ver disputa de outro.
+sellerRouter.get('/disputes', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const seller = await resolveSeller(req);
+    if (!db || !seller) return res.json({ success: true, data: [] });
+
+    const disputeRows = await db
+      .select({
+        dispute: disputes,
+        orderNumber: orders.orderNumber,
+        buyerFullName: users.fullName,
+      })
+      .from(disputes)
+      .innerJoin(orders, eq(disputes.orderId, orders.id))
+      .innerJoin(users, eq(disputes.buyerId, users.id))
+      .where(eq(disputes.sellerId, seller.id))
+      .orderBy(desc(disputes.createdAt));
+
+    if (disputeRows.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const disputeIds = disputeRows.map((r: any) => r.dispute.id);
+    const orderIds = [...new Set(disputeRows.map((r: any) => r.dispute.orderId))];
+
+    // Item representativo do pedido (só deste vendedor — um pedido pode ter
+    // itens de outros vendedores, nunca misturamos) para mostrar
+    // produto/imagem na listagem, sem inventar um vínculo direto
+    // disputa->item que não existe no schema.
+    const [itemRows, messageRows] = await Promise.all([
+      db
+        .select({ orderId: orderItems.orderId, productTitle: orderItems.productTitle, productImage: orderItems.productImage })
+        .from(orderItems)
+        .where(and(inArray(orderItems.orderId, orderIds), eq(orderItems.sellerId, seller.id))),
+      db
+        .select()
+        .from(disputeMessages)
+        .where(inArray(disputeMessages.disputeId, disputeIds))
+        // Fase M1-C — desempate por id além de createdAt: duas mensagens
+        // inseridas no mesmo milissegundo (createdAt igual) precisam de uma
+        // ordem determinística, nunca dependente da ordem física de disco.
+        .orderBy(asc(disputeMessages.createdAt), asc(disputeMessages.id)),
+    ]);
+
+    const firstItemByOrder = new Map<string, any>();
+    for (const item of itemRows as any[]) {
+      if (!firstItemByOrder.has(item.orderId)) firstItemByOrder.set(item.orderId, item);
+    }
+    const messagesByDispute = new Map<string, any[]>();
+    for (const msg of messageRows as any[]) {
+      const list = messagesByDispute.get(msg.disputeId) || [];
+      list.push(msg);
+      messagesByDispute.set(msg.disputeId, list);
+    }
+
+    const data = disputeRows.map((r: any) => {
+      const item = firstItemByOrder.get(r.dispute.orderId);
+      return {
+        id: r.dispute.id,
+        orderId: r.dispute.orderId,
+        orderNumber: r.orderNumber,
+        buyerName: r.buyerFullName,
+        productTitle: item?.productTitle || null,
+        productImage: item?.productImage || null,
+        reason: r.dispute.reason,
+        description: r.dispute.description,
+        status: r.dispute.status, // valores reais: open, in_mediation, resolved_buyer, resolved_seller, cancelled
+        claimAmount: Number(r.dispute.claimAmount),
+        currency: r.dispute.currency,
+        resolution: r.dispute.resolution,
+        createdAt: r.dispute.createdAt,
+        updatedAt: r.dispute.updatedAt,
+        // Somente leitura nesta etapa — nenhuma ação de resposta/acordo foi
+        // conectada (ver relatório da correção).
+        messages: (messagesByDispute.get(r.dispute.id) || []).map((m: any) => ({
+          id: m.id,
+          senderRole: m.senderRole,
+          message: m.message,
+          createdAt: m.createdAt,
+        })),
+      };
+    });
+
+    return res.json({ success: true, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar disputas.' });
+  }
+});
+
+// Fase M1-C — primeiro endpoint REAL de resposta do vendedor numa disputa
+// (antes só existia leitura; SellerDisputesManager.tsx informava "ainda não
+// disponível"). Mesmo padrão de auth/scoping do GET acima: seller SEMPRE
+// vem de resolveSeller(req) (sessão), nunca de query/body. Identidade da
+// mensagem (senderId/senderRole) sempre derivada da sessão —
+// disputeMessageService nem aceita esses campos vindos de fora. Nenhuma
+// lógica financeira: só INSERT em dispute_messages.
+sellerRouter.post('/disputes/:id/messages', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const seller = await resolveSeller(req);
+    if (!db || !seller) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+
+    const inserted = await postSellerDisputeMessage(db, {
+      disputeId: req.params.id,
+      sellerId: seller.id,
+      sellerUserId: seller.userId,
+      rawMessage: req.body?.message,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Mensagem enviada.',
+      data: { id: inserted.id, senderRole: inserted.senderRole, message: inserted.message, createdAt: inserted.createdAt },
+    });
+  } catch (err: any) {
+    if (err instanceof DisputeMessageValidationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao enviar mensagem.' });
   }
 });
 
@@ -1844,7 +1973,7 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
 
     const mapped = rows.map((item) => {
       const addr = (item.shippingAddressJson as any) || {};
-      const { status: mappedStatus, rawStatus: currentStatus } = mapOperationalStatus(item.orderStatus, item.paymentStatus, item.itemStatus);
+      const { status: mappedStatus, rawStatus: currentStatus } = mapOperationalStatus(item.orderStatus, item.paymentStatus, item.itemStatus, item.shipmentStatus);
 
       return {
         id: item.orderItemId,

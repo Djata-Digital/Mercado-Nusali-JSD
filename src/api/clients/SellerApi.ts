@@ -122,6 +122,20 @@ export class SellerApi {
     return apiClient.get('/seller/customers');
   }
 
+  // Correção (auditoria "painel do vendedor" — disputas nunca apareciam):
+  // GET /seller/disputes é real e escopado ao vendedor autenticado (nunca
+  // aceita sellerId do cliente).
+  static async getDisputes(): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/disputes');
+  }
+
+  // Fase M1-C — primeira resposta REAL do vendedor numa disputa (antes só
+  // era possível ler). Ownership provada no backend (disputeMessageService),
+  // nunca aqui — este cliente só encaminha a mensagem.
+  static async sendDisputeMessage(disputeId: string, message: string): Promise<ApiResponse<any>> {
+    return apiClient.post(`/seller/disputes/${disputeId}/messages`, { message });
+  }
+
   static async updateOrderStatus(
     id: string,
     data: { status?: string; trackingCode?: string; shippingCarrier?: string }

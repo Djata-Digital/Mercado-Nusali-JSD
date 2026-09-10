@@ -25,6 +25,7 @@ import {
   returns,
   disputes,
   disputeMessages,
+  escrowAccounts,
   conversations,
   messages,
   supportTickets,
@@ -42,8 +43,13 @@ import {
   reviewImages,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
-import { eq, desc, and, or, isNull } from 'drizzle-orm';
+import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
 import { createBuyerDispute, RefundValidationError } from './modules/payments/refundService.js';
+import { postBuyerDisputeMessage, DisputeMessageValidationError } from './modules/disputes/disputeMessageService.js';
+// Fase M1-D1 — MESMA whitelist já usada por /admin/overview (única fonte de
+// verdade de "disputa ativa" — nunca uma segunda lista duplicada e
+// potencialmente divergente).
+import { ACTIVE_DISPUTE_STATUSES } from './adminRoutes.js';
 import { updateBuyerTaxId, BuyerProfileValidationError } from './modules/buyer/buyerProfileService.js';
 import { isProductAvailableForCountry, eligibilityReason } from './modules/catalog/productEligibilityService.js';
 
@@ -353,9 +359,21 @@ buyerRouter.get('/overview', requireAuth, async (req: AuthRequest, res: Response
   const claimedCouponsCount = 0;
 
   let unreadNotificationsCount = 0;
+  // Fase M1-D1 — achado M1-C: buyerDataStore.disputes nunca era preenchido
+  // (mock in-memory), então openDisputesCount ficava sempre 0 independente
+  // de quantas disputas reais o buyer tivesse. Substituído por contagem REAL
+  // no Postgres, escopada ao próprio buyer, com a MESMA definição
+  // fail-closed de "ativa" já usada em /admin/overview.
+  let openDisputesCount = 0;
   if (db) {
     const unread = await db.select().from(notifications).where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
     unreadNotificationsCount = unread.length;
+
+    const activeDisputeRows = await db
+      .select()
+      .from(disputes)
+      .where(and(eq(disputes.buyerId, userId), inArray(disputes.status, ACTIVE_DISPUTE_STATUSES)));
+    openDisputesCount = activeDisputeRows.length;
   }
 
   const realProfile = await loadRealBuyerProfile(userId);
@@ -376,7 +394,7 @@ buyerRouter.get('/overview', requireAuth, async (req: AuthRequest, res: Response
         favoritesCount: buyerDataStore.favorites.length,
         claimedCouponsCount,
         totalCouponsCount: buyerDataStore.coupons.length,
-        openDisputesCount: buyerDataStore.disputes.filter(d => d.status === 'opened' || d.status === 'in_mediation').length,
+        openDisputesCount,
         activeReturnsCount: buyerDataStore.returns.filter(r => r.status === 'under_review' || r.status === 'in_transit').length,
         unreadNotificationsCount,
       },
@@ -1309,6 +1327,28 @@ buyerRouter.post('/orders', requireAuth, async (req: AuthRequest, res: Response)
   }
 });
 
+// Fase M1-D1 — leitura READ-ONLY buyer-scoped de um purchase_group, para
+// reload/recarregar a tela de confirmação multi-seller
+// (/purchase-groups/:id/confirmation, ainda não implementada no frontend —
+// M1-D2). Mesmo padrão de não-revelação já usado em disputeMessageService
+// (Fase M1-C): group inexistente OU de outro buyer -> EXATAMENTE a mesma
+// resposta (404 PURCHASE_GROUP_NOT_FOUND), nunca revela a um usuário não
+// autorizado que o group existe mas é de outra pessoa.
+buyerRouter.get('/purchase-groups/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+
+    const group = await OrderService.getPurchaseGroupById(req.params.id);
+    if (!group || group.buyerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: { code: 'PURCHASE_GROUP_NOT_FOUND', message: 'Compra não encontrada.' } });
+    }
+
+    return res.json({ success: true, data: group });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: { code: 'PURCHASE_GROUP_FETCH_FAILED', message: err?.message || 'Erro ao carregar a compra.' } });
+  }
+});
+
 buyerRouter.post('/orders/:id/confirm-delivery', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { shipmentId } = req.body ?? {};
@@ -1723,6 +1763,59 @@ buyerRouter.post('/returns', async (req: AuthRequest, res: Response) => {
 // 9. DISPUTES & ESCROW MEDIATION
 // ==========================================
 
+// Fase M1-A (B1) — mesma whitelist defensiva já usada em
+// refundService.ts/paymentService.ts (status IN ('held','eligible')) para
+// "dinheiro ainda sob custódia" — 'eligible' nunca é escrito hoje, mas é um
+// valor documentado no schema e outros pontos do código já o tratam como
+// equivalente a 'held' por segurança; reaproveitar a MESMA whitelist evita
+// duas definições divergentes de "em custódia" no mesmo sistema. Exportada
+// (não só local à rota) para o mesmo padrão de testabilidade já usado por
+// BLOCKING_CHARGEBACK_LOCAL_STATUSES em chargebackService.ts.
+export const DISPUTE_IN_CUSTODY_ESCROW_STATUSES = ['held', 'eligible'];
+
+/**
+ * Fase M1-A (B1) — enriquece cada disputa com o dinheiro REALMENTE em
+ * custódia agora (escrow_accounts.amount), nunca claimAmount (valor
+ * alegado pelo comprador ao abrir a disputa — pode divergir do valor real
+ * do pedido). Uma disputa pode legitimamente existir com o escrow já
+ * 'released' (ver createBuyerDispute/resolveDispute — resolver debita a
+ * wallet do vendedor proporcionalmente nesse caso) — aqui reportamos
+ * honestamente `escrowAmount: null` quando não há mais dinheiro protegido,
+ * em vez de repetir o valor antigo do escrow como se ainda estivesse
+ * retido. Batch único (nunca N+1) via orderId. Extraída como função
+ * exportada só para ser testável diretamente (mesmo padrão de
+ * `resolveFundingPaymentForOrder`/`assertNoBlockingChargebackForPayment`) —
+ * nenhuma mudança de comportamento em relação à rota original.
+ */
+export async function enrichDisputesWithEscrowAmount(db: any, disputeRows: any[]) {
+  const orderIds = Array.from(new Set(disputeRows.map((d: any) => d.orderId)));
+  const escrowRows = orderIds.length > 0
+    ? await db.select({
+        orderId: escrowAccounts.orderId,
+        amount: escrowAccounts.amount,
+        currency: escrowAccounts.currency,
+        status: escrowAccounts.status,
+      }).from(escrowAccounts).where(inArray(escrowAccounts.orderId, orderIds))
+    : [];
+  const escrowByOrderId = new Map<string, any>(escrowRows.map((e: any) => [e.orderId, e]));
+
+  return disputeRows.map((d: any) => {
+    const esc = escrowByOrderId.get(d.orderId);
+    const inCustody = !!esc && DISPUTE_IN_CUSTODY_ESCROW_STATUSES.includes(esc.status);
+    return {
+      ...d,
+      claimAmount: Number(d.claimAmount),
+      // escrowAmount: null é uma resposta HONESTA (nunca fabricada) para
+      // "sem escrow correspondente" OU "escrow já não representa custódia"
+      // (released/refunded) — nunca reaproveita claimAmount nem o valor
+      // antigo do escrow como se ainda estivesse retido.
+      escrowAmount: inCustody ? Number(esc.amount) : null,
+      escrowCurrency: esc ? esc.currency : null,
+      escrowStatus: esc ? esc.status : null,
+    };
+  });
+}
+
 buyerRouter.get('/disputes', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -1730,13 +1823,30 @@ buyerRouter.get('/disputes', requireAuth, async (req: AuthRequest, res: Response
     const userId = req.user.id;
     if (db) {
       const disputeRows = await db.select().from(disputes).where(eq(disputes.buyerId, userId)).orderBy(desc(disputes.createdAt));
-      return res.json({
-        success: true,
-        data: disputeRows.map(d => ({
-          ...d,
-          claimAmount: Number(d.claimAmount),
-        })),
-      });
+      const enriched = await enrichDisputesWithEscrowAmount(db, disputeRows);
+
+      // Fase M1-C — leitura simétrica com GET /seller/disputes: o buyer
+      // precisa ver as MESMAS mensagens reais (buyer + seller) que o
+      // vendedor já vê, na mesma ordem determinística. Antes desta fase,
+      // este endpoint nunca retornava `messages` — o frontend só enxergava
+      // o mock local (buyerDataStore), nunca uma mensagem do vendedor.
+      const disputeIds = enriched.map((d: any) => d.id);
+      const messageRows = disputeIds.length > 0
+        ? await db
+            .select()
+            .from(disputeMessages)
+            .where(inArray(disputeMessages.disputeId, disputeIds))
+            .orderBy(asc(disputeMessages.createdAt), asc(disputeMessages.id))
+        : [];
+      const messagesByDispute = new Map<string, any[]>();
+      for (const msg of messageRows as any[]) {
+        const list = messagesByDispute.get(msg.disputeId) || [];
+        list.push({ id: msg.id, senderRole: msg.senderRole, message: msg.message, createdAt: msg.createdAt });
+        messagesByDispute.set(msg.disputeId, list);
+      }
+      const withMessages = enriched.map((d: any) => ({ ...d, messages: messagesByDispute.get(d.id) || [] }));
+
+      return res.json({ success: true, data: withMessages });
     }
     return res.json({ success: true, data: [] });
   } catch (err: any) {
@@ -1779,34 +1889,36 @@ buyerRouter.post('/disputes', requireAuth, async (req: AuthRequest, res: Respons
   }
 });
 
-buyerRouter.post('/disputes/:id/messages', (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { text } = req.body;
+// Fase M1-C — substitui o mock in-memory (buyerDataStore.disputes, nunca
+// persistia nada de verdade e nunca provava posse) por persistência REAL em
+// dispute_messages. Identidade (senderId/senderRole) SEMPRE derivada da
+// sessão autenticada — o body nunca é usado para isso, mesmo que tente
+// enviar esses campos (postBuyerDisputeMessage nem os aceita como
+// parâmetro). Ownership provada via disputeMessageService (dispute.buyerId
+// E order.buyerId == req.user.id) antes de qualquer INSERT.
+buyerRouter.post('/disputes/:id/messages', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
 
-  if (!text || !text.trim()) {
-    return res.status(400).json({ success: false, message: 'Texto da mensagem é obrigatório.' });
+    const inserted = await postBuyerDisputeMessage(db, {
+      disputeId: req.params.id,
+      buyerId: req.user.id,
+      rawMessage: req.body?.message,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Mensagem enviada na sala de mediação!',
+      data: { id: inserted.id, senderRole: inserted.senderRole, message: inserted.message, createdAt: inserted.createdAt },
+    });
+  } catch (err: any) {
+    if (err instanceof DisputeMessageValidationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao enviar mensagem.' });
   }
-
-  const dispute = buyerDataStore.disputes.find(d => d.id === id);
-  if (!dispute) {
-    return res.status(404).json({ success: false, message: 'Disputa não encontrada.' });
-  }
-
-  const newMsg = {
-    id: `dm-${Date.now()}`,
-    sender: 'buyer' as const,
-    senderName: (req as any).user?.fullName || 'Comprador',
-    text: text.trim(),
-    timestamp: 'Agora mesmo',
-  };
-
-  dispute.messages.push(newMsg);
-
-  return res.json({
-    success: true,
-    message: 'Mensagem enviada na sala de mediação!',
-    data: newMsg,
-  });
 });
 
 // ==========================================

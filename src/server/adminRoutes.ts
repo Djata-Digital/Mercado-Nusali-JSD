@@ -1159,6 +1159,45 @@ function logAdminAction(userName: string, userRole: string, action: string, enti
 // ==========================================
 // 1. OVERVIEW & KPIS (REAL POSTGRESQL METRICS)
 // ==========================================
+// Fase M1-A (B4) — CORREÇÃO: o literal 'resolved' nunca existe em
+// disputes.status (valores reais: open, in_mediation, resolved_buyer,
+// resolved_seller, cancelled — ver schema.ts). A checagem negativa
+// `!== 'resolved'` era sempre verdadeira, contando 100% das disputas
+// (inclusive já resolvidas/canceladas) como "ativas". Corrigido para
+// whitelist explícita (fail-close: só os 2 estados que representam disputa
+// em andamento contam como ativa) em vez de outra negação genérica que
+// poderia repetir o mesmo tipo de erro no futuro. Exportada para o mesmo
+// padrão de testabilidade do resto desta fase.
+export const ACTIVE_DISPUTE_STATUSES = ['open', 'in_mediation'];
+
+// Fase M1-A (C1) — mesma whitelist de "dinheiro ainda em custódia" já usada
+// em buyerRoutes.ts (GET /buyer/disputes)/refundService.ts/paymentService.ts:
+// status IN ('held','eligible'). Auditado explicitamente (não assumido):
+// 'eligible' está documentado no comentário do schema mas NUNCA é escrito
+// por nenhum código hoje — incluído mesmo assim por segurança/consistência
+// com os outros pontos do sistema que já tratam os dois como equivalentes.
+// 'released'/'refunded' são estados TERMINAIS — dinheiro já saiu da
+// custódia da plataforma (para o vendedor ou de volta ao comprador) —
+// excluídos deliberadamente da soma.
+export const ADMIN_IN_CUSTODY_ESCROW_STATUSES = ['held', 'eligible'];
+
+/**
+ * Fase M1-A (C1) — agregado REAL por moeda de dinheiro ainda em custódia
+ * (nunca somado entre moedas diferentes — escrow_accounts.currency é um
+ * valor livre por linha, sem conversão cambial nenhuma no sistema).
+ * Extraída como função exportada só para ser testável diretamente (mesmo
+ * padrão de `enrichDisputesWithEscrowAmount` em buyerRoutes.ts) — nenhuma
+ * mudança de comportamento em relação à query original.
+ */
+export async function getEscrowInCustodyByCurrency(db: any): Promise<{ currency: string; amount: number }[]> {
+  const rows = await db
+    .select({ currency: escrowAccounts.currency, total: sql<string>`COALESCE(SUM(${escrowAccounts.amount}), 0)` })
+    .from(escrowAccounts)
+    .where(inArray(escrowAccounts.status, ADMIN_IN_CUSTODY_ESCROW_STATUSES))
+    .groupBy(escrowAccounts.currency);
+  return rows.map((r: any) => ({ currency: r.currency, amount: Number(r.total) })).filter((r: any) => r.amount > 0);
+}
+
 adminRouter.get('/overview', async (req: Request, res: Response) => {
   try {
     const db = getDb();
@@ -1172,6 +1211,7 @@ adminRouter.get('/overview', async (req: Request, res: Response) => {
       allWarehouses,
       allOrders,
       recentAuditLogs,
+      escrowInCustodyByCurrency,
     ] = await Promise.all([
       db.select().from(users),
       db.select().from(sellers),
@@ -1180,17 +1220,30 @@ adminRouter.get('/overview', async (req: Request, res: Response) => {
       db.select().from(warehouses),
       db.select().from(orders),
       db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(10),
+      getEscrowInCustodyByCurrency(db),
     ]);
 
     const activeUsersCount = allUsers.length;
     const verifiedSellersCount = allSellers.length;
     const pendingKycCount = pendingKycUsers.length;
-    const activeDisputesCount = allDisputes.filter((d: any) => d.status !== 'resolved').length;
+    const activeDisputesCount = allDisputes.filter((d: any) => ACTIVE_DISPUTE_STATUSES.includes(d.status)).length;
     const activeHubsCount = allWarehouses.length;
     const totalOrdersCount = allOrders.length;
 
     const totalGmvAmount = allOrders.reduce((sum: number, o: any) => sum + (Number(o.totalAmount) || 0), 0);
     const totalGmvFormatted = totalGmvAmount > 0 ? `${totalGmvAmount.toLocaleString('pt-PT')} XOF` : '0 XOF';
+
+    // Fase M1-A (C1) — estrutura por moeda (já calculada por
+    // getEscrowInCustodyByCurrency) é a fonte AUTORITATIVA (nunca soma
+    // BRL+XOF+etc. num único número). `escrowInCustodyFormatted` (string)
+    // é preservado por compatibilidade — quando há mais de uma moeda em
+    // custódia, concatena os totais em vez de inventar uma conversão
+    // cambial; quando não há nenhuma linha em custódia, mostra '0 XOF'
+    // (mesma convenção neutra já usada por totalGmvFormatted acima para
+    // "sem dado" nesta mesma rota).
+    const escrowInCustodyFormatted = escrowInCustodyByCurrency.length === 0
+      ? '0 XOF'
+      : escrowInCustodyByCurrency.map((r: any) => `${r.amount.toLocaleString('pt-PT')} ${r.currency}`).join(' + ');
 
     return res.json({
       success: true,
@@ -1202,7 +1255,12 @@ adminRouter.get('/overview', async (req: Request, res: Response) => {
           verifiedSellersCount,
           pendingKycCount,
           activeDisputesCount,
-          escrowInCustodyFormatted: '0 XOF',
+          escrowInCustodyFormatted,
+          // Fase M1-A (C1) — campo estruturado NOVO (compatibilidade: o
+          // campo antigo acima continua existindo com o mesmo nome/tipo
+          // string). Autoritativo para qualquer consumidor futuro que
+          // precise do valor exato por moeda em vez da string formatada.
+          escrowInCustodyByCurrency,
           activeHubsCount,
           securityAlertsCount: 0,
         },
