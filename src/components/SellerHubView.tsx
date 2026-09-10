@@ -450,6 +450,15 @@ export const SellerHubView: React.FC = () => {
             profile={profile}
             showToast={showToast}
             onNavigateSection={setActiveSection}
+            /* Fase M1-D2.6 — prop obrigatória `onUpdateProfile` estava
+               faltando: em runtime `SellerAccount.handleSave` chamava
+               `onUpdateProfile(...)` (undefined) e quebrava o botão Salvar.
+               SellerAccount JÁ faz sua própria chamada a
+               SellerService.updateProfile + toast; o callback aqui só
+               precisa sincronizar o estado local `profile` do pai —
+               `setProfile` faz exatamente isso, sem chamada de API nem
+               toast duplicados (por isso não usamos handleUpdateProfile). */
+            onUpdateProfile={setProfile}
           />
         )}
 

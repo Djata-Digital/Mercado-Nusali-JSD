@@ -74,7 +74,11 @@ export const CartView: React.FC = () => {
       destinationCountry: selectedCountry.toUpperCase(),
       weightKg: totalWeight,
       currency: cart[0]?.product?.currency || 'XOF',
-      storeId: cart[0]?.product?.storeId || cart[0]?.product?.seller?.storeId,
+      // Fase M1-D2.6 — `seller.storeId` removido do fallback: o sub-objeto
+      // `seller` (Seller) nunca teve `storeId` em nenhuma resposta de API;
+      // o storeId real está no nível do produto (`product.storeId`, setado
+      // por getFormattedUserCart e normalizeProduct). O fallback era morto.
+      storeId: cart[0]?.product?.storeId || undefined,
       sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
       productSubtotal: cartTotal,
     }).then((res) => {

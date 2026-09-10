@@ -26,7 +26,11 @@ export const ReturnsRefundsView: React.FC = () => {
 
   const [returnReason, setReturnReason] = useState('defective');
   const [returnDescription, setReturnDescription] = useState('');
-  const [selectedOrderId, setSelectedOrderId] = useState(orders[0]?.id || 'NSL-8941203');
+  // Fase M1-D4 — removido o fallback fictício 'NSL-8941203' (pedido que
+  // nunca existiu). Começa vazio; o comprador ESCOLHE um pedido real no
+  // <select> abaixo (opção "Selecione um pedido" + guarda no submit). Nunca
+  // auto-seleciona um pedido nem usa first-child.
+  const [selectedOrderId, setSelectedOrderId] = useState('');
   const [activeReturns, setActiveReturns] = useState<BuyerReturn[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -75,6 +79,10 @@ export const ReturnsRefundsView: React.FC = () => {
 
   const handleCreateReturn = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!selectedOrderId) {
+      showToast('Selecione o pedido que deseja devolver.');
+      return;
+    }
     if (!returnDescription.trim()) {
       showToast('Por favor, descreva o motivo da devolução.');
       return;
@@ -224,9 +232,10 @@ export const ReturnsRefundsView: React.FC = () => {
                 onChange={e => setSelectedOrderId(e.target.value)}
                 className="w-full px-3 py-2.5 bg-gray-50 border border-gray-300 rounded-xl text-xs text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
               >
+                <option value="">{orders.length === 0 ? 'Você ainda não tem pedidos' : 'Selecione um pedido'}</option>
                 {orders.map((o: any) => (
                   <option key={o.id} value={o.id}>
-                    Pedido #{o.id} - Realizado em {o.date} (Total: {formatCurrency(o.totalAmount ?? o.total ?? 0, selectedCurrency)})
+                    Pedido #{o.orderNumber || o.id} - Realizado em {o.createdAt ? new Date(o.createdAt).toLocaleDateString('pt-BR') : o.date} (Total: {formatCurrency(o.totalAmount ?? o.total ?? 0, o.currency || selectedCurrency)})
                   </option>
                 ))}
               </select>

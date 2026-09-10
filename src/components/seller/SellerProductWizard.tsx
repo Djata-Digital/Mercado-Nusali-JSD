@@ -44,6 +44,7 @@ import { CategoriesApi } from '../../api/clients/CategoriesApi';
 import { uploadService } from '../../services/uploadService';
 import {
   Product,
+  ProductCondition,
   CurrencyCode,
   CountryCode,
   PublishingScope,
@@ -54,10 +55,36 @@ import {
 import { countriesConfig, getCountryFlag, getCountryName } from '../../utils/currencyUtils';
 import { useCountries } from '../../hooks/useCountries';
 
+// Fase M1-D2.6 — payload de escrita (create/update). NÃO é um Product
+// normalizado: é o formato de WIRE que o backend aceita em
+// products.* — `condition` em inglês ('new'|'used'|'refurbished') ou null
+// (o normalizeProduct converte para 'novo'/'usado'/'recondicionado' só na
+// LEITURA), `categoryId` flat, etc. O parent
+// (SellerHubView.handleAddNewProduct/handleUpdateProduct, ambos `(p: any)`)
+// repassa direto para SellerService.createProduct/updateProduct.
+type SellerProductWritePayload = Omit<Partial<Product>, 'condition'> & {
+  // O backend aceita AMBOS os formatos em products.condition:
+  // productCreationService.ts e sellerRoutes.ts (PATCH) têm o mesmo
+  // conditionMap { new/novo -> new, used/usado -> used,
+  // refurbished/recondicionado -> refurbished }. `null` limpa o campo.
+  condition?: 'new' | 'used' | 'refurbished' | ProductCondition | null;
+};
+
+// Product.videos é `ProductVideo[] | string[]` — o primeiro elemento pode
+// ser uma string (URL solta) OU um objeto. Extrai os campos com segurança
+// sem assumir que é sempre objeto (normalizeProduct passa `p.videos`
+// adiante como veio).
+function firstVideoParts(videos: Product['videos']): { url?: string; title?: string; duration?: string } {
+  const v = Array.isArray(videos) ? videos[0] : undefined;
+  if (!v) return {};
+  if (typeof v === 'string') return { url: v };
+  return { url: v.url, title: v.title, duration: v.duration };
+}
+
 interface SellerProductWizardProps {
   initialProduct?: Product | null;
-  onAddProduct: (p: Omit<Product, 'id'>) => Promise<any> | any;
-  onUpdateProduct?: (p: Product) => Promise<any> | any;
+  onAddProduct: (p: SellerProductWritePayload) => Promise<any> | any;
+  onUpdateProduct?: (p: SellerProductWritePayload) => Promise<any> | any;
   onCancelEdit?: () => void;
   onOpenProductDetail: (id: string) => void;
   showToast: (msg: string) => void;
@@ -317,17 +344,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   const [shortVideoUrl, setShortVideoUrl] = useState(
     initialProduct?.shortVideo?.url ||
       initialProduct?.videoUrl ||
-      (initialProduct?.videos && initialProduct.videos[0]?.url) ||
+      firstVideoParts(initialProduct?.videos).url ||
       ''
   );
   const [shortVideoTitle, setShortVideoTitle] = useState(
     initialProduct?.shortVideo?.title ||
-      (initialProduct?.videos && initialProduct.videos[0]?.title) ||
+      firstVideoParts(initialProduct?.videos).title ||
       'Vídeo Demonstrativo do Produto'
   );
   const [shortVideoDuration, setShortVideoDuration] = useState(
     initialProduct?.shortVideo?.duration ||
-      (initialProduct?.videos && initialProduct.videos[0]?.duration) ||
+      firstVideoParts(initialProduct?.videos).duration ||
       '0:25'
   );
 
@@ -396,17 +423,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       const existingVideo =
         initialProduct.shortVideo?.url ||
         initialProduct.videoUrl ||
-        (initialProduct.videos && initialProduct.videos[0]?.url) ||
+        firstVideoParts(initialProduct.videos).url ||
         '';
       setShortVideoUrl(existingVideo);
       setShortVideoTitle(
         initialProduct.shortVideo?.title ||
-          (initialProduct.videos && initialProduct.videos[0]?.title) ||
+          firstVideoParts(initialProduct.videos).title ||
           'Vídeo Demonstrativo do Produto'
       );
       setShortVideoDuration(
         initialProduct.shortVideo?.duration ||
-          (initialProduct.videos && initialProduct.videos[0]?.duration) ||
+          firstVideoParts(initialProduct.videos).duration ||
           '0:25'
       );
 
@@ -916,7 +943,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       if (warehouseHub && warehouseHub.trim()) cleanEditSpecs['Armazém'] = warehouseHub.trim();
       else delete cleanEditSpecs['Armazém'];
 
-      const updatedProduct: Product = {
+      const updatedProduct: SellerProductWritePayload = {
         ...initialProduct,
         title,
         price: priceNum,
@@ -959,7 +986,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         // null explícito (não undefined) para que a limpeza de condição
         // realmente chegue ao PATCH — undefined seria descartado pelo
         // JSON.stringify e o backend nunca saberia que deve limpar o campo.
-        condition: (condition || null) as any,
+        condition: condition || null,
         brand: brand && brand.trim() ? brand.trim() : undefined,
         model: model && model.trim() ? model.trim() : undefined,
         stock: parsedStock,
