@@ -640,12 +640,46 @@ export const shippingRates = pgTable('shipping_rates', {
 // 6. PEDIDOS (SNAPSHOT COMPLETO, HISTÓRICO DE STATUS)
 // ============================================================================
 
+// FASE A — arquitetura multi-vendedor (schema apenas; NENHUM código de
+// checkout/payment/escrow foi alterado nesta fase — ver orderService.ts,
+// paymentService.ts, refundService.ts, shipmentService.ts,
+// escrowAutoReleaseService.ts, todos intocados). purchase_groups é o
+// "recibo visual" de uma compra que pode conter itens de vários vendedores —
+// nunca uma fonte de verdade financeira. Cada vendedor continua tendo seu
+// próprio `orders` (1 order = 1 seller), e é essa linha de `orders` que
+// mantém toda a autoridade financeira já validada (escrow, commission,
+// sellerNetAmount, disputes, refunds) — nada disso muda de lugar.
+// totalAmount aqui é só a soma dos orders filhos para exibição agregada ao
+// comprador (nunca usado por nenhuma regra de escrow/release/wallet).
+export const purchaseGroups = pgTable('purchase_groups', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull(),
+  // Espelha/deriva do conjunto de orders filhos (nunca escrito diretamente
+  // por lógica de escrow/pagamento) — só para a UI agregada do comprador
+  // saber se mostra "processando"/"parcialmente entregue"/etc. sem precisar
+  // agregar os orders toda vez.
+  status: varchar('status', { length: 50 }).notNull().default('pending_payment'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  purchase_groups_buyer_created_idx: index('purchase_groups_buyer_created_idx').on(table.buyerId, table.createdAt),
+}));
+
 export const orders = pgTable('orders', {
   id: varchar('id', { length: 255 }).primaryKey(),
   orderNumber: varchar('order_number', { length: 100 }).notNull().unique(),
   buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
   storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'set null' }),
   sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'set null' }),
+  // FASE A — NULLABLE de propósito: NULL = pedido legado/single-seller
+  // anterior a esta arquitetura (todo pedido existente hoje se encaixa
+  // aqui — auditoria confirmou 0 pedidos multi-seller em produção). Só
+  // pedidos novos criados pelo checkout multi-vendedor (fase futura, ainda
+  // não implementada) preenchem este campo. Nenhum código atual lê ou
+  // escreve esta coluna ainda.
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'set null' }),
   subtotal: numeric('subtotal', { precision: 12, scale: 2 }).notNull(),
   shippingFee: numeric('shipping_fee', { precision: 12, scale: 2 }).notNull().default('0.00'),
   customsDuty: numeric('customs_duty', { precision: 12, scale: 2 }).default('0.00'),
@@ -680,6 +714,7 @@ export const orders = pgTable('orders', {
   orders_seller_status_idx: index('orders_seller_status_idx').on(table.sellerId, table.status),
   orders_store_status_idx: index('orders_store_status_idx').on(table.storeId, table.status),
   orders_status_created_idx: index('orders_status_created_idx').on(table.status, table.createdAt),
+  orders_purchase_group_idx: index('orders_purchase_group_idx').on(table.purchaseGroupId),
 }));
 
 export const orderItems = pgTable('order_items', {
@@ -726,9 +761,54 @@ export const orderStatusHistory = pgTable('order_status_history', {
 // 7. PAGAMENTOS, ATTEMPTS, REFUNDS E WEBHOOKS
 // ============================================================================
 
+// FASE C2 — arquitetura multi-vendedor (schema apenas; PaymentService,
+// webhook, refundService e releaseEscrowForOrder permanecem INTOCADOS nesta
+// fase — nenhum código ainda lê/escreve purchaseGroupId/settlementRole).
+//
+// orderId agora é NULLABLE: LEGADO/single-seller continua preenchendo
+// orderId (purchaseGroupId NULL); um pagamento futuro de purchase_group
+// (fase futura, não implementada) preencherá purchaseGroupId e deixará
+// orderId NULL. payments_owner_exclusive_check garante no banco que as duas
+// coisas nunca coexistem nem ficam ambas vazias. Nenhum payment histórico
+// precisa de backfill para satisfazer esse CHECK: toda linha existente já
+// tem orderId preenchido, e purchaseGroupId é uma coluna nova (nasce NULL
+// para todas elas automaticamente).
+//
+// settlementRole é ortogonal ao `status` (que permanece só o ciclo de vida
+// no PSP: pending/authorized/paid/failed/refunded/cancelled/expired).
+// settlementRole responde "este pagamento financia algo?": candidate (ainda
+// não se sabe — nenhum pagamento pendente pode ser tratado como vencedor
+// antes de qualquer confirmação real), primary (é o pagamento que de fato
+// financiou o(s) order(s)/allocations/escrow deste order ou purchase_group),
+// surplus (pagamento realmente recebido do PSP, mas excedente — ex.: retry
+// que também foi pago depois que outra tentativa já havia vencido —
+// dinheiro real que precisa de reconciliação/refund próprio, sem tocar
+// order/allocation/escrow). NUNCA tem DEFAULT no banco (ver nota abaixo) —
+// todo INSERT novo é obrigado a declarar o valor explicitamente; setting
+// implícito por omissão nunca deve promover algo a 'primary' em silêncio.
+//
+// Todo payment histórico (sempre single-seller, sempre a única cobrança que
+// financiou seu order) é classificado como 'primary' na própria migration
+// 0023, via o mecanismo "fast default" do Postgres (ADD COLUMN ... DEFAULT
+// 'primary' NOT NULL seguido de ALTER COLUMN DROP DEFAULT no mesmo
+// statement-breakpoint) — não um UPDATE manual. Ver comentário na migration
+// 0023 para a justificativa completa dessa escolha.
 export const payments = pgTable('payments', {
   id: varchar('id', { length: 255 }).primaryKey(),
-  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'restrict' }),
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'restrict' }),
+  // Nunca declarar `.default(...)` nem `.$defaultFn(...)` aqui — DEFAULT
+  // (SQL ou client-side) reabriria exatamente o risco que motivou este
+  // desenho (INSERT que esquece o campo nasceria 'primary'/qualquer valor
+  // em silêncio). NOT NULL sem nenhum default força o TypeScript a exigir
+  // o valor em TODO `.values()` novo — a auditoria da Fase C3 confirmou que
+  // os 3 INSERTs legítimos de runtime (paymentService.ts x2,
+  // asaasPaymentProvider.ts x1) já declaram 'primary' explicitamente, então
+  // não há mais nenhum call site legítimo que dependa de um default para
+  // compilar. (Fase C2 usou temporariamente um `$defaultFn` que lançava, só
+  // para destravar a checagem de tipos antes desta auditoria — removido
+  // aqui, como planejado desde então.)
+  settlementRole: varchar('settlement_role', { length: 20 }).notNull(), // candidate, primary, surplus
   buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
   amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
   currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
@@ -747,9 +827,100 @@ export const payments = pgTable('payments', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
   payments_order_idx: index('payments_order_idx').on(table.orderId),
+  payments_purchase_group_idx: index('payments_purchase_group_idx').on(table.purchaseGroupId),
   payments_buyer_created_idx: index('payments_buyer_created_idx').on(table.buyerId, table.createdAt),
   payments_status_created_idx: index('payments_status_created_idx').on(table.status, table.createdAt),
   payments_transaction_ref_uq: uniqueIndex('payments_transaction_ref_uq').on(table.transactionRef),
+  // Barreira final (independente do lock de aplicação) contra dois primary
+  // no mesmo purchase_group — mesmo padrão de índice único parcial já usado
+  // por payment_allocations_order_active_uq/refunds_idempotency_uq.
+  // purchase_group_id NULL (todo pagamento legado) nunca colide entre si,
+  // porque SQL nunca trata NULL = NULL como igual num índice único.
+  payments_purchase_group_primary_uq: uniqueIndex('payments_purchase_group_primary_uq')
+    .on(table.purchaseGroupId)
+    .where(sql`${table.settlementRole} = 'primary'`),
+  payments_settlement_role_check: check(
+    'payments_settlement_role_check',
+    sql`${table.settlementRole} IN ('candidate', 'primary', 'surplus')`
+  ),
+  payments_owner_exclusive_check: check(
+    'payments_owner_exclusive_check',
+    sql`(${table.orderId} IS NOT NULL AND ${table.purchaseGroupId} IS NULL) OR (${table.orderId} IS NULL AND ${table.purchaseGroupId} IS NOT NULL)`
+  ),
+}));
+
+// FASE A — arquitetura multi-vendedor (schema apenas). Representa quanto de
+// UM payment real do comprador pertence a UM order filho (1 seller). Nunca
+// substitui `payments.orderId` (mantido intacto para todo pedido legado
+// single-seller) — só passa a existir quando o checkout multi-vendedor
+// (fase futura, NÃO implementada ainda) precisar dividir um único pagamento
+// entre vários orders. Tabela vazia nesta fase; nenhum código lê/escreve
+// nela ainda.
+//
+// UNIQUE(paymentId, orderId) é a garantia de idempotência de INSERÇÃO — nunca
+// duas linhas para o mesmo par payment/order — sem precisar de uma coluna de
+// idempotencyKey separada.
+//
+// Revisão Fase A (auditoria de retry de pagamento, antes da Fase B):
+// payments.orderId NÃO é 1:1 hoje — initiatePayment reutiliza a linha
+// 'pending' existente só quando ORDEM+PROVIDER coincidem (paymentService.ts,
+// bloco "Reuse an already-pending payment"); uma nova tentativa com OUTRO
+// provider/método cria uma segunda linha genuína em `payments` para o MESMO
+// order, coexistindo com a primeira (nada no código marca a antiga como
+// failed/expired). Ou seja: payment 1:N por order é uma possibilidade real
+// do sistema atual, não uma hipótese. O que NUNCA pode coexistir são DUAS
+// allocations financeiramente ATIVAS para o mesmo order (isso seria
+// duplicação de crédito) — por isso o índice único parcial abaixo, no
+// mesmo padrão já usado por refunds_idempotency_uq (índice único
+// condicionado a uma coluna, não em toda a tabela): garante no Postgres que
+// só existe 1 allocation com status='active' por order, mas permite
+// legitimamente uma segunda linha (histórica, já 'refunded') coexistir se um
+// reprocessamento genuíno precisar existir no futuro — sem inventar um
+// segundo mecanismo de idempotência.
+//
+// amount > 0 segue EXATAMENTE o padrão já existente em
+// ledger_entries_amount_check (ver ledgerEntries acima) — reaproveitado, não
+// inventado. refundedAmount >= 0 é a mesma família de guarda (nunca um valor
+// negativo). refundedAmount <= amount (revisão Fase A, 2ª rodada) é o
+// primeiro CHECK entre duas colunas deste schema — decisão explícita, não
+// automática: o Postgres suporta nativamente (CHECK enxerga toda a linha),
+// sem incompatibilidade técnica encontrada.
+//
+// refundedAmount + status seguem o mesmo padrão já usado por outras tabelas
+// financeiras deste schema (refunds.sellerDebitAmount, escrow_accounts.status)
+// para permitir refund parcial por order e auditoria sem recalcular a
+// qualquer momento: soma(payment_allocations.amount) deve sempre poder ser
+// comparada a payments.amount para reconciliação.
+export const paymentAllocations = pgTable('payment_allocations', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'set null' }),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  status: varchar('status', { length: 50 }).notNull().default('active'), // active, partially_refunded, refunded
+  refundedAmount: numeric('refunded_amount', { precision: 12, scale: 2 }).notNull().default('0.00'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  payment_allocations_payment_order_uq: uniqueIndex('payment_allocations_payment_order_uq').on(table.paymentId, table.orderId),
+  // Invariante financeira: nunca mais de 1 allocation ATIVA por order.
+  payment_allocations_order_active_uq: uniqueIndex('payment_allocations_order_active_uq')
+    .on(table.orderId)
+    .where(sql`${table.status} = 'active'`),
+  payment_allocations_order_idx: index('payment_allocations_order_idx').on(table.orderId),
+  payment_allocations_payment_idx: index('payment_allocations_payment_idx').on(table.paymentId),
+  payment_allocations_purchase_group_idx: index('payment_allocations_purchase_group_idx').on(table.purchaseGroupId),
+  payment_allocations_amount_check: check('payment_allocations_amount_check', sql`${table.amount} > 0`),
+  payment_allocations_refunded_amount_check: check('payment_allocations_refunded_amount_check', sql`${table.refundedAmount} >= 0`),
+  // Revisão Fase A (2ª rodada): CHECK entre duas colunas da MESMA linha —
+  // suportado nativamente pelo Postgres, sem incompatibilidade técnica.
+  // Garante no banco que uma allocation nunca registra mais reembolsado do
+  // que o valor que ela própria representa.
+  payment_allocations_refunded_not_exceed_amount_check: check(
+    'payment_allocations_refunded_not_exceed_amount_check',
+    sql`${table.refundedAmount} <= ${table.amount}`
+  ),
 }));
 
 export const paymentAttempts = pgTable('payment_attempts', {
@@ -777,10 +948,50 @@ export const paymentCustomers = pgTable('payment_customers', {
   payment_customers_user_idx: index('payment_customers_user_idx').on(table.userId),
 }));
 
+// FASE C5.2-B — arquitetura multi-vendedor (schema apenas; refundService.ts,
+// paymentService.ts, asaasPaymentProvider.ts e asaasWebhookService.ts
+// permanecem INTOCADOS nesta fase — nenhum código ainda lê/escreve
+// purchaseGroupId aqui, nem decide runtime de refund parcial/surplus).
+//
+// order_id agora é NULLABLE — mesma classificação já usada para
+// payments.order_id na Fase C2: alteração de constraint não destrutiva e
+// compatível com os dados existentes (nenhuma linha atual seria invalidada
+// por deixar de exigir order_id — todas já o têm preenchido), NÃO uma
+// alteração "aditiva" no sentido de nunca ter existido antes.
+//
+// Dois regimes, nunca misturados (owner exclusivo, mesmo padrão de
+// payments_owner_exclusive_check da Fase C2):
+//
+//   A) REFUND DE ORDER (order_id preenchido, purchase_group_id NULL):
+//      cobre tanto o refund legacy quanto o refund de um CHILD ORDER de
+//      purchase_group — nos dois casos o vínculo financeiro é sempre
+//      order->payment (payment PRIMARY, no caso do child), nunca
+//      order->purchase_group diretamente. A relação do child com seu group
+//      já é resolvida via orders.purchaseGroupId + payment_allocations —
+//      não duplicada aqui.
+//
+//   B) REFUND DE PAYMENT/GROUP-LEVEL (purchase_group_id preenchido,
+//      order_id NULL): reservado para refund de um payment SURPLUS —
+//      dinheiro real recebido que nunca financiou nenhum order/allocation/
+//      escrow, então não há order nenhum para associar. paymentId aponta
+//      direto para o payment surplus.
+//
+// Nenhum campo refundKind/refundScope foi adicionado: o owner shape
+// (order_id XOR purchase_group_id) já distingue os dois casos de forma
+// completa e inequívoca — uma coluna extra só duplicaria essa informação
+// sem necessidade estrutural comprovada (nenhuma encontrada na auditoria
+// C5.2-A).
 export const refunds = pgTable('refunds', {
   id: varchar('id', { length: 255 }).primaryKey(),
   paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'restrict' }),
-  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'restrict' }),
+  // ON DELETE RESTRICT — mesmo padrão já usado por payments.purchaseGroupId
+  // (Fase C2): um refund é registro financeiro/auditoria, nunca deve perder
+  // seu owner silenciosamente (diferente de orders.purchaseGroupId/
+  // payment_allocations.purchaseGroupId, que usam SET NULL porque são
+  // referências de conveniência, não a própria prova de que o dinheiro
+  // existiu).
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'restrict' }),
   amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
   currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
   reason: text('reason'),
@@ -788,7 +999,8 @@ export const refunds = pgTable('refunds', {
   approvedBy: varchar('approved_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
   // Fase "Refund/disputa/chargeback": quanto foi de fato debitado da wallet do
   // vendedor (proporcional a orders.sellerNetAmount) — null quando o refund
-  // aconteceu ANTES do escrow release (vendedor nunca recebeu, nada a debitar).
+  // aconteceu ANTES do escrow release (vendedor nunca recebeu, nada a debitar)
+  // OU quando é um refund de payment/group-level (surplus nunca toca wallet).
   // Auditável: mostra exatamente o que aconteceu com o dinheiro do vendedor em
   // cada refund, sem precisar recalcular.
   sellerDebitAmount: numeric('seller_debit_amount', { precision: 12, scale: 2 }),
@@ -798,13 +1010,124 @@ export const refunds = pgTable('refunds', {
   // nunca gerada aqui a partir do próprio ID recém-criado (isso seria sempre
   // único e não protegeria nada, o mesmo bug já corrigido em seller_payouts).
   idempotencyKey: varchar('idempotency_key', { length: 255 }),
+  // ==========================================================================
+  // Fase C5.2-D.2 — EVIDÊNCIA/CORRELAÇÃO DE REFUND EXTERNO (schema apenas;
+  // nenhum código de runtime lê/escreve estas colunas ainda — ver
+  // refundService.ts, inalterado nesta fase). Preparam o terreno para o
+  // fluxo futuro reserve -> external submit -> provider evidence ->
+  // reconciliation -> DONE -> local finalization (D.4/D.5/D.6), auditado
+  // oficialmente na Fase C5.2-D.1 contra docs.asaas.com.
+  //
+  // Todas nullable, SEM DEFAULT: todo refund legado (histórico e qualquer
+  // linha inserida pelo runtime atual, que não muda nesta fase) nasce/
+  // permanece com as 7 colunas abaixo = NULL — nenhum backfill, nenhuma
+  // inferência de provider histórico (seção 3 do pedido). O owner CHECK
+  // abaixo é preservado exatamente como estava.
+  //
+  // provider: NÃO hardcodar 'asaas' aqui (nem DEFAULT nem valor implícito) —
+  // a auditoria da seção 2 confirmou que `payments.provider` já é a fonte
+  // real da verdade (pix_engine, orange_money, mtn, stripe, nusali_pay,
+  // asaas, ...). O runtime futuro (D.4) deve copiar
+  // `refund.provider = paymentFinanciador.provider`, nunca inventar um
+  // valor fixo — este projeto já suporta múltiplos providers de payment.
+  provider: varchar('provider', { length: 50 }),
+  // providerCorrelationKey: nossa identidade de correlação do lado externo —
+  // NUNCA um id emitido pelo Asaas (a auditoria D.1 confirmou, com tripla
+  // fonte oficial, que o objeto de refund individual do Asaas NÃO possui
+  // campo `id` próprio, inclusive para Pix). O valor aqui é o mesmo que o
+  // runtime futuro envia como `description` na POST /v3/payments/{id}/refund
+  // (formato conceitual futuro: NUSALI_REFUND:<refundLocalId>) — é o único
+  // campo, confirmado pela doc oficial, que ecoa de volta em
+  // payment.refunds[]/GET /refunds/webhook. Chamado de "CorrelationKey" (não
+  // "Description") porque descreve o PAPEL da coluna no nosso desenho, não o
+  // nome do campo Asaas.
+  providerCorrelationKey: varchar('provider_correlation_key', { length: 255 }),
+  // providerStatus: valores REAIS do provedor externo (para Asaas, hoje:
+  // PENDING | CANCELLED | DONE — auditoria D.1, seção 6) — dimensão
+  // deliberadamente SEPARADA de `status` (LOCAL REFUND STATUS) acima, nunca
+  // misturada (seção 21 da D.1). Varchar livre, SEM CHECK nesta fase: é
+  // campo de integração externa, e um CHECK fixo hoje viraria migration
+  // obrigatória no dia em que o PSP acrescentar um novo status — validação
+  // de valores conhecidos é responsabilidade do runtime futuro, não do schema.
+  providerStatus: varchar('provider_status', { length: 50 }),
+  // providerRequestedAt: momento em que a tentativa externa foi de fato
+  // iniciada (chamada da POST) — nunca confundir com `createdAt` (criação da
+  // RESERVA local, que pode preceder o envio real). Sem DEFAULT NOW(): só o
+  // runtime futuro, no momento exato do envio, sabe gravar isto.
+  providerRequestedAt: timestamp('provider_requested_at'),
+  // providerConfirmedAt: momento em que observamos providerStatus=DONE (não
+  // o momento do 200 da POST, que a auditoria D.1 confirmou não ser
+  // necessariamente terminal).
+  providerConfirmedAt: timestamp('provider_confirmed_at'),
+  // providerRawResponse: snapshot do item de payment.refunds[] correlacionado
+  // (dateCreated/status/value/description/endToEndIdentifier/
+  // transactionReceiptUrl/refundedSplits) — nunca access_token, headers ou
+  // qualquer segredo de autenticação (seção 7 do pedido: nenhum segredo pode
+  // aparecer nesta coluna).
+  providerRawResponse: jsonb('provider_raw_response'),
+  // lastError: código/mensagem SANITIZADA do último erro definitivo ou
+  // problema de reconciliação (ex.: 400 de saldo insuficiente documentado na
+  // D.1, timeout, ambiguidade). Nunca access_token/headers/stack com
+  // segredos (seção 9 do pedido).
+  lastError: text('last_error'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => ({
   refunds_payment_idx: index('refunds_payment_idx').on(table.paymentId),
   refunds_order_idx: index('refunds_order_idx').on(table.orderId),
+  refunds_purchase_group_idx: index('refunds_purchase_group_idx').on(table.purchaseGroupId),
   refunds_idempotency_uq: uniqueIndex('refunds_idempotency_uq')
     .on(table.idempotencyKey)
     .where(sql`${table.idempotencyKey} IS NOT NULL`),
+  // Owner exclusivo — mesmo padrão de payments_owner_exclusive_check (Fase
+  // C2): todo refund histórico já tem order_id preenchido, logo satisfaz
+  // este CHECK trivialmente (purchase_group_id nasce NULL para todos eles,
+  // coluna nova) — sem nenhum backfill.
+  refunds_owner_exclusive_check: check(
+    'refunds_owner_exclusive_check',
+    sql`(${table.orderId} IS NOT NULL AND ${table.purchaseGroupId} IS NULL) OR (${table.orderId} IS NULL AND ${table.purchaseGroupId} IS NOT NULL)`
+  ),
+  // Fase C5.2-D.2, seção 4 — identidade externa nunca duplicada: duas rows
+  // locais nunca podem representar o MESMO estorno do MESMO provider. Escopo
+  // (provider, providerCorrelationKey) — não só a key isolada — porque a
+  // mesma string poderia teoricamente colidir entre providers diferentes sem
+  // representar o mesmo evento externo (seção 19, teste D: "provider
+  // diferente + mesma correlation -> PASS estruturalmente"). Partial: nasce
+  // vazio para 100% do legado (provider/providerCorrelationKey sempre NULL
+  // até o runtime D.4 existir), nunca bloqueado por dado histórico.
+  refunds_provider_correlation_uq: uniqueIndex('refunds_provider_correlation_uq')
+    .on(table.provider, table.providerCorrelationKey)
+    .where(sql`${table.provider} IS NOT NULL AND ${table.providerCorrelationKey} IS NOT NULL`),
+  // Fase C5.2-D.2, seções 10-16 — ACTIVE RESERVATION (defesa em profundidade,
+  // não a única proteção — locks+SELECT do fluxo de reservation continuam
+  // sendo a barreira primária). Impede duas reservas simultaneamente ativas
+  // do NOVO fluxo (provider-managed) para o MESMO alvo econômico.
+  //
+  // Por que `provider_correlation_key IS NOT NULL` distingue corretamente
+  // "novo fluxo" de "legacy", sem join com orders/payments (que um índice
+  // parcial do Postgres não pode fazer): todo refund legado, e toda linha
+  // que o runtime ATUAL (inalterado nesta fase) insere, nasce com
+  // provider_correlation_key SEMPRE NULL (seção 3) — logo nunca entra nesta
+  // condição WHERE, e múltiplos refunds legados/parciais para o mesmo order
+  // continuam 100% permitidos, exatamente como hoje. Só uma linha inserida
+  // pelo runtime FUTURO (D.4), que explicitamente grava
+  // providerCorrelationKey antes do external submit, pode colidir aqui.
+  //
+  // 'processed' e 'failed' são TERMINAIS (auditoria seção 12/13 do pedido:
+  // 'processed' = sucesso definitivo — o próprio runtime atual só insere
+  // com este status ao final de uma transação atômica que já finalizou tudo;
+  // 'failed' = falha definitiva, libera nova tentativa) — por isso NÃO
+  // entram nesta lista. Só os 3 estados verdadeiramente ativos/bloqueantes
+  // entram: 'pending' (reserva criada, ainda não enviada), 'provider_pending'
+  // (enviada, aguardando DONE) e 'ambiguous_timeout' (não reconciliado
+  // ainda — seção 14: precisa continuar bloqueando até reconciliação
+  // decidir). Nomes de status ainda não escritos por nenhum código (D.4/D.5
+  // os introduzem) — a coluna já aceita qualquer varchar hoje.
+  refunds_child_active_reservation_uq: uniqueIndex('refunds_child_active_reservation_uq')
+    .on(table.orderId)
+    .where(sql`${table.orderId} IS NOT NULL AND ${table.providerCorrelationKey} IS NOT NULL AND ${table.status} IN ('pending', 'provider_pending', 'ambiguous_timeout')`),
+  refunds_surplus_active_reservation_uq: uniqueIndex('refunds_surplus_active_reservation_uq')
+    .on(table.paymentId)
+    .where(sql`${table.orderId} IS NULL AND ${table.purchaseGroupId} IS NOT NULL AND ${table.providerCorrelationKey} IS NOT NULL AND ${table.status} IN ('pending', 'provider_pending', 'ambiguous_timeout')`),
 }));
 
 export const paymentWebhookEvents = pgTable('payment_webhook_events', {
@@ -820,6 +1143,153 @@ export const paymentWebhookEvents = pgTable('payment_webhook_events', {
 }, (table) => ({
   payment_webhook_provider_event_uq: uniqueIndex('payment_webhook_provider_event_uq').on(table.provider, table.eventId),
   payment_webhook_processed_idx: index('payment_webhook_processed_idx').on(table.processed, table.createdAt),
+}));
+
+// ============================================================================
+// Fase C5.3-B — payment_chargebacks (SCHEMA APENAS; nenhum código de runtime
+// lê/escreve esta tabela ainda — nenhum débito, nenhum bloqueio de release,
+// nenhum webhook. Ver auditoria C5.3-A/C5.3-A.1).
+//
+// 1 row = 1 chargeback Asaas, identificado por (provider,
+// providerChargebackId) — NUNCA por paymentId sozinho. A auditoria oficial
+// C5.3-A.1 (contra o schema OpenAPI real por trás de docs.asaas.com, não só
+// a prosa narrativa) confirmou que PaymentChargebackResponseDTO.id é um UUID
+// real, estável e documentado (ex.: "8e784c3e-afe8-4844-bb93-6b445763"),
+// recuperável via GET /v3/payments/{id}/chargeback e via GET
+// /v3/chargebacks/ (coleção paginada e filtrável) — logo um mesmo payment
+// PODE, estruturalmente, vir a ter mais de um chargeback ao longo do tempo;
+// nada aqui assume o contrário.
+//
+// Chargeback NÃO é refund (C5.3-A, seção 4): esta tabela é deliberadamente
+// separada de `refunds` — nunca reaproveita idempotencyKey nem o vocabulário
+// de status ('processed'/'failed') do refund, porque a origem da decisão
+// (emissor do cartão do comprador, nunca uma intenção local nossa) e a
+// identidade (chargeback tem id próprio; refund individual do Asaas
+// confirmadamente NÃO tem — C5.3-A.1, seção 1) são estruturalmente
+// diferentes.
+export const paymentChargebacks = pgTable('payment_chargebacks', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  // ON DELETE RESTRICT — mesmo padrão de refunds.paymentId: registro
+  // financeiro/auditoria nunca perde seu owner silenciosamente.
+  paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'restrict' }),
+  // Nullable: NULL para chargeback de payment legacy (orderId preenchido
+  // direto); preenchido só quando paymentId referencia um payment GROUP
+  // (settlementRole candidate/primary/surplus). Snapshot/referência de
+  // conveniência — paymentId continua sendo a ÚNICA autoridade financeira,
+  // nunca substituída por purchaseGroupId (mesmo cuidado de
+  // payment_allocations.purchaseGroupId). ON DELETE RESTRICT pelo mesmo
+  // motivo de refunds.purchaseGroupId (registro de auditoria, não
+  // conveniência) — diferente de orders.purchaseGroupId/
+  // payment_allocations.purchaseGroupId, que usam SET NULL.
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'restrict' }),
+  // provider: NUNCA default — copiado de payments.provider pelo runtime
+  // futuro (ainda não implementado nesta fase). Mesmo cuidado de
+  // refunds.provider (Fase C5.2-D.2): um default esconderia silenciosamente
+  // qual provider realmente processou o chargeback.
+  provider: varchar('provider', { length: 50 }).notNull(),
+  // providerChargebackId: PaymentChargebackResponseDTO.id — diferente de
+  // refunds.providerCorrelationKey (que é uma correlation key NOSSA, porque
+  // o refund individual do Asaas não tem id), este É um id emitido pelo
+  // provider, confirmado documentado.
+  providerChargebackId: varchar('provider_chargeback_id', { length: 255 }).notNull(),
+  // providerStatus / providerDisputeStatus / providerReason: RAW, exatamente
+  // como recebido — SEM CHECK fechado (mesmo raciocínio de
+  // refunds.providerStatus). A própria doc oficial instrui explicitamente: "não traduza
+  // nem altere os valores dos enums... trate valores ainda não mapeados,
+  // preserve o valor original" (C5.3-A.1, seção 3.3) — um CHECK fechado aqui
+  // viraria migration obrigatória no dia em que a Asaas adicionar um valor
+  // novo. Hoje os valores conhecidos são:
+  //   providerStatus:        REQUESTED, IN_DISPUTE, DISPUTE_LOST, REVERSED, DONE
+  //   providerDisputeStatus: REQUESTED, ACCEPTED, REJECTED
+  // Validação/decisão financeira sobre esses valores é responsabilidade do
+  // runtime futuro, nunca do schema.
+  providerStatus: varchar('provider_status', { length: 50 }).notNull(),
+  providerDisputeStatus: varchar('provider_dispute_status', { length: 50 }),
+  providerReason: varchar('provider_reason', { length: 100 }),
+  // value: snapshot do chargeback.value do provider (campo confirmado
+  // existir via schema OpenAPI oficial — C5.3-A.1, seções 2 e 3). NUNCA
+  // assumido igual a payments.amount — nenhum CHECK cross-table é criado
+  // aqui (exigiria trigger, não CHECK simples; e a documentação nunca
+  // confirma nem proíbe chargeback parcial). Runtime futuro decide.
+  value: numeric('value', { precision: 12, scale: 2 }).notNull(),
+  // currency: a Asaas NÃO documenta campo de moeda em
+  // PaymentChargebackResponseDTO (auditado em C5.3-A.1) — este valor é
+  // SEMPRE um snapshot LOCAL, copiado do payment financiador no momento da
+  // persistência pelo runtime futuro, nunca um campo que "veio" do
+  // provider. Sem default: nenhuma linha pode nascer com moeda inventada.
+  currency: varchar('currency', { length: 10 }).notNull(),
+  // disputeStartDate / deadlineToSendDisputeDocuments: datas do PROVIDER
+  // (PaymentChargebackResponseDTO.disputeStartDate /
+  // .deadlineToSendDisputeDocuments). Tipo timestamp por consistência com o
+  // resto deste arquivo (nenhuma outra tabela usa um tipo `date` puro,
+  // nem está importado) — nunca confundir com createdAt/updatedAt locais
+  // abaixo, que são o ciclo de vida da NOSSA linha, não do chargeback no
+  // provider.
+  disputeStartDate: timestamp('dispute_start_date'),
+  deadlineToSendDisputeDocuments: timestamp('deadline_to_send_dispute_documents'),
+  // localStatus: enum NOSSO (não do provider) — CHECK fechado é seguro aqui
+  // porque somos nós que o escrevemos, mesmo padrão de
+  // payments_settlement_role_check.
+  //
+  // Fase C5.3-B.1 — CORREÇÃO: o DEFAULT 'active' original (C5.3-B) partia da
+  // premissa errada de que "toda linha nova nasce por termos acabado de
+  // observar um chargeback não-terminal". Falso: a PRIMEIRA observação de um
+  // chargeback.id pode perfeitamente já chegar terminal (ex.: redelivery de
+  // webhook atrasado, ou o runtime só processa o evento depois do desfecho já
+  // ter ocorrido no provider) — nesse caso a linha NUNCA deveria nascer
+  // 'active'. Um DEFAULT aqui esconderia exatamente esse erro de
+  // classificação. Runtime (C5.3-C1) SEMPRE calcula e fornece localStatus
+  // explicitamente a partir de chargeback.status observado (ver
+  // mapProviderChargebackStatusToLocalStatus em refundService.ts) — nenhum
+  // INSERT depende mais de um valor implícito.
+  //   active         — REQUESTED/IN_DISPUTE observados, sem desfecho terminal
+  //   lost           — DISPUTE_LOST observado (débito, quando implementado,
+  //                    aplicado exatamente uma vez)
+  //   reversed       — REVERSED observado, sem débito prévio
+  //   manual_review  — fatos insuficientes/conflitantes (C5.3-A.1, item 21;
+  //                    C5.3-C1: primeira observação DONE/desconhecida, ou
+  //                    conflito terminal lost<->reversed)
+  // Nenhum destes states aplica qualquer efeito financeiro nesta fase.
+  localStatus: varchar('local_status', { length: 20 }).notNull(),
+  // providerRawResponse: snapshot SANITIZADO do objeto chargeback (nunca o
+  // webhook inteiro, nunca segredos/headers) — mesmo padrão de
+  // refunds.providerRawResponse. Não preenchido nesta fase.
+  providerRawResponse: jsonb('provider_raw_response'),
+  // firstSeenEventId / lastSeenEventId: rastreabilidade, NUNCA autoridade
+  // financeira — apontam conceitualmente para payment_webhook_events.
+  // event_id (varchar(255), nullable, único só em par com provider — nunca
+  // sozinho). SEM FK: event_id não tem constraint unique/PK isolada naquela
+  // tabela (só via UNIQUE composto provider+event_id) e é nullable — uma FK
+  // exigiria uma coluna alvo unique própria, que não existe; além disso um
+  // campo puramente de auditoria não deveria travar numa eventual política
+  // futura de retenção/purga de payment_webhook_events. Não preenchido
+  // nesta fase.
+  firstSeenEventId: varchar('first_seen_event_id', { length: 255 }),
+  lastSeenEventId: varchar('last_seen_event_id', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  // Identidade externa: nunca duas rows para o MESMO chargeback do MESMO
+  // provider. Composto (provider, providerChargebackId) — não a key isolada
+  // — para manter namespace correto se outro PSP for adicionado no futuro
+  // (mesmo raciocínio de refunds_provider_correlation_uq).
+  payment_chargebacks_provider_external_uq: uniqueIndex('payment_chargebacks_provider_external_uq')
+    .on(table.provider, table.providerChargebackId),
+  payment_chargebacks_payment_idx: index('payment_chargebacks_payment_idx').on(table.paymentId),
+  payment_chargebacks_purchase_group_idx: index('payment_chargebacks_purchase_group_idx')
+    .on(table.purchaseGroupId)
+    .where(sql`${table.purchaseGroupId} IS NOT NULL`),
+  payment_chargebacks_local_status_idx: index('payment_chargebacks_local_status_idx').on(table.localStatus),
+  // Suporta diretamente a futura consulta de release-blocking
+  // (releaseEscrowForOrder: "existe chargeback ativo para este payment?"),
+  // ainda NÃO implementada nesta fase.
+  payment_chargebacks_payment_active_idx: index('payment_chargebacks_payment_active_idx')
+    .on(table.paymentId, table.localStatus),
+  payment_chargebacks_value_check: check('payment_chargebacks_value_check', sql`${table.value} > 0`),
+  payment_chargebacks_local_status_check: check(
+    'payment_chargebacks_local_status_check',
+    sql`${table.localStatus} IN ('active', 'lost', 'reversed', 'manual_review')`
+  ),
 }));
 
 // ============================================================================
