@@ -112,6 +112,8 @@ export interface SellerOrderData {
   selectedVariantImage?: string;
   quantity: number;
   unitPrice: number;
+  /** Subtotal real do item (order_items.subtotal) — autoritativo, nunca derivado de totalAmount (que inclui frete). */
+  subtotal?: number | null;
   totalAmount: number;
   /** Comissão real do marketplace sobre o pedido (orders.marketplace_commission). Nomenclatura canônica — nunca "commissionFee". */
   marketplaceCommission?: number | null;

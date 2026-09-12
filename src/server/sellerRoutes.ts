@@ -1993,6 +1993,12 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
         variantTitle: item.variantTitle,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
+        // Fix (diagnóstico "Produtos (Subtotal): R$ 0,00" — Detalhamento
+        // Financeiro da Venda): order_items.subtotal já vinha calculado
+        // corretamente em getSellerOrderRows, mas nunca era copiado para a
+        // resposta HTTP — nenhum consumidor conseguia lê-lo. Campo aditivo,
+        // nunca substitui totalAmount/unitPrice já existentes.
+        subtotal: item.subtotal,
         totalAmount: item.totalAmount,
         currency: item.currency,
         fulfillmentMode: item.fulfillmentMode,
