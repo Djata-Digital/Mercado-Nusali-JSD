@@ -25,7 +25,7 @@ import { useCountries } from '../hooks/useCountries';
 import { PixPaymentModal } from './PixPaymentModal';
 import { PixService } from '../services/pixService';
 import { convertToBRL, PixTransaction } from '../utils/pixEngine';
-import { ShippingService } from '../services/shippingService';
+import { calculateMultiSellerFreight } from '../utils/multiSellerFreight';
 
 import { OrdersApi } from '../api/clients/OrdersApi';
 import { BuyerService } from '../services/buyerService';
@@ -222,28 +222,29 @@ export const CheckoutView: React.FC = () => {
         }
         return;
       }
-      const totalWeight = cart.reduce((sum, item) => sum + item.product.weightKg! * item.quantity, 0);
-      const res = await ShippingService.calculateFreight({
+      // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
+      // vendedor; cada vendedor é uma entrega/child order independente no
+      // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
+      // calculateMultiSellerFreight agrupa por sellerId e soma 1 cotação
+      // por grupo — NUNCA 1 cotação para o carrinho inteiro (que ignorava
+      // todos os vendedores exceto o do primeiro item). Fail-closed: se
+      // qualquer grupo falhar, o resultado inteiro vem available:false
+      // (nunca um total parcial/subestimado).
+      const aggregated = await calculateMultiSellerFreight(cart, {
         originCountry,
         destinationCountry: destCountry,
-        weightKg: totalWeight,
         currency: orderCurrency,
-        // Fase M1-D2.6 — `seller.storeId` removido do fallback (morto: o
-        // sub-objeto Seller nunca teve storeId); storeId real vem do produto.
-        storeId: cart[0]?.product?.storeId || undefined,
-        sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
-        productSubtotal: cartTotal,
       });
 
       if (!isMounted) return;
 
-      if (res.success && res.data) {
+      if (aggregated.available) {
         setFreightQuote({
-          shippingCost: res.data.shippingCost,
-          shippingChargedToBuyer: res.data.shippingChargedToBuyer,
-          shippingSellerSubsidy: res.data.shippingSellerSubsidy,
-          estimatedMinDays: res.data.estimatedMinDays,
-          estimatedMaxDays: res.data.estimatedMaxDays,
+          shippingCost: aggregated.shippingCost,
+          shippingChargedToBuyer: aggregated.shippingChargedToBuyer,
+          shippingSellerSubsidy: aggregated.shippingSellerSubsidy,
+          estimatedMinDays: aggregated.estimatedMinDays,
+          estimatedMaxDays: aggregated.estimatedMaxDays,
           available: true,
           loading: false,
         });
@@ -256,7 +257,7 @@ export const CheckoutView: React.FC = () => {
           estimatedMaxDays: 0,
           available: false,
           loading: false,
-          error: res.error?.message || 'Frete não disponível para o endereço informado.',
+          error: aggregated.errorMessage || 'Frete não disponível para o endereço informado.',
         });
       }
     };
@@ -265,6 +266,7 @@ export const CheckoutView: React.FC = () => {
     return () => {
       isMounted = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originCountry, destCountry, cartTotal, orderCurrency]);
 
   const customsDuty = 0; // Removed 8% fake tax - national is 0, international is pending

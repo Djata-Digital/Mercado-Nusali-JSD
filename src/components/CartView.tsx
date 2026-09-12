@@ -4,7 +4,7 @@ import { useCart } from '../hooks/useCart';
 import { usePreferences } from '../context/PreferencesContext';
 import { useCountries } from '../hooks/useCountries';
 import { formatCurrency } from '../utils/currencyUtils';
-import { ShippingService } from '../services/shippingService';
+import { calculateMultiSellerFreight } from '../utils/multiSellerFreight';
 import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } from 'lucide-react';
 
 export const CartView: React.FC = () => {
@@ -68,28 +68,25 @@ export const CartView: React.FC = () => {
       return;
     }
     setShippingQuote((prev) => ({ ...(prev || { loading: true, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF' }), loading: true }));
-    const totalWeight = cart.reduce((sum, item) => sum + item.product.weightKg! * item.quantity, 0);
-    ShippingService.calculateFreight({
+    // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
+    // vendedor; cada vendedor é uma entrega/child order independente no
+    // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
+    // calculateMultiSellerFreight agrupa por sellerId e soma 1 cotação por
+    // grupo — NUNCA 1 cotação para o carrinho inteiro (que ignorava todos
+    // os vendedores exceto o do primeiro item, subestimando o frete real).
+    calculateMultiSellerFreight(cart, {
       originCountry,
       destinationCountry: selectedCountry.toUpperCase(),
-      weightKg: totalWeight,
       currency: cart[0]?.product?.currency || 'XOF',
-      // Fase M1-D2.6 — `seller.storeId` removido do fallback: o sub-objeto
-      // `seller` (Seller) nunca teve `storeId` em nenhuma resposta de API;
-      // o storeId real está no nível do produto (`product.storeId`, setado
-      // por getFormattedUserCart e normalizeProduct). O fallback era morto.
-      storeId: cart[0]?.product?.storeId || undefined,
-      sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
-      productSubtotal: cartTotal,
-    }).then((res) => {
+    }).then((aggregated) => {
       if (!isMounted) return;
-      if (res.success && res.data) {
+      if (aggregated.available) {
         setShippingQuote({
-          loading: false, available: true, shippingChargedToBuyer: res.data.shippingChargedToBuyer, currency: res.data.currency,
-          estimatedMinDays: res.data.estimatedMinDays, estimatedMaxDays: res.data.estimatedMaxDays,
+          loading: false, available: true, shippingChargedToBuyer: aggregated.shippingChargedToBuyer, currency: cart[0]?.product?.currency || 'XOF',
+          estimatedMinDays: aggregated.estimatedMinDays, estimatedMaxDays: aggregated.estimatedMaxDays,
         });
       } else {
-        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: res.error?.message || 'Frete indisponível para este destino.' });
+        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: aggregated.errorMessage || 'Frete indisponível para este destino.' });
       }
     });
     return () => { isMounted = false; };
