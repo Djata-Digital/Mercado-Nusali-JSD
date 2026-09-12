@@ -1794,11 +1794,19 @@ export class PaymentService {
         .where(eq(orders.id, ord.id));
 
       // 5. Escrow Transaction Ledger
+      // Fix (diagnóstico "RELEASE_SELLER gravando bruto em vez de líquido"):
+      // amount tem que representar o que de fato SAIU do escrow rumo ao
+      // vendedor — releaseAmount (= orders.sellerNetAmount), a MESMA
+      // variável já usada acima para o crédito na wallet — nunca
+      // esc.amount (o bruto retido; isso já é fielmente registrado pelo
+      // HOLD, que continua inalterado). Mesma convenção que REFUND_BUYER já
+      // segue em refundService.ts (valor real do evento, nunca uma cópia
+      // estática de escrow_accounts.amount).
       await tx.insert(escrowTransactions).values({
         id: `etx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         escrowAccountId: esc.id,
         type: 'RELEASE_SELLER',
-        amount: esc.amount,
+        amount: String(releaseAmount.toFixed(2)),
         currency: esc.currency,
         reason: options?.reason || 'ESCROW_RELEASED: Entrega confirmada pelo comprador. Saldo liberado ao vendedor.',
         performedBy,
