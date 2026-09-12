@@ -65,6 +65,7 @@ import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
 import { requireAuth, AuthRequest } from './modules/auth/authMiddleware.js';
 import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
+import { resolveCarrierNames, pickCarrierName } from './modules/logistics/carrierResolver.js';
 import { storageService } from './infra/storage.js';
 import { requestSellerPayout, PayoutValidationError } from './modules/wallet/payoutService.js';
 import { postSellerDisputeMessage, DisputeMessageValidationError } from './modules/disputes/disputeMessageService.js';
@@ -1971,6 +1972,11 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
     // cancelados/reembolsados, exatamente como já acontecia antes.
     const rows = (await getSellerOrderRows(seller.id, db)).filter((r) => r.paymentStatus === 'paid');
 
+    // Fix (diagnóstico "Transportadora" vazia): resolução em LOTE (1 query,
+    // nunca N+1) via o mesmo resolver central já usado por
+    // orderService.ts/adminRoutes.ts/shipmentService.ts.
+    const carrierMap = await resolveCarrierNames(db, rows.map((r) => r.carrierId));
+
     const mapped = rows.map((item) => {
       const addr = (item.shippingAddressJson as any) || {};
       const { status: mappedStatus, rawStatus: currentStatus } = mapOperationalStatus(item.orderStatus, item.paymentStatus, item.itemStatus, item.shipmentStatus);
@@ -2024,6 +2030,13 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
         shipmentId: item.shipmentId,
         shipmentStatus: item.shipmentStatus,
         trackingNumber: item.trackingNumber,
+        // Fix (diagnóstico "Transportadora" vazia no Seller > Pedidos de
+        // Venda): mesma resolução central já usada por orderService.ts
+        // (order detail do buyer), adminRoutes.ts (Expedição & Entregas) e
+        // shipmentService.ts (etiqueta/rastreio) — carrierId (persistente)
+        // tem prioridade, texto legado (shipments.carrier) é fallback,
+        // nunca derivado de trackingEvents/histórico textual.
+        shippingCarrier: pickCarrierName(item.carrierId, item.carrier, carrierMap),
         labelAvailable: Boolean(item.shipmentId),
         // Rótulo ciente de SELLER_FULFILLMENT vs NUSALI_FULFILLMENT — nunca
         // inventa evento, só traduz order_items.status + shipments.status reais.

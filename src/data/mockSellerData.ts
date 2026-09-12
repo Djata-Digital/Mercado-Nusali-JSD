@@ -130,7 +130,8 @@ export interface SellerOrderData {
   status: OrderStatus;
   escrowStatus: EscrowStatus;
   escrowReleaseDate?: string; // nunca enviado pelo backend hoje
-  shippingCarrier?: string; // nunca enviado pelo backend hoje
+  /** Nome real da transportadora (shipments.carrierId -> carriers.name, fallback shipments.carrier) — resolvido por GET /seller/orders via carrierResolver.ts. */
+  shippingCarrier?: string | null;
   trackingCode?: string;
   createdAt: string;
   /** Histórico estruturado de eventos — o backend real nunca envia isso hoje. Sempre trate como [] quando ausente, nunca invente eventos. */

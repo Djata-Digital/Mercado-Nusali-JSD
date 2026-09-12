@@ -107,6 +107,12 @@ export interface SellerOrderRow {
   shipmentId: string | null;
   shipmentStatus: string | null;
   trackingNumber: string | null;
+  // Fix (diagnóstico "Transportadora" vazia no Seller > Pedidos de Venda):
+  // fonte crua para resolução central via carrierResolver.ts — nunca
+  // resolvido aqui (o resolver precisa de um Map em lote, feito pelo
+  // chamador em sellerRoutes.ts).
+  carrierId: string | null;
+  carrier: string | null;
 }
 
 /**
@@ -248,6 +254,8 @@ export async function getSellerOrderRows(sellerId: string, executor?: any): Prom
       shipmentId: orderItems.shipmentId,
       shipmentStatus: shipments.status,
       trackingNumber: shipments.trackingNumber,
+      carrierId: shipments.carrierId,
+      carrier: shipments.carrier,
     })
     .from(orderItems)
     .innerJoin(orders, eq(orderItems.orderId, orders.id))
