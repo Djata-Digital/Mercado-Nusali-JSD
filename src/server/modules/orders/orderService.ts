@@ -25,6 +25,7 @@ import { eq, and, desc, asc, sql, inArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
+import { InventoryService } from '../inventory/inventoryService.js';
 import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor } from '../shipping/shippingCalculatorService.js';
 import { categories, platformSettings, countries } from '../../../db/schema.js';
 import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
@@ -1212,52 +1213,16 @@ export class OrderService {
         createdAt: new Date(),
       });
 
-      // Release active stock reservations and decrement quantityReserved in inventory
-      const activeReservations = await tx
-        .select()
-        .from(stockReservations)
-        .where(and(eq(stockReservations.orderId, orderId), eq(stockReservations.status, 'active')));
-
-      for (const res of activeReservations) {
-        await tx
-          .update(stockReservations)
-          .set({ status: 'released' })
-          .where(eq(stockReservations.id, res.id));
-
-        let invRows;
-        if (res.variantId) {
-          invRows = await tx
-            .select()
-            .from(inventory)
-            .where(and(eq(inventory.productId, res.productId), eq(inventory.variantId, res.variantId)));
-        } else {
-          invRows = await tx.select().from(inventory).where(eq(inventory.productId, res.productId));
-        }
-
-        if (invRows.length > 0) {
-          const inv = invRows[0];
-          await tx
-            .update(inventory)
-            .set({
-              quantityReserved: sql`GREATEST(0, ${inventory.quantityReserved} - ${res.quantity})`,
-              updatedAt: new Date(),
-            })
-            .where(eq(inventory.id, inv.id));
-
-          await tx.insert(inventoryMovements).values({
-            id: `mov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            warehouseId: inv.warehouseId,
-            productId: res.productId,
-            variantId: res.variantId,
-            type: 'RELEASE',
-            quantity: res.quantity,
-            reason: `Cancelamento do pedido ${ord.orderNumber}`,
-            referenceId: orderId,
-            performedBy: userId,
-            createdAt: new Date(),
-          });
-        }
-      }
+      // Libera as reservas ativas do pedido usando o inventoryId EXATO já
+      // persistido em cada stockReservations row — nunca "qualquer
+      // inventory" por productId/variantId (bug corrigido: quando o mesmo
+      // produto tem mais de uma linha de inventory, ex.: SELLER_LOCATION +
+      // NUSALI_HUB, buscar pelo par productId/variantId e pegar a primeira
+      // linha podia liberar a reserva na localização física errada).
+      // InventoryService.releaseStock() já é a implementação correta (usa
+      // res.inventoryId diretamente) e aceita `tx` como executor, então
+      // roda dentro desta mesma transação sem duplicar lógica.
+      await InventoryService.releaseStock(orderId, tx);
     });
 
     return this.getOrderById(orderId);
