@@ -46,6 +46,11 @@ import {
   shippingRates,
   shippingZones,
   carriers,
+  shippingRegions,
+  shippingSectors,
+  shippingRoutes,
+  shippingServices,
+  shippingRouteRates,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull, or, gte, lte, ne, inArray } from 'drizzle-orm';
@@ -72,6 +77,9 @@ import { resolveCarrierNames, pickCarrierName } from './modules/logistics/carrie
 import { processPayoutStatusChange } from './modules/wallet/payoutService.js';
 import { resolveDispute, RefundValidationError } from './modules/payments/refundService.js';
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
+import {
+  validateShippingRouteRateInput,
+} from './modules/shipping/shippingGeographyService.js';
 
 export const adminRouter = Router();
 
@@ -4594,6 +4602,267 @@ adminRouter.delete('/shipping-rates/:id', requireShippingRateManager, async (req
     await writeRealAudit(req, 'SHIPPING_RATE_DELETED', 'shipping_rate', id, { before: existing });
     return res.json({ success: true, message: 'Tarifa de frete removida.' });
   } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// ==========================================
+// FASE D15-A — FUNDAÇÃO DE ROTAS DE FRETE POR SETOR
+// ==========================================
+// Sistema PARALELO ao bloco de /shipping-rates acima (país↔país, modelo
+// antigo, ainda o único usado pelo checkout real). Nada aqui é lido por
+// ShippingCalculatorService/orderService.ts nesta fase — integração real é
+// fase futura (D15-B). GET usa requireLogisticsStaff (leitura); mutações de
+// tarifa/rota usam requireShippingRateManager — mesmos gates já usados pelo
+// bloco de tarifas antigo, por serem exatamente o mesmo domínio de acesso.
+
+adminRouter.get('/shipping/regions', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { country, active } = req.query;
+    const conditions: any[] = [];
+    if (country) conditions.push(eq(shippingRegions.countryCode, String(country).trim().toUpperCase()));
+    if (active !== undefined) conditions.push(eq(shippingRegions.isActive, active === 'true'));
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+
+    const rows = await db.select().from(shippingRegions).where(whereClause).orderBy(asc(shippingRegions.countryCode), asc(shippingRegions.name));
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+adminRouter.get('/shipping/sectors', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { country, region, active } = req.query;
+    const conditions: any[] = [];
+    if (country) conditions.push(eq(shippingSectors.countryCode, String(country).trim().toUpperCase()));
+    if (region) conditions.push(eq(shippingSectors.regionId, String(region)));
+    if (active !== undefined) conditions.push(eq(shippingSectors.isActive, active === 'true'));
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+
+    const rows = await db.select().from(shippingSectors).where(whereClause).orderBy(asc(shippingSectors.countryCode), asc(shippingSectors.name));
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// GET /admin/shipping/routes — SEMPRE paginado (1.521 linhas de GB sozinho;
+// nunca devolvido inteiro cegamente). Filtros: country, region (setor de
+// origem OU destino pertence à região), originSector, destinationSector,
+// service (rota tem tarifa ATIVA desse serviço), active (da própria rota),
+// hasRate (tem ao menos 1 tarifa ativa, qualquer serviço).
+adminRouter.get('/shipping/routes', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { country, region, originSector, destinationSector, service, active, hasRate, page, limit } = req.query;
+    const conditions: any[] = [];
+    if (country) conditions.push(eq(shippingRoutes.countryCode, String(country).trim().toUpperCase()));
+    if (originSector) conditions.push(eq(shippingRoutes.originSectorId, String(originSector)));
+    if (destinationSector) conditions.push(eq(shippingRoutes.destinationSectorId, String(destinationSector)));
+    if (active !== undefined) conditions.push(eq(shippingRoutes.isActive, active === 'true'));
+
+    if (region) {
+      const regionSectorRows = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(eq(shippingSectors.regionId, String(region)));
+      const sectorIds = regionSectorRows.map((r: any) => r.id);
+      if (sectorIds.length === 0) {
+        return res.json({ success: true, data: [], pagination: { total: 0, page: 1, limit: Number(limit) || 50, totalPages: 0 } });
+      }
+      conditions.push(or(inArray(shippingRoutes.originSectorId, sectorIds), inArray(shippingRoutes.destinationSectorId, sectorIds)));
+    }
+
+    if (service) {
+      conditions.push(sql`EXISTS (SELECT 1 FROM shipping_route_rates srr WHERE srr.route_id = ${shippingRoutes.id} AND srr.service_id = ${String(service)} AND srr.is_active = true)`);
+    } else if (hasRate === 'true') {
+      conditions.push(sql`EXISTS (SELECT 1 FROM shipping_route_rates srr WHERE srr.route_id = ${shippingRoutes.id} AND srr.is_active = true)`);
+    } else if (hasRate === 'false') {
+      conditions.push(sql`NOT EXISTS (SELECT 1 FROM shipping_route_rates srr WHERE srr.route_id = ${shippingRoutes.id} AND srr.is_active = true)`);
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.min(200, Math.max(1, Number(limit) || 50));
+    const offset = (pageNum - 1) * limitNum;
+
+    const [rows, totalRows] = await Promise.all([
+      db.select().from(shippingRoutes).where(whereClause)
+        .orderBy(asc(shippingRoutes.countryCode), asc(shippingRoutes.originSectorId), asc(shippingRoutes.destinationSectorId))
+        .limit(limitNum).offset(offset),
+      db.select({ count: sql<number>`count(*)::int` }).from(shippingRoutes).where(whereClause),
+    ]);
+
+    const total = totalRows[0]?.count || 0;
+    return res.json({
+      success: true,
+      data: rows,
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+    });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+adminRouter.get('/shipping/routes/:id', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { id } = req.params;
+    const [route] = await db.select().from(shippingRoutes).where(eq(shippingRoutes.id, id)).limit(1);
+    if (!route) return res.status(404).json({ success: false, error: { code: 'SHIPPING_ROUTE_NOT_FOUND', message: 'Rota não encontrada.' } });
+
+    const [originSector] = await db.select().from(shippingSectors).where(eq(shippingSectors.id, route.originSectorId)).limit(1);
+    const [destinationSector] = await db.select().from(shippingSectors).where(eq(shippingSectors.id, route.destinationSectorId)).limit(1);
+    const rates = await db.select().from(shippingRouteRates).where(eq(shippingRouteRates.routeId, id))
+      .orderBy(asc(shippingRouteRates.serviceId), asc(shippingRouteRates.minWeightKg));
+
+    return res.json({ success: true, data: { ...route, originSector, destinationSector, rates } });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// PATCH /admin/shipping/routes/:id — SOMENTE isActive/deletedAt. Nunca um
+// DELETE físico (regra 5 do D15-A: rotas históricas não desaparecem).
+adminRouter.patch('/shipping/routes/:id', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { id } = req.params;
+    const { isActive, deletedAt } = req.body ?? {};
+
+    const [existing] = await db.select().from(shippingRoutes).where(eq(shippingRoutes.id, id)).limit(1);
+    if (!existing) throw new AdminRequestError(404, 'Rota não encontrada.');
+
+    const updateData: any = { updatedAt: new Date() };
+    if (isActive !== undefined) updateData.isActive = Boolean(isActive);
+    if (deletedAt !== undefined) updateData.deletedAt = deletedAt ? new Date(deletedAt) : null;
+
+    if (Object.keys(updateData).length === 1) {
+      throw new AdminRequestError(400, 'Nenhum campo válido informado (isActive ou deletedAt).');
+    }
+
+    await db.update(shippingRoutes).set(updateData).where(eq(shippingRoutes.id, id));
+    const [updated] = await db.select().from(shippingRoutes).where(eq(shippingRoutes.id, id)).limit(1);
+
+    await writeRealAudit(req, 'admin.shipping_route.updated', 'shipping_routes', id, updateData);
+    return res.json({ success: true, message: 'Rota atualizada com sucesso.', data: updated });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// POST /admin/shipping/rates — cria tarifa nova. Toda validação roda dentro
+// da MESMA transação da escrita (validateShippingRouteRateInput), nunca
+// confiando no frontend: route/service existem, mesmo país, moeda coerente
+// com o mercado, sem overlap de faixa ativa no mesmo período de vigência.
+adminRouter.post('/shipping/rates', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { routeId, serviceId, minWeightKg, maxWeightKg, amount, currency, isActive, validFrom, validUntil } = req.body ?? {};
+
+    const created = await db.transaction(async (tx: any) => {
+      const validation = await validateShippingRouteRateInput(tx, {
+        routeId: String(routeId || ''),
+        serviceId: String(serviceId || ''),
+        minWeightKg: Number(minWeightKg),
+        maxWeightKg: Number(maxWeightKg),
+        amount: Number(amount),
+        currency: String(currency || ''),
+        validFrom: validFrom || null,
+        validUntil: validUntil || null,
+      });
+      if (!('ok' in validation)) {
+        throw new AdminRequestError(400, validation.error);
+      }
+
+      const newRate = {
+        id: `shprate_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+        routeId: String(routeId),
+        serviceId: String(serviceId),
+        minWeightKg: String(Number(minWeightKg)),
+        maxWeightKg: String(Number(maxWeightKg)),
+        amount: String(Number(amount)),
+        currency: String(currency).trim().toUpperCase(),
+        isActive: isActive !== false,
+        validFrom: validFrom ? new Date(validFrom) : null,
+        validUntil: validUntil ? new Date(validUntil) : null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      await tx.insert(shippingRouteRates).values(newRate);
+      return newRate;
+    });
+
+    await writeRealAudit(req, 'admin.shipping_route_rate.created', 'shipping_route_rates', created.id, created);
+    return res.status(201).json({ success: true, message: 'Tarifa criada com sucesso.', data: created });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// PATCH /admin/shipping/rates/:id — atualização parcial, revalidando tudo
+// (exclui a própria tarifa da checagem de overlap).
+adminRouter.patch('/shipping/rates/:id', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { id } = req.params;
+    const body = req.body ?? {};
+
+    const updated = await db.transaction(async (tx: any) => {
+      const [existing] = await tx.select().from(shippingRouteRates).where(eq(shippingRouteRates.id, id)).limit(1);
+      if (!existing) throw new AdminRequestError(404, 'Tarifa não encontrada.');
+
+      const merged = {
+        routeId: body.routeId !== undefined ? String(body.routeId) : existing.routeId,
+        serviceId: body.serviceId !== undefined ? String(body.serviceId) : existing.serviceId,
+        minWeightKg: body.minWeightKg !== undefined ? Number(body.minWeightKg) : Number(existing.minWeightKg),
+        maxWeightKg: body.maxWeightKg !== undefined ? Number(body.maxWeightKg) : Number(existing.maxWeightKg),
+        amount: body.amount !== undefined ? Number(body.amount) : Number(existing.amount),
+        currency: body.currency !== undefined ? String(body.currency) : existing.currency,
+        validFrom: body.validFrom !== undefined ? (body.validFrom || null) : existing.validFrom,
+        validUntil: body.validUntil !== undefined ? (body.validUntil || null) : existing.validUntil,
+      };
+
+      const validation = await validateShippingRouteRateInput(tx, merged, { excludeRateId: id });
+      if (!('ok' in validation)) {
+        throw new AdminRequestError(400, validation.error);
+      }
+
+      const updateData: any = {
+        routeId: merged.routeId,
+        serviceId: merged.serviceId,
+        minWeightKg: String(merged.minWeightKg),
+        maxWeightKg: String(merged.maxWeightKg),
+        amount: String(merged.amount),
+        currency: merged.currency.trim().toUpperCase(),
+        validFrom: merged.validFrom ? new Date(merged.validFrom) : null,
+        validUntil: merged.validUntil ? new Date(merged.validUntil) : null,
+        updatedAt: new Date(),
+      };
+      if (body.isActive !== undefined) updateData.isActive = Boolean(body.isActive);
+
+      await tx.update(shippingRouteRates).set(updateData).where(eq(shippingRouteRates.id, id));
+      const [row] = await tx.select().from(shippingRouteRates).where(eq(shippingRouteRates.id, id)).limit(1);
+      return row;
+    });
+
+    await writeRealAudit(req, 'admin.shipping_route_rate.updated', 'shipping_route_rates', id, updated);
+    return res.json({ success: true, message: 'Tarifa atualizada com sucesso.', data: updated });
+  } catch (error) {
     return sendAdminError(res, error);
   }
 });

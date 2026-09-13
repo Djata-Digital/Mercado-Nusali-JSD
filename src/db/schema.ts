@@ -1746,6 +1746,124 @@ export const countryRepresentatives = pgTable('country_representatives', {
   country_representatives_country_idx: index('country_representatives_country_idx').on(table.countryCode),
 }));
 
+// ============================================================================
+// FASE D15-A — FUNDAÇÃO DE ROTAS DE FRETE POR SETOR (país > região > setor >
+// rota origem-setor→destino-setor > serviço > tarifa por faixa de peso).
+//
+// Sistema PARALELO ao modelo país/zona já existente acima (shippingZones/
+// shippingRates/storeShippingPolicies) — NENHUMA dessas tabelas foi alterada
+// e o checkout (ShippingCalculatorService/orderService.ts) NÃO usa este
+// modelo novo ainda; a integração é uma fase futura (D15-B). Nenhum pedido
+// histórico é afetado.
+//
+// "regions" (tabela RBAC logo acima) é um domínio DIFERENTE — supervisão
+// territorial de pessoas (supervisorEmail texto livre, freightBaseRate nunca
+// lido por nenhum cálculo real, só 4 linhas de demonstração). Não é
+// reaproveitada aqui de propósito, para nunca confundir os dois conceitos:
+// "Região Cacheu" (RBAC, se existisse) nunca é a mesma entidade que
+// "Região Cacheu" -> "Setor Cacheu" deste módulo de frete.
+//
+// Todas as FKs desta cadeia são ON DELETE RESTRICT (nunca CASCADE): a
+// operação administrativa normal é isActive=false (+ deletedAt em
+// shipping_routes) — nunca DELETE físico. Isso preserva rotas/tarifas
+// históricas mesmo que uma região/setor pare de ser usada.
+// ============================================================================
+
+export const shippingRegions = pgTable('shipping_regions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  code: varchar('code', { length: 100 }).notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_regions_country_code_uq: uniqueIndex('shipping_regions_country_code_uq').on(table.countryCode, table.code),
+  shipping_regions_country_idx: index('shipping_regions_country_idx').on(table.countryCode),
+}));
+
+export const shippingSectors = pgTable('shipping_sectors', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  // RESTRICT (ajuste 1): uma região com setores vinculados nunca pode ser
+  // removida fisicamente — só desativada (shipping_regions.isActive=false).
+  regionId: varchar('region_id', { length: 255 }).notNull().references(() => shippingRegions.id, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  code: varchar('code', { length: 100 }).notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_sectors_country_code_uq: uniqueIndex('shipping_sectors_country_code_uq').on(table.countryCode, table.code),
+  shipping_sectors_region_idx: index('shipping_sectors_region_idx').on(table.regionId),
+  shipping_sectors_country_idx: index('shipping_sectors_country_idx').on(table.countryCode),
+}));
+
+export const shippingRoutes = pgTable('shipping_routes', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  // RESTRICT (ajuste 1): um setor referenciado por qualquer rota nunca pode
+  // ser removido fisicamente — só desativado.
+  originSectorId: varchar('origin_sector_id', { length: 255 }).notNull().references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  destinationSectorId: varchar('destination_sector_id', { length: 255 }).notNull().references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  isActive: boolean('is_active').notNull().default(true),
+  // Remoção lógica (regra 5 do pedido): rotas nunca desaparecem fisicamente
+  // se puderem ter sido usadas por pedidos no futuro — isActive=false para
+  // "parar de oferecer", deletedAt como remoção lógica adicional se um dia
+  // for necessário distinguir "nunca existiu" de "existiu e foi desativada".
+  deletedAt: timestamp('deleted_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_routes_country_origin_dest_uq: uniqueIndex('shipping_routes_country_origin_dest_uq').on(table.countryCode, table.originSectorId, table.destinationSectorId),
+  shipping_routes_origin_idx: index('shipping_routes_origin_idx').on(table.originSectorId),
+  shipping_routes_destination_idx: index('shipping_routes_destination_idx').on(table.destinationSectorId),
+  shipping_routes_country_idx: index('shipping_routes_country_idx').on(table.countryCode),
+}));
+
+export const shippingServices = pgTable('shipping_services', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  code: varchar('code', { length: 100 }).notNull(), // ex.: STANDARD, ECONOMY, EXPRESS
+  description: text('description'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_services_country_code_uq: uniqueIndex('shipping_services_country_code_uq').on(table.countryCode, table.code),
+}));
+
+// Nome deliberadamente DIFERENTE de "shipping_rates" (tabela já existente,
+// modelo país↔país, ativamente usada pelo checkout hoje) — evita colisão de
+// nome e evita qualquer confusão entre os dois sistemas paralelos.
+export const shippingRouteRates = pgTable('shipping_route_rates', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  // RESTRICT (ajuste 1): uma rota/serviço com tarifas cadastradas nunca pode
+  // ser removida fisicamente — só desativada. Preserva histórico de tarifas.
+  routeId: varchar('route_id', { length: 255 }).notNull().references(() => shippingRoutes.id, { onDelete: 'restrict' }),
+  serviceId: varchar('service_id', { length: 255 }).notNull().references(() => shippingServices.id, { onDelete: 'restrict' }),
+  // Semântica documentada e validada em código: [minWeightKg, maxWeightKg) —
+  // mínimo inclusivo, máximo exclusivo. 1kg pertence à faixa que o CONTÉM
+  // como mínimo, nunca à faixa anterior que o teria como máximo.
+  minWeightKg: numeric('min_weight_kg', { precision: 8, scale: 3 }).notNull(),
+  maxWeightKg: numeric('max_weight_kg', { precision: 8, scale: 3 }).notNull(),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  // Moeda por tarifa/mercado — nunca hardcoded (Guiné-Bissau usa XOF, não BRL).
+  currency: varchar('currency', { length: 10 }).notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  validFrom: timestamp('valid_from'),
+  validUntil: timestamp('valid_until'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_route_rates_route_idx: index('shipping_route_rates_route_idx').on(table.routeId),
+  shipping_route_rates_service_idx: index('shipping_route_rates_service_idx').on(table.serviceId),
+  shipping_route_rates_min_weight_check: check('shipping_route_rates_min_weight_check', sql`${table.minWeightKg} >= 0`),
+  shipping_route_rates_max_gt_min_check: check('shipping_route_rates_max_gt_min_check', sql`${table.maxWeightKg} > ${table.minWeightKg}`),
+  shipping_route_rates_amount_check: check('shipping_route_rates_amount_check', sql`${table.amount} >= 0`),
+}));
+
 export const platformSettings = pgTable('platform_settings', {
   key: varchar('key', { length: 255 }).primaryKey(),
   valueJson: jsonb('value_json').notNull(),

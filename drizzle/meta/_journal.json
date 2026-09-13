@@ -169,6 +169,13 @@
       "when": 1788744183280,
       "tag": "0023_material_pandemic",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1789274367838,
+      "tag": "0024_shipping_sector_route_foundation",
+      "breakpoints": true
     }
   ]
 }
