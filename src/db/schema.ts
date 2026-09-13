@@ -464,12 +464,24 @@ export const inventory = pgTable('inventory', {
   quantityOnHand: integer('quantity_on_hand').notNull().default(0),
   quantityReserved: integer('quantity_reserved').notNull().default(0),
   minimumStockLevel: integer('minimum_stock_level').default(5),
+  // FASE D15-C3 (ajuste arquitetural) — nullable de propósito. `inventory`
+  // continua sendo a ÚNICA fonte de verdade de estoque (quantityOnHand/
+  // quantityReserved); esta coluna apenas aponta OPCIONALMENTE para ONDE
+  // (fulfillment_locations) aquela linha existe fisicamente, sem duplicar
+  // quantidade em nenhuma tabela paralela. NULL em todas as linhas
+  // existentes hoje — nenhum backfill nesta fase (ver comentário acima de
+  // fulfillmentLocations). locationType/warehouseId/sellerId legados
+  // permanecem intactos e continuam sendo a única coisa lida/escrita por
+  // checkout, reserva, despacho e catálogo até uma fase futura migrar esses
+  // consumidores explicitamente.
+  fulfillmentLocationId: varchar('fulfillment_location_id', { length: 255 }).references(() => fulfillmentLocations.id, { onDelete: 'restrict' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
   inventory_product_idx: index('inventory_product_idx').on(table.productId),
   inventory_warehouse_idx: index('inventory_warehouse_idx').on(table.warehouseId),
   inventory_seller_idx: index('inventory_seller_idx').on(table.sellerId),
+  inventory_fulfillment_location_idx: index('inventory_fulfillment_location_idx').on(table.fulfillmentLocationId),
 }));
 
 export const inventoryMovements = pgTable('inventory_movements', {
@@ -523,6 +535,85 @@ export const inventoryTransfers = pgTable('inventory_transfers', {
 }, (table) => ({
   inventory_transfers_seller_idx: index('inventory_transfers_seller_idx').on(table.sellerId),
   inventory_transfers_product_idx: index('inventory_transfers_product_idx').on(table.productId),
+}));
+
+// ============================================================================
+// FASE D15-C3 — FULFILLMENT LOCATIONS (fundação de múltiplas origens
+// físicas de estoque).
+//
+// AJUSTE ARQUITETURAL (mesma fase, antes do commit): a primeira versão desta
+// fundação incluía uma tabela `inventory_locations` paralela (sellerId +
+// productId + variantId + fulfillmentLocationId + quantityOnHand/
+// quantityReserved próprios). Auditoria identificou risco real de DUAS
+// FONTES DE VERDADE de estoque (`inventory` vs `inventory_locations`
+// divergindo para o mesmo seller/produto/local) — `inventory_locations` foi
+// REMOVIDA antes de qualquer aplicação em staging/produção. `inventory`
+// continua sendo a ÚNICA fonte de verdade de quantidade (quantityOnHand/
+// quantityReserved); ela apenas ganhou uma coluna opcional
+// `fulfillmentLocationId` (ver definição de `inventory` acima) que aponta
+// PARA ONDE aquela linha existe fisicamente, sem duplicar quantidade em
+// nenhuma tabela nova.
+//
+// fulfillment_locations = ONDE um estoque físico pode existir (uma loja do
+// seller OU um HUB/armazém Nusali) — nunca A QUEM o estoque pertence (isso
+// continua em `inventory.sellerId`, como sempre foi).
+// Um HUB pode guardar estoque de vários sellers ao mesmo tempo (sellerId
+// fica NULL para NUSALI_WAREHOUSE, de propósito). Geografia nunca duplicada:
+// para STORE, addressId/shippingSectorId são sempre um espelho (refrescado
+// por ensureStoreFulfillmentLocation) do que já está em
+// stores.operationalAddressId -> addresses.shippingSectorId — nunca uma
+// segunda fonte de verdade independente. Para NUSALI_WAREHOUSE, ambos ficam
+// NULL de propósito: warehouses ainda não tem addressId/shippingSectorId
+// estruturado hoje (confirmado por auditoria — só city/address/countryCode
+// texto livre) — nada é inventado para preencher essa lacuna.
+//
+// Nenhuma linha existente de `inventory` é backfillada nesta fase (nem HUB,
+// determinístico via warehouseId, nem SELLER_LOCATION, que hoje não tem
+// informação suficiente para saber a qual store pertence — ver auditoria).
+// shipmentService.ts/orderService.ts/checkout/frete/seleção inteligente
+// continuam usando exclusivamente locationType/warehouseId/sellerId nesta
+// fase — `fulfillmentLocationId` ainda não é lido por nenhum consumidor.
+// ============================================================================
+
+export const fulfillmentLocations = pgTable('fulfillment_locations', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  // NULL = HUB Nusali compartilhado (não pertence a nenhum seller
+  // específico). Preenchido apenas para locationType='STORE'.
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'restrict' }),
+  locationType: varchar('location_type', { length: 50 }).notNull(), // STORE | NUSALI_WAREHOUSE
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'restrict' }),
+  warehouseId: varchar('warehouse_id', { length: 255 }).references(() => warehouses.id, { onDelete: 'restrict' }),
+  // Espelho de stores.operationalAddressId no momento da última chamada de
+  // ensureStoreFulfillmentLocation — nunca uma fonte de verdade paralela.
+  addressId: varchar('address_id', { length: 255 }).references(() => addresses.id, { onDelete: 'set null' }),
+  countryCode: varchar('country_code', { length: 10 }).notNull(),
+  // Espelho de addresses.shippingSectorId (STORE) — sempre NULL para
+  // NUSALI_WAREHOUSE nesta fase (ver comentário acima).
+  shippingSectorId: varchar('shipping_sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  // Uma location por store / uma location por warehouse — idempotência
+  // garantida no schema, não só na aplicação. UNIQUE comum trataria NULL
+  // como distinto (permitiria N locations com storeId nulo); índices
+  // parciais resolvem isso (mesmo padrão de ledger_accounts acima).
+  fulfillment_locations_store_uq: uniqueIndex('fulfillment_locations_store_uq')
+    .on(table.storeId)
+    .where(sql`${table.storeId} IS NOT NULL`),
+  fulfillment_locations_warehouse_uq: uniqueIndex('fulfillment_locations_warehouse_uq')
+    .on(table.warehouseId)
+    .where(sql`${table.warehouseId} IS NOT NULL`),
+  fulfillment_locations_country_idx: index('fulfillment_locations_country_idx').on(table.countryCode),
+  fulfillment_locations_type_check: check('fulfillment_locations_type_check', sql`${table.locationType} IN ('STORE','NUSALI_WAREHOUSE')`),
+  // XOR estrutural: STORE sempre tem storeId (nunca warehouseId) e
+  // NUSALI_WAREHOUSE sempre tem warehouseId (nunca storeId) — nunca os dois
+  // nem nenhum dos dois.
+  fulfillment_locations_store_xor_warehouse_check: check(
+    'fulfillment_locations_store_xor_warehouse_check',
+    sql`(${table.locationType} = 'STORE' AND ${table.storeId} IS NOT NULL AND ${table.warehouseId} IS NULL) OR (${table.locationType} = 'NUSALI_WAREHOUSE' AND ${table.warehouseId} IS NOT NULL AND ${table.storeId} IS NULL)`
+  ),
 }));
 
 // ============================================================================

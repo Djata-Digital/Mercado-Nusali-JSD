@@ -183,6 +183,13 @@
       "when": 1789319209870,
       "tag": "0025_seller_operational_address_geography",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1789324684799,
+      "tag": "0026_fulfillment_locations_foundation",
+      "breakpoints": true
     }
   ]
 }

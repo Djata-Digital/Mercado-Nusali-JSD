@@ -86,6 +86,7 @@ import {
   validateAddressSectorAssignment,
   deriveShippingRegionFromSector,
 } from './modules/shipping/shippingGeographyService.js';
+import { listFulfillmentLocationsForSeller } from './modules/logistics/fulfillmentLocationService.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -1339,6 +1340,27 @@ sellerRouter.get('/shipping/sectors', async (req: AuthRequest, res: Response) =>
     return res.json({ success: true, data: rows });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar setores.' });
+  }
+});
+
+// GET /seller/fulfillment-locations — FASE D15-C3. Fundação de múltiplas
+// origens físicas de estoque. Lista SOMENTE o que é relevante ao seller
+// autenticado: (1) as fulfillment_locations das próprias lojas (garantidas/
+// atualizadas na hora — nunca duplicadas) e (2) HUBs Nusali onde ele JÁ TEM
+// estoque (política atual: HUB continua admin-managed, seller só visualiza
+// onde possui estoque, nunca edita um HUB arbitrariamente). Nada aqui
+// conecta a checkout/frete/reserva real.
+sellerRouter.get('/fulfillment-locations', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.json({ success: true, data: [] });
+
+    const locations = await listFulfillmentLocationsForSeller(seller.id, db);
+    return res.json({ success: true, data: locations });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar locais de fulfillment.' });
   }
 });
 

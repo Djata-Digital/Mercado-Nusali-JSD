@@ -51,6 +51,7 @@ import {
   shippingRoutes,
   shippingServices,
   shippingRouteRates,
+  fulfillmentLocations,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull, or, gte, lte, ne, inArray } from 'drizzle-orm';
@@ -2470,6 +2471,30 @@ adminRouter.post('/warehouses', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// GET /admin/fulfillment-locations — FASE D15-C3. Leitura administrativa da
+// fundação de múltiplas origens físicas de estoque (fulfillment_locations).
+// Nunca cria/edita — só lista o que já existe (as locations nascem via
+// ensureStoreFulfillmentLocation/ensureWarehouseFulfillmentLocation, nunca
+// por esta rota). Filtros: locationType, country, active.
+adminRouter.get('/fulfillment-locations', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { locationType, country, active } = req.query;
+    const conditions: any[] = [];
+    if (locationType) conditions.push(eq(fulfillmentLocations.locationType, String(locationType)));
+    if (country) conditions.push(eq(fulfillmentLocations.countryCode, String(country).trim().toUpperCase()));
+    if (active !== undefined) conditions.push(eq(fulfillmentLocations.isActive, active === 'true'));
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+
+    const rows = await db.select().from(fulfillmentLocations).where(whereClause).orderBy(asc(fulfillmentLocations.locationType), asc(fulfillmentLocations.name));
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
   }
 });
 
