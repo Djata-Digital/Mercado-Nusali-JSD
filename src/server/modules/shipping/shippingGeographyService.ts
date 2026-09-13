@@ -33,6 +33,9 @@ import {
   shippingRoutes,
   shippingServices,
   shippingRouteRates,
+  addresses,
+  stores,
+  sellers,
 } from '../../../db/schema.js';
 
 export const GUINEA_BISSAU_COUNTRY_CODE = 'GW';
@@ -439,4 +442,111 @@ export async function validateShippingRouteRateInput(
   }
 
   return { ok: true, route, service };
+}
+
+// ============================================================================
+// FASE D15-C — origem operacional do seller (endereço estruturado + setor de
+// frete opcional). NÃO conectado ao checkout/shipmentService nesta fase —
+// só schema, validação e CRUD administrável pelo próprio seller.
+// ============================================================================
+
+/**
+ * Deriva região a partir do setor — NUNCA o contrário. addresses.shippingSectorId
+ * é a ÚNICA fonte de verdade geográfica de frete gravada no endereço; a
+ * região é sempre computada em tempo de leitura (evita a divergência
+ * region=X + sector=setor-de-Y que uma coluna shippingRegionId paralela
+ * permitiria). Retorna null se o setor não existir (nunca inventa região).
+ */
+export async function deriveShippingRegionFromSector(
+  executor: any,
+  shippingSectorId: string | null | undefined
+): Promise<{ sector: typeof shippingSectors.$inferSelect; region: typeof shippingRegions.$inferSelect } | null> {
+  if (!shippingSectorId) return null;
+  const [sector] = await executor.select().from(shippingSectors).where(eq(shippingSectors.id, shippingSectorId)).limit(1);
+  if (!sector) return null;
+  const [region] = await executor.select().from(shippingRegions).where(eq(shippingRegions.id, sector.regionId)).limit(1);
+  if (!region) return null;
+  return { sector, region };
+}
+
+/**
+ * Valida a atribuição de um setor de frete a UM ENDEREÇO (sem contexto de
+ * loja ainda) — usada na criação/edição do endereço operacional do seller.
+ * shippingSectorId null é sempre válido (opt-in — países sem geografia por
+ * setor, ex.: BR, continuam funcionando). Nunca confia em regionId vindo do
+ * chamador (não existe esse campo em addresses, de propósito).
+ */
+export async function validateAddressSectorAssignment(
+  executor: any,
+  input: { countryCode: string; shippingSectorId?: string | null }
+): Promise<{ error: string } | { ok: true }> {
+  if (!input.shippingSectorId) return { ok: true };
+
+  const derived = await deriveShippingRegionFromSector(executor, input.shippingSectorId);
+  if (!derived) {
+    return { error: `SHIPPING_SECTOR_NOT_FOUND: setor "${input.shippingSectorId}" não encontrado.` };
+  }
+  const { sector, region } = derived;
+
+  if (sector.isActive === false) {
+    return { error: `SHIPPING_SECTOR_INACTIVE: o setor "${sector.name}" está inativo e não pode ser usado como origem operacional.` };
+  }
+  const addressCountry = String(input.countryCode || '').trim().toUpperCase();
+  if (sector.countryCode !== addressCountry) {
+    return { error: `SHIPPING_SECTOR_COUNTRY_MISMATCH: o setor "${sector.name}" pertence a "${sector.countryCode}", mas o endereço é de "${addressCountry}".` };
+  }
+  // Defesa em profundidade: mesmo com FK garantindo sector->region, confirma
+  // explicitamente que a região herdada é do mesmo país (nunca confia em
+  // nada vindo do chamador para decidir isso).
+  if (region.countryCode !== sector.countryCode) {
+    return { error: `SHIPPING_REGION_COUNTRY_MISMATCH: a região "${region.name}" pertence a "${region.countryCode}", mas o setor "${sector.name}" pertence a "${sector.countryCode}".` };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Valida a associação COMPLETA loja -> endereço operacional
+ * (stores.operationalAddressId), exatamente os 6 itens pedidos:
+ *   1. address existe
+ *   2. store existe
+ *   3. store pertence ao seller autenticado
+ *   4. address.userId === seller.userId (nunca aponta para endereço de outro usuário)
+ *   5. address.countryCode === store.countryCode
+ *   6. se address.shippingSectorId != null: setor existe, ativo, mesmo país do
+ *      endereço, região do setor no mesmo país
+ * Nunca confia em regionId vindo do frontend (nem existe esse campo aqui).
+ */
+export async function validateOperationalAddressGeography(
+  executor: any,
+  input: { addressId: string; storeId: string; sellerUserId: string }
+): Promise<{ error: string } | { ok: true; address: typeof addresses.$inferSelect; store: typeof stores.$inferSelect }> {
+  const [address] = await executor.select().from(addresses).where(eq(addresses.id, input.addressId)).limit(1);
+  if (!address) return { error: `ADDRESS_NOT_FOUND: endereço "${input.addressId}" não encontrado.` };
+
+  const [store] = await executor.select().from(stores).where(eq(stores.id, input.storeId)).limit(1);
+  if (!store) return { error: `STORE_NOT_FOUND: loja "${input.storeId}" não encontrada.` };
+
+  const [seller] = await executor.select().from(sellers).where(eq(sellers.id, store.sellerId)).limit(1);
+  if (!seller || seller.userId !== input.sellerUserId) {
+    return { error: 'STORE_NOT_OWNED: esta loja não pertence ao vendedor autenticado.' };
+  }
+
+  if (address.userId !== input.sellerUserId) {
+    return { error: 'ADDRESS_NOT_OWNED: este endereço não pertence ao vendedor autenticado — não é possível associá-lo a uma loja de outro usuário.' };
+  }
+
+  if (String(address.countryCode || '').toUpperCase() !== String(store.countryCode || '').toUpperCase()) {
+    return { error: `ADDRESS_STORE_COUNTRY_MISMATCH: o endereço é de "${address.countryCode}", mas a loja é de "${store.countryCode}".` };
+  }
+
+  if (address.shippingSectorId) {
+    const sectorValidation = await validateAddressSectorAssignment(executor, {
+      countryCode: address.countryCode,
+      shippingSectorId: address.shippingSectorId,
+    });
+    if (!('ok' in sectorValidation)) return sectorValidation;
+  }
+
+  return { ok: true, address, store };
 }

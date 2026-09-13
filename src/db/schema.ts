@@ -69,7 +69,16 @@ export const addresses = pgTable('addresses', {
   zipCode: varchar('zip_code', { length: 50 }),
   phone: varchar('phone', { length: 50 }).notNull(),
   isDefault: boolean('is_default').notNull().default(false),
-  addressType: varchar('address_type', { length: 50 }).notNull().default('shipping'), // shipping, billing
+  addressType: varchar('address_type', { length: 50 }).notNull().default('shipping'), // shipping, billing, business (FASE D15-C)
+  // FASE D15-C — origem operacional do seller (fundação D15-A). NULLABLE de
+  // propósito: opt-in, nunca exigido globalmente — endereços de países sem
+  // geografia de frete por setor (ex.: BR) continuam com isto sempre NULL.
+  // Deliberadamente SEM um shippingRegionId paralelo: a região é SEMPRE
+  // derivada de shipping_sectors.region_id (nunca persistida aqui de novo),
+  // para nunca permitir a divergência region=X + sector=setor-de-Y. ON
+  // DELETE RESTRICT: um setor referenciado por algum endereço nunca pode
+  // ser removido fisicamente — só desativado (shipping_sectors.isActive).
+  shippingSectorId: varchar('shipping_sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
@@ -252,6 +261,14 @@ export const stores = pgTable('stores', {
   categoryId: varchar('category_id', { length: 255 }),
   addressJson: jsonb('address_json'),
   businessHoursJson: jsonb('business_hours_json'),
+  // FASE D15-C — ponteiro EXPLÍCITO para qual endereço (addresses.id) é a
+  // origem operacional desta loja. Nunca inferido por isDefault/primeiro
+  // endereço/addressType — sempre uma escolha explícita do seller (ou
+  // ausência = NULL, "ainda não configurado"). addressJson acima continua
+  // existindo e funcionando exatamente como hoje — nada aqui o substitui ou
+  // migra automaticamente. ON DELETE SET NULL: apagar o endereço nunca deixa
+  // a loja com uma referência inválida — só volta a "não configurado".
+  operationalAddressId: varchar('operational_address_id', { length: 255 }).references(() => addresses.id, { onDelete: 'set null' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({

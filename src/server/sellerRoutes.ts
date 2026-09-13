@@ -79,6 +79,11 @@ import {
   computeSellerWalletSnapshot,
   computeSellerCustomers,
 } from './modules/seller/sellerFinancialsService.js';
+import {
+  validateOperationalAddressGeography,
+  validateAddressSectorAssignment,
+  deriveShippingRegionFromSector,
+} from './modules/shipping/shippingGeographyService.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -1203,7 +1208,30 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
       email: rawEmail,
       businessHoursJson: rawBusinessHoursJson,
       businessHours: rawBusinessHours,
+      operationalAddressId: rawOperationalAddressId,
     } = req.body;
+
+    // FASE D15-C — origem operacional explícita (stores.operationalAddressId).
+    // Nunca inferida (isDefault/primeiro endereço) — só aceita se as 6
+    // validações passarem (dono real, mesmo país, setor coerente quando
+    // houver). `null` explícito remove a associação (loja volta a "sem
+    // origem configurada") sem apagar o endereço em si.
+    let operationalAddressId = storeRows[0].operationalAddressId;
+    if (rawOperationalAddressId !== undefined) {
+      if (rawOperationalAddressId === null) {
+        operationalAddressId = null;
+      } else {
+        const validation = await validateOperationalAddressGeography(db, {
+          addressId: String(rawOperationalAddressId),
+          storeId: req.params.id,
+          sellerUserId: req.user!.id,
+        });
+        if (!('ok' in validation)) {
+          return res.status(400).json({ success: false, error: { code: 'OPERATIONAL_ADDRESS_INVALID', message: validation.error } });
+        }
+        operationalAddressId = String(rawOperationalAddressId);
+      }
+    }
 
     const logoUrl = rawLogoUrl !== undefined ? rawLogoUrl : (rawLogo !== undefined ? rawLogo : storeRows[0].logoUrl);
     const bannerUrl = rawBannerUrl !== undefined ? rawBannerUrl : (rawBanner !== undefined ? rawBanner : storeRows[0].bannerUrl);
@@ -1249,6 +1277,7 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
         categoryId: categoryId ? String(categoryId).trim() : storeRows[0].categoryId,
         addressJson,
         businessHoursJson,
+        operationalAddressId,
         updatedAt: new Date(),
       })
       .where(and(eq(storesTable.id, req.params.id), eq(storesTable.sellerId, seller.id)));
@@ -1259,6 +1288,184 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao atualizar loja.' });
+  }
+});
+
+// ==========================================
+// FASE D15-C — ENDEREÇO OPERACIONAL ESTRUTURADO DO SELLER
+// ==========================================
+// Hoje /buyer/addresses hardcoda addressType='shipping' e nunca aceita o
+// campo do corpo da requisição — não há como um seller criar um endereço
+// operacional real por essa rota. Estes 3 endpoints são o mínimo necessário
+// (nenhum redundante: nada em sellerRoutes.ts ou buyerRoutes.ts atende
+// isso hoje). addressType é SEMPRE 'business' aqui, controlado pelo
+// backend — nunca aceito do corpo. userId é SEMPRE req.user.id — nunca
+// aceito do corpo (impede um seller criar/editar endereço de outro
+// usuário). shippingSectorId é opcional (opt-in) e sempre revalidado
+// contra o país do próprio endereço via validateAddressSectorAssignment.
+// NÃO conectado a checkout/shipmentService nesta fase.
+
+function formatOperationalAddress(row: any, sectorInfo: { sector: any; region: any } | null) {
+  return {
+    id: row.id,
+    recipientName: row.recipientName,
+    street: row.street,
+    number: row.number,
+    complement: row.complement || '',
+    neighborhood: row.neighborhood || '',
+    city: row.city,
+    state: row.state,
+    countryCode: row.countryCode,
+    zipCode: row.zipCode || '',
+    phone: row.phone,
+    addressType: row.addressType,
+    isDefault: row.isDefault,
+    shippingSectorId: row.shippingSectorId || null,
+    shippingSectorName: sectorInfo?.sector?.name || null,
+    // DERIVADO em tempo de leitura a partir do setor — nunca uma coluna
+    // própria em addresses (evita a divergência region=X + sector=setor-de-Y).
+    shippingRegionId: sectorInfo?.region?.id || null,
+    shippingRegionName: sectorInfo?.region?.name || null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+sellerRouter.get('/addresses', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não cadastrado.' });
+
+    const rows = await db.select().from(addresses)
+      .where(and(eq(addresses.userId, req.user!.id), eq(addresses.addressType, 'business')))
+      .orderBy(desc(addresses.createdAt));
+
+    const formatted = await Promise.all(rows.map(async (r) => {
+      const sectorInfo = await deriveShippingRegionFromSector(db, r.shippingSectorId);
+      return formatOperationalAddress(r, sectorInfo);
+    }));
+
+    return res.json({ success: true, data: formatted });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar endereços operacionais.' });
+  }
+});
+
+sellerRouter.post('/addresses', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não cadastrado.' });
+
+    const {
+      recipientName, street, number, complement, neighborhood, city, state,
+      countryCode: rawCountryCode, zipCode, phone, shippingSectorId, isDefault,
+    } = req.body ?? {};
+
+    if (!recipientName || !String(recipientName).trim() || !street || !String(street).trim() || !city || !String(city).trim()) {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'Nome do responsável, rua e cidade são obrigatórios.' } });
+    }
+
+    const countryCode = String(rawCountryCode || seller.countryCode || 'GW').trim().toUpperCase();
+
+    if (shippingSectorId) {
+      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode, shippingSectorId: String(shippingSectorId) });
+      if (!('ok' in sectorValidation)) {
+        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+      }
+    }
+
+    const newId = `addr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    await db.insert(addresses).values({
+      id: newId,
+      userId: req.user!.id, // NUNCA aceito do corpo — sempre a sessão autenticada.
+      recipientName: String(recipientName).trim(),
+      street: String(street).trim(),
+      number: String(number || 'S/N').trim(),
+      complement: complement ? String(complement).trim() : null,
+      neighborhood: neighborhood ? String(neighborhood).trim() : null,
+      city: String(city).trim(),
+      state: state ? String(state).trim() : String(city).trim(),
+      countryCode,
+      zipCode: zipCode ? String(zipCode).trim() : null,
+      phone: String(phone || '').trim(),
+      isDefault: Boolean(isDefault),
+      addressType: 'business', // SEMPRE controlado pelo backend — nunca aceito do corpo.
+      shippingSectorId: shippingSectorId ? String(shippingSectorId) : null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as any);
+
+    const [inserted] = await db.select().from(addresses).where(eq(addresses.id, newId)).limit(1);
+    const sectorInfo = await deriveShippingRegionFromSector(db, inserted.shippingSectorId);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Endereço operacional cadastrado com sucesso!',
+      data: formatOperationalAddress(inserted, sectorInfo),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao cadastrar endereço operacional.' });
+  }
+});
+
+sellerRouter.patch('/addresses/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não cadastrado.' });
+
+    const [existing] = await db.select().from(addresses).where(eq(addresses.id, req.params.id)).limit(1);
+    if (!existing || existing.userId !== req.user!.id) {
+      return res.status(404).json({ success: false, error: { code: 'ADDRESS_NOT_FOUND', message: 'Endereço não encontrado.' } });
+    }
+
+    const {
+      recipientName, street, number, complement, neighborhood, city, state,
+      countryCode: rawCountryCode, zipCode, phone, shippingSectorId, isDefault,
+    } = req.body ?? {};
+
+    const countryCode = rawCountryCode !== undefined ? String(rawCountryCode).trim().toUpperCase() : existing.countryCode;
+    const nextShippingSectorId = shippingSectorId !== undefined ? (shippingSectorId ? String(shippingSectorId) : null) : existing.shippingSectorId;
+
+    if (nextShippingSectorId) {
+      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode, shippingSectorId: nextShippingSectorId });
+      if (!('ok' in sectorValidation)) {
+        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+      }
+    }
+
+    await db.update(addresses).set({
+      recipientName: recipientName !== undefined ? String(recipientName).trim() : existing.recipientName,
+      street: street !== undefined ? String(street).trim() : existing.street,
+      number: number !== undefined ? String(number).trim() : existing.number,
+      complement: complement !== undefined ? (complement ? String(complement).trim() : null) : existing.complement,
+      neighborhood: neighborhood !== undefined ? (neighborhood ? String(neighborhood).trim() : null) : existing.neighborhood,
+      city: city !== undefined ? String(city).trim() : existing.city,
+      state: state !== undefined ? String(state).trim() : existing.state,
+      countryCode,
+      zipCode: zipCode !== undefined ? (zipCode ? String(zipCode).trim() : null) : existing.zipCode,
+      phone: phone !== undefined ? String(phone).trim() : existing.phone,
+      isDefault: isDefault !== undefined ? Boolean(isDefault) : existing.isDefault,
+      shippingSectorId: nextShippingSectorId,
+      // addressType NUNCA editável por aqui — permanece 'business' sempre.
+      updatedAt: new Date(),
+    }).where(eq(addresses.id, req.params.id));
+
+    const [updated] = await db.select().from(addresses).where(eq(addresses.id, req.params.id)).limit(1);
+    const sectorInfo = await deriveShippingRegionFromSector(db, updated.shippingSectorId);
+
+    return res.json({
+      success: true,
+      message: 'Endereço operacional atualizado com sucesso!',
+      data: formatOperationalAddress(updated, sectorInfo),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao atualizar endereço operacional.' });
   }
 });
 
