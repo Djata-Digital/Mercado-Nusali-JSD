@@ -3117,6 +3117,13 @@ adminRouter.get('/categories', async (req: Request, res: Response) => {
       isActive: cat.isActive,
       prods: countsMap.get(cat.id) || countsMap.get(cat.slug) || 0,
       status: cat.isActive ? 'Ativa' : 'Inativa',
+      // Correção crítica (comissão da categoria "sempre 10%"): este endpoint
+      // nunca devolvia commissionRate — o Admin editava um campo que nem
+      // sequer refletia o valor real, e o payload de salvar nunca o incluía
+      // (ver AdminCategoriesManager.tsx). categories.commissionRate já
+      // existe e já é aceito por PATCH /admin/categories/:id; faltava só
+      // expor no GET. numeric do Postgres/Drizzle chega como string ou null.
+      commissionRate: cat.commissionRate,
       createdAt: cat.createdAt,
     }));
 
@@ -3131,10 +3138,23 @@ adminRouter.post('/categories', requireAuth, async (req: AuthRequest, res: Respo
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
 
-    const { name, slug, icon, parentId, displayOrder, isActive } = req.body ?? {};
+    const { name, slug, icon, parentId, displayOrder, isActive, commissionRate } = req.body ?? {};
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       throw new AdminRequestError(400, 'O nome da categoria é obrigatório.');
+    }
+
+    // Fase "Comissão percentual + logística real": mesma validação já usada
+    // em PATCH /admin/categories/:id — SEMPRE percentual (nunca valor fixo
+    // em dinheiro), null/ausente deixa a categoria sem taxa própria (cai
+    // para sellers.commissionRate, depois o global).
+    let categoryCommissionRate: string | null = null;
+    if (commissionRate !== undefined && commissionRate !== null && commissionRate !== '') {
+      const rate = Number(commissionRate);
+      if (isNaN(rate) || rate < 0 || rate > 100) {
+        throw new AdminRequestError(400, 'A comissão da categoria deve ser um percentual entre 0 e 100.');
+      }
+      categoryCommissionRate = String(rate);
     }
 
     const cleanName = name.trim();
@@ -3170,6 +3190,7 @@ adminRouter.post('/categories', requireAuth, async (req: AuthRequest, res: Respo
       parentId: realParentId,
       displayOrder: Number(displayOrder) || 0,
       isActive: isActive !== false,
+      commissionRate: categoryCommissionRate,
       createdAt: new Date(),
     };
 
@@ -3182,6 +3203,7 @@ adminRouter.post('/categories', requireAuth, async (req: AuthRequest, res: Respo
         parentId: newCategory.parentId,
         displayOrder: newCategory.displayOrder,
         isActive: newCategory.isActive,
+        commissionRate: newCategory.commissionRate,
       },
     });
 
