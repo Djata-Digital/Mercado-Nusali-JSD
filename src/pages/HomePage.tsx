@@ -11,7 +11,20 @@ import { ChevronRight, Globe } from 'lucide-react';
 export const HomePage: React.FC = () => {
   const navigate = useNavigate();
   const { selectedCountry } = usePreferences();
-  const { data: products = [], isLoading } = useProducts();
+  // Correção crítica (produtos somem do catálogo/home): useProducts() era
+  // chamado SEM nenhum filtro, então a queryKey do React Query nunca incluía
+  // o país selecionado — a lista buscava uma única vez (o país que estivesse
+  // em vigor no primeiro mount) e nunca refazia a busca quando o comprador
+  // trocava de país (GW<->BR etc.), mesmo com o header X-Country-Code do
+  // apiClient já correto a partir daí. Passar `country` explicitamente aqui
+  // faz duas coisas: (1) a queryKey (['products', filters]) passa a incluir
+  // o país, então trocar país invalida o cache automaticamente e refaz a
+  // busca; (2) o backend deixa de depender só do header — recebe o destino
+  // explícito na querystring, igual a StorePublicView.tsx já faz com
+  // storeId. Não remove nem afrouxa a regra de elegibilidade geográfica
+  // (productEligibilityService.ts) — só garante que o filtro correto seja
+  // reavaliado a cada troca de país.
+  const { data: products = [], isLoading } = useProducts({ country: selectedCountry });
 
   const featuredProducts = products.filter((p) => p.featured || p.offerOfDay);
   const currentCountry = countriesConfig[selectedCountry] || countriesConfig.GW;

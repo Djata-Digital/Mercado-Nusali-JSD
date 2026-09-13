@@ -128,8 +128,6 @@ export const Header: React.FC = () => {
   const categoryMenuRef = useRef<HTMLDivElement>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
 
-  const userLocation = { city: 'Bissau', country: selectedCountry };
-
   const pendingDisputesCount = disputes.filter(
     (d: any) => d.status === 'opened' || d.status === 'under_admin_review'
   ).length;
@@ -500,8 +498,13 @@ export const Header: React.FC = () => {
               <MapPin className="w-4 h-4 text-emerald-400" />
               <div className="flex flex-col text-left">
                 <span className={`text-[10px] leading-3 ${curTheme.addressSubtext}`}>Enviar para</span>
+                {/* Correção crítica (bug cosmético): não existe cidade real do
+                    comprador disponível aqui — "Bissau" era um valor fixo,
+                    exibido mesmo quando o país selecionado era outro (ex.:
+                    "Bissau, Brasil"). Mostra só o país real (currentCountry
+                    já deriva de selectedCountry), nunca uma cidade inventada. */}
                 <span className={`font-semibold leading-3 ${curTheme.addressMaintext}`}>
-                  {userLocation.city}, {currentCountry.name}
+                  {currentCountry.name}
                 </span>
               </div>
             </button>
