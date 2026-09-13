@@ -59,6 +59,8 @@ import {
   messages,
   supportTickets,
   supportTicketMessages,
+  shippingRegions,
+  shippingSectors,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
@@ -1288,6 +1290,55 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao atualizar loja.' });
+  }
+});
+
+// ==========================================
+// FASE D15-C2 — LEITURA DE GEOGRAFIA DE FRETE PARA O SELLER
+// ==========================================
+// Os endpoints /admin/shipping/regions e /admin/shipping/sectors (D15-A)
+// exigem requireLogisticsStaff (INTERNAL_STAFF_ROLES) — SELLER não está
+// nesse conjunto, de propósito (autorização admin não é relaxada aqui).
+// Sem uma rota própria do seller, o formulário de endereço operacional não
+// teria como popular Região/Setor sem hardcodar a lista no frontend. Estes
+// 2 endpoints são SOMENTE LEITURA, filtram isActive=true, e devolvem apenas
+// id/name/code/regionId — nunca tarifas, rotas ou qualquer dado
+// administrativo de frete.
+sellerRouter.get('/shipping/regions', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const country = String(req.query.country || '').trim().toUpperCase();
+    if (!country) return res.status(400).json({ success: false, error: { code: 'COUNTRY_REQUIRED', message: 'country é obrigatório.' } });
+
+    const rows = await db.select({
+      id: shippingRegions.id, name: shippingRegions.name, code: shippingRegions.code,
+    }).from(shippingRegions).where(and(eq(shippingRegions.countryCode, country), eq(shippingRegions.isActive, true)))
+      .orderBy(asc(shippingRegions.name));
+
+    return res.json({ success: true, data: rows });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar regiões.' });
+  }
+});
+
+sellerRouter.get('/shipping/sectors', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const country = String(req.query.country || '').trim().toUpperCase();
+    if (!country) return res.status(400).json({ success: false, error: { code: 'COUNTRY_REQUIRED', message: 'country é obrigatório.' } });
+
+    const conditions = [eq(shippingSectors.countryCode, country), eq(shippingSectors.isActive, true)];
+    if (req.query.region) conditions.push(eq(shippingSectors.regionId, String(req.query.region)));
+
+    const rows = await db.select({
+      id: shippingSectors.id, name: shippingSectors.name, code: shippingSectors.code, regionId: shippingSectors.regionId,
+    }).from(shippingSectors).where(and(...conditions)).orderBy(asc(shippingSectors.name));
+
+    return res.json({ success: true, data: rows });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar setores.' });
   }
 });
 

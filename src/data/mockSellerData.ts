@@ -57,6 +57,8 @@ export interface SellerStoreData {
   categoryId?: string;
   businessHoursJson?: any;
   addressJson?: any;
+  /** FASE D15-C2 — origem operacional explícita (stores.operational_address_id). Nunca inferida por isDefault/primeiro endereço. Ainda não conectada a shipmentService/checkout. */
+  operationalAddressId?: string | null;
 }
 
 export interface SellerTeamMember {

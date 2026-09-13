@@ -22,6 +22,7 @@ import { countriesConfig } from '../../utils/currencyUtils';
 import { useCountries } from '../../hooks/useCountries';
 import { uploadService } from '../../services/uploadService';
 import { apiClient } from '../../api/apiClient';
+import { SellerOperationalAddressManager } from './SellerOperationalAddressManager';
 
 interface SellerMultiStoreProps {
   stores: SellerStoreData[];
@@ -32,6 +33,15 @@ interface SellerMultiStoreProps {
   onUpdateStore: (store: SellerStoreData) => void;
   showToast: (msg: string) => void;
   openPublicStoreView?: (slug: string) => void;
+  /**
+   * FASE D15-C2 — o drawer de origem operacional (SellerOperationalAddressManager)
+   * chama a API real diretamente (PATCH /seller/stores/:id só com
+   * operationalAddressId, nunca o formulário inteiro da loja) — este
+   * callback só sincroniza o estado local já buscado por SellerHubView,
+   * nunca dispara uma segunda chamada de rede (ao contrário de
+   * onUpdateStore, que reenvia a loja inteira).
+   */
+  onOperationalAddressChanged?: (storeId: string, addressId: string | null) => void;
 }
 
 interface CategoryItem {
@@ -75,9 +85,13 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
   onUpdateStore,
   showToast,
   openPublicStoreView,
+  onOperationalAddressChanged,
 }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingStore, setEditingStore] = useState<SellerStoreData | null>(null);
+  // FASE D15-C2 — loja cuja origem operacional está sendo gerenciada no
+  // drawer (null = fechado).
+  const [managingOriginStore, setManagingOriginStore] = useState<SellerStoreData | null>(null);
 
   // Dynamic Categories from Backend
   const [categoriesList, setCategoriesList] = useState<CategoryItem[]>([]);
@@ -494,6 +508,15 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
 
                     <div className="flex items-center gap-2">
                       <button
+                        onClick={() => setManagingOriginStore(s)}
+                        className={`p-2 rounded-xl transition text-xs font-bold flex items-center gap-1 cursor-pointer ${
+                          s.operationalAddressId ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'
+                        }`}
+                        title="Origem Operacional / Local de Coleta"
+                      >
+                        <MapPin className="w-3.5 h-3.5" /> {s.operationalAddressId ? 'Origem Definida' : 'Definir Origem'}
+                      </button>
+                      <button
                         onClick={() => handleOpenEditModal(s)}
                         className="p-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl transition text-xs font-bold flex items-center gap-1 cursor-pointer"
                         title="Editar Loja"
@@ -785,6 +808,20 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {managingOriginStore && (
+        <SellerOperationalAddressManager
+          storeId={managingOriginStore.id}
+          storeCountryCode={managingOriginStore.country || 'GW'}
+          currentOperationalAddressId={managingOriginStore.operationalAddressId || null}
+          showToast={showToast}
+          onClose={() => setManagingOriginStore(null)}
+          onOperationalAddressChanged={(addressId) => {
+            onOperationalAddressChanged?.(managingOriginStore.id, addressId);
+            setManagingOriginStore((prev) => (prev ? { ...prev, operationalAddressId: addressId } : prev));
+          }}
+        />
       )}
     </div>
   );

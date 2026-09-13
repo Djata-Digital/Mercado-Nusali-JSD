@@ -39,6 +39,33 @@ export class SellerApi {
     return apiClient.patch(`/seller/stores/${id}`, data);
   }
 
+  // FASE D15-C2 — origem operacional (endereço estruturado + geografia de
+  // frete por setor, fundação D15-A/C). Reutiliza updateStore acima para
+  // gravar operationalAddressId — nenhum método novo necessário para isso.
+  static async getAddresses(): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/addresses');
+  }
+
+  static async createAddress(data: {
+    recipientName: string; street: string; number?: string; complement?: string; neighborhood?: string;
+    city: string; state?: string; countryCode: string; zipCode?: string; phone?: string;
+    shippingSectorId?: string | null; isDefault?: boolean;
+  }): Promise<ApiResponse<any>> {
+    return apiClient.post('/seller/addresses', data);
+  }
+
+  static async updateAddress(id: string, data: any): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/seller/addresses/${id}`, data);
+  }
+
+  static async getShippingRegions(country: string): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/shipping/regions', { params: { country } });
+  }
+
+  static async getShippingSectors(country: string, regionId?: string): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/shipping/sectors', { params: regionId ? { country, region: regionId } : { country } });
+  }
+
   // Team
   static async getTeam(): Promise<ApiResponse<any>> {
     return apiClient.get('/seller/team');
