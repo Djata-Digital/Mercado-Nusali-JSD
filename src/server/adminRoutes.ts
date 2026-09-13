@@ -4653,30 +4653,77 @@ adminRouter.get('/shipping/sectors', requireLogisticsStaff, async (req: Request,
   }
 });
 
+// GET /admin/shipping/services — FASE D15-B. Não existia no D15-A (a
+// fundação criou/gravou serviços, mas nunca expôs uma forma de listá-los
+// via API) — sem isto não há como popular o seletor de serviço nem as
+// colunas Standard/Economy/Express da tabela de rotas no painel admin.
+// Mesmo padrão exato de /shipping/regions e /shipping/sectors — não é uma
+// API redundante, é a única forma de listar shipping_services hoje.
+adminRouter.get('/shipping/services', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { country, active } = req.query;
+    const conditions: any[] = [];
+    if (country) conditions.push(eq(shippingServices.countryCode, String(country).trim().toUpperCase()));
+    if (active !== undefined) conditions.push(eq(shippingServices.isActive, active === 'true'));
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+
+    const rows = await db.select().from(shippingServices).where(whereClause).orderBy(asc(shippingServices.countryCode), asc(shippingServices.code));
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
 // GET /admin/shipping/routes — SEMPRE paginado (1.521 linhas de GB sozinho;
 // nunca devolvido inteiro cegamente). Filtros: country, region (setor de
-// origem OU destino pertence à região), originSector, destinationSector,
-// service (rota tem tarifa ATIVA desse serviço), active (da própria rota),
-// hasRate (tem ao menos 1 tarifa ativa, qualquer serviço).
+// origem OU destino pertence à região), originRegion/destinationRegion
+// (lado específico — FASE D15-B, o painel admin precisa distinguir "região
+// de origem" de "região de destino", o que `region` sozinho não permite),
+// originSector, destinationSector, service (rota tem tarifa ATIVA desse
+// serviço), active (da própria rota), hasRate (tem ao menos 1 tarifa ativa,
+// qualquer serviço), q (FASE D15-B — busca textual por nome de setor,
+// origem ou destino).
 adminRouter.get('/shipping/routes', requireLogisticsStaff, async (req: Request, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
 
-    const { country, region, originSector, destinationSector, service, active, hasRate, page, limit } = req.query;
+    const { country, region, originRegion, destinationRegion, originSector, destinationSector, service, active, hasRate, q, page, limit } = req.query;
     const conditions: any[] = [];
     if (country) conditions.push(eq(shippingRoutes.countryCode, String(country).trim().toUpperCase()));
     if (originSector) conditions.push(eq(shippingRoutes.originSectorId, String(originSector)));
     if (destinationSector) conditions.push(eq(shippingRoutes.destinationSectorId, String(destinationSector)));
     if (active !== undefined) conditions.push(eq(shippingRoutes.isActive, active === 'true'));
 
+    const emptyPage = () => res.json({ success: true, data: [], pagination: { total: 0, page: 1, limit: Number(limit) || 50, totalPages: 0 } });
+
     if (region) {
       const regionSectorRows = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(eq(shippingSectors.regionId, String(region)));
       const sectorIds = regionSectorRows.map((r: any) => r.id);
-      if (sectorIds.length === 0) {
-        return res.json({ success: true, data: [], pagination: { total: 0, page: 1, limit: Number(limit) || 50, totalPages: 0 } });
-      }
+      if (sectorIds.length === 0) return emptyPage();
       conditions.push(or(inArray(shippingRoutes.originSectorId, sectorIds), inArray(shippingRoutes.destinationSectorId, sectorIds)));
+    }
+    if (originRegion) {
+      const rows = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(eq(shippingSectors.regionId, String(originRegion)));
+      const ids = rows.map((r: any) => r.id);
+      if (ids.length === 0) return emptyPage();
+      conditions.push(inArray(shippingRoutes.originSectorId, ids));
+    }
+    if (destinationRegion) {
+      const rows = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(eq(shippingSectors.regionId, String(destinationRegion)));
+      const ids = rows.map((r: any) => r.id);
+      if (ids.length === 0) return emptyPage();
+      conditions.push(inArray(shippingRoutes.destinationSectorId, ids));
+    }
+    if (q && String(q).trim()) {
+      const term = `%${String(q).trim()}%`;
+      const matchingSectors = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(sql`${shippingSectors.name} ILIKE ${term}`);
+      const ids = matchingSectors.map((r: any) => r.id);
+      if (ids.length === 0) return emptyPage();
+      conditions.push(or(inArray(shippingRoutes.originSectorId, ids), inArray(shippingRoutes.destinationSectorId, ids)));
     }
 
     if (service) {
@@ -4700,9 +4747,46 @@ adminRouter.get('/shipping/routes', requireLogisticsStaff, async (req: Request, 
     ]);
 
     const total = totalRows[0]?.count || 0;
+
+    // FASE D15-B: enriquece a página atual (nunca as 1.521 de uma vez) com
+    // nome dos setores e quais serviços já têm tarifa ATIVA — sem isso o
+    // painel admin não teria como mostrar "Bissau | Gabú | ... | Standard:
+    // Não configurado" sem N+1 chamadas por linha. Continua sendo a MESMA
+    // rota/endpoint — só o payload ganhou campos a mais (nunca remove nada
+    // do formato já usado pelo teste D15-A).
+    const sectorIds = Array.from(new Set(rows.flatMap((r: any) => [r.originSectorId, r.destinationSectorId])));
+    const routeIds = rows.map((r: any) => r.id);
+    const [sectorRows, configuredPairs] = await Promise.all([
+      sectorIds.length > 0
+        ? db.select({ id: shippingSectors.id, name: shippingSectors.name, regionId: shippingSectors.regionId }).from(shippingSectors).where(inArray(shippingSectors.id, sectorIds))
+        : Promise.resolve([]),
+      routeIds.length > 0
+        ? db.select({ routeId: shippingRouteRates.routeId, serviceCode: shippingServices.code })
+            .from(shippingRouteRates)
+            .innerJoin(shippingServices, eq(shippingServices.id, shippingRouteRates.serviceId))
+            .where(and(inArray(shippingRouteRates.routeId, routeIds), eq(shippingRouteRates.isActive, true)))
+        : Promise.resolve([]),
+    ]);
+    const sectorMap = new Map((sectorRows as any[]).map((s: any) => [s.id, s]));
+    // Agrega em memória (no máximo `limitNum` rotas × 3 serviços por página —
+    // nunca vale a pena um array_agg em SQL só para isso).
+    const configuredMap = new Map<string, string[]>();
+    for (const pair of configuredPairs as any[]) {
+      const list = configuredMap.get(pair.routeId) || [];
+      if (!list.includes(pair.serviceCode)) list.push(pair.serviceCode);
+      configuredMap.set(pair.routeId, list);
+    }
+
+    const enrichedRows = rows.map((r: any) => ({
+      ...r,
+      originSectorName: sectorMap.get(r.originSectorId)?.name || null,
+      destinationSectorName: sectorMap.get(r.destinationSectorId)?.name || null,
+      configuredServiceCodes: configuredMap.get(r.id) || [],
+    }));
+
     return res.json({
       success: true,
-      data: rows,
+      data: enrichedRows,
       pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
     });
   } catch (error) {
@@ -4721,10 +4805,23 @@ adminRouter.get('/shipping/routes/:id', requireLogisticsStaff, async (req: Reque
 
     const [originSector] = await db.select().from(shippingSectors).where(eq(shippingSectors.id, route.originSectorId)).limit(1);
     const [destinationSector] = await db.select().from(shippingSectors).where(eq(shippingSectors.id, route.destinationSectorId)).limit(1);
-    const rates = await db.select().from(shippingRouteRates).where(eq(shippingRouteRates.routeId, id))
+    const rawRates = await db.select().from(shippingRouteRates).where(eq(shippingRouteRates.routeId, id))
       .orderBy(asc(shippingRouteRates.serviceId), asc(shippingRouteRates.minWeightKg));
 
-    return res.json({ success: true, data: { ...route, originSector, destinationSector, rates } });
+    // FASE D15-B: resolve o nome/código do serviço em cada tarifa e devolve
+    // TODOS os serviços do país da rota (mesmo os sem nenhuma tarifa ainda)
+    // — o drawer "Gerenciar" do admin precisa mostrar STANDARD/ECONOMY/
+    // EXPRESS mesmo quando "Não configurado". Sempre a MESMA rota/endpoint,
+    // só com mais campos no payload.
+    const services = await db.select().from(shippingServices).where(eq(shippingServices.countryCode, route.countryCode)).orderBy(asc(shippingServices.code));
+    const serviceMap = new Map(services.map((s: any) => [s.id, s]));
+    const rates = rawRates.map((r: any) => ({
+      ...r,
+      serviceCode: serviceMap.get(r.serviceId)?.code || null,
+      serviceName: serviceMap.get(r.serviceId)?.name || null,
+    }));
+
+    return res.json({ success: true, data: { ...route, originSector, destinationSector, services, rates } });
   } catch (error) {
     return sendAdminError(res, error);
   }

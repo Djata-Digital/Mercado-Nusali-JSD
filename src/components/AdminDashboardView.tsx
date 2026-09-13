@@ -4,7 +4,7 @@ import {
   Warehouse, DollarSign, Users, PackageCheck, MapPin, UserCheck, Store, Package,
   Layers, Tag, ShoppingBag, CreditCard, ArrowUpRight, ArrowDownRight, RotateCcw,
   Truck, LifeBuoy, AlertOctagon, ShieldAlert, Megaphone, Bell, BarChart3, History,
-  Settings, Shield, Database, Search, Menu, X, ChevronRight, Check
+  Settings, Shield, Database, Search, Menu, X, ChevronRight, Check, Route
 } from 'lucide-react';
 
 import { AdminCountriesManager } from './admin/AdminCountriesManager';
@@ -28,6 +28,7 @@ import { AdminDisputesManager } from './admin/AdminDisputesManager';
 import { AdminReturnsManager } from './admin/AdminReturnsManager';
 import { AdminLogisticsDashboard } from './admin/AdminLogisticsDashboard';
 import { AdminShippingRatesManager } from './admin/AdminShippingRatesManager';
+import { AdminShippingGeographyManager } from './admin/AdminShippingGeographyManager';
 import { AdminWarehousesManager } from './admin/AdminWarehousesManager';
 import { AdminCarriersManager } from './admin/AdminCarriersManager';
 import { AdminCustomsManager } from './admin/AdminCustomsManager';
@@ -105,6 +106,7 @@ export const AdminDashboardView: React.FC = () => {
       items: [
         { id: 'logistics', label: 'Expedição & Entregas', icon: Truck },
         { id: 'shipping_rates', label: 'Tarifas de Frete', icon: DollarSign },
+        { id: 'shipping_geography', label: 'Rotas & Tarifas por Setor', icon: Route },
         { id: 'warehouses', label: 'HUBs & Armazéns', icon: Warehouse },
         { id: 'carriers', label: 'Transportadoras & Frotas', icon: Truck },
         { id: 'customs', label: 'Alfândega & DTA', icon: Shield },
@@ -408,6 +410,7 @@ export const AdminDashboardView: React.FC = () => {
             {activeTab === 'returns' && <AdminReturnsManager showToast={showToast} />}
             {activeTab === 'logistics' && <AdminLogisticsDashboard showToast={showToast} />}
             {activeTab === 'shipping_rates' && <AdminShippingRatesManager showToast={showToast} />}
+            {activeTab === 'shipping_geography' && <AdminShippingGeographyManager showToast={showToast} />}
             {activeTab === 'warehouses' && <AdminWarehousesManager showToast={showToast} />}
             {activeTab === 'carriers' && <AdminCarriersManager showToast={showToast} />}
             {activeTab === 'customs' && <AdminCustomsManager showToast={showToast} />}
