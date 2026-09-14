@@ -54,6 +54,11 @@ export const CartService = {
       storage?: string;
       kit?: any;
       unitPriceOverride?: number;
+      // FASE D16-C2 — ID real da variante (pvar_*). É ISSO que vira a FK
+      // cart_items.variant_id — nunca options.selectedVariantSku (correção
+      // do bug que causava 500 em CART_ADD_FAILED: o SKU não existe como
+      // productVariants.id, violando a foreign key no INSERT).
+      variantId?: string;
       selectedVariantSku?: string;
       selectedVariantImage?: string;
     }
@@ -63,7 +68,13 @@ export const CartService = {
       const res = await CartApi.create({
         productId: product.id,
         quantity,
-        variantId: options?.selectedVariantSku,
+        variantId: options?.variantId,
+        // selectedAttributesJson real do comprador (nunca o objeto options
+        // inteiro, que misturava unitPriceOverride/selectedVariantSku/
+        // selectedVariantImage dentro do que devia ser só {color, size}).
+        selectedAttributes: options?.color || options?.size || options?.storage
+          ? { color: options?.color, size: options?.size, storage: options?.storage }
+          : undefined,
         options,
       });
       if (res && res.success) {

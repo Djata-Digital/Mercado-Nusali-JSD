@@ -139,17 +139,32 @@ export interface ProductColor {
 
 export interface ProductVariant {
   id: string;
+  productId?: string;
   sku?: string;
   color?: string;
   size?: string;
+  capacity?: string;
+  // Legado/não-autoritativo (D16-A2) — nunca usar para decidir
+  // disponibilidade. A fonte real é `availableStock`, abaixo.
   stock: number;
   price?: number;
   originalPrice?: number;
+  // FASE D16-C2 — estoque AO VIVO da variante (inventory, calculado na
+  // leitura pelo backend). undefined só em respostas antigas/sem essa
+  // enriquecimento; nesse caso trate como indisponível, nunca como "sem
+  // limite".
+  availableStock?: number;
+  // Campo real vindo do backend (product_variants.imageUrl) — usar este,
+  // nunca `image` (que só existe nos dados de mock/demo do frontend).
+  imageUrl?: string;
+  /** @deprecated Só existe em dados de demonstração (src/data/mockData.ts). Variantes reais do backend usam `imageUrl`. */
   image?: string;
   galleryImages?: string[];
   videos?: ProductVideo[] | string[];
   description?: string;
   specs?: Record<string, string>;
+  attributesJson?: Record<string, any>;
+  isActive?: boolean;
 }
 
 export interface ProductKit {
@@ -213,6 +228,10 @@ export interface Product {
   availableColors?: (ProductColor | string)[];
   availableSizes?: string[];
   variants?: ProductVariant[];
+  // FASE D16-C2.1 — sinal leve (sem trazer as variantes inteiras) para telas
+  // que só precisam saber "este produto exige seleção de variante?" antes de
+  // decidir entre adicionar direto ou levar ao detalhe (ex.: ProductCard).
+  hasVariants?: boolean;
   shipping: {
     freeShipping: boolean;
     arrivesTomorrow: boolean;

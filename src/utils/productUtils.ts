@@ -152,6 +152,12 @@ export function normalizeProduct(p: any): Product {
     availableColors: Array.isArray(p.availableColors) ? p.availableColors : [],
     availableSizes: Array.isArray(p.availableSizes) ? p.availableSizes : [],
     variants: Array.isArray(p.variants) ? p.variants : [],
+    // FASE D16-C2.1 — prefere o sinal explícito do backend (presente tanto
+    // na listagem quanto no detalhe); só cai para inferir do array completo
+    // quando `hasVariants` não veio (ex.: dado de mock/demo local).
+    hasVariants: typeof p.hasVariants === 'boolean'
+      ? p.hasVariants
+      : Array.isArray(p.variants) && p.variants.some((v: any) => v?.isActive !== false),
     shipping: {
       freeShipping: Boolean(p.shipping?.freeShipping ?? p.freeShipping),
       arrivesTomorrow: Boolean(p.shipping?.arrivesTomorrow ?? p.arrivesTomorrow),

@@ -121,27 +121,43 @@ const OrderCard: React.FC<{
                   </div>
                 </div>
 
-                {prod.id && (
-                  <button
-                    disabled={buyAgainPendingKey !== null}
-                    onClick={async () => {
-                      if (buyAgainPendingKey !== null) return;
-                      setBuyAgainPendingKey(pendingKey);
-                      try {
-                        await addItem(prod, qty);
-                        navigate('/cart');
-                      } catch (err: any) {
-                        showToast(err?.message || 'Não foi possível adicionar ao carrinho. Tente novamente.');
-                      } finally {
-                        setBuyAgainPendingKey(null);
-                      }
-                    }}
-                    className="bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed text-emerald-800 font-bold px-3 py-1.5 rounded-xl text-xs transition flex items-center gap-1 shrink-0 border border-emerald-200 cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isPending ? 'animate-spin' : ''}`} />
-                    <span>{isPending ? 'Adicionando...' : 'Comprar novamente'}</span>
-                  </button>
-                )}
+                {prod.id && (() => {
+                  // FASE D16-C2.1 — o item histórico tem variantId (o pedido
+                  // foi de um produto variável). Não temos dado ao vivo aqui
+                  // (isActive/estoque atual da variante) para validar com
+                  // segurança que ela ainda é reutilizável — nunca inventar:
+                  // manda para a página do produto para uma nova seleção
+                  // explícita, em vez de adicionar direto uma variante que
+                  // pode ter mudado ou não existir mais.
+                  const requiresVariantReselection = Boolean(item.variantId);
+                  const targetProductId = item.productId || prod.id;
+
+                  return (
+                    <button
+                      disabled={buyAgainPendingKey !== null}
+                      onClick={async () => {
+                        if (buyAgainPendingKey !== null) return;
+                        if (requiresVariantReselection) {
+                          navigate(`/products/${targetProductId}`);
+                          return;
+                        }
+                        setBuyAgainPendingKey(pendingKey);
+                        try {
+                          await addItem(prod, qty);
+                          navigate('/cart');
+                        } catch (err: any) {
+                          showToast(err?.message || 'Não foi possível adicionar ao carrinho. Tente novamente.');
+                        } finally {
+                          setBuyAgainPendingKey(null);
+                        }
+                      }}
+                      className="bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed text-emerald-800 font-bold px-3 py-1.5 rounded-xl text-xs transition flex items-center gap-1 shrink-0 border border-emerald-200 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isPending ? 'animate-spin' : ''}`} />
+                      <span>{requiresVariantReselection ? 'Ver opções' : isPending ? 'Adicionando...' : 'Comprar novamente'}</span>
+                    </button>
+                  );
+                })()}
               </div>
             );
           })}

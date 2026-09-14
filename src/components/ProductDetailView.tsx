@@ -49,6 +49,16 @@ import { ShippingService } from '../services/shippingService';
 import { ProductMediaViewerModal, MediaItem } from './ProductMediaViewerModal';
 import { ProductShareModal } from './ProductShareModal';
 import { ProductKit, ProductColor, ProductVariant } from '../types';
+import {
+  getActiveVariants,
+  groupActiveVariantsByColor,
+  getSizesForColor,
+  resolveSelectedVariant,
+  computeBuyerPriceDisplay,
+  isVariantAvailable,
+  getVariantMaxQuantity,
+  getSelectionGuardMessage,
+} from '../utils/productVariantBuyer';
 
 export const ProductDetailView: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -91,115 +101,65 @@ export const ProductDetailView: React.FC = () => {
   const [isInlineVideoPlaying, setIsInlineVideoPlaying] = useState(true);
   const [isInlineVideoMuted, setIsInlineVideoMuted] = useState(true);
 
-  // Selected Variations (Color & Size)
-  const availableColors: ProductColor[] = useMemo(() => {
-    if (!product?.availableColors || product.availableColors.length === 0) return [];
-    return product.availableColors.map((c) =>
-      typeof c === 'string' ? { name: c, hex: '#374151' } : c
-    );
-  }, [product]);
+  // FASE D16-C2 — Variações reais do produto. NUNCA mais
+  // product.availableColors/availableSizes como fonte (campos fantasma,
+  // nunca persistidos pelo backend — achado da auditoria D16-C1). Tudo
+  // derivado de product.variants, a mesma lógica pura usada pelo wizard do
+  // vendedor (D16-B1), adaptada para o comprador em productVariantBuyer.ts.
+  const hasRealVariants = useMemo(() => getActiveVariants(product?.variants).length > 0, [product]);
 
-  const availableSizes: string[] = useMemo(() => {
-    return product?.availableSizes || [];
-  }, [product]);
+  const colorGroups = useMemo(() => groupActiveVariantsByColor(product?.variants), [product]);
 
   const [selectedColor, setSelectedColor] = useState<string>('');
   const [selectedSize, setSelectedSize] = useState<string>('');
   const [selectedKit, setSelectedKit] = useState<ProductKit | null>(null);
 
-  // Initialize selected variation on product load
+  // Reset a seleção sempre que o produto mudar (nunca herdar seleção de um
+  // produto anterior ao navegar entre páginas de produto).
   useEffect(() => {
-    if (product) {
-      if (availableColors.length > 0 && !selectedColor) {
-        setSelectedColor(availableColors[0].name);
-      }
-      if (availableSizes.length > 0 && !selectedSize) {
-        setSelectedSize(availableSizes[0]);
-      }
-    }
-  }, [product, availableColors, availableSizes]);
+    setSelectedColor('');
+    setSelectedSize('');
+  }, [product?.id]);
 
-  // Active color object with specific images/videos/descriptions
-  const activeColorObj = useMemo<ProductColor | null>(() => {
-    if (!product || availableColors.length === 0) return null;
-    if (selectedColor) {
-      const found = availableColors.find(
-        (c) => c.name.toLowerCase() === selectedColor.toLowerCase()
-      );
-      if (found) return found;
-    }
-    return availableColors[0] || null;
-  }, [product, selectedColor, availableColors]);
+  const selectedColorGroup = useMemo(
+    () => colorGroups.find((g) => g.color === selectedColor) || null,
+    [colorGroups, selectedColor]
+  );
 
-  // Active variant match based on selectedColor + selectedSize
-  const activeVariant = useMemo<ProductVariant | null>(() => {
-    if (!product?.variants || product.variants.length === 0) return null;
-    if (selectedColor && selectedSize) {
-      const match = product.variants.find(
-        (v) =>
-          v.color?.toLowerCase() === selectedColor.toLowerCase() &&
-          v.size?.toLowerCase() === selectedSize.toLowerCase()
-      );
-      if (match) return match;
-    }
-    if (selectedColor) {
-      const match = product.variants.find(
-        (v) => v.color?.toLowerCase() === selectedColor.toLowerCase()
-      );
-      if (match) return match;
-    }
-    if (selectedSize) {
-      const match = product.variants.find(
-        (v) => v.size?.toLowerCase() === selectedSize.toLowerCase()
-      );
-      if (match) return match;
-    }
-    return product.variants[0] || null;
-  }, [product, selectedColor, selectedSize]);
+  // Tamanhos/capacidades REAIS existentes na cor selecionada (ou entre
+  // todas as variantes ativas, se o produto não tem eixo de cor) — nunca
+  // uma combinação cartesiana inventada.
+  const sizesForSelectedColor = useMemo(
+    () => getSizesForColor(product?.variants, selectedColor || null),
+    [product, selectedColor]
+  );
+
+  // Variante concreta resolvida — NUNCA um fallback silencioso para
+  // variants[0]. Só resolve sozinha quando a escolha é inequívoca (ver
+  // resolveSelectedVariant); em qualquer outro caso fica null até o
+  // comprador escolher.
+  const activeVariant = useMemo<ProductVariant | null>(
+    () => resolveSelectedVariant(product?.variants, { color: selectedColor || null, size: selectedSize || null }),
+    [product, selectedColor, selectedSize]
+  );
 
   // Handler for color selection with media index reset
   const handleSelectColor = (colorName: string) => {
     setSelectedColor(colorName);
+    // Trocar de cor invalida um tamanho que só existia na cor anterior.
+    setSelectedSize((prev) => (getSizesForColor(product?.variants, colorName).includes(prev) ? prev : ''));
     setSelectedMediaIndex(0);
   };
 
-  // Determine current active stock based on (selectedColor, selectedSize) from variants matrix
-  const currentVariantStock = useMemo(() => {
-    if (!product) return 0;
-    if (!product.variants || product.variants.length === 0) {
-      return product.stock ?? 10;
-    }
-
-    // Match both color and size
-    if (selectedColor && selectedSize) {
-      const match = product.variants.find(
-        (v) =>
-          v.color?.toLowerCase() === selectedColor.toLowerCase() &&
-          v.size?.toLowerCase() === selectedSize.toLowerCase()
-      );
-      if (match) return match.stock;
-    }
-
-    // Match only color if no sizes
-    if (selectedColor && availableSizes.length === 0) {
-      const match = product.variants.find(
-        (v) => v.color?.toLowerCase() === selectedColor.toLowerCase()
-      );
-      if (match) return match.stock;
-    }
-
-    // Match only size if no colors
-    if (selectedSize && availableColors.length === 0) {
-      const match = product.variants.find(
-        (v) => v.size?.toLowerCase() === selectedSize.toLowerCase()
-      );
-      if (match) return match.stock;
-    }
-
-    return product.stock ?? 10;
-  }, [product, selectedColor, selectedSize, availableColors, availableSizes]);
-
-  const isCurrentVariationOutOfStock = currentVariantStock <= 0;
+  // Estoque: produto simples continua usando product.stock (já é live,
+  // computeLiveStockAndSales); produto variável usa o estoque AO VIVO da
+  // variante resolvida (inventory via availableStock, D16-C2) — nunca a
+  // coluna product_variants.stock legada.
+  const currentVariantStock = hasRealVariants ? getVariantMaxQuantity(activeVariant) : (product?.stock ?? 10);
+  const needsVariantSelection = hasRealVariants && !activeVariant;
+  const isCurrentVariationOutOfStock = hasRealVariants
+    ? (!needsVariantSelection && !isVariantAvailable(activeVariant))
+    : currentVariantStock <= 0;
 
   // Build unified media items array (images + short videos) synchronized with selected color/variant
   const mediaItems: MediaItem[] = useMemo(() => {
@@ -207,16 +167,16 @@ export const ProductDetailView: React.FC = () => {
 
     const items: MediaItem[] = [];
 
-    // 1. Determine images for selected color variation
+    // 1. Determine images for selected color variation. A imagem da
+    // COR (variant.imageUrl, D16-C2) tem prioridade enquanto aquela cor
+    // estiver selecionada — nunca apaga a galeria geral, só a antecede.
     let rawImages: string[] = [];
-    if (activeColorObj?.galleryImages && activeColorObj.galleryImages.length > 0) {
-      rawImages = activeColorObj.galleryImages;
-    } else if (activeVariant?.galleryImages && activeVariant.galleryImages.length > 0) {
+    if (activeVariant?.galleryImages && activeVariant.galleryImages.length > 0) {
       rawImages = activeVariant.galleryImages;
-    } else if (activeColorObj?.image) {
-      rawImages = [activeColorObj.image, ...(product.galleryImages || [])];
-    } else if (activeVariant?.image) {
-      rawImages = [activeVariant.image, ...(product.galleryImages || [])];
+    } else if (selectedColorGroup?.imageUrl) {
+      rawImages = [selectedColorGroup.imageUrl, ...(product.galleryImages || [])];
+    } else if (activeVariant?.imageUrl) {
+      rawImages = [activeVariant.imageUrl, ...(product.galleryImages || [])];
     } else if (product.galleryImages && product.galleryImages.length > 0) {
       rawImages = product.galleryImages;
     } else {
@@ -239,9 +199,8 @@ export const ProductDetailView: React.FC = () => {
       });
     });
 
-    // 2. Short Videos (from active color, active variant, or base product)
+    // 2. Short Videos (from active variant, or base product)
     const videoSource =
-      (activeColorObj?.videos && activeColorObj.videos.length > 0 ? activeColorObj.videos : null) ||
       (activeVariant?.videos && activeVariant.videos.length > 0 ? activeVariant.videos : null) ||
       (product.videos && product.videos.length > 0 ? product.videos : null);
 
@@ -283,15 +242,14 @@ export const ProductDetailView: React.FC = () => {
     }
 
     return items;
-  }, [product, activeColorObj, activeVariant, selectedColor]);
+  }, [product, selectedColorGroup, activeVariant, selectedColor]);
 
-  // Dynamic Description and Specs based on selected color & variant
+  // Dynamic Description and Specs based on selected variant
   const activeDescription = useMemo(() => {
     if (!product) return '';
-    if (activeColorObj?.description) return activeColorObj.description;
     if (activeVariant?.description) return activeVariant.description;
     return product.description;
-  }, [product, activeColorObj, activeVariant]);
+  }, [product, activeVariant]);
 
   const activeSpecs = useMemo(() => {
     if (!product) return {};
@@ -302,14 +260,11 @@ export const ProductDetailView: React.FC = () => {
     if (selectedSize) {
       specsMap['Tamanho / Especificação'] = selectedSize;
     }
-    if (activeColorObj?.specs) {
-      Object.assign(specsMap, activeColorObj.specs);
-    }
     if (activeVariant?.specs) {
       Object.assign(specsMap, activeVariant.specs);
     }
     return specsMap;
-  }, [product, selectedColor, selectedSize, activeColorObj, activeVariant]);
+  }, [product, selectedColor, selectedSize, activeVariant]);
 
   if (!isValidId) {
     return (
@@ -366,10 +321,21 @@ export const ProductDetailView: React.FC = () => {
   const videosCount = mediaItems.filter((m) => m.type === 'video').length;
 
   const baseProductPrice = typeof product.price === 'number' ? product.price : parseFloat(product.price as any) || 0;
-  
-  // Resolve variant specific price if seller assigned a price to this size/color combination
-  const activeVariantPrice = activeVariant?.price ?? activeColorObj?.price ?? baseProductPrice;
-  const activeVariantOriginalPrice = activeVariant?.originalPrice ?? activeColorObj?.originalPrice ?? product.originalPrice;
+
+  // FASE D16-C2 — produto variável: preço SEMPRE derivado das variantes
+  // reais, nunca de product.price como autoridade depois de uma seleção.
+  // Sem seleção -> "a partir de" (menor preço ativo). Com seleção -> preço
+  // e riscado exclusivos da variante escolhida (riscado só se > preço dela
+  // mesma). Produto simples: comportamento de sempre, intocado.
+  const buyerPriceDisplay = useMemo(
+    () => computeBuyerPriceDisplay(product.variants, activeVariant),
+    [product, activeVariant]
+  );
+  const isPriceFromRange = hasRealVariants && buyerPriceDisplay.mode === 'from';
+  const activeVariantPrice = hasRealVariants ? (buyerPriceDisplay.price ?? baseProductPrice) : baseProductPrice;
+  const activeVariantOriginalPrice = hasRealVariants
+    ? (buyerPriceDisplay.mode === 'selected' ? buyerPriceDisplay.originalPrice : undefined)
+    : product.originalPrice;
 
   // Price calculations considering selectedKit
   const effectiveUnitPrice = selectedKit
@@ -498,6 +464,14 @@ export const ProductDetailView: React.FC = () => {
 
   const handleBuyNow = async () => {
     if (cartActionPending) return; // ignora clique duplicado/duplo-clique enquanto já há uma operação em andamento
+    // FASE D16-C2 — bloqueio real: produto variável nunca envia a
+    // requisição sem uma variante concreta e disponível resolvida. Nunca
+    // cai silenciosamente em variants[0].
+    const guardMessage = getSelectionGuardMessage(product.variants, { color: selectedColor || null, size: selectedSize || null });
+    if (guardMessage) {
+      showToast(guardMessage);
+      return;
+    }
     setCartActionPending('buy');
     try {
       const buyQty = selectedKit ? selectedKit.quantity : quantity;
@@ -506,8 +480,11 @@ export const ProductDetailView: React.FC = () => {
         size: selectedSize || undefined,
         kit: selectedKit || undefined,
         unitPriceOverride: effectiveUnitPrice,
-        selectedVariantSku: activeVariant?.sku || product.sku,
-        selectedVariantImage: activeVariant?.image || activeColorObj?.image || product.image,
+        // ID real da variante (pvar_*) — é isso que vira a FK no carrinho.
+        // NUNCA o SKU (correção do bug que causava 500 em CART_ADD_FAILED).
+        variantId: activeVariant?.id,
+        selectedVariantSku: activeVariant?.sku,
+        selectedVariantImage: selectedColorGroup?.imageUrl || activeVariant?.imageUrl || product.image,
       });
       // Só navega depois que o item está confirmado no backend — o checkout
       // vai buscar o carrinho real (GET /cart) e já vai encontrá-lo lá.
@@ -522,6 +499,11 @@ export const ProductDetailView: React.FC = () => {
 
   const handleAddToCart = async () => {
     if (cartActionPending) return;
+    const guardMessage = getSelectionGuardMessage(product.variants, { color: selectedColor || null, size: selectedSize || null });
+    if (guardMessage) {
+      showToast(guardMessage);
+      return;
+    }
     setCartActionPending('add');
     try {
       const buyQty = selectedKit ? selectedKit.quantity : quantity;
@@ -530,8 +512,9 @@ export const ProductDetailView: React.FC = () => {
         size: selectedSize || undefined,
         kit: selectedKit || undefined,
         unitPriceOverride: effectiveUnitPrice,
-        selectedVariantSku: activeVariant?.sku || product.sku,
-        selectedVariantImage: activeVariant?.image || activeColorObj?.image || product.image,
+        variantId: activeVariant?.id,
+        selectedVariantSku: activeVariant?.sku,
+        selectedVariantImage: selectedColorGroup?.imageUrl || activeVariant?.imageUrl || product.image,
       });
       navigate('/cart');
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -788,6 +771,11 @@ export const ProductDetailView: React.FC = () => {
             )}
 
             <div className="flex flex-col">
+              {/* FASE D16-C2 — sem variante concreta selecionada ainda,
+                  nunca afirmamos "o preço é X": é sempre "a partir de". */}
+              {isPriceFromRange && !selectedKit && (
+                <span className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">A partir de</span>
+              )}
               <div className="flex items-baseline gap-2">
                 <span className="text-3xl font-black text-gray-900">
                   {effectiveTotalInfo.formatted}
@@ -886,58 +874,49 @@ export const ProductDetailView: React.FC = () => {
             </div>
           )}
 
-          {/* 2. SELETOR DE CORES / VARIAÇÕES EM MINIATURAS (PADRÃO MERCADO LIVRE) */}
-          {availableColors.length > 0 && (
+          {/* 2. SELETOR DE CORES — FASE D16-C2. Derivado de product.variants
+              (nunca product.availableColors, campo fantasma). Uma
+              miniatura por COR real, nunca uma por combinação — a imagem é
+              sempre variant.imageUrl (nunca .image, que só existe em mock). */}
+          {colorGroups.length > 0 && (
             <div className="space-y-2.5 pt-3 border-t border-gray-100">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-gray-800">
-                  Cor: <strong className="text-gray-900 font-extrabold ml-1">{selectedColor || availableColors[0]?.name}</strong>
+                  Cor: <strong className="text-gray-900 font-extrabold ml-1">{selectedColor || 'Escolha uma opção'}</strong>
                 </span>
-                <span className="text-gray-500 text-[11px] font-medium">{availableColors.length} opções disponíveis</span>
+                <span className="text-gray-500 text-[11px] font-medium">{colorGroups.length} opções disponíveis</span>
               </div>
 
               {/* Grid de Miniaturas de Produtos (Como no Mercado Livre) */}
               <div className="flex flex-wrap gap-2.5 items-center">
-                {availableColors.map((c, idx) => {
-                  const isSelected = selectedColor.toLowerCase() === c.name.toLowerCase();
-                  const thumbImg =
-                    c.image ||
-                    (c.galleryImages && c.galleryImages.length > 0 ? c.galleryImages[0] : null) ||
-                    product.variants?.find((v) => v.color?.toLowerCase() === c.name.toLowerCase())?.image ||
-                    product.image;
+                {colorGroups.map((group) => {
+                  const isSelected = selectedColor === group.color;
+                  const thumbImg = group.imageUrl || product.image;
+                  const groupAvailable = group.variants.some((v) => (v.availableStock ?? 0) > 0);
 
                   return (
                     <button
-                      key={idx}
+                      key={group.color}
                       type="button"
-                      onClick={() => handleSelectColor(c.name)}
-                      title={`Selecionar cor: ${c.name}`}
+                      onClick={() => handleSelectColor(group.color)}
+                      title={`Selecionar cor: ${group.color}`}
                       className={`relative w-16 h-16 sm:w-18 sm:h-18 rounded-lg overflow-hidden border-2 transition-all cursor-pointer bg-white group p-0.5 shrink-0 ${
                         isSelected
                           ? 'border-blue-600 ring-2 ring-blue-500/25 shadow-xs scale-102'
                           : 'border-gray-200 hover:border-gray-400 opacity-85 hover:opacity-100'
-                      }`}
+                      } ${!groupAvailable ? 'opacity-40' : ''}`}
                     >
                       <img
                         src={thumbImg}
-                        alt={c.name}
+                        alt={group.color}
                         className="w-full h-full object-cover rounded-md group-hover:scale-105 transition-transform duration-200"
                       />
-                      
+
                       {/* Check badge when selected */}
                       {isSelected && (
                         <div className="absolute top-1 right-1 bg-blue-600 text-white p-0.5 rounded-full shadow-xs">
                           <Check className="w-2.5 h-2.5 stroke-[3]" />
                         </div>
-                      )}
-
-                      {/* Mini color dot preview */}
-                      {c.hex && (
-                        <div
-                          className="absolute bottom-1 left-1 w-2.5 h-2.5 rounded-full border border-white shadow-2xs"
-                          style={{ backgroundColor: c.hex }}
-                          title={c.name}
-                        />
                       )}
                     </button>
                   );
@@ -946,8 +925,11 @@ export const ProductDetailView: React.FC = () => {
             </div>
           )}
 
-          {/* 3. SELETOR DE TAMANHOS / CAPACIDADES (PADRÃO MERCADO LIVRE) */}
-          {availableSizes.length > 0 && (
+          {/* 3. SELETOR DE TAMANHOS / CAPACIDADES — FASE D16-C2. Só mostra
+              as opções que REALMENTE existem na cor escolhida (nunca uma
+              combinação cartesiana inventada); se o produto tem eixo de
+              cor, espera a cor ser escolhida primeiro (fluxo Alibaba). */}
+          {sizesForSelectedColor.length > 0 && (colorGroups.length === 0 || !!selectedColor) && (
             <div className="space-y-2 pt-3 border-t border-gray-100">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-gray-800">
@@ -957,17 +939,21 @@ export const ProductDetailView: React.FC = () => {
               </div>
 
               <div className="flex flex-wrap gap-2">
-                {availableSizes.map((s, idx) => {
-                  const isSelected = selectedSize.toLowerCase() === s.toLowerCase();
+                {sizesForSelectedColor.map((s, idx) => {
+                  const isSelected = selectedSize === s;
 
-                  // Check stock and variant price for this specific combination
+                  // Variante real dessa combinação (cor já escolhida + este
+                  // tamanho) — nunca "qualquer variante com esse tamanho".
                   const varItem = product.variants?.find(
                     (v) =>
-                      v.size?.toLowerCase() === s.toLowerCase() &&
-                      (!selectedColor || v.color?.toLowerCase() === selectedColor.toLowerCase())
-                  ) || product.variants?.find((v) => v.size?.toLowerCase() === s.toLowerCase());
+                      (v.size || v.capacity) === s &&
+                      (!selectedColor || v.color === selectedColor) &&
+                      v.isActive !== false
+                  );
 
-                  const isSizeOutOfStock = varItem !== undefined && varItem.stock <= 0;
+                  // Fonte real de disponibilidade: availableStock (inventory
+                  // ao vivo, D16-C2) — nunca a coluna stock legada.
+                  const isSizeOutOfStock = varItem !== undefined && (varItem.availableStock ?? 0) <= 0;
                   const customVariantPrice = varItem?.price;
 
                   return (
@@ -1127,7 +1113,11 @@ export const ProductDetailView: React.FC = () => {
             <div className="space-y-1 bg-gray-50 p-2.5 rounded-lg border border-gray-200">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-bold text-gray-900">Disponibilidade:</span>
-                {isCurrentVariationOutOfStock ? (
+                {needsVariantSelection ? (
+                  <span className="text-gray-600 font-bold flex items-center gap-1">
+                    <Info className="w-3.5 h-3.5" /> Selecione as opções
+                  </span>
+                ) : isCurrentVariationOutOfStock ? (
                   <span className="text-red-600 font-bold flex items-center gap-1">
                     <AlertCircle className="w-3.5 h-3.5" /> Esgotado
                   </span>
@@ -1154,7 +1144,7 @@ export const ProductDetailView: React.FC = () => {
                 <span className="font-semibold text-gray-700">Quantidade:</span>
                 <select
                   value={quantity}
-                  disabled={isCurrentVariationOutOfStock}
+                  disabled={needsVariantSelection || isCurrentVariationOutOfStock}
                   onChange={(e) => setQuantity(Number(e.target.value))}
                   className="bg-gray-50 border border-gray-300 text-gray-900 text-xs rounded-md p-1.5 font-bold focus:outline-hidden focus:ring-2 focus:ring-blue-500"
                 >
@@ -1172,7 +1162,7 @@ export const ProductDetailView: React.FC = () => {
             {/* Action Buttons */}
             <div className="space-y-2 pt-2">
               <button
-                disabled={isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination}
+                disabled={needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination}
                 onClick={handleBuyNow}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black py-3 px-4 rounded-xl shadow-xs transition transform active:scale-98 text-sm cursor-pointer"
               >
@@ -1180,6 +1170,8 @@ export const ProductDetailView: React.FC = () => {
                   ? 'Preparando compra...'
                   : isUnavailableForDestination
                   ? 'Indisponível no seu país'
+                  : needsVariantSelection
+                  ? 'Selecione as opções'
                   : isCurrentVariationOutOfStock
                   ? 'Variação Esgotada'
                   : !product.weightKg
@@ -1190,11 +1182,17 @@ export const ProductDetailView: React.FC = () => {
               </button>
 
               <button
-                disabled={isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination}
+                disabled={needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination}
                 onClick={handleAddToCart}
                 className="w-full bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed text-blue-700 font-extrabold py-3 px-4 rounded-xl transition text-sm border border-blue-200 cursor-pointer"
               >
-                {cartActionPending === 'add' ? 'Adicionando...' : isUnavailableForDestination ? 'Indisponível no seu país' : 'Adicionar ao carrinho'}
+                {cartActionPending === 'add'
+                  ? 'Adicionando...'
+                  : isUnavailableForDestination
+                  ? 'Indisponível no seu país'
+                  : needsVariantSelection
+                  ? 'Selecione as opções'
+                  : 'Adicionar ao carrinho'}
               </button>
 
               <div className="grid grid-cols-2 gap-2 pt-1">

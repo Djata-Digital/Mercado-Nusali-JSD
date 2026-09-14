@@ -49,6 +49,13 @@ export const useCart = () => {
       storage?: string;
       kit?: any;
       unitPriceOverride?: number;
+      // FASE D16-C2 — ID real da variante (product_variants.id, "pvar_...").
+      // É este campo que vira a FK cart_items.variant_id no backend — NUNCA
+      // o SKU (ver selectedVariantSku abaixo, que é só apresentação).
+      variantId?: string;
+      // Apresentação apenas (ex.: exibir o SKU no carrinho) — nunca usado
+      // como FK. Continuar existindo separadamente evita reintroduzir o bug
+      // de SKU-como-variantId corrigido nesta fase.
       selectedVariantSku?: string;
       selectedVariantImage?: string;
     }
