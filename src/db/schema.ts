@@ -387,6 +387,13 @@ export const productVariants = pgTable('product_variants', {
   weight: numeric('weight', { precision: 8, scale: 2 }),
   imageUrl: text('image_url'),
   attributesJson: jsonb('attributes_json'),
+  // FASE D16-A1 (fundação de schema) — nullable seria ambíguo aqui (não há
+  // "não se aplica" para status de uma variante); NOT NULL DEFAULT true
+  // preserva 100% do comportamento atual para toda linha existente (nenhuma
+  // tem hoje como estar "inativa" — o conceito não existia). Nenhum writer
+  // grava esta coluna ainda; permanece true até uma fase futura introduzir a
+  // ação de pausar/despausar variante.
+  isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
@@ -842,6 +849,13 @@ export const orderItems = pgTable('order_items', {
   storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'set null' }),
   productImage: text('product_image'),
   attributesJson: jsonb('attributes_json'),
+  // FASE D16-A1 (fundação de schema) — nullable de propósito: snapshot do
+  // preço riscado/comparação NO MOMENTO da compra, para o pedido nunca
+  // depender do compareAtPrice atual do produto/variante (que pode mudar ou
+  // desaparecer depois). NULL para todo pedido existente (histórico) e para
+  // todo pedido novo até um writer futuro passar a preenchê-lo — nenhum
+  // backfill, nenhum valor inventado.
+  compareAtPriceSnapshot: numeric('compare_at_price_snapshot', { precision: 12, scale: 2 }),
   inventoryId: varchar('inventory_id', { length: 255 }).references(() => inventory.id, { onDelete: 'set null' }),
   warehouseId: varchar('warehouse_id', { length: 255 }).references(() => warehouses.id, { onDelete: 'set null' }),
   shipmentId: varchar('shipment_id', { length: 255 }).references(() => shipments.id, { onDelete: 'set null' }),
