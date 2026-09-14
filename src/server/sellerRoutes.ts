@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ProductCreationService } from './modules/catalog/productCreationService.js';
 import { InventoryService } from './modules/inventory/inventoryService.js';
+import { syncVariantsForProduct } from './modules/catalog/variantService.js';
 import { getDb, checkDbConnection } from '../db/index.js';
 import {
   products,
@@ -2029,6 +2030,23 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
 
     if (updates.stock !== undefined) {
       await InventoryService.updateSellerStock(id, Number(updates.stock), check.seller.id, null, req.user.id);
+    }
+
+    // FASE D16-A2 — variantes NUNCA entram no UPDATE de products acima
+    // (fieldsToUpdate nunca inclui updates.variants). Sync separado, na
+    // própria transação: `variants` ausente do payload = não mexe em
+    // nenhuma variante existente (diferente de `variants: []`, que
+    // desativa todas — nunca deleta nenhuma).
+    if (updates.variants !== undefined) {
+      const variantsArray = Array.isArray(updates.variants) ? updates.variants : [];
+      await db.transaction((tx: any) =>
+        syncVariantsForProduct(tx, {
+          sellerId: check.seller.id,
+          productId: id,
+          variants: variantsArray,
+          performedBy: req.user.id,
+        })
+      );
     }
 
     await delCache('products_list_all');
