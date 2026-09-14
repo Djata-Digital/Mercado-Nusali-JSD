@@ -58,6 +58,7 @@ import {
   isVariantAvailable,
   getVariantMaxQuantity,
   getSelectionGuardMessage,
+  computeMultiVariantSummary,
 } from '../utils/productVariantBuyer';
 
 export const ProductDetailView: React.FC = () => {
@@ -76,7 +77,7 @@ export const ProductDetailView: React.FC = () => {
   const product = rawProduct ? normalizeProduct(rawProduct) : null;
   const isUnavailableForDestination = product?.availableForCountry === false;
 
-  const { addItem } = useCart();
+  const { addItem, addItemsBatch } = useCart();
   const { toggleFavorite, isFavorite } = useFavorites();
   // Correção pré-piloto (race condition/duplicação): "Adicionar ao carrinho" e
   // "Comprar agora" navegavam ANTES do addItem() (assíncrono) terminar — a
@@ -114,11 +115,19 @@ export const ProductDetailView: React.FC = () => {
   const [selectedSize, setSelectedSize] = useState<string>('');
   const [selectedKit, setSelectedKit] = useState<ProductKit | null>(null);
 
+  // FASE D16-D2 — compra multi-variante estilo Alibaba: quantidades
+  // independentes por variante (chave = productVariants.id REAL), em vez de
+  // uma única `quantity` para a variante "selecionada". Resetado SOMENTE
+  // quando o produto muda (nunca ao trocar de cor — D16-D1, seção 6: trocar
+  // Preta -> Branca -> Preta não pode apagar Preta/M=2).
+  const [variantQuantities, setVariantQuantities] = useState<Record<string, number>>({});
+
   // Reset a seleção sempre que o produto mudar (nunca herdar seleção de um
   // produto anterior ao navegar entre páginas de produto).
   useEffect(() => {
     setSelectedColor('');
     setSelectedSize('');
+    setVariantQuantities({});
   }, [product?.id]);
 
   const selectedColorGroup = useMemo(
@@ -142,6 +151,30 @@ export const ProductDetailView: React.FC = () => {
     () => resolveSelectedVariant(product?.variants, { color: selectedColor || null, size: selectedSize || null }),
     [product, selectedColor, selectedSize]
   );
+
+  // FASE D16-D2 — este produto tem um eixo de tamanho/capacidade real
+  // (independente da cor atualmente escolhida)? Se sim, a experiência de
+  // quantidade vira multi-variante (linhas com [-] qty [+]); se não (produto
+  // simples, ou variável só por cor, sem tamanho), o fluxo de seleção única
+  // do D16-C2 continua exatamente como antes (D16-D1, seção O).
+  const hasSecondaryAxisOverall = useMemo(
+    () => getActiveVariants(product?.variants).some((v) => !!(v.size || v.capacity)),
+    [product]
+  );
+  const isMultiVariantMode = hasRealVariants && hasSecondaryAxisOverall;
+
+  // Resumo puro (productVariantBuyer.ts) — nunca product.price, sempre o
+  // preço REAL de cada variante com quantidade > 0, calculado sobre TODAS as
+  // cores (não só a exibida agora), exatamente como o "8 unidades
+  // selecionadas" do enunciado exige.
+  const multiVariantSummary = useMemo(
+    () => computeMultiVariantSummary(product?.variants, variantQuantities),
+    [product, variantQuantities]
+  );
+  // Comprar agora continua single-variant (D16-D1, seção 7/M): só pode
+  // operar quando exatamente 1 variante tem quantidade > 0 — nunca
+  // variants[0], nunca uma escolha ambígua entre várias.
+  const buyNowSingleLine = multiVariantSummary.lines.length === 1 ? multiVariantSummary.lines[0] : null;
 
   // Handler for color selection with media index reset
   const handleSelectColor = (colorName: string) => {
@@ -464,6 +497,40 @@ export const ProductDetailView: React.FC = () => {
 
   const handleBuyNow = async () => {
     if (cartActionPending) return; // ignora clique duplicado/duplo-clique enquanto já há uma operação em andamento
+
+    // FASE D16-D2 (D16-D1, seção 7/M) — Comprar agora continua SINGLE-
+    // VARIANT mesmo com a nova seleção multi-variante: só opera quando
+    // exatamente 1 variante tem quantidade > 0. Nunca escolhe variants[0]
+    // nem "a primeira com qty>0 entre várias" — ambíguo demais.
+    if (isMultiVariantMode) {
+      if (!buyNowSingleLine) {
+        showToast(
+          multiVariantSummary.totalUnits === 0
+            ? 'Defina a quantidade da variação desejada antes de comprar agora.'
+            : 'Comprar agora funciona com apenas 1 variação por vez. Para várias, use "Adicionar ao carrinho".'
+        );
+        return;
+      }
+      setCartActionPending('buy');
+      try {
+        await addItem(product, buyNowSingleLine.quantity, {
+          color: buyNowSingleLine.variant.color,
+          size: buyNowSingleLine.variant.size || buyNowSingleLine.variant.capacity,
+          unitPriceOverride: buyNowSingleLine.variant.price,
+          variantId: buyNowSingleLine.variantId,
+          selectedVariantSku: buyNowSingleLine.variant.sku,
+          selectedVariantImage: buyNowSingleLine.variant.imageUrl || product.image,
+        });
+        navigate('/checkout');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } catch (err: any) {
+        showToast(err?.message || 'Não foi possível preparar a compra. Tente novamente.');
+      } finally {
+        setCartActionPending(null);
+      }
+      return;
+    }
+
     // FASE D16-C2 — bloqueio real: produto variável nunca envia a
     // requisição sem uma variante concreta e disponível resolvida. Nunca
     // cai silenciosamente em variants[0].
@@ -497,8 +564,37 @@ export const ProductDetailView: React.FC = () => {
     }
   };
 
+  // FASE D16-D2 (D16-D1, seção L) — UM único request batch, nunca um loop
+  // de N chamadas de addItem no frontend (risco de estado parcial já
+  // identificado na auditoria).
+  const handleAddMultiVariantToCart = async () => {
+    if (cartActionPending) return;
+    if (multiVariantSummary.totalUnits === 0) return;
+    setCartActionPending('add');
+    try {
+      await addItemsBatch(
+        product,
+        multiVariantSummary.lines.map((l) => ({
+          variantId: l.variantId,
+          quantity: l.quantity,
+          color: l.variant.color,
+          size: l.variant.size || l.variant.capacity,
+        }))
+      );
+      navigate('/cart');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (err: any) {
+      showToast(err?.message || 'Não foi possível adicionar as variações ao carrinho. Tente novamente.');
+    } finally {
+      setCartActionPending(null);
+    }
+  };
+
   const handleAddToCart = async () => {
     if (cartActionPending) return;
+    if (isMultiVariantMode) {
+      return handleAddMultiVariantToCart();
+    }
     const guardMessage = getSelectionGuardMessage(product.variants, { color: selectedColor || null, size: selectedSize || null });
     if (guardMessage) {
       showToast(guardMessage);
@@ -925,23 +1021,23 @@ export const ProductDetailView: React.FC = () => {
             </div>
           )}
 
-          {/* 3. SELETOR DE TAMANHOS / CAPACIDADES — FASE D16-C2. Só mostra
-              as opções que REALMENTE existem na cor escolhida (nunca uma
-              combinação cartesiana inventada); se o produto tem eixo de
-              cor, espera a cor ser escolhida primeiro (fluxo Alibaba). */}
+          {/* 3. QUANTIDADES POR TAMANHO/CAPACIDADE — FASE D16-D2 (estilo
+              Alibaba). Só mostra as opções que REALMENTE existem na cor
+              escolhida (nunca uma combinação cartesiana inventada); se o
+              produto tem eixo de cor, espera a cor ser escolhida primeiro.
+              Cada linha tem sua PRÓPRIA quantidade — trocar de cor NUNCA
+              apaga a quantidade das outras cores (D16-D1, seção 6). */}
           {sizesForSelectedColor.length > 0 && (colorGroups.length === 0 || !!selectedColor) && (
             <div className="space-y-2 pt-3 border-t border-gray-100">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-gray-800">
-                  Tamanho: <strong className="text-gray-900 font-extrabold ml-1">{selectedSize || 'Escolha uma opção'}</strong>
+                  Tamanho{selectedColor ? ` (${selectedColor})` : ''}:
                 </span>
                 <span className="text-gray-500 text-[11px]">Guia de tamanhos</span>
               </div>
 
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-col gap-2">
                 {sizesForSelectedColor.map((s, idx) => {
-                  const isSelected = selectedSize === s;
-
                   // Variante real dessa combinação (cor já escolhida + este
                   // tamanho) — nunca "qualquer variante com esse tamanho".
                   const varItem = product.variants?.find(
@@ -951,36 +1047,72 @@ export const ProductDetailView: React.FC = () => {
                       v.isActive !== false
                   );
 
-                  // Fonte real de disponibilidade: availableStock (inventory
-                  // ao vivo, D16-C2) — nunca a coluna stock legada.
-                  const isSizeOutOfStock = varItem !== undefined && (varItem.availableStock ?? 0) <= 0;
-                  const customVariantPrice = varItem?.price;
+                  const rowMax = getVariantMaxQuantity(varItem);
+                  const rowAvailable = isVariantAvailable(varItem);
+                  const rowQty = varItem ? variantQuantities[varItem.id] || 0 : 0;
+                  const rowPrice = varItem?.price;
+                  const rowOriginalPrice = varItem?.originalPrice;
+
+                  const applyRowQty = (nextQty: number) => {
+                    if (!varItem) return;
+                    const clamped = Math.max(0, Math.min(rowMax, nextQty));
+                    setVariantQuantities((prev) => ({ ...prev, [varItem.id]: clamped }));
+                    // Mantém imagem/preço/"Disponibilidade" (painel à direita)
+                    // sincronizados com a ÚLTIMA linha tocada — nunca apaga
+                    // quantidades de outras linhas/cores ao fazer isso.
+                    setSelectedSize(s);
+                  };
 
                   return (
-                    <button
+                    <div
                       key={idx}
-                      type="button"
-                      disabled={isSizeOutOfStock}
-                      onClick={() => setSelectedSize(s)}
-                      className={`min-w-[56px] px-3.5 py-2 rounded-lg border text-xs font-bold transition cursor-pointer text-center flex flex-col items-center justify-center ${
-                        isSizeOutOfStock
-                          ? 'border-gray-200 bg-gray-50 text-gray-400 line-through cursor-not-allowed opacity-60'
-                          : isSelected
-                          ? 'border-blue-600 bg-blue-50/70 text-blue-900 ring-2 ring-blue-500/20 shadow-2xs font-extrabold'
-                          : 'border-gray-300 hover:border-gray-500 bg-white text-gray-800'
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-lg border transition ${
+                        !rowAvailable
+                          ? 'border-gray-200 bg-gray-50 opacity-60'
+                          : rowQty > 0
+                          ? 'border-blue-600 bg-blue-50/50 ring-1 ring-blue-500/20'
+                          : 'border-gray-300 bg-white'
                       }`}
                     >
-                      <span>{s}</span>
-                      {customVariantPrice !== undefined && customVariantPrice > 0 && (
-                        <span
-                          className={`text-[10px] font-semibold mt-0.5 ${
-                            isSelected ? 'text-blue-700 font-bold' : 'text-gray-500'
-                          }`}
-                        >
-                          {formatCurrency(customVariantPrice, productCurrency)}
+                      <div className="flex flex-col min-w-0">
+                        <span className={`text-xs font-bold ${rowAvailable ? 'text-gray-900' : 'text-gray-400 line-through'}`}>
+                          {s}
                         </span>
-                      )}
-                    </button>
+                        <span className="text-[11px] flex items-center gap-1.5 flex-wrap">
+                          {rowPrice !== undefined && rowPrice > 0 && (
+                            <span className="text-gray-600 font-semibold">{formatCurrency(rowPrice, productCurrency)}</span>
+                          )}
+                          {rowOriginalPrice !== undefined && rowPrice !== undefined && rowOriginalPrice > rowPrice && (
+                            <span className="text-gray-400 line-through">{formatCurrency(rowOriginalPrice, productCurrency)}</span>
+                          )}
+                          {!rowAvailable ? (
+                            <span className="text-red-600 font-bold">Esgotado</span>
+                          ) : rowMax > 0 && rowMax <= 5 ? (
+                            <span className="text-amber-600 font-semibold">{rowMax} disponível{rowMax > 1 ? 'is' : ''}</span>
+                          ) : null}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-white shrink-0">
+                        <button
+                          type="button"
+                          disabled={!rowAvailable || rowQty <= 0}
+                          onClick={() => applyRowQty(rowQty - 1)}
+                          className="px-2.5 py-1 text-gray-700 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed font-bold cursor-pointer disabled:cursor-not-allowed"
+                        >
+                          -
+                        </button>
+                        <span className="px-3 py-1 text-xs font-bold text-gray-900 min-w-[2rem] text-center">{rowQty}</span>
+                        <button
+                          type="button"
+                          disabled={!rowAvailable || rowQty >= rowMax}
+                          onClick={() => applyRowQty(rowQty + 1)}
+                          className="px-2.5 py-1 text-gray-700 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed font-bold cursor-pointer"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -1138,8 +1270,11 @@ export const ProductDetailView: React.FC = () => {
               )}
             </div>
 
-            {/* Quantity Selector if single purchase */}
-            {!selectedKit && (
+            {/* Quantity Selector if single purchase — FASE D16-D2: em modo
+                multi-variante a quantidade é definida linha a linha (acima),
+                nunca aqui. Produto simples/variável-só-por-cor: 100% igual
+                ao D16-C2, intocado. */}
+            {!selectedKit && !isMultiVariantMode && (
               <div className="flex items-center justify-between text-xs">
                 <span className="font-semibold text-gray-700">Quantidade:</span>
                 <select
@@ -1159,14 +1294,58 @@ export const ProductDetailView: React.FC = () => {
               </div>
             )}
 
+            {/* FASE D16-D2 (D16-D1, seção 8/K) — resumo multi-variante:
+                total de unidades + subtotal, calculado 100% no frontend
+                (Σ variant.price * quantity, NUNCA product.price). */}
+            {isMultiVariantMode && (
+              <div className="bg-blue-50/60 border border-blue-200 rounded-xl p-3 space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-700 font-semibold">
+                    {multiVariantSummary.totalUnits === 0
+                      ? 'Nenhuma unidade selecionada'
+                      : `${multiVariantSummary.totalUnits} unidade${multiVariantSummary.totalUnits > 1 ? 's' : ''} selecionada${multiVariantSummary.totalUnits > 1 ? 's' : ''}`}
+                  </span>
+                  {multiVariantSummary.selectedVariantCount > 0 && (
+                    <span className="text-[11px] text-gray-500">
+                      {multiVariantSummary.selectedVariantCount} variação{multiVariantSummary.selectedVariantCount > 1 ? 'ões' : ''}
+                    </span>
+                  )}
+                </div>
+                {multiVariantSummary.totalUnits > 0 && (
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-xs text-gray-600">Subtotal:</span>
+                    <span className="text-lg font-black text-gray-900">
+                      {formatPrice(multiVariantSummary.subtotal, productCurrency).formatted}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Action Buttons */}
             <div className="space-y-2 pt-2">
               <button
-                disabled={needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination}
+                disabled={
+                  isMultiVariantMode
+                    ? !buyNowSingleLine || !product.weightKg || cartActionPending !== null || isUnavailableForDestination
+                    : needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination
+                }
                 onClick={handleBuyNow}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black py-3 px-4 rounded-xl shadow-xs transition transform active:scale-98 text-sm cursor-pointer"
               >
-                {cartActionPending === 'buy'
+                {isMultiVariantMode
+                  ? cartActionPending === 'buy'
+                    ? 'Preparando compra...'
+                    : isUnavailableForDestination
+                    ? 'Indisponível no seu país'
+                    : !product.weightKg
+                    ? 'Indisponível (peso não cadastrado)'
+                    : !buyNowSingleLine
+                    ? multiVariantSummary.totalUnits === 0
+                      ? 'Defina 1 variação para comprar'
+                      : 'Só 1 variação por vez'
+                    : 'Comprar agora'
+                  : cartActionPending === 'buy'
                   ? 'Preparando compra...'
                   : isUnavailableForDestination
                   ? 'Indisponível no seu país'
@@ -1182,11 +1361,27 @@ export const ProductDetailView: React.FC = () => {
               </button>
 
               <button
-                disabled={needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination}
+                disabled={
+                  isMultiVariantMode
+                    ? multiVariantSummary.totalUnits === 0 || !product.weightKg || cartActionPending !== null || isUnavailableForDestination
+                    : needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination
+                }
                 onClick={handleAddToCart}
                 className="w-full bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed text-blue-700 font-extrabold py-3 px-4 rounded-xl transition text-sm border border-blue-200 cursor-pointer"
               >
-                {cartActionPending === 'add'
+                {isMultiVariantMode
+                  ? cartActionPending === 'add'
+                    ? 'Adicionando...'
+                    : isUnavailableForDestination
+                    ? 'Indisponível no seu país'
+                    : !product.weightKg
+                    ? 'Indisponível (peso não cadastrado)'
+                    : multiVariantSummary.totalUnits === 0
+                    ? 'Selecione as quantidades'
+                    : multiVariantSummary.totalUnits === 1
+                    ? 'Adicionar 1 unidade ao carrinho'
+                    : `Adicionar ${multiVariantSummary.totalUnits} unidades ao carrinho`
+                  : cartActionPending === 'add'
                   ? 'Adicionando...'
                   : isUnavailableForDestination
                   ? 'Indisponível no seu país'

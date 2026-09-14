@@ -157,7 +157,7 @@ export const CartView: React.FC = () => {
               const itemSubtotal = unitPrice * item.quantity;
 
               return (
-                <div key={`${item.product.id}-${item.selectedColor || ''}-${item.selectedSize || ''}-${item.selectedKit?.id || ''}`} className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div key={item.id || `${item.product.id}-${item.selectedColor || ''}-${item.selectedSize || ''}-${item.selectedKit?.id || ''}`} className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                   <div className="flex items-start gap-4 flex-1">
                     <img
                       src={item.product.image}
@@ -218,14 +218,14 @@ export const CartView: React.FC = () => {
                   <div className="flex items-center justify-between w-full sm:w-auto sm:justify-end gap-6 pt-2 sm:pt-0 border-t sm:border-none border-gray-100">
                     <div className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-gray-50">
                       <button
-                        onClick={() => updateCartQuantity(item.product.id, item.quantity - 1)}
+                        onClick={() => updateCartQuantity(item.id || item.product.id, item.quantity - 1)}
                         className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold"
                       >
                         -
                       </button>
                       <span className="px-3 py-1 text-xs font-bold text-gray-900">{item.quantity}</span>
                       <button
-                        onClick={() => updateCartQuantity(item.product.id, item.quantity + 1)}
+                        onClick={() => updateCartQuantity(item.id || item.product.id, item.quantity + 1)}
                         className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold"
                       >
                         +
@@ -251,7 +251,7 @@ export const CartView: React.FC = () => {
                     </div>
 
                     <button
-                      onClick={() => removeFromCart(item.product.id)}
+                      onClick={() => removeFromCart(item.id || item.product.id)}
                       className="text-gray-400 hover:text-red-600 p-1 transition"
                       title="Excluir item"
                     >

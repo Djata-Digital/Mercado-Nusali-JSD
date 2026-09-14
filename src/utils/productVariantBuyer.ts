@@ -189,3 +189,46 @@ export function getSelectionGuardMessage(
   if (hasSecondaryAxis && !selection.size) return 'Selecione um tamanho.';
   return 'Selecione uma variação válida antes de continuar.';
 }
+
+/**
+ * FASE D16-D2 — compra multi-variante estilo Alibaba: quantidades
+ * independentes por variante (Record<variantId, quantity>), em vez de uma
+ * única quantidade para a variante "selecionada". Puro — nunca acessa
+ * rede/estado, só resume o que já está em `variants[]` + o mapa de
+ * quantidades escolhidas pelo comprador.
+ */
+export interface MultiVariantSummary {
+  totalUnits: number;
+  /** Quantas variantes DISTINTAS têm quantidade > 0 (nunca conta uma variante com qty=0). */
+  selectedVariantCount: number;
+  /** Σ variant.price * quantity — NUNCA product.price, sempre o preço REAL de cada variante. */
+  subtotal: number;
+  /** Uma entrada por variante com quantidade > 0 — pronta para virar `items[]` do batch. */
+  lines: Array<{ variantId: string; variant: ProductVariant; quantity: number; lineTotal: number }>;
+}
+
+export function computeMultiVariantSummary(
+  variants: ProductVariant[] | undefined | null,
+  variantQuantities: Record<string, number> | undefined | null
+): MultiVariantSummary {
+  const active = getActiveVariants(variants);
+  const qtyMap = variantQuantities || {};
+
+  let totalUnits = 0;
+  let selectedVariantCount = 0;
+  let subtotal = 0;
+  const lines: MultiVariantSummary['lines'] = [];
+
+  for (const v of active) {
+    const qty = Math.max(0, Math.floor(Number(qtyMap[v.id]) || 0));
+    if (qty <= 0) continue;
+    const price = typeof v.price === 'number' && !isNaN(v.price) ? v.price : 0;
+    const lineTotal = price * qty;
+    totalUnits += qty;
+    selectedVariantCount += 1;
+    subtotal += lineTotal;
+    lines.push({ variantId: v.id, variant: v, quantity: qty, lineTotal });
+  }
+
+  return { totalUnits, selectedVariantCount, subtotal, lines };
+}

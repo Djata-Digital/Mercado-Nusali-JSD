@@ -117,6 +117,66 @@ export const CartService = {
     return current;
   },
 
+  // FASE D16-D2 — compra multi-variante estilo Alibaba: UM request batch
+  // para várias linhas do MESMO produto (cada uma com seu productVariants.id
+  // real), em vez de um loop de addItem no frontend (auditoria D16-D1,
+  // seção 4: loop teria risco de estado parcial sem transação). NUNCA
+  // remove/substitui addItem — fluxos single (ProductCard, MyOrdersView)
+  // continuam usando addItem normalmente.
+  async addItemsBatch(
+    product: Product,
+    lines: Array<{
+      variantId: string;
+      quantity: number;
+      color?: string;
+      size?: string;
+    }>
+  ): Promise<CartItem[]> {
+    const token = storageService.getToken();
+    if (token) {
+      const res = await CartApi.createBatch(
+        lines.map((l) => ({
+          productId: product.id,
+          variantId: l.variantId,
+          quantity: l.quantity,
+          selectedAttributesJson: l.color || l.size ? { color: l.color, size: l.size } : undefined,
+        }))
+      );
+      if (res && res.success) {
+        return await this.fetchServerCart();
+      }
+      const errorMsg = res?.error?.message || 'Erro ao adicionar variações ao carrinho no servidor.';
+      throw new Error(errorMsg);
+    }
+
+    // Carrinho local (sem login) — mesma regra de merge por
+    // (productId, selectedVariantSku) já usada em addItem, aplicada a cada
+    // linha em sequência (não há transação real possível em localStorage;
+    // não há concorrência entre abas relevante aqui, ao contrário do
+    // servidor).
+    const normalizedProd = normalizeProduct(product);
+    let current = this.getCart();
+    for (const l of lines) {
+      const existingIndex = current.findIndex(
+        (item) => item.product.id === normalizedProd.id && item.selectedVariantSku === l.variantId
+      );
+      if (existingIndex >= 0) {
+        current[existingIndex].quantity += l.quantity;
+      } else {
+        current.push({
+          id: `ci_local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          product: normalizedProd,
+          quantity: l.quantity,
+          selectedColor: l.color,
+          selectedSize: l.size,
+          selectedVariantSku: l.variantId,
+        });
+      }
+    }
+    this.setCart(current);
+    return current;
+  },
+
   async updateQuantity(productIdOrItemId: string, quantity: number): Promise<CartItem[]> {
     const token = storageService.getToken();
     if (token) {

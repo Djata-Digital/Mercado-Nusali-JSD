@@ -65,6 +65,18 @@ export const useCart = () => {
     return updated;
   };
 
+  // FASE D16-D2 — compra multi-variante: UM request batch para várias
+  // linhas do mesmo produto. Erros propagam igual a addItem (quem chama
+  // decide o que mostrar/não navegar).
+  const addItemsBatch = async (
+    product: Product,
+    lines: Array<{ variantId: string; quantity: number; color?: string; size?: string }>
+  ) => {
+    const updated = await CartService.addItemsBatch(product, lines);
+    setItems([...updated]);
+    return updated;
+  };
+
   const updateQuantity = async (productId: string, quantity: number) => {
     const updated = await CartService.updateQuantity(productId, quantity);
     setItems([...updated]);
@@ -97,6 +109,7 @@ export const useCart = () => {
     error,
     loadCart,
     addItem,
+    addItemsBatch,
     updateQuantity,
     removeItem,
     clearCart,
