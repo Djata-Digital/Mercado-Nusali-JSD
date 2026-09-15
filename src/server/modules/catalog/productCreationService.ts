@@ -14,6 +14,10 @@ import {
 import { eq, inArray, asc, or } from 'drizzle-orm';
 import { delCache } from '../../../db/redis.js';
 import { syncVariantsForProduct, type VariantSyncInput } from './variantService.js';
+// FASE D16-E2 — mesma função já usada por GET /seller/fulfillment-locations
+// (D15-C3) e agora por variantService.ts, para vincular o inventory NOVO do
+// produto simples à origem física real da store — nunca uma store adivinhada.
+import { ensureStoreFulfillmentLocation } from '../logistics/fulfillmentLocationService.js';
 
 export interface CreateProductInput {
   title: string;
@@ -417,7 +421,12 @@ export class ProductCreationService {
           performedBy: seller.userId || null,
         });
       } else {
-        // Produto simples — fluxo idêntico ao de sempre, nada mudou aqui.
+        // Produto simples — fluxo idêntico ao de sempre, MAIS a origem
+        // física real (FASE D16-E2): `store` já foi validada/é obrigatória
+        // no topo desta função (PRODUCT_STORE_REQUIRED), então
+        // fulfillmentLocationId nunca fica null para produto criado a
+        // partir de agora — nunca uma store adivinhada.
+        const fulfillmentLocation = await ensureStoreFulfillmentLocation(store.id, tx);
         const initialInvId = `inv_seller_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         await tx.insert(inventory).values({
           id: initialInvId,
@@ -429,6 +438,7 @@ export class ProductCreationService {
           quantityOnHand: cleanStock,
           quantityReserved: 0,
           minimumStockLevel: 0,
+          fulfillmentLocationId: fulfillmentLocation?.id || null,
           createdAt: new Date(),
           updatedAt: new Date(),
         });

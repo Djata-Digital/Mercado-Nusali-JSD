@@ -31,6 +31,11 @@
  */
 import { eq } from 'drizzle-orm';
 import { products, productVariants, inventory, inventoryMovements } from '../../../db/schema.js';
+// FASE D16-E2 — mesma função já usada por GET /seller/fulfillment-locations
+// (D15-C3), agora também para vincular o inventory NOVO de uma variante à
+// origem física real da store — nunca uma segunda lógica de "achar/criar a
+// location", nunca uma store adivinhada.
+import { ensureStoreFulfillmentLocation } from '../logistics/fulfillmentLocationService.js';
 
 export interface VariantSyncInput {
   /** ID real existente (edição) OU um ID efêmero do frontend (ex.: "var-1") — nunca usado como PK novo. */
@@ -83,6 +88,20 @@ export async function syncVariantsForProduct(
   if (!product) throw new Error(`PRODUCT_NOT_FOUND: produto "${productId}" não encontrado.`);
   if (product.sellerId !== sellerId) {
     throw new Error('PRODUCT_NOT_OWNED: este produto não pertence ao vendedor autenticado.');
+  }
+
+  // FASE D16-E2 — origem física real do inventory NOVO desta variante: a
+  // MESMA store dona do produto (products.storeId), nunca uma store
+  // adivinhada/"a primeira do seller". Resolvida UMA vez aqui (não por
+  // variante) — todas as variantes novas deste sync apontam para a mesma
+  // fulfillment_location, participando da MESMA transação (`db` já É o
+  // `tx` do chamador, quando houver um). Produto legado sem storeId (era
+  // possível antes da exigência em ProductCreationService) -> fica null,
+  // exatamente como hoje; nunca inventamos uma store para ele.
+  let newVariantFulfillmentLocationId: string | null = null;
+  if (product.storeId) {
+    const location = await ensureStoreFulfillmentLocation(product.storeId, db);
+    newVariantFulfillmentLocationId = location?.id || null;
   }
 
   const existingRows = await db.select().from(productVariants).where(eq(productVariants.productId, productId));
@@ -237,6 +256,10 @@ export async function syncVariantsForProduct(
         quantityOnHand: stockInitial,
         quantityReserved: 0,
         minimumStockLevel: 0,
+        // FASE D16-E2 — origem física real (fulfillment_locations da store
+        // dona do produto), resolvida uma única vez acima. NULL só no caso
+        // legado de produto sem storeId — nunca uma store inventada.
+        fulfillmentLocationId: newVariantFulfillmentLocationId,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
