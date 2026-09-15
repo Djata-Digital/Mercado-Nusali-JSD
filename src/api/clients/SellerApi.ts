@@ -88,17 +88,25 @@ export class SellerApi {
     return apiClient.get('/seller/inventory');
   }
 
+  // FASE D16-E5 — read-model dedicado: uma opção por inventory row
+  // SELLER_LOCATION real e transferível (produto/variante/loja já
+  // resolvidos pelo backend) — nunca derivado de products.attributesJson.
+  static async getTransferableInventory(): Promise<ApiResponse<any>> {
+    return apiClient.get('/seller/inventory/transferable');
+  }
+
   static async getTransfers(): Promise<ApiResponse<any>> {
     return apiClient.get('/seller/inventory/transfers');
   }
 
+  // FASE D16-E5 — origem sempre uma inventory row EXATA (sourceInventoryId);
+  // productId/variantId/pickupSnapshotJson não são mais aceitos aqui — o
+  // backend deriva tudo a partir da própria inventory (ver auditoria D16-E5).
   static async requestTransfer(data: {
-    productId: string;
-    variantId?: string;
+    sourceInventoryId: string;
     toWarehouseId: string;
     quantity: number;
     deliveryMode?: string;
-    pickupSnapshotJson?: any;
   }): Promise<ApiResponse<any>> {
     return apiClient.post('/seller/inventory/transfers', data);
   }

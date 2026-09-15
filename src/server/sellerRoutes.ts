@@ -62,6 +62,7 @@ import {
   supportTicketMessages,
   shippingRegions,
   shippingSectors,
+  fulfillmentLocations,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
@@ -2225,6 +2226,113 @@ sellerRouter.patch('/products/:id/status', async (req: AuthRequest, res: Respons
   }
 });
 
+// GET /api/v1/seller/inventory/transferable — FASE D16-E5. Read-model
+// dedicado para o modal "Enviar para o HUB": UMA opção explícita por
+// inventory row SELLER_LOCATION real e transferível deste seller — nunca
+// agregado por produto, nunca usando product_variants a partir de
+// products.attributesJson (achado da auditoria: fonte errada, sempre
+// vazia). Só inclui linhas com origem física válida (fulfillment_location
+// ativa, do tipo STORE, cuja store pertence a este seller e está ativa) —
+// exatamente as que InventoryService.requestTransferToHub aceitaria,
+// nunca uma opção que a UI mostra mas o backend depois rejeita.
+sellerRouter.get('/inventory/transferable', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+
+    const [seller] = await db.select().from(sellers).where(eq(sellers.userId, req.user.id)).limit(1);
+    if (!seller) return res.status(403).json({ success: false, message: 'Vendedor não encontrado.' });
+
+    const rows = await db.select().from(inventory).where(and(eq(inventory.sellerId, seller.id), eq(inventory.locationType, 'SELLER_LOCATION')));
+    if (rows.length === 0) return res.json({ success: true, data: [] });
+
+    const productIds = Array.from(new Set(rows.map((r: any) => r.productId)));
+    const variantIds = Array.from(new Set(rows.map((r: any) => r.variantId).filter(Boolean))) as string[];
+    const flocIds = Array.from(new Set(rows.map((r: any) => r.fulfillmentLocationId).filter(Boolean))) as string[];
+    const inventoryIds = rows.map((r: any) => r.id);
+
+    const [productRows, variantRows, flocRows, pendingRows] = await Promise.all([
+      db.select().from(products).where(inArray(products.id, productIds)),
+      variantIds.length > 0 ? db.select().from(productVariants).where(inArray(productVariants.id, variantIds)) : Promise.resolve([]),
+      flocIds.length > 0 ? db.select().from(fulfillmentLocations).where(inArray(fulfillmentLocations.id, flocIds)) : Promise.resolve([]),
+      db.select({ fromInventoryId: inventoryTransfers.fromInventoryId, qty: inventoryTransfers.quantity })
+        .from(inventoryTransfers)
+        .where(and(
+          inArray(inventoryTransfers.fromInventoryId, inventoryIds),
+          or(eq(inventoryTransfers.status, 'PENDING'), eq(inventoryTransfers.status, 'IN_TRANSIT'))
+        )),
+    ]);
+
+    const activeFlocRows = (flocRows as any[]).filter((f) => f.isActive && f.locationType === 'STORE' && f.storeId);
+    const storeIds = Array.from(new Set(activeFlocRows.map((f: any) => f.storeId))) as string[];
+    const storeRows = storeIds.length > 0 ? await db.select().from(storesTable).where(inArray(storesTable.id, storeIds)) : [];
+    const activeStoreIds = new Set((storeRows as any[]).filter((s) => s.status === 'active').map((s: any) => s.id));
+
+    const operationalAddressIds = Array.from(new Set((storeRows as any[]).map((s) => s.operationalAddressId).filter(Boolean))) as string[];
+    const addressRows = operationalAddressIds.length > 0 ? await db.select().from(addresses).where(inArray(addresses.id, operationalAddressIds)) : [];
+
+    const productMap = new Map((productRows as any[]).map((p) => [p.id, p]));
+    const variantMap = new Map((variantRows as any[]).map((v) => [v.id, v]));
+    const flocMap = new Map(activeFlocRows.map((f) => [f.id, f]));
+    const storeMap = new Map((storeRows as any[]).map((s) => [s.id, s]));
+    const addressMap = new Map((addressRows as any[]).map((a) => [a.id, a]));
+    const pendingMap = new Map<string, number>();
+    for (const p of pendingRows as any[]) {
+      pendingMap.set(p.fromInventoryId, (pendingMap.get(p.fromInventoryId) || 0) + (Number(p.qty) || 0));
+    }
+
+    const formatted = rows
+      .map((r: any) => {
+        const floc = r.fulfillmentLocationId ? flocMap.get(r.fulfillmentLocationId) : null;
+        // Só entra na lista se a origem física é exatamente a que o backend
+        // aceitaria (nunca oferece uma opção que depois seria rejeitada).
+        if (!floc) return null;
+        const store = storeMap.get(floc.storeId);
+        if (!store || !activeStoreIds.has(store.id)) return null;
+
+        const product = productMap.get(r.productId);
+        const variant = r.variantId ? variantMap.get(r.variantId) : null;
+        const address = store.operationalAddressId ? addressMap.get(store.operationalAddressId) : null;
+        const pending = pendingMap.get(r.id) || 0;
+        const onHand = Number(r.quantityOnHand) || 0;
+        const reserved = Number(r.quantityReserved) || 0;
+        const availableForTransfer = Math.max(0, onHand - reserved - pending);
+        const storeAddressText = address
+          ? `${address.street}, ${address.number || 'S/N'}${address.neighborhood ? ', ' + address.neighborhood : ''}`.trim()
+          : null;
+
+        return {
+          inventoryId: r.id,
+          productId: r.productId,
+          productName: product?.title || `Produto ${r.productId}`,
+          productSku: product?.sku || null,
+          variantId: r.variantId || null,
+          variantTitle: variant?.title || null,
+          variantSku: variant?.sku || null,
+          color: variant?.color || null,
+          size: variant?.size || null,
+          capacity: variant?.capacity || null,
+          quantityOnHand: onHand,
+          quantityReserved: reserved,
+          pendingTransferQuantity: pending,
+          availableForTransfer,
+          fulfillmentLocationId: floc.id,
+          storeId: store.id,
+          storeName: store.name,
+          storeCity: address?.city || null,
+          storeCountryCode: address?.countryCode || store.countryCode || null,
+          storePhone: address?.phone || null,
+          storeAddressText,
+        };
+      })
+      .filter(Boolean);
+
+    return res.json({ success: true, data: formatted });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
 // GET /api/v1/seller/inventory
 sellerRouter.get('/inventory', async (req: AuthRequest, res: Response) => {
   try {
@@ -2263,6 +2371,13 @@ sellerRouter.get('/inventory/transfers', async (req: AuthRequest, res: Response)
 });
 
 // POST /api/v1/seller/inventory/transfers
+// FASE D16-E5 — contrato reescrito: a ORIGEM é sempre uma inventory row
+// EXATA (sourceInventoryId), nunca mais productId+variantId opcional. Todo
+// ownership/origem (seller, produto, variante, fulfillment location, store)
+// é revalidado dentro de InventoryService.requestTransferToHub a partir do
+// PRÓPRIO sourceInventoryId — nunca confiando em productId/variantId/
+// pickupSnapshotJson enviados pelo corpo (fail-closed, sem fallback para o
+// contrato antigo: único caller real é SellerStockManager.tsx, já adaptado).
 sellerRouter.post('/inventory/transfers', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -2271,42 +2386,19 @@ sellerRouter.post('/inventory/transfers', async (req: AuthRequest, res: Response
     const [seller] = await db.select().from(sellers).where(eq(sellers.userId, req.user.id)).limit(1);
     if (!seller) return res.status(403).json({ success: false, message: 'Vendedor não encontrado.' });
 
-    const { productId, variantId, toWarehouseId, quantity, deliveryMode } = req.body;
-    if (!productId || !toWarehouseId || !quantity) {
-      return res.status(400).json({ success: false, message: 'productId, toWarehouseId e quantity são obrigatórios.' });
-    }
-
-    const [sellerUser] = await db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
-    const [store] = await db.select().from(storesTable).where(eq(storesTable.sellerId, seller.id)).limit(1);
-    const [sellerAddress] = await db.select().from(addresses).where(eq(addresses.userId, req.user.id)).limit(1);
-
-    let pickupSnapshotJson: any = req.body.pickupSnapshotJson || null;
-    if (!pickupSnapshotJson) {
-      const addrFormatted = sellerAddress
-        ? `${sellerAddress.street}, ${sellerAddress.number}${sellerAddress.complement ? ' - ' + sellerAddress.complement : ''}${sellerAddress.neighborhood ? ', ' + sellerAddress.neighborhood : ''}`.trim()
-        : null;
-
-      pickupSnapshotJson = {
-        storeName: store?.name || seller.tradingName || seller.companyName || null,
-        contactName: sellerUser?.fullName || seller.companyName || seller.tradingName || null,
-        phone: sellerAddress?.phone || seller.phone || null,
-        address: addrFormatted || null,
-        city: sellerAddress?.city || null,
-        region: sellerAddress?.state || null,
-        countryCode: sellerAddress?.countryCode || store?.countryCode || seller.countryCode || null,
-      };
+    const { sourceInventoryId, toWarehouseId, quantity, deliveryMode } = req.body;
+    if (!sourceInventoryId || !toWarehouseId || !quantity) {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'sourceInventoryId, toWarehouseId e quantity são obrigatórios.' } });
     }
 
     const mode = deliveryMode === 'SELLER_DROPOFF' ? 'SELLER_DROPOFF' : 'NUSALI_PICKUP';
 
     const transferResult = await InventoryService.requestTransferToHub(
       seller.id,
-      productId,
+      String(sourceInventoryId),
       toWarehouseId,
       Number(quantity),
-      variantId,
-      mode,
-      pickupSnapshotJson
+      mode
     );
 
     return res.status(201).json({

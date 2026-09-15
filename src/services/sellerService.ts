@@ -68,17 +68,19 @@ export const SellerService = {
     return SellerApi.getInventory();
   },
 
+  async getTransferableInventory(): Promise<ApiResponse<any>> {
+    return SellerApi.getTransferableInventory();
+  },
+
   async getTransfers(): Promise<ApiResponse<any>> {
     return SellerApi.getTransfers();
   },
 
   async requestTransfer(data: {
-    productId: string;
-    variantId?: string;
+    sourceInventoryId: string;
     toWarehouseId: string;
     quantity: number;
     deliveryMode?: string;
-    pickupSnapshotJson?: any;
   }): Promise<ApiResponse<any>> {
     return SellerApi.requestTransfer(data);
   },
