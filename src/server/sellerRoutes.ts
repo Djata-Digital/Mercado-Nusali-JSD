@@ -2343,7 +2343,40 @@ sellerRouter.get('/inventory', async (req: AuthRequest, res: Response) => {
     if (!seller) return res.status(403).json({ success: false, message: 'Vendedor não encontrado.' });
 
     const rows = await db.select().from(inventory).where(eq(inventory.sellerId, seller.id));
-    return res.json({ success: true, data: rows });
+    if (rows.length === 0) return res.json({ success: true, data: [] });
+
+    // FASE D16-E5.1 — enriquece cada linha com a identidade REAL do produto
+    // e da variante (product_variants), para as tabelas "Meu Estoque" e
+    // "Estoque nos Nusali HUBs" pararem de mostrar só o productId/variantId
+    // técnico. Nunca lê products.attributesJson (fonte errada, corrigida no
+    // D16-E5) — só product_variants.{color,size,capacity,attributesJson}.
+    const productIds = Array.from(new Set(rows.map((r: any) => r.productId)));
+    const variantIds = Array.from(new Set(rows.map((r: any) => r.variantId).filter(Boolean))) as string[];
+
+    const [productRows, variantRows] = await Promise.all([
+      productIds.length > 0 ? db.select().from(products).where(inArray(products.id, productIds)) : Promise.resolve([]),
+      variantIds.length > 0 ? db.select().from(productVariants).where(inArray(productVariants.id, variantIds)) : Promise.resolve([]),
+    ]);
+    const productMap = new Map((productRows as any[]).map((p: any) => [p.id, p]));
+    const variantMap = new Map((variantRows as any[]).map((v: any) => [v.id, v]));
+
+    const enriched = rows.map((r: any) => {
+      const product = productMap.get(r.productId);
+      const variant = r.variantId ? variantMap.get(r.variantId) : null;
+      return {
+        ...r,
+        productName: product?.title || null,
+        productSku: product?.sku || null,
+        variantTitle: variant?.title || null,
+        variantSku: variant?.sku || null,
+        color: variant?.color || null,
+        size: variant?.size || null,
+        capacity: variant?.capacity || null,
+        variantAttributesJson: (variant?.attributesJson && typeof variant.attributesJson === 'object') ? variant.attributesJson : null,
+      };
+    });
+
+    return res.json({ success: true, data: enriched });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
   }

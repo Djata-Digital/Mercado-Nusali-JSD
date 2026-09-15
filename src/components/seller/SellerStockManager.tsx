@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { SellerService } from '../../services/sellerService';
 import { countriesConfig } from '../../utils/currencyUtils';
+import { formatVariantIdentity } from '../../utils/variantIdentity';
 
 interface SellerStockManagerProps {
   warehouses?: any[];
@@ -460,6 +461,15 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                   const onHand = Number(inv.quantityOnHand) || 0;
                   const reserved = Number(inv.quantityReserved) || 0;
                   const available = Math.max(0, onHand - reserved);
+                  const variantLabel = inv.variantId
+                    ? formatVariantIdentity({
+                        color: inv.color,
+                        size: inv.size,
+                        capacity: inv.capacity,
+                        attributesJson: inv.variantAttributesJson,
+                      })
+                    : '';
+                  const skuLabel = inv.variantSku || prod?.sku || inv.productSku || inv.productId;
 
                   return (
                     <tr key={inv.id} className="hover:bg-gray-50/50">
@@ -477,10 +487,13 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                             </div>
                           )}
                           <div>
-                            <span className="font-bold text-gray-900 block">{prod?.title || inv.productId}</span>
-                            <span className="text-[10px] font-mono text-gray-400">
-                              SKU: {prod?.sku || inv.productId} {inv.variantId ? `• Var: ${inv.variantId}` : ''}
+                            <span className="font-bold text-gray-900 block">
+                              {prod?.title || inv.productName || inv.productId}
                             </span>
+                            {variantLabel && (
+                              <span className="text-[11px] font-semibold text-gray-600 block">{variantLabel}</span>
+                            )}
+                            <span className="text-[10px] font-mono text-gray-400">SKU: {skuLabel}</span>
                           </div>
                         </div>
                       </td>
@@ -556,6 +569,15 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                   const onHand = Number(inv.quantityOnHand) || 0;
                   const reserved = Number(inv.quantityReserved) || 0;
                   const available = Math.max(0, onHand - reserved);
+                  const variantLabel = inv.variantId
+                    ? formatVariantIdentity({
+                        color: inv.color,
+                        size: inv.size,
+                        capacity: inv.capacity,
+                        attributesJson: inv.variantAttributesJson,
+                      })
+                    : '';
+                  const skuLabel = inv.variantSku || prod?.sku || inv.productSku || inv.productId;
 
                   return (
                     <tr key={inv.id} className="hover:bg-gray-50/50">
@@ -573,10 +595,13 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                             </div>
                           )}
                           <div>
-                            <span className="font-bold text-gray-900 block">{prod?.title || inv.productId}</span>
-                            <span className="text-[10px] font-mono text-gray-400">
-                              SKU: {prod?.sku || inv.productId} {inv.variantId ? `• Var: ${inv.variantId}` : ''}
+                            <span className="font-bold text-gray-900 block">
+                              {prod?.title || inv.productName || inv.productId}
                             </span>
+                            {variantLabel && (
+                              <span className="text-[11px] font-semibold text-gray-600 block">{variantLabel}</span>
+                            )}
+                            <span className="text-[10px] font-mono text-gray-400">SKU: {skuLabel}</span>
                           </div>
                         </div>
                       </td>
