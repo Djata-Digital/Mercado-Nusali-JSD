@@ -89,6 +89,44 @@ export async function computeLiveStockAndSales(productIds: string[], executor?: 
   return result;
 }
 
+// FASE D16-C2 — estoque AO VIVO por variante, read-only, mesma fonte de
+// verdade de sempre (`inventory`), nunca `product_variants.stock` (não-
+// autoritativa desde D16-A2). Mesma fórmula de computeLiveStockAndSales
+// (SUM(quantityOnHand - quantityReserved), nunca negativo), só que agrupada
+// por `variantId` em vez de `productId` — nenhuma tabela nova, nenhum writer
+// tocado, nenhuma mudança na semântica de reserva/liberação/despacho.
+export async function computeLiveVariantStock(variantIds: string[], executor?: any): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (variantIds.length === 0) return result;
+
+  const db = executor ?? getDb();
+  if (!db) return result;
+
+  const rows = await db
+    .select({
+      variantId: inventory.variantId,
+      onHand: sql<string>`COALESCE(SUM(${inventory.quantityOnHand}), 0)`,
+      reserved: sql<string>`COALESCE(SUM(${inventory.quantityReserved}), 0)`,
+    })
+    .from(inventory)
+    .where(inArray(inventory.variantId, variantIds))
+    .groupBy(inventory.variantId);
+
+  for (const row of rows) {
+    if (!row.variantId) continue;
+    result.set(row.variantId, Math.max(0, Number(row.onHand) - Number(row.reserved)));
+  }
+  // Variante sem NENHUMA linha de inventory (não deveria acontecer para
+  // variantes criadas via VariantService, que sempre cria uma) -> 0, nunca
+  // undefined/null — o chamador precisa de um número para decidir
+  // disponibilidade, e "sem controle de estoque" nunca deve significar
+  // "comprável à vontade".
+  for (const id of variantIds) {
+    if (!result.has(id)) result.set(id, 0);
+  }
+  return result;
+}
+
 export interface ProductQueryFilters {
   q?: string;
   category?: string;
@@ -210,6 +248,18 @@ export class CatalogService {
     // página de resultados — nunca grava nada, nunca duplica cálculo.
     const liveStockMap = await computeLiveStockAndSales(items.map((p) => p.id), executor);
 
+    // FASE D16-C2.1 — sinal leve "este produto tem variantes reais ativas"
+    // para a listagem (ProductCard nunca escolhe variants[0] às cegas — só
+    // decide, com isso, se leva ao detalhe em vez de adicionar direto).
+    // Read-only, nunca traz os dados completos da variante aqui.
+    const variantOwnerRows = items.length > 0
+      ? await db
+          .selectDistinct({ productId: productVariants.productId })
+          .from(productVariants)
+          .where(and(inArray(productVariants.productId, items.map((p) => p.id)), eq(productVariants.isActive, true)))
+      : [];
+    const hasVariantsSet = new Set(variantOwnerRows.map((r: any) => r.productId));
+
     const result = {
       products: items.map((p) => {
         const live = liveStockMap.get(p.id);
@@ -220,6 +270,7 @@ export class CatalogService {
           rating: Number(p.rating || 5.0),
           stock: live?.availableStock ?? Number(p.stock),
           salesCount: live?.salesCount ?? 0,
+          hasVariants: hasVariantsSet.has(p.id),
         };
       }),
       pagination: {
@@ -250,10 +301,20 @@ export class CatalogService {
       // do cache expirar.
       const liveCached = await computeLiveStockAndSales([id], executor);
       const liveC = liveCached.get(id);
+      // Mesma regra do produto: estoque por variante também nunca pode vir
+      // congelado do cache — recalculado a cada leitura, mesmo em cache hit.
+      const cachedVariants: any[] = Array.isArray(cached.variants) ? cached.variants : [];
+      const liveVariantStockCached = cachedVariants.length > 0
+        ? await computeLiveVariantStock(cachedVariants.map((v: any) => v.id), executor)
+        : new Map<string, number>();
       const withLiveStock = {
         ...cached,
         stock: liveC?.availableStock ?? Number(cached.stock),
         salesCount: liveC?.salesCount ?? 0,
+        variants: cachedVariants.map((v: any) => ({
+          ...v,
+          availableStock: liveVariantStockCached.get(v.id) ?? 0,
+        })),
       };
       return this.attachEligibility(withLiveStock, destinationCountry);
     }
@@ -305,6 +366,14 @@ export class CatalogService {
 
     const resolvedCountry = p.countryCode || sellerInfo?.country || (p.currency === 'BRL' ? 'BR' : '');
 
+    // FASE D16-C2 — estoque AO VIVO por variante (fonte: inventory, nunca
+    // product_variants.stock). Read-only, calculado na leitura, nunca
+    // gravado — mesmo padrão já usado para o produto inteiro logo abaixo
+    // (computeLiveStockAndSales).
+    const liveVariantStock = variantsRes.length > 0
+      ? await computeLiveVariantStock(variantsRes.map((v) => v.id), executor ?? db)
+      : new Map<string, number>();
+
     const fullProduct = {
       ...p,
       image: mainImage,
@@ -318,10 +387,17 @@ export class CatalogService {
       stock: Number(p.stock),
       specs: combinedSpecs,
       attributesJson: combinedSpecs,
+      // FASE D16-C2.1 — mesmo sinal leve da listagem, calculado aqui sem
+      // query extra (variantsRes já foi buscado acima).
+      hasVariants: variantsRes.some((v) => v.isActive !== false),
       variants: variantsRes.map((v) => ({
         ...v,
         price: Number(v.price),
+        originalPrice: v.originalPrice ? Number(v.originalPrice) : undefined,
+        // Legado/não-autoritativo — nunca usar para decidir disponibilidade
+        // (ver availableStock, a fonte real, logo abaixo).
         stock: Number(v.stock),
+        availableStock: liveVariantStock.get(v.id) ?? 0,
       })),
       images: imageUrlList.length > 0 ? imageUrlList : (p.image ? [p.image] : []),
       galleryImages: imageUrlList.length > 0 ? imageUrlList : (p.image ? [p.image] : []),

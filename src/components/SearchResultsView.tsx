@@ -12,10 +12,15 @@ export const SearchResultsView: React.FC = () => {
   const queryParam = searchParams.get('q') || '';
   const { data: products = [] } = useProducts();
 
+  // Fase M1-D2.6 — removidos `brand: ''` e `officialStoresOnly: false`: não
+  // existem em FilterState (src/types.ts) e este componente nunca os LÊ em
+  // lugar nenhum (a filtragem aqui é 100% client-side sobre os campos reais:
+  // category/condition/priceMin/priceMax/freeShippingOnly/fullOnly/
+  // arrivesTomorrowOnly/sellerPlatinumOnly/sortBy). Eram campos de estado
+  // mortos. Nenhum seletor de UI os alimentava.
   const [filterState, setFilterState] = useState<FilterState>({
     query: queryParam,
     category: '',
-    brand: '',
     priceMin: undefined,
     priceMax: undefined,
     condition: 'all',
@@ -23,7 +28,9 @@ export const SearchResultsView: React.FC = () => {
     fullOnly: false,
     arrivesTomorrowOnly: false,
     sellerPlatinumOnly: false,
-    officialStoresOnly: false,
+    // Campo obrigatório de FilterState que este literal omitia (mascarado
+    // pelos erros de excess-property `brand`/`officialStoresOnly` antes).
+    internationalOnly: false,
     sortBy: 'relevance',
   });
 
@@ -40,7 +47,6 @@ export const SearchResultsView: React.FC = () => {
     setFilterState({
       query: '',
       category: '',
-      brand: '',
       priceMin: undefined,
       priceMax: undefined,
       condition: 'all',
@@ -48,7 +54,7 @@ export const SearchResultsView: React.FC = () => {
       fullOnly: false,
       arrivesTomorrowOnly: false,
       sellerPlatinumOnly: false,
-      officialStoresOnly: false,
+      internationalOnly: false,
       sortBy: 'relevance',
     });
     setSearchParams({});

@@ -25,6 +25,7 @@ import {
   returns,
   disputes,
   disputeMessages,
+  escrowAccounts,
   conversations,
   messages,
   supportTickets,
@@ -42,10 +43,18 @@ import {
   reviewImages,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
-import { eq, desc, and, or, isNull } from 'drizzle-orm';
+import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
 import { createBuyerDispute, RefundValidationError } from './modules/payments/refundService.js';
+import { postBuyerDisputeMessage, DisputeMessageValidationError } from './modules/disputes/disputeMessageService.js';
+// Fase M1-D1 — MESMA whitelist já usada por /admin/overview (única fonte de
+// verdade de "disputa ativa" — nunca uma segunda lista duplicada e
+// potencialmente divergente).
+import { ACTIVE_DISPUTE_STATUSES } from './adminRoutes.js';
 import { updateBuyerTaxId, BuyerProfileValidationError } from './modules/buyer/buyerProfileService.js';
 import { isProductAvailableForCountry, eligibilityReason } from './modules/catalog/productEligibilityService.js';
+// FASE D16-D2 — mesma fonte de estoque AO VIVO por variante já usada pelo
+// catálogo (D16-C2): nunca product_variants.stock, nunca uma segunda fórmula.
+import { computeLiveVariantStock } from './modules/catalog/catalogService.js';
 
 export const buyerRouter = Router();
 buyerRouter.use(requireAuth);
@@ -353,9 +362,21 @@ buyerRouter.get('/overview', requireAuth, async (req: AuthRequest, res: Response
   const claimedCouponsCount = 0;
 
   let unreadNotificationsCount = 0;
+  // Fase M1-D1 — achado M1-C: buyerDataStore.disputes nunca era preenchido
+  // (mock in-memory), então openDisputesCount ficava sempre 0 independente
+  // de quantas disputas reais o buyer tivesse. Substituído por contagem REAL
+  // no Postgres, escopada ao próprio buyer, com a MESMA definição
+  // fail-closed de "ativa" já usada em /admin/overview.
+  let openDisputesCount = 0;
   if (db) {
     const unread = await db.select().from(notifications).where(and(eq(notifications.userId, userId), eq(notifications.isRead, false)));
     unreadNotificationsCount = unread.length;
+
+    const activeDisputeRows = await db
+      .select()
+      .from(disputes)
+      .where(and(eq(disputes.buyerId, userId), inArray(disputes.status, ACTIVE_DISPUTE_STATUSES)));
+    openDisputesCount = activeDisputeRows.length;
   }
 
   const realProfile = await loadRealBuyerProfile(userId);
@@ -376,7 +397,7 @@ buyerRouter.get('/overview', requireAuth, async (req: AuthRequest, res: Response
         favoritesCount: buyerDataStore.favorites.length,
         claimedCouponsCount,
         totalCouponsCount: buyerDataStore.coupons.length,
-        openDisputesCount: buyerDataStore.disputes.filter(d => d.status === 'opened' || d.status === 'in_mediation').length,
+        openDisputesCount,
         activeReturnsCount: buyerDataStore.returns.filter(r => r.status === 'under_review' || r.status === 'in_transit').length,
         unreadNotificationsCount,
       },
@@ -884,7 +905,11 @@ export async function getFormattedUserCart(db: any, userId: string, destinationC
         currency: prodCurrency,
         countryCode: prodCountry,
         originCountry: prodCountry,
-        image: prod.image || '',
+        // FASE D16-D2 (item N) — linha de carrinho de uma variante mostra a
+        // imagem DAQUELA variante (product_variants.image_url) quando
+        // existir, nunca só a imagem genérica do produto — mesma fonte já
+        // usada pelo detalhe do produto (D16-C2), nunca um campo fantasma.
+        image: varObj?.imageUrl || prod.image || '',
         brand: prod.brand || '',
         stock: Number(prod.stock || 0),
         sellerId: prod.sellerId,
@@ -954,6 +979,186 @@ buyerRouter.get('/cart', requireAuth, async (req: AuthRequest, res: Response) =>
   }
 });
 
+// FASE D16-D2 — erro interno com status/code, mesmo padrão já usado em
+// paymentService.ts/orderService.ts para operações dentro de db.transaction
+// (lançar e deixar a transação fazer ROLLBACK sozinha, traduzido para
+// { error } só na borda pública). Nunca exposto fora deste arquivo.
+class CartOperationError extends Error {
+  status: number;
+  code: string;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+// Extraído de addItemToCartForUser (D16-D2) para ser reutilizado também pelo
+// batch (POST /cart/items/batch) — MESMA regra de moeda/país única no
+// carrinho, nunca uma segunda versão divergente. `executor` é `db` (chamada
+// avulsa) OU `tx` (dentro de uma transação do batch) — idêntico em ambos os
+// casos, já que os dois implementam a mesma interface drizzle.
+async function resolveOrCreateCartForItem(executor: any, userId: string, prod: any): Promise<any> {
+  const prodCurrency = prod.currency;
+  const prodCountry = prod.countryCode;
+
+  let userCart = (await executor.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
+  if (!userCart) {
+    const newCartId = `cart_${userId}`;
+    await executor.insert(carts).values({
+      id: newCartId,
+      userId: userId,
+      currency: prodCurrency,
+      countryCode: prodCountry,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    userCart = (await executor.select().from(carts).where(eq(carts.id, newCartId)).limit(1))[0];
+  } else {
+    // Check existing items in cart for mixed currency rule. Dentro do
+    // batch, isso também enxerga os itens já inseridos por itens ANTERIORES
+    // do mesmo batch (mesma transação) — nunca permite misturar moeda nem
+    // dentro de um único request de batch.
+    const existingCartItems = await executor.select().from(cartItems).where(eq(cartItems.cartId, userCart.id));
+    if (existingCartItems.length > 0) {
+      const firstItem = existingCartItems[0];
+      const firstProdRows = await executor.select().from(products).where(eq(products.id, firstItem.productId)).limit(1);
+      if (firstProdRows.length > 0) {
+        const firstProd = firstProdRows[0];
+        if (firstProd.currency && firstProd.currency !== prodCurrency) {
+          throw new CartOperationError(
+            400,
+            'CART_MIXED_CURRENCY_NOT_ALLOWED',
+            `Não é possível misturar produtos com moedas diferentes (${firstProd.currency} e ${prodCurrency}) no mesmo carrinho. Finalize ou limpe o carrinho atual primeiro.`
+          );
+        }
+      }
+    }
+
+    if (userCart.currency !== prodCurrency || userCart.countryCode !== prodCountry) {
+      await executor.update(carts).set({
+        currency: prodCurrency,
+        countryCode: prodCountry,
+        updatedAt: new Date(),
+      }).where(eq(carts.id, userCart.id));
+    }
+  }
+  return userCart;
+}
+
+// Extraído de addItemToCartForUser (D16-D2) — núcleo de "adicionar/mesclar
+// UMA linha real no carrinho", reutilizado tanto pelo add avulso (modo
+// `strictStock: false`, comportamento 100% preservado: estoque insuficiente
+// SATURA a quantidade em vez de rejeitar) quanto pelo batch (modo
+// `strictStock: true`, exigido pelo D16-D1: estoque insuficiente REJEITA o
+// item inteiro, que por sua vez faz a transação inteira dar ROLLBACK — nunca
+// duplica a regra comercial em dois lugares divergentes).
+//
+// Estoque: quando a linha tem variantId real, a fonte é SEMPRE o estoque AO
+// VIVO por variante (inventory, via computeLiveVariantStock — igual ao já
+// usado pelo catálogo em D16-C2). NUNCA product_variants.stock (legado/não-
+// autoritativo) nem products.stock (nível errado para produto variável —
+// lacuna encontrada na auditoria D16-D1). Produto simples (sem variantId)
+// continua exatamente como antes: products.stock.
+async function addSingleCartLine(
+  executor: any,
+  userCart: { id: string },
+  prod: any,
+  line: { variantId?: string | null; quantity?: number; attrData?: any },
+  opts: { strictStock: boolean }
+): Promise<void> {
+  let realUnitPrice = Number(prod.price);
+  const targetVariantId = line.variantId || null;
+
+  if (targetVariantId) {
+    const varRows = await executor.select().from(productVariants).where(eq(productVariants.id, targetVariantId)).limit(1);
+    const variantRow = varRows[0] || null;
+    // Nunca confia num variantId que não existe, ou que existe mas pertence
+    // a OUTRO produto (ex.: cliente adulterando o payload) — mesmo espírito
+    // de nunca revelar/aceitar dado incoerente já usado pelo resto do arquivo.
+    if (!variantRow || variantRow.productId !== prod.id) {
+      throw new CartOperationError(404, 'VARIANT_NOT_FOUND', 'Variante não encontrada para este produto.');
+    }
+    if (variantRow.isActive === false) {
+      throw new CartOperationError(400, 'VARIANT_INACTIVE', 'Esta variação não está mais disponível.');
+    }
+    if (variantRow.price) {
+      realUnitPrice = Number(variantRow.price);
+    }
+  }
+
+  const addQty = Math.max(1, Number(line.quantity) || 1);
+
+  const existingItems = await executor.select().from(cartItems).where(
+    and(
+      eq(cartItems.cartId, userCart.id),
+      eq(cartItems.productId, prod.id),
+      targetVariantId ? eq(cartItems.variantId, targetVariantId) : isNull(cartItems.variantId)
+    )
+  ).limit(1);
+
+  // Correção pré-piloto (item 10.J) + FASE D16-D2 (lacuna do D16-D1):
+  // quantidade no carrinho nunca pode ultrapassar o estoque REAL —
+  // products.stock para produto simples, inventory/variante para produto
+  // variável. Protege cliques repetidos e qualquer chamador que tente somar
+  // além do disponível.
+  let stockCap: number;
+  if (targetVariantId) {
+    const liveMap = await computeLiveVariantStock([targetVariantId], executor);
+    stockCap = liveMap.get(targetVariantId) ?? 0;
+  } else {
+    const availableStock = Number(prod.stock);
+    stockCap = !isNaN(availableStock) && availableStock >= 0 ? availableStock : Infinity;
+  }
+
+  if (stockCap <= 0) {
+    throw new CartOperationError(
+      400,
+      'OUT_OF_STOCK',
+      targetVariantId ? 'Esta variação está sem estoque disponível no momento.' : 'Este produto está sem estoque disponível no momento.'
+    );
+  }
+
+  if (existingItems.length > 0) {
+    const existing = existingItems[0];
+    const desiredQty = Number(existing.quantity) + addQty;
+    if (opts.strictStock && desiredQty > stockCap) {
+      throw new CartOperationError(
+        400,
+        'INSUFFICIENT_STOCK',
+        `Estoque insuficiente: já há ${existing.quantity} unidade(s) no carrinho e apenas ${stockCap} disponível(is) no total.`
+      );
+    }
+    const newQty = opts.strictStock ? desiredQty : Math.min(desiredQty, stockCap);
+    await executor.update(cartItems).set({
+      quantity: newQty,
+      unitPrice: String(realUnitPrice),
+      selectedAttributesJson: line.attrData || existing.selectedAttributesJson,
+      updatedAt: new Date(),
+    }).where(eq(cartItems.id, existing.id));
+  } else {
+    if (opts.strictStock && addQty > stockCap) {
+      throw new CartOperationError(
+        400,
+        'INSUFFICIENT_STOCK',
+        `Estoque insuficiente: apenas ${stockCap} unidade(s) disponível(is).`
+      );
+    }
+    const newItemId = `ci_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    await executor.insert(cartItems).values({
+      id: newItemId,
+      cartId: userCart.id,
+      productId: prod.id,
+      variantId: targetVariantId,
+      quantity: opts.strictStock ? addQty : Math.min(addQty, stockCap),
+      unitPrice: String(realUnitPrice),
+      selectedAttributesJson: line.attrData || null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
+}
+
 // Extraída do handler HTTP para ser testável diretamente (Docker Postgres)
 // sem precisar simular req/res. Retorna { error } OU { cart } — o handler
 // abaixo só traduz isso para a resposta HTTP.
@@ -968,142 +1173,153 @@ export async function addItemToCartForUser(
     return { error: { status: 400, code: 'MISSING_PRODUCT_ID', message: 'ID do produto é obrigatório.' } };
   }
 
-  const prodRows = await db.select().from(products).where(eq(products.id, productId)).limit(1);
-  if (prodRows.length === 0) {
-    return { error: { status: 404, code: 'PRODUCT_NOT_FOUND', message: 'Produto não encontrado no catálogo.' } };
+  try {
+    const prodRows = await db.select().from(products).where(eq(products.id, productId)).limit(1);
+    if (prodRows.length === 0) {
+      throw new CartOperationError(404, 'PRODUCT_NOT_FOUND', 'Produto não encontrado no catálogo.');
+    }
+
+    const prod = prodRows[0];
+    if (!prod.currency || !prod.countryCode) {
+      throw new CartOperationError(400, 'PRODUCT_INCONSISTENT', 'Produto possui dados de moeda ou país inconsistentes no catálogo.');
+    }
+
+    // Melhoria pré-piloto (elegibilidade por país): backend revalida mesmo que
+    // o produto tenha "escapado" do catálogo filtrado (ex.: link direto, cache
+    // desatualizado). Prioridade do destino a validar: (1) endereço de entrega
+    // padrão do comprador — sinal mais real que existe; (2) destinationCountry
+    // explícito enviado pelo frontend; (3) país já em uso no carrinho atual
+    // (carrinho não pode misturar destinos, mesma lógica já aplicada à moeda).
+    // Sem nenhum desses (comprador novíssimo, sem endereço, carrinho vazio),
+    // não há como determinar o destino ainda — o checkout continua sendo o
+    // portão definitivo que nunca pode ser contornado.
+    const [defaultAddress] = await db.select().from(addresses).where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true))).limit(1);
+    const existingCartForDestination = (await db.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
+    const destinationCountry: string | undefined =
+      defaultAddress?.countryCode ||
+      payload.destinationCountry ||
+      (existingCartForDestination && (await db.select().from(cartItems).where(eq(cartItems.cartId, existingCartForDestination.id)).limit(1)).length > 0
+        ? existingCartForDestination.countryCode
+        : undefined);
+
+    if (destinationCountry && !isProductAvailableForCountry(prod, destinationCountry)) {
+      throw new CartOperationError(400, 'PRODUCT_NOT_AVAILABLE_FOR_DESTINATION', eligibilityReason(prod, destinationCountry));
+    }
+
+    const userCart = await resolveOrCreateCartForItem(db, userId, prod);
+
+    const targetVariantId = variantId || options?.selectedVariantSku || options?.variantId || null;
+    const attrData = selectedAttributes || options || (color || size || storage ? { color, size, storage } : null);
+
+    await addSingleCartLine(db, userCart, prod, { variantId: targetVariantId, quantity, attrData }, { strictStock: false });
+
+    const updatedCart = await getFormattedUserCart(db, userId, destinationCountry);
+    return { cart: updatedCart };
+  } catch (e: any) {
+    if (e instanceof CartOperationError) {
+      return { error: { status: e.status, code: e.code, message: e.message } };
+    }
+    throw e;
   }
+}
 
-  const prod = prodRows[0];
-  if (!prod.currency || !prod.countryCode) {
-    return { error: { status: 400, code: 'PRODUCT_INCONSISTENT', message: 'Produto possui dados de moeda ou país inconsistentes no catálogo.' } };
+// ==========================================
+// FASE D16-D2 — BATCH: multi-variante estilo Alibaba. Um único request
+// transacional para N linhas (produto+variante+quantidade) do MESMO
+// comprador — tudo ou nada (auditoria D16-D1, seção D). Reutiliza
+// EXATAMENTE as mesmas regras comerciais de addItemToCartForUser via
+// resolveOrCreateCartForItem/addSingleCartLine — nunca uma segunda versão
+// divergente de "o que é um item de carrinho válido".
+// ==========================================
+export interface CartBatchItemInput {
+  productId?: string;
+  variantId?: string;
+  quantity?: number;
+  selectedAttributesJson?: any;
+}
+
+const CART_BATCH_MAX_ITEMS = 50;
+
+export async function addItemsBatchForUser(
+  db: any,
+  userId: string,
+  items: CartBatchItemInput[],
+  destinationCountry?: string
+): Promise<{ error: { status: number; code: string; message: string } } | { cart: Awaited<ReturnType<typeof getFormattedUserCart>> }> {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { error: { status: 400, code: 'EMPTY_BATCH', message: 'Nenhum item foi informado para adicionar ao carrinho.' } };
   }
-
-  const prodCurrency = prod.currency;
-  const prodCountry = prod.countryCode;
-
-  // Melhoria pré-piloto (elegibilidade por país): backend revalida mesmo que
-  // o produto tenha "escapado" do catálogo filtrado (ex.: link direto, cache
-  // desatualizado). Prioridade do destino a validar: (1) endereço de entrega
-  // padrão do comprador — sinal mais real que existe; (2) destinationCountry
-  // explícito enviado pelo frontend; (3) país já em uso no carrinho atual
-  // (carrinho não pode misturar destinos, mesma lógica já aplicada à moeda).
-  // Sem nenhum desses (comprador novíssimo, sem endereço, carrinho vazio),
-  // não há como determinar o destino ainda — o checkout continua sendo o
-  // portão definitivo que nunca pode ser contornado.
-  const [defaultAddress] = await db.select().from(addresses).where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true))).limit(1);
-  const existingCartForDestination = (await db.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
-  const destinationCountry: string | undefined =
-    defaultAddress?.countryCode ||
-    payload.destinationCountry ||
-    (existingCartForDestination && (await db.select().from(cartItems).where(eq(cartItems.cartId, existingCartForDestination.id)).limit(1)).length > 0
-      ? existingCartForDestination.countryCode
-      : undefined);
-
-  if (destinationCountry && !isProductAvailableForCountry(prod, destinationCountry)) {
-    return {
-      error: {
-        status: 400,
-        code: 'PRODUCT_NOT_AVAILABLE_FOR_DESTINATION',
-        message: eligibilityReason(prod, destinationCountry),
-      },
-    };
+  if (items.length > CART_BATCH_MAX_ITEMS) {
+    return { error: { status: 400, code: 'BATCH_TOO_LARGE', message: `No máximo ${CART_BATCH_MAX_ITEMS} itens por requisição.` } };
   }
-
-  let realUnitPrice = Number(prod.price);
-
-  const targetVariantId = variantId || options?.selectedVariantSku || options?.variantId || null;
-  if (targetVariantId) {
-    const varRows = await db.select().from(productVariants).where(eq(productVariants.id, targetVariantId)).limit(1);
-    if (varRows.length > 0 && varRows[0].price) {
-      realUnitPrice = Number(varRows[0].price);
+  for (const it of items) {
+    if (!it || !it.productId) {
+      return { error: { status: 400, code: 'MISSING_PRODUCT_ID', message: 'ID do produto é obrigatório em todos os itens.' } };
+    }
+    const q = Number(it.quantity);
+    if (!Number.isInteger(q) || q <= 0) {
+      return { error: { status: 400, code: 'INVALID_QUANTITY', message: 'Quantidade deve ser um número inteiro maior que zero para todos os itens.' } };
     }
   }
 
-  const addQty = Math.max(1, Number(quantity) || 1);
-
-  let userCart = (await db.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
-  if (!userCart) {
-    const newCartId = `cart_${userId}`;
-    await db.insert(carts).values({
-      id: newCartId,
-      userId: userId,
-      currency: prodCurrency,
-      countryCode: prodCountry,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-    userCart = (await db.select().from(carts).where(eq(carts.id, newCartId)).limit(1))[0];
-  } else {
-    // Check existing items in cart for mixed currency rule
-    const existingCartItems = await db.select().from(cartItems).where(eq(cartItems.cartId, userCart.id));
-    if (existingCartItems.length > 0) {
-      const firstItem = existingCartItems[0];
-      const firstProdRows = await db.select().from(products).where(eq(products.id, firstItem.productId)).limit(1);
-      if (firstProdRows.length > 0) {
-        const firstProd = firstProdRows[0];
-        if (firstProd.currency && firstProd.currency !== prodCurrency) {
-          return {
-            error: {
-              status: 400,
-              code: 'CART_MIXED_CURRENCY_NOT_ALLOWED',
-              message: `Não é possível misturar produtos com moedas diferentes (${firstProd.currency} e ${prodCurrency}) no mesmo carrinho. Finalize ou limpe o carrinho atual primeiro.`,
-            },
-          };
+  try {
+    // Uma ÚNICA transação para o batch inteiro (auditoria D16-D1, seção D):
+    // qualquer erro em qualquer item -> ROLLBACK total, nenhuma das linhas
+    // anteriores do MESMO batch permanece.
+    await db.transaction(async (tx: any) => {
+      for (const it of items) {
+        const prodRows = await tx.select().from(products).where(eq(products.id, it.productId)).limit(1);
+        if (prodRows.length === 0) {
+          throw new CartOperationError(404, 'PRODUCT_NOT_FOUND', `Produto "${it.productId}" não encontrado no catálogo.`);
         }
+        const prod = prodRows[0];
+        if (!prod.currency || !prod.countryCode) {
+          throw new CartOperationError(400, 'PRODUCT_INCONSISTENT', 'Produto possui dados de moeda ou país inconsistentes no catálogo.');
+        }
+
+        if (destinationCountry && !isProductAvailableForCountry(prod, destinationCountry)) {
+          throw new CartOperationError(400, 'PRODUCT_NOT_AVAILABLE_FOR_DESTINATION', eligibilityReason(prod, destinationCountry));
+        }
+
+        // Produto variável exige variantId real — nunca deixa o backend
+        // escolher sozinho (mesma regra já aplicada no frontend em D16-C2.1,
+        // agora também garantida no servidor, já que o batch é uma porta de
+        // entrada nova que o D16-C2.1 não previa).
+        if (!it.variantId) {
+          const activeVariantRows = await tx
+            .select({ id: productVariants.id })
+            .from(productVariants)
+            .where(and(eq(productVariants.productId, prod.id), eq(productVariants.isActive, true)))
+            .limit(1);
+          if (activeVariantRows.length > 0) {
+            throw new CartOperationError(400, 'VARIANT_REQUIRED', `Selecione uma variação de "${prod.title}" antes de adicionar ao carrinho.`);
+          }
+        }
+
+        const userCart = await resolveOrCreateCartForItem(tx, userId, prod);
+        await addSingleCartLine(
+          tx,
+          userCart,
+          prod,
+          { variantId: it.variantId || null, quantity: it.quantity, attrData: it.selectedAttributesJson || null },
+          { strictStock: true }
+        );
       }
-    }
-
-    if (userCart.currency !== prodCurrency || userCart.countryCode !== prodCountry) {
-      await db.update(carts).set({
-        currency: prodCurrency,
-        countryCode: prodCountry,
-        updatedAt: new Date(),
-      }).where(eq(carts.id, userCart.id));
-    }
-  }
-
-  const existingItems = await db.select().from(cartItems).where(
-    and(
-      eq(cartItems.cartId, userCart.id),
-      eq(cartItems.productId, productId),
-      targetVariantId ? eq(cartItems.variantId, targetVariantId) : isNull(cartItems.variantId)
-    )
-  ).limit(1);
-
-  const attrData = selectedAttributes || options || (color || size || storage ? { color, size, storage } : null);
-
-  // Correção pré-piloto (item 10.J): quantidade no carrinho nunca pode
-  // ultrapassar o estoque real do produto — protege tanto contra cliques
-  // repetidos (mesmo com a race condition do frontend corrigida) quanto
-  // contra qualquer outro caminho que tente somar além do disponível.
-  const availableStock = Number(prod.stock);
-  const stockCap = !isNaN(availableStock) && availableStock >= 0 ? availableStock : Infinity;
-  if (stockCap <= 0) {
-    return { error: { status: 400, code: 'OUT_OF_STOCK', message: 'Este produto está sem estoque disponível no momento.' } };
-  }
-
-  if (existingItems.length > 0) {
-    const existing = existingItems[0];
-    const newQty = Math.min(Number(existing.quantity) + addQty, stockCap);
-    await db.update(cartItems).set({
-      quantity: newQty,
-      unitPrice: String(realUnitPrice),
-      selectedAttributesJson: attrData || existing.selectedAttributesJson,
-      updatedAt: new Date(),
-    }).where(eq(cartItems.id, existing.id));
-  } else {
-    const newItemId = `ci_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    await db.insert(cartItems).values({
-      id: newItemId,
-      cartId: userCart.id,
-      productId,
-      variantId: targetVariantId,
-      quantity: Math.min(addQty, stockCap),
-      unitPrice: String(realUnitPrice),
-      selectedAttributesJson: attrData,
-      createdAt: new Date(),
-      updatedAt: new Date(),
     });
+  } catch (e: any) {
+    if (e instanceof CartOperationError) {
+      return { error: { status: e.status, code: e.code, message: e.message } };
+    }
+    // FASE D16-D2 (auditoria D16-D1, seção F — concorrência): duas
+    // requisições concorrentes podem colidir na unique index real
+    // (cartId, productId, variantId) entre o SELECT e o INSERT desta mesma
+    // função — trata como conflito amigável (o comprador tenta de novo) em
+    // vez de vazar um 500 genérico. Não é uma reescrita de arquitetura: só
+    // reconhece o código de erro do Postgres para unique_violation.
+    if (e?.code === '23505') {
+      return { error: { status: 409, code: 'CART_CONCURRENT_UPDATE', message: 'O carrinho foi alterado ao mesmo tempo por outra requisição. Tente novamente.' } };
+    }
+    throw e;
   }
 
   const updatedCart = await getFormattedUserCart(db, userId, destinationCountry);
@@ -1133,6 +1349,33 @@ buyerRouter.post('/cart/items', requireAuth, async (req: AuthRequest, res: Respo
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, error: { code: 'CART_ADD_FAILED', message: error?.message || 'Erro ao adicionar item ao carrinho.' } });
+  }
+});
+
+// FASE D16-D2 — compra multi-variante estilo Alibaba: UM request, várias
+// linhas (produto+variante+quantidade) do mesmo comprador, tudo ou nada.
+// Nunca substitui POST /cart/items (que continua existindo intocado para os
+// fluxos single: ProductCard, MyOrdersView "Comprar novamente").
+buyerRouter.post('/cart/items/batch', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
+
+    const userId = req.user!.id;
+    const destinationCountry = await resolveCartDestinationCountry(db, userId, req);
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const result = await addItemsBatchForUser(db, userId, items, destinationCountry);
+    if ('error' in result) {
+      return res.status(result.error.status).json({ success: false, error: { code: result.error.code, message: result.error.message } });
+    }
+
+    return res.json({
+      success: true,
+      message: `${items.length} variação(ões) adicionada(s) ao carrinho com sucesso!`,
+      data: result.cart,
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: { code: 'CART_BATCH_ADD_FAILED', message: error?.message || 'Erro ao adicionar itens ao carrinho.' } });
   }
 });
 
@@ -1306,6 +1549,28 @@ buyerRouter.post('/orders', requireAuth, async (req: AuthRequest, res: Response)
       success: false,
       error: { code: 'ORDER_CREATION_FAILED', message: err?.message || 'Erro ao criar pedido.' },
     });
+  }
+});
+
+// Fase M1-D1 — leitura READ-ONLY buyer-scoped de um purchase_group, para
+// reload/recarregar a tela de confirmação multi-seller
+// (/purchase-groups/:id/confirmation, ainda não implementada no frontend —
+// M1-D2). Mesmo padrão de não-revelação já usado em disputeMessageService
+// (Fase M1-C): group inexistente OU de outro buyer -> EXATAMENTE a mesma
+// resposta (404 PURCHASE_GROUP_NOT_FOUND), nunca revela a um usuário não
+// autorizado que o group existe mas é de outra pessoa.
+buyerRouter.get('/purchase-groups/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+
+    const group = await OrderService.getPurchaseGroupById(req.params.id);
+    if (!group || group.buyerId !== req.user.id) {
+      return res.status(404).json({ success: false, error: { code: 'PURCHASE_GROUP_NOT_FOUND', message: 'Compra não encontrada.' } });
+    }
+
+    return res.json({ success: true, data: group });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: { code: 'PURCHASE_GROUP_FETCH_FAILED', message: err?.message || 'Erro ao carregar a compra.' } });
   }
 });
 
@@ -1723,6 +1988,59 @@ buyerRouter.post('/returns', async (req: AuthRequest, res: Response) => {
 // 9. DISPUTES & ESCROW MEDIATION
 // ==========================================
 
+// Fase M1-A (B1) — mesma whitelist defensiva já usada em
+// refundService.ts/paymentService.ts (status IN ('held','eligible')) para
+// "dinheiro ainda sob custódia" — 'eligible' nunca é escrito hoje, mas é um
+// valor documentado no schema e outros pontos do código já o tratam como
+// equivalente a 'held' por segurança; reaproveitar a MESMA whitelist evita
+// duas definições divergentes de "em custódia" no mesmo sistema. Exportada
+// (não só local à rota) para o mesmo padrão de testabilidade já usado por
+// BLOCKING_CHARGEBACK_LOCAL_STATUSES em chargebackService.ts.
+export const DISPUTE_IN_CUSTODY_ESCROW_STATUSES = ['held', 'eligible'];
+
+/**
+ * Fase M1-A (B1) — enriquece cada disputa com o dinheiro REALMENTE em
+ * custódia agora (escrow_accounts.amount), nunca claimAmount (valor
+ * alegado pelo comprador ao abrir a disputa — pode divergir do valor real
+ * do pedido). Uma disputa pode legitimamente existir com o escrow já
+ * 'released' (ver createBuyerDispute/resolveDispute — resolver debita a
+ * wallet do vendedor proporcionalmente nesse caso) — aqui reportamos
+ * honestamente `escrowAmount: null` quando não há mais dinheiro protegido,
+ * em vez de repetir o valor antigo do escrow como se ainda estivesse
+ * retido. Batch único (nunca N+1) via orderId. Extraída como função
+ * exportada só para ser testável diretamente (mesmo padrão de
+ * `resolveFundingPaymentForOrder`/`assertNoBlockingChargebackForPayment`) —
+ * nenhuma mudança de comportamento em relação à rota original.
+ */
+export async function enrichDisputesWithEscrowAmount(db: any, disputeRows: any[]) {
+  const orderIds = Array.from(new Set(disputeRows.map((d: any) => d.orderId)));
+  const escrowRows = orderIds.length > 0
+    ? await db.select({
+        orderId: escrowAccounts.orderId,
+        amount: escrowAccounts.amount,
+        currency: escrowAccounts.currency,
+        status: escrowAccounts.status,
+      }).from(escrowAccounts).where(inArray(escrowAccounts.orderId, orderIds))
+    : [];
+  const escrowByOrderId = new Map<string, any>(escrowRows.map((e: any) => [e.orderId, e]));
+
+  return disputeRows.map((d: any) => {
+    const esc = escrowByOrderId.get(d.orderId);
+    const inCustody = !!esc && DISPUTE_IN_CUSTODY_ESCROW_STATUSES.includes(esc.status);
+    return {
+      ...d,
+      claimAmount: Number(d.claimAmount),
+      // escrowAmount: null é uma resposta HONESTA (nunca fabricada) para
+      // "sem escrow correspondente" OU "escrow já não representa custódia"
+      // (released/refunded) — nunca reaproveita claimAmount nem o valor
+      // antigo do escrow como se ainda estivesse retido.
+      escrowAmount: inCustody ? Number(esc.amount) : null,
+      escrowCurrency: esc ? esc.currency : null,
+      escrowStatus: esc ? esc.status : null,
+    };
+  });
+}
+
 buyerRouter.get('/disputes', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -1730,13 +2048,30 @@ buyerRouter.get('/disputes', requireAuth, async (req: AuthRequest, res: Response
     const userId = req.user.id;
     if (db) {
       const disputeRows = await db.select().from(disputes).where(eq(disputes.buyerId, userId)).orderBy(desc(disputes.createdAt));
-      return res.json({
-        success: true,
-        data: disputeRows.map(d => ({
-          ...d,
-          claimAmount: Number(d.claimAmount),
-        })),
-      });
+      const enriched = await enrichDisputesWithEscrowAmount(db, disputeRows);
+
+      // Fase M1-C — leitura simétrica com GET /seller/disputes: o buyer
+      // precisa ver as MESMAS mensagens reais (buyer + seller) que o
+      // vendedor já vê, na mesma ordem determinística. Antes desta fase,
+      // este endpoint nunca retornava `messages` — o frontend só enxergava
+      // o mock local (buyerDataStore), nunca uma mensagem do vendedor.
+      const disputeIds = enriched.map((d: any) => d.id);
+      const messageRows = disputeIds.length > 0
+        ? await db
+            .select()
+            .from(disputeMessages)
+            .where(inArray(disputeMessages.disputeId, disputeIds))
+            .orderBy(asc(disputeMessages.createdAt), asc(disputeMessages.id))
+        : [];
+      const messagesByDispute = new Map<string, any[]>();
+      for (const msg of messageRows as any[]) {
+        const list = messagesByDispute.get(msg.disputeId) || [];
+        list.push({ id: msg.id, senderRole: msg.senderRole, message: msg.message, createdAt: msg.createdAt });
+        messagesByDispute.set(msg.disputeId, list);
+      }
+      const withMessages = enriched.map((d: any) => ({ ...d, messages: messagesByDispute.get(d.id) || [] }));
+
+      return res.json({ success: true, data: withMessages });
     }
     return res.json({ success: true, data: [] });
   } catch (err: any) {
@@ -1779,34 +2114,36 @@ buyerRouter.post('/disputes', requireAuth, async (req: AuthRequest, res: Respons
   }
 });
 
-buyerRouter.post('/disputes/:id/messages', (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { text } = req.body;
+// Fase M1-C — substitui o mock in-memory (buyerDataStore.disputes, nunca
+// persistia nada de verdade e nunca provava posse) por persistência REAL em
+// dispute_messages. Identidade (senderId/senderRole) SEMPRE derivada da
+// sessão autenticada — o body nunca é usado para isso, mesmo que tente
+// enviar esses campos (postBuyerDisputeMessage nem os aceita como
+// parâmetro). Ownership provada via disputeMessageService (dispute.buyerId
+// E order.buyerId == req.user.id) antes de qualquer INSERT.
+buyerRouter.post('/disputes/:id/messages', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
 
-  if (!text || !text.trim()) {
-    return res.status(400).json({ success: false, message: 'Texto da mensagem é obrigatório.' });
+    const inserted = await postBuyerDisputeMessage(db, {
+      disputeId: req.params.id,
+      buyerId: req.user.id,
+      rawMessage: req.body?.message,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Mensagem enviada na sala de mediação!',
+      data: { id: inserted.id, senderRole: inserted.senderRole, message: inserted.message, createdAt: inserted.createdAt },
+    });
+  } catch (err: any) {
+    if (err instanceof DisputeMessageValidationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao enviar mensagem.' });
   }
-
-  const dispute = buyerDataStore.disputes.find(d => d.id === id);
-  if (!dispute) {
-    return res.status(404).json({ success: false, message: 'Disputa não encontrada.' });
-  }
-
-  const newMsg = {
-    id: `dm-${Date.now()}`,
-    sender: 'buyer' as const,
-    senderName: (req as any).user?.fullName || 'Comprador',
-    text: text.trim(),
-    timestamp: 'Agora mesmo',
-  };
-
-  dispute.messages.push(newMsg);
-
-  return res.json({
-    success: true,
-    message: 'Mensagem enviada na sala de mediação!',
-    data: newMsg,
-  });
 });
 
 // ==========================================

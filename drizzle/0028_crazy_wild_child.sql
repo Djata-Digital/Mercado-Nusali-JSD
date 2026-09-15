@@ -1,0 +1,3 @@
+ALTER TABLE "warehouses" ADD COLUMN "shipping_sector_id" varchar(255);--> statement-breakpoint
+ALTER TABLE "warehouses" ADD CONSTRAINT "warehouses_shipping_sector_id_shipping_sectors_id_fk" FOREIGN KEY ("shipping_sector_id") REFERENCES "public"."shipping_sectors"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "warehouses_shipping_sector_idx" ON "warehouses" USING btree ("shipping_sector_id");

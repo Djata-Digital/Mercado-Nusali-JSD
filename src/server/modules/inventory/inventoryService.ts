@@ -1,7 +1,14 @@
 import { getDb } from '../../../db/index.js';
-import { inventory, inventoryMovements, stockReservations, products, warehouses, inventoryTransfers, sellers } from '../../../db/schema.js';
+import {
+  inventory, inventoryMovements, stockReservations, products, warehouses, inventoryTransfers, sellers,
+  productVariants, fulfillmentLocations, stores, addresses,
+} from '../../../db/schema.js';
 import { eq, and, sql, desc, or } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
+// FASE D16-E3 — mesma função já usada por GET /seller/fulfillment-locations
+// e pelos writers de inventory de D16-E2, agora também para vincular o
+// inventory HUB NOVO à origem física real do warehouse de destino.
+import { ensureWarehouseFulfillmentLocation } from '../logistics/fulfillmentLocationService.js';
 
 export class InventoryService {
   /**
@@ -163,24 +170,38 @@ export class InventoryService {
   }
 
   /**
-   * Creates a stock transfer request from a seller location to a Nusali HUB.
-   * Expects sellerId (sellers.id). Does NOT deduct stock immediately; stock is transferred only on confirm.
+   * FASE D16-E5 — reescrito para exigir uma inventory row EXATA
+   * (sourceInventoryId) como origem da transferência, nunca mais
+   * productId+variantId opcional resolvido por .limit(1)/find() implícito
+   * (achado da auditoria D16-E5: produto variável podia transferir uma
+   * variante arbitrária; fluxo multi-store podia usar a loja errada).
+   *
+   * Toda a cadeia de ownership/origem é revalidada aqui, nunca confiando em
+   * nada vindo do frontend além do próprio ID da inventory e da quantidade/
+   * destino/modalidade:
+   *   inventory (sourceInventoryId) -> product -> [variant] -> fulfillment_location -> store
+   * sellerId nunca é aceito do chamador remoto — vem sempre da sessão
+   * autenticada resolvida pela rota (mesmo padrão já usado em todo o resto
+   * do arquivo).
+   *
+   * pickupSnapshotJson NUNCA é mais aceito do frontend — reconstruído aqui
+   * inteiramente a partir do endereço operacional REAL da store de origem
+   * (stores.operationalAddressId -> addresses), a única fonte autoritativa
+   * (D16-E4).
    */
   static async requestTransferToHub(
     sellerId: string,
-    productId: string,
+    sourceInventoryId: string,
     toWarehouseId: string,
     quantity: number,
-    variantId?: string | null,
-    deliveryMode?: string,
-    pickupSnapshotJson?: any
+    deliveryMode?: string
   ) {
     const db = getDb();
     if (!db) throw new Error('Banco de dados indisponível.');
 
     const qtyToTransfer = Math.floor(Number(quantity));
     if (isNaN(qtyToTransfer) || qtyToTransfer <= 0) {
-      throw new Error('Quantidade de transferência inválida.');
+      throw new Error('QUANTITY_INVALID: Quantidade de transferência inválida.');
     }
 
     if (!deliveryMode || (deliveryMode !== 'NUSALI_PICKUP' && deliveryMode !== 'SELLER_DROPOFF')) {
@@ -188,56 +209,119 @@ export class InventoryService {
     }
     const mode = deliveryMode;
 
-    if (mode === 'NUSALI_PICKUP') {
-      const snapAddr = pickupSnapshotJson?.address;
-      const snapCity = pickupSnapshotJson?.city;
-      const snapCountry = pickupSnapshotJson?.countryCode;
-      const snapPhone = pickupSnapshotJson?.phone;
-
-      if (
-        !snapAddr || !String(snapAddr).trim() ||
-        !snapCity || !String(snapCity).trim() ||
-        !snapCountry || !String(snapCountry).trim() ||
-        !snapPhone || !String(snapPhone).trim()
-      ) {
-        throw new Error('PICKUP_LOCATION_INCOMPLETE: Por favor, cadastre o endereço completo (rua, cidade, país) e o telefone de contato da sua loja antes de solicitar a coleta pela Nusali.');
-      }
+    if (!sourceInventoryId || !String(sourceInventoryId).trim()) {
+      throw new Error('SOURCE_INVENTORY_REQUIRED: Selecione exatamente qual estoque (produto/variante/loja) deseja transferir.');
     }
 
-    // Verify product ownership
-    const [prod] = await db.select().from(products).where(eq(products.id, productId)).limit(1);
-    if (!prod) throw new Error('Produto não encontrado.');
+    // FASE D16-E5 (seção "concorrência") — TUDO a partir daqui roda dentro
+    // de UMA transação com lock de linha na inventory de origem (mesmo
+    // padrão .for('update') já usado em wallets/escrow/refunds neste
+    // projeto). Duas requisições concorrentes para a MESMA sourceInventoryId
+    // agora serializam: a segunda só lê a linha depois que a primeira
+    // confirmar (commit) ou desistir (rollback), e por isso sempre enxerga
+    // a transferência pendente que a primeira acabou de criar — nunca duas
+    // reservas somadas além do disponível real.
+    return await db.transaction(async (tx: any) => {
+    // A. inventory existe (lock de linha — nunca lido "solto" fora da tx).
+    const [sourceInv] = await tx.select().from(inventory).where(eq(inventory.id, String(sourceInventoryId))).for('update').limit(1);
+    if (!sourceInv) {
+      throw new Error('SOURCE_INVENTORY_NOT_FOUND: Estoque de origem não encontrado.');
+    }
+
+    // B. pertence ao seller autenticado — nunca ao seller enviado pelo corpo.
+    if (sourceInv.sellerId !== sellerId) {
+      throw new Error('SOURCE_INVENTORY_NOT_OWNED: Este estoque não pertence ao vendedor autenticado.');
+    }
+
+    // C. nunca transferir de um HUB (origem sempre SELLER_LOCATION).
+    if (sourceInv.locationType !== 'SELLER_LOCATION') {
+      throw new Error('SOURCE_INVENTORY_INVALID_LOCATION: Só é possível transferir estoque do seu estabelecimento — nunca a partir de um HUB.');
+    }
+
+    // D. produto real e do mesmo seller (defesa em profundidade — já
+    // implícito por sourceInv.sellerId, mas nunca confia só nisso).
+    const [prod] = await tx.select().from(products).where(eq(products.id, sourceInv.productId)).limit(1);
+    if (!prod) throw new Error('PRODUCT_NOT_FOUND: Produto do estoque de origem não encontrado.');
     if (prod.sellerId !== sellerId) {
       throw new Error('PRODUCT_NOT_OWNED: Você não é o proprietário deste produto.');
     }
 
-    // Check seller inventory and calculate pending transfers (to avoid overcommit)
-    const conditions = [
-      eq(inventory.productId, productId),
-      eq(inventory.locationType, 'SELLER_LOCATION'),
-      eq(inventory.sellerId, sellerId),
-    ];
-    if (variantId) {
-      conditions.push(eq(inventory.variantId, variantId));
+    // E. variantId real quando o produto for variável — nunca aceita uma
+    // inventory "agregada" do produto se ele já tem variantes ativas reais
+    // (a linha teria que ser de uma variante específica, D16-A2/D16-E2
+    // sempre criam assim para produto variável).
+    if (sourceInv.variantId) {
+      const [variantRow] = await tx.select().from(productVariants).where(eq(productVariants.id, sourceInv.variantId)).limit(1);
+      if (!variantRow || variantRow.productId !== sourceInv.productId) {
+        throw new Error('SOURCE_INVENTORY_VARIANT_MISMATCH: A variante deste estoque não pertence ao produto correspondente.');
+      }
+    } else {
+      const activeVariantRows = await tx
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .where(and(eq(productVariants.productId, sourceInv.productId), eq(productVariants.isActive, true)))
+        .limit(1);
+      if (activeVariantRows.length > 0) {
+        throw new Error('SOURCE_INVENTORY_VARIANT_REQUIRED: Este produto tem variantes ativas — selecione o estoque de uma variante específica, nunca o estoque agregado do produto.');
+      }
     }
 
-    const [sellerInv] = await db
-      .select()
-      .from(inventory)
-      .where(and(...conditions))
-      .limit(1);
-
-    if (!sellerInv) {
-      throw new Error(`Estoque no seu estabelecimento não encontrado para este produto.`);
+    // F/G/H/I. fulfillment location precisa existir, estar ativa, e ser do
+    // tipo STORE (nunca um HUB nem uma location "solta").
+    if (!sourceInv.fulfillmentLocationId) {
+      throw new Error('SOURCE_INVENTORY_LOCATION_MISSING: Este estoque ainda não tem uma origem física configurada — defina a origem operacional da loja antes de transferir.');
+    }
+    const [floc] = await tx.select().from(fulfillmentLocations).where(eq(fulfillmentLocations.id, sourceInv.fulfillmentLocationId)).limit(1);
+    if (!floc) {
+      throw new Error('SOURCE_INVENTORY_LOCATION_NOT_FOUND: Origem física deste estoque não encontrada.');
+    }
+    if (!floc.isActive) {
+      throw new Error('SOURCE_INVENTORY_LOCATION_INACTIVE: A origem física deste estoque está inativa.');
+    }
+    if (floc.locationType !== 'STORE' || !floc.storeId) {
+      throw new Error('SOURCE_INVENTORY_LOCATION_INVALID: A origem deste estoque não é uma loja válida.');
     }
 
-    // Query active pending/in-transit transfers from this seller inventory
-    const activePendingTransfers = await db
+    // J/K. store precisa existir, pertencer ao MESMO seller autenticado, e
+    // estar ativa — nunca a "primeira loja do seller", sempre A loja real
+    // desta inventory específica (essencial agora que suportamos multi-store).
+    const [store] = await tx.select().from(stores).where(eq(stores.id, floc.storeId)).limit(1);
+    if (!store) {
+      throw new Error('SOURCE_STORE_NOT_FOUND: Loja de origem não encontrada.');
+    }
+    if (store.sellerId !== sellerId) {
+      throw new Error('SOURCE_STORE_NOT_OWNED: Esta loja não pertence ao vendedor autenticado.');
+    }
+    if (store.status !== 'active') {
+      throw new Error('SOURCE_STORE_INACTIVE: A loja de origem não está ativa.');
+    }
+
+    // Endereço operacional REAL da store de origem — única fonte
+    // autoritativa do snapshot de coleta (D16-E4). Nunca aceita nada vindo
+    // do frontend para decidir isso.
+    let operationalAddress: any = null;
+    if (store.operationalAddressId) {
+      const [addr] = await tx.select().from(addresses).where(eq(addresses.id, store.operationalAddressId)).limit(1);
+      operationalAddress = addr || null;
+    }
+
+    if (mode === 'NUSALI_PICKUP') {
+      if (!operationalAddress || !operationalAddress.street || !operationalAddress.city || !operationalAddress.countryCode || !operationalAddress.phone) {
+        throw new Error('PICKUP_LOCATION_INCOMPLETE: Configure o endereço operacional completo desta loja (rua, cidade, país e telefone) antes de solicitar a coleta pela Nusali.');
+      }
+    }
+
+    // Estoque disponível da linha EXATA escolhida — nunca agregado do
+    // produto, nunca de outra variante/loja. Transferências pendentes
+    // filtradas por ESTE MESMO fromInventoryId (mesma semântica de sempre),
+    // lidas DENTRO da mesma transação/lock (nunca uma leitura "solta" que
+    // outra requisição concorrente poderia invalidar depois).
+    const activePendingTransfers = await tx
       .select({ qty: inventoryTransfers.quantity })
       .from(inventoryTransfers)
       .where(
         and(
-          eq(inventoryTransfers.fromInventoryId, sellerInv.id),
+          eq(inventoryTransfers.fromInventoryId, sourceInv.id),
           or(eq(inventoryTransfers.status, 'PENDING'), eq(inventoryTransfers.status, 'IN_TRANSIT'))
         )
       );
@@ -249,34 +333,48 @@ export class InventoryService {
 
     const availableForTransfer = Math.max(
       0,
-      sellerInv.quantityOnHand - sellerInv.quantityReserved - pendingTransferQuantity
+      sourceInv.quantityOnHand - sourceInv.quantityReserved - pendingTransferQuantity
     );
 
     if (availableForTransfer < qtyToTransfer) {
       throw new Error(
-        `Estoque disponível para transferência insuficiente (Em estoque: ${sellerInv.quantityOnHand}, Reservado pedidos: ${sellerInv.quantityReserved}, Transferências pendentes: ${pendingTransferQuantity}, Livre: ${availableForTransfer}, Solicitado: ${qtyToTransfer}).`
+        `INSUFFICIENT_STOCK: Estoque disponível para transferência insuficiente (Em estoque: ${sourceInv.quantityOnHand}, Reservado pedidos: ${sourceInv.quantityReserved}, Transferências pendentes: ${pendingTransferQuantity}, Livre: ${availableForTransfer}, Solicitado: ${qtyToTransfer}).`
       );
     }
 
-    // Verify destination warehouse
-    const [wh] = await db.select().from(warehouses).where(eq(warehouses.id, toWarehouseId)).limit(1);
-    if (!wh) throw new Error(`Armazém/HUB target "${toWarehouseId}" não encontrado.`);
+    // Verify destination warehouse — D16-E3 preservado, nada mudado aqui.
+    const [wh] = await tx.select().from(warehouses).where(eq(warehouses.id, toWarehouseId)).limit(1);
+    if (!wh) throw new Error(`WAREHOUSE_NOT_FOUND: Armazém/HUB "${toWarehouseId}" não encontrado.`);
 
     const transferId = `trf_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const trackingCode = `NUS-TRF-${Date.now().toString().slice(-6)}`;
 
-    await db.insert(inventoryTransfers).values({
+    const pickupSnapshotJson = mode === 'NUSALI_PICKUP'
+      ? {
+          storeName: store.name,
+          contactName: null,
+          phone: operationalAddress.phone,
+          address: `${operationalAddress.street}, ${operationalAddress.number || 'S/N'}${operationalAddress.complement ? ' - ' + operationalAddress.complement : ''}${operationalAddress.neighborhood ? ', ' + operationalAddress.neighborhood : ''}`.trim(),
+          city: operationalAddress.city,
+          region: operationalAddress.state || null,
+          countryCode: operationalAddress.countryCode,
+        }
+      : null;
+
+    await tx.insert(inventoryTransfers).values({
       id: transferId,
       sellerId,
-      productId,
-      variantId: variantId || null,
+      // productId/variantId SEMPRE derivados da inventory real — nunca de
+      // um valor comercial enviado pelo navegador.
+      productId: sourceInv.productId,
+      variantId: sourceInv.variantId || null,
       fromLocationType: 'SELLER_LOCATION',
-      fromInventoryId: sellerInv.id,
+      fromInventoryId: sourceInv.id,
       toWarehouseId: wh.id,
       quantity: qtyToTransfer,
       status: 'PENDING',
       deliveryMode: mode,
-      pickupSnapshotJson: pickupSnapshotJson || null,
+      pickupSnapshotJson,
       trackingCode,
       createdAt: new Date(),
     });
@@ -288,6 +386,7 @@ export class InventoryService {
       toWarehouseName: wh.name,
       status: 'PENDING',
     };
+    });
   }
 
   /**
@@ -420,6 +519,12 @@ export class InventoryService {
 
       let targetHubInvId = hubInv?.id;
       if (!hubInv) {
+        // FASE D16-E3 — inventory HUB NOVO recebe a origem física real
+        // (fulfillment_locations do warehouse de destino), mesmo princípio
+        // já aplicado a SELLER_LOCATION em D16-E2. Nunca faz backfill de uma
+        // linha HUB já existente (ver seção 8 do enunciado) — só a criação
+        // de uma linha nova participa disso, dentro da MESMA transação.
+        const fulfillmentLocation = await ensureWarehouseFulfillmentLocation(trf.toWarehouseId, tx);
         targetHubInvId = `inv_hub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         await tx.insert(inventory).values({
           id: targetHubInvId,
@@ -431,6 +536,7 @@ export class InventoryService {
           quantityOnHand: trf.quantity,
           quantityReserved: 0,
           minimumStockLevel: 0,
+          fulfillmentLocationId: fulfillmentLocation?.id || null,
           createdAt: new Date(),
           updatedAt: new Date(),
         });

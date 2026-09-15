@@ -18,6 +18,7 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { createRateLimiter } from '../../infra/rateLimiter.js';
 import { runEscrowAutoReleaseOnce } from '../payments/escrowAutoReleaseService.js';
+import { runRefundRecoveryOnce } from '../payments/refundRecoveryService.js';
 import { logger } from '../../infra/logger.js';
 
 export const internalJobsRouter = Router();
@@ -97,6 +98,59 @@ internalJobsRouter.post('/escrow-auto-release', internalJobsLimiter, async (req:
     return res.status(500).json({
       success: false,
       error: { code: 'ESCROW_AUTO_RELEASE_JOB_ERROR', message: 'Falha ao executar o reconciliador.' },
+    });
+  }
+});
+
+// Fase M1-B — endpoint interno para o recovery de refunds provider-managed
+// reservados e nunca submetidos (achado D1 da auditoria M1). MESMO padrão
+// exato do endpoint acima: mesmo limiter, mesma autenticação
+// (isInternalJobsSecretValid/INTERNAL_JOBS_SECRET), nenhum mecanismo novo.
+// POST /api/v1/internal/jobs/refund-recovery
+internalJobsRouter.post('/refund-recovery', internalJobsLimiter, async (req: Request, res: Response) => {
+  const secretHeader = req.headers['x-internal-jobs-secret'] as string | undefined;
+
+  if (!process.env.INTERNAL_JOBS_SECRET || !process.env.INTERNAL_JOBS_SECRET.trim()) {
+    logger.error({}, 'INTERNAL_JOBS_SECRET_NOT_CONFIGURED');
+    return res.status(503).json({
+      success: false,
+      error: { code: 'INTERNAL_JOBS_NOT_CONFIGURED', message: 'Endpoint interno não configurado no servidor.' },
+    });
+  }
+
+  if (!isInternalJobsSecretValid(secretHeader)) {
+    logger.warn({}, 'INTERNAL_JOBS_SECRET_INVALID');
+    return res.status(401).json({
+      success: false,
+      error: { code: 'INVALID_INTERNAL_JOBS_SECRET', message: 'Credencial interna inválida ou ausente.' },
+    });
+  }
+
+  try {
+    const rawBatchSize = req.body?.batchSize;
+    const batchSize = typeof rawBatchSize === 'number' && Number.isFinite(rawBatchSize) ? rawBatchSize : undefined;
+
+    const result = await runRefundRecoveryOnce({ batchSize });
+
+    // Nunca retorna dados sensíveis — só refundId (identificador de
+    // negócio, não PII), classificação e o outcome já sanitizado por
+    // refundService.ts. Nenhum providerRawResponse, nenhum dado de
+    // comprador/cartão, nenhum segredo.
+    return res.status(200).json({
+      success: true,
+      data: {
+        status: result.status,
+        batchSize: result.batchSize,
+        minAgeMs: result.minAgeMs,
+        candidateCount: result.candidateCount,
+        results: result.results,
+      },
+    });
+  } catch (err: any) {
+    logger.error({ error: err?.message }, 'REFUND_RECOVERY_JOB_ERROR');
+    return res.status(500).json({
+      success: false,
+      error: { code: 'REFUND_RECOVERY_JOB_ERROR', message: 'Falha ao executar o recovery de refunds.' },
     });
   }
 });

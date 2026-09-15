@@ -219,6 +219,16 @@ export const SellerHubView: React.FC = () => {
     }
   };
 
+  // FASE D15-C2 — SellerOperationalAddressManager já chamou a API real
+  // (PATCH /seller/stores/:id só com operationalAddressId) antes de invocar
+  // isto — aqui só sincroniza o estado local já carregado, nunca uma
+  // segunda requisição (diferente de handleUpdateStore, que reenvia a loja
+  // inteira e por isso não deve ser reaproveitado para uma troca tão
+  // pontual).
+  const handleOperationalAddressChanged = (storeId: string, addressId: string | null) => {
+    setStores((prev) => prev.map((s) => (s.id === storeId ? { ...s, operationalAddressId: addressId } : s)));
+  };
+
   const handleUpdateStore = async (updated: SellerStoreData) => {
     try {
       const res = await SellerService.updateStore(updated.id, updated);
@@ -450,6 +460,15 @@ export const SellerHubView: React.FC = () => {
             profile={profile}
             showToast={showToast}
             onNavigateSection={setActiveSection}
+            /* Fase M1-D2.6 — prop obrigatória `onUpdateProfile` estava
+               faltando: em runtime `SellerAccount.handleSave` chamava
+               `onUpdateProfile(...)` (undefined) e quebrava o botão Salvar.
+               SellerAccount JÁ faz sua própria chamada a
+               SellerService.updateProfile + toast; o callback aqui só
+               precisa sincronizar o estado local `profile` do pai —
+               `setProfile` faz exatamente isso, sem chamada de API nem
+               toast duplicados (por isso não usamos handleUpdateProfile). */
+            onUpdateProfile={setProfile}
           />
         )}
 
@@ -469,6 +488,7 @@ export const SellerHubView: React.FC = () => {
             onSelectStore={setSelectedStoreId}
             onAddStore={handleAddStore}
             onUpdateStore={handleUpdateStore}
+            onOperationalAddressChanged={handleOperationalAddressChanged}
             showToast={showToast}
           />
         )}

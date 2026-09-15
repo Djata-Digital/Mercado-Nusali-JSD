@@ -407,10 +407,14 @@ export const OrderConfirmationView: React.FC = () => {
   return (
     <div className="max-w-4xl mx-auto px-4 py-8 space-y-6">
       {/* Pix Modal for Pending Payment */}
+      {/* Fase M1-D2 — esta view é exclusivamente de order legacy (single
+          order, /orders/:id/confirmation); PixPaymentModal agora exige
+          `pollTarget` discriminado em vez de `orderId` solto (ver
+          PixPaymentModal.tsx) — aqui é sempre mode:'legacy'. */}
       <PixPaymentModal
         isOpen={isPixModalOpen}
         onClose={() => setIsPixModalOpen(false)}
-        orderId={activeOrder?.id || ''}
+        pollTarget={{ mode: 'legacy', orderId: activeOrder?.id || '' }}
         paymentData={pixData}
         onPaymentSuccess={handlePixSuccess}
       />
@@ -559,19 +563,40 @@ export const OrderConfirmationView: React.FC = () => {
             <span>Status: Pagamento Pendente ({formattedPaymentMethod})</span>
           </div>
 
-          {/* Pending PIX button if order uses PIX */}
-          {rawPaymentMethod === 'pix' && (
+          {/* Fase M1-D3 — se este pedido é um child de uma compra
+              multi-vendedor, o pagamento NÃO é por pedido: pertence ao
+              purchase_group (o backend rejeita PaymentsApi.initiate para
+              child de group com ORDER_BELONGS_TO_PURCHASE_GROUP). Levamos
+              o comprador para a tela da compra, onde o pagamento é feito
+              pelo purchaseGroup.id. */}
+          {activeOrder.purchaseGroupId ? (
             <div className="pt-2">
               <button
                 type="button"
-                onClick={handleOpenPixModal}
-                disabled={isInitiatingPix}
-                className="bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold px-6 py-3 rounded-xl text-sm shadow-md transition inline-flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                onClick={() => navigate(`/purchase-groups/${activeOrder.purchaseGroupId}/confirmation`)}
+                className="bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold px-6 py-3 rounded-xl text-sm shadow-md transition inline-flex items-center gap-2 cursor-pointer"
               >
                 <QrCode className="w-5 h-5" />
-                <span>{isInitiatingPix ? 'Carregando PIX...' : 'PAGAR COM PIX / VER QR CODE'}</span>
+                <span>PAGAR ESTA COMPRA MULTI-LOJA</span>
               </button>
+              <p className="text-[11px] text-slate-400 mt-2">
+                Este pedido faz parte de uma compra com mais de um vendedor — o pagamento cobre todos os pedidos de uma vez.
+              </p>
             </div>
+          ) : (
+            rawPaymentMethod === 'pix' && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={handleOpenPixModal}
+                  disabled={isInitiatingPix}
+                  className="bg-emerald-500 hover:bg-emerald-600 text-white font-extrabold px-6 py-3 rounded-xl text-sm shadow-md transition inline-flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <QrCode className="w-5 h-5" />
+                  <span>{isInitiatingPix ? 'Carregando PIX...' : 'PAGAR COM PIX / VER QR CODE'}</span>
+                </button>
+              </div>
+            )
           )}
         </div>
       )}

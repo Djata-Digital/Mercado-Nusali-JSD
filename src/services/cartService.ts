@@ -54,6 +54,11 @@ export const CartService = {
       storage?: string;
       kit?: any;
       unitPriceOverride?: number;
+      // FASE D16-C2 — ID real da variante (pvar_*). É ISSO que vira a FK
+      // cart_items.variant_id — nunca options.selectedVariantSku (correção
+      // do bug que causava 500 em CART_ADD_FAILED: o SKU não existe como
+      // productVariants.id, violando a foreign key no INSERT).
+      variantId?: string;
       selectedVariantSku?: string;
       selectedVariantImage?: string;
     }
@@ -63,7 +68,13 @@ export const CartService = {
       const res = await CartApi.create({
         productId: product.id,
         quantity,
-        variantId: options?.selectedVariantSku,
+        variantId: options?.variantId,
+        // selectedAttributesJson real do comprador (nunca o objeto options
+        // inteiro, que misturava unitPriceOverride/selectedVariantSku/
+        // selectedVariantImage dentro do que devia ser só {color, size}).
+        selectedAttributes: options?.color || options?.size || options?.storage
+          ? { color: options?.color, size: options?.size, storage: options?.storage }
+          : undefined,
         options,
       });
       if (res && res.success) {
@@ -102,6 +113,66 @@ export const CartService = {
       });
     }
 
+    this.setCart(current);
+    return current;
+  },
+
+  // FASE D16-D2 — compra multi-variante estilo Alibaba: UM request batch
+  // para várias linhas do MESMO produto (cada uma com seu productVariants.id
+  // real), em vez de um loop de addItem no frontend (auditoria D16-D1,
+  // seção 4: loop teria risco de estado parcial sem transação). NUNCA
+  // remove/substitui addItem — fluxos single (ProductCard, MyOrdersView)
+  // continuam usando addItem normalmente.
+  async addItemsBatch(
+    product: Product,
+    lines: Array<{
+      variantId: string;
+      quantity: number;
+      color?: string;
+      size?: string;
+    }>
+  ): Promise<CartItem[]> {
+    const token = storageService.getToken();
+    if (token) {
+      const res = await CartApi.createBatch(
+        lines.map((l) => ({
+          productId: product.id,
+          variantId: l.variantId,
+          quantity: l.quantity,
+          selectedAttributesJson: l.color || l.size ? { color: l.color, size: l.size } : undefined,
+        }))
+      );
+      if (res && res.success) {
+        return await this.fetchServerCart();
+      }
+      const errorMsg = res?.error?.message || 'Erro ao adicionar variações ao carrinho no servidor.';
+      throw new Error(errorMsg);
+    }
+
+    // Carrinho local (sem login) — mesma regra de merge por
+    // (productId, selectedVariantSku) já usada em addItem, aplicada a cada
+    // linha em sequência (não há transação real possível em localStorage;
+    // não há concorrência entre abas relevante aqui, ao contrário do
+    // servidor).
+    const normalizedProd = normalizeProduct(product);
+    let current = this.getCart();
+    for (const l of lines) {
+      const existingIndex = current.findIndex(
+        (item) => item.product.id === normalizedProd.id && item.selectedVariantSku === l.variantId
+      );
+      if (existingIndex >= 0) {
+        current[existingIndex].quantity += l.quantity;
+      } else {
+        current.push({
+          id: `ci_local_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          product: normalizedProd,
+          quantity: l.quantity,
+          selectedColor: l.color,
+          selectedSize: l.size,
+          selectedVariantSku: l.variantId,
+        });
+      }
+    }
     this.setCart(current);
     return current;
   },

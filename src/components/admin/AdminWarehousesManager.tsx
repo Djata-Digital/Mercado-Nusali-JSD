@@ -43,6 +43,20 @@ export interface WarehouseRecord {
   staffCount?: number | null;
   status?: string;
   createdAt?: string;
+  // FASE D16-E3 — geografia estruturada opcional do HUB. Região é SEMPRE
+  // derivada do setor pelo backend (nunca uma coluna própria) — só
+  // shippingSectorId é de fato persistido.
+  shippingSectorId?: string | null;
+  shippingSectorName?: string | null;
+  shippingRegionId?: string | null;
+  shippingRegionName?: string | null;
+}
+
+interface GeoOption {
+  id: string;
+  name: string;
+  code: string;
+  regionId?: string;
 }
 
 interface AdminWarehousesManagerProps {
@@ -194,6 +208,54 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
   const [address, setAddress] = useState('');
   const [managerName, setManagerName] = useState('');
   const [staffCount, setStaffCount] = useState('');
+
+  // FASE D16-E3 — geografia por setor no cadastro do HUB. MESMO padrão de
+  // SellerOperationalAddressManager.tsx: `selectedRegionId` é SÓ estado de
+  // UI (filtra os setores mostrados) — NUNCA enviado ao backend; só
+  // `shippingSectorId` é de fato persistido, e a região volta sempre
+  // DERIVADA dele na leitura.
+  const [geoRegions, setGeoRegions] = useState<GeoOption[]>([]);
+  const [geoSectors, setGeoSectors] = useState<GeoOption[]>([]);
+  const [isLoadingGeo, setIsLoadingGeo] = useState(false);
+  const [selectedRegionId, setSelectedRegionId] = useState('');
+  const [shippingSectorId, setShippingSectorId] = useState('');
+
+  // Edit-sector modal state (único campo editável nesta fase).
+  const [editingWarehouse, setEditingWarehouse] = useState<WarehouseRecord | null>(null);
+  const [editSelectedRegionId, setEditSelectedRegionId] = useState('');
+  const [editShippingSectorId, setEditShippingSectorId] = useState('');
+  const [isSavingSector, setIsSavingSector] = useState(false);
+
+  const fetchGeography = useCallback(async (country: string) => {
+    setIsLoadingGeo(true);
+    try {
+      const [regionsRes, sectorsRes] = await Promise.all([
+        AdminApi.getShippingGeographyRegions({ country }),
+        AdminApi.getShippingGeographySectors({ country }),
+      ]);
+      setGeoRegions(regionsRes.success ? (regionsRes.data as any) || [] : []);
+      setGeoSectors(sectorsRes.success ? (sectorsRes.data as any) || [] : []);
+    } catch {
+      setGeoRegions([]);
+      setGeoSectors([]);
+    } finally {
+      setIsLoadingGeo(false);
+    }
+  }, []);
+
+  // Recarrega região/setor sempre que o país selecionado (criação) muda —
+  // um HUB não pode ter setor de um país diferente do seu próprio.
+  useEffect(() => {
+    if (isAddModalOpen) {
+      setSelectedRegionId('');
+      setShippingSectorId('');
+      fetchGeography(countryCode);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAddModalOpen, countryCode]);
+
+  const hasSectorGeography = geoRegions.length > 0;
+  const sectorOptionsForCreate = selectedRegionId ? geoSectors.filter((s) => s.regionId === selectedRegionId) : geoSectors;
 
   // Fetch Warehouses
   const fetchWarehouses = useCallback(async () => {
@@ -475,6 +537,9 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
         address: address.trim(),
         managerName: managerName.trim() || undefined,
         staffCount: staffCount ? parseInt(staffCount) : undefined,
+        // FASE D16-E3 — nunca envia shippingRegionId (região é sempre
+        // derivada do setor pelo backend); selectedRegionId é só filtro de UI.
+        shippingSectorId: shippingSectorId || undefined,
       });
 
       if (res.success && res.data) {
@@ -488,6 +553,8 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
         setAddress('');
         setManagerName('');
         setStaffCount('');
+        setSelectedRegionId('');
+        setShippingSectorId('');
       } else {
         showToast(res.message || 'Erro ao cadastrar HUB Logístico.');
       }
@@ -497,6 +564,37 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
       setIsSubmittingHub(false);
     }
   };
+
+  // FASE D16-E3 — abrir o editor de setor de um HUB já existente. Pré-seleciona
+  // a região a partir do shippingRegionId JÁ DERIVADO pelo backend (nunca
+  // recalculado aqui) e recarrega a geografia do país REAL do warehouse.
+  const handleOpenEditSector = (w: WarehouseRecord) => {
+    setEditingWarehouse(w);
+    setEditShippingSectorId(w.shippingSectorId || '');
+    setEditSelectedRegionId(w.shippingRegionId || '');
+    fetchGeography((w.countryCode || w.country || 'GW').toUpperCase());
+  };
+
+  const handleSaveSector = async () => {
+    if (!editingWarehouse) return;
+    setIsSavingSector(true);
+    try {
+      const res = await AdminService.updateWarehouseShippingSector(editingWarehouse.id, editShippingSectorId || null);
+      if (res.success && res.data) {
+        setWarehouses((prev) => prev.map((w) => (w.id === editingWarehouse.id ? res.data : w)));
+        showToast(res.message || 'Setor do HUB atualizado com sucesso!');
+        setEditingWarehouse(null);
+      } else {
+        showToast(res.message || 'Erro ao atualizar setor do HUB.');
+      }
+    } catch (err: any) {
+      showToast(`Erro ao atualizar setor: ${err?.message || 'Falha de comunicação com o servidor'}`);
+    } finally {
+      setIsSavingSector(false);
+    }
+  };
+
+  const editSectorOptions = editSelectedRegionId ? geoSectors.filter((s) => s.regionId === editSelectedRegionId) : geoSectors;
 
   return (
     <div className="space-y-6 animate-fadeIn">
@@ -941,6 +1039,15 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                           <p className="text-xs text-purple-700 font-bold">
                             {w.city} • {w.address}
                           </p>
+                          {/* FASE D16-E3 — setor/região SEMPRE derivados pelo
+                              backend a partir de shippingSectorId real. */}
+                          {w.shippingSectorId ? (
+                            <p className="text-[11px] text-gray-500 mt-0.5">
+                              Setor: <strong className="text-gray-700">{w.shippingSectorName}</strong> ({w.shippingRegionName})
+                            </p>
+                          ) : (
+                            <p className="text-[11px] text-gray-400 mt-0.5">Setor não definido</p>
+                          )}
                         </div>
 
                         <span
@@ -962,6 +1069,15 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                         <div className="flex justify-between text-gray-600">
                           <span>Equipe Operacional:</span>
                           <strong className="text-gray-900 font-bold">{displayStaffCount}</strong>
+                        </div>
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditSector(w)}
+                            className="text-[11px] font-bold text-purple-700 hover:text-purple-900 bg-purple-50 hover:bg-purple-100 px-2.5 py-1 rounded-lg transition cursor-pointer"
+                          >
+                            {w.shippingSectorId ? 'Alterar setor' : 'Definir setor'}
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -1672,6 +1788,38 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                 />
               </div>
 
+              {/* FASE D16-E3 — Região é SÓ estado de UI (filtra os setores
+                  mostrados abaixo); somente Setor é enviado ao backend.
+                  Ausente para países sem geografia por setor configurada. */}
+              {hasSectorGeography && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-gray-700 mb-1">Região (opcional):</label>
+                    <select
+                      value={selectedRegionId}
+                      onChange={(e) => { setSelectedRegionId(e.target.value); setShippingSectorId(''); }}
+                      disabled={isLoadingGeo}
+                      className="w-full p-2.5 border border-gray-300 rounded-xl font-bold"
+                    >
+                      <option value="">Todas as regiões</option>
+                      {geoRegions.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-gray-700 mb-1">Setor (opcional):</label>
+                    <select
+                      value={shippingSectorId}
+                      onChange={(e) => setShippingSectorId(e.target.value)}
+                      disabled={isLoadingGeo}
+                      className="w-full p-2.5 border border-gray-300 rounded-xl font-bold"
+                    >
+                      <option value="">Nenhum setor</option>
+                      {sectorOptionsForCreate.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">Cidade *:</label>
@@ -1746,6 +1894,94 @@ export const AdminWarehousesManager: React.FC<AdminWarehousesManagerProps> = ({ 
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* FASE D16-E3 — editar o setor de frete de um HUB já existente.
+          Único campo editável nesta fase (objetivo explícito da fase);
+          demais dados do warehouse continuam sem edição. */}
+      {editingWarehouse && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-gray-100 space-y-4 animate-fadeIn">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+              <h3 className="font-black text-base text-gray-900 flex items-center gap-2">
+                <MapPin className="w-5 h-5 text-purple-600" /> Setor de Frete — {editingWarehouse.name}
+              </h3>
+              <button
+                onClick={() => setEditingWarehouse(null)}
+                disabled={isSavingSector}
+                className="p-1 text-gray-400 hover:text-gray-600 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <p className="text-gray-500">
+                País do HUB: <strong className="text-gray-800">{(editingWarehouse.countryCode || editingWarehouse.country || 'GW').toUpperCase()}</strong>
+              </p>
+
+              {geoRegions.length === 0 && !isLoadingGeo ? (
+                <p className="text-gray-500 bg-gray-50 border border-gray-200 rounded-xl p-3">
+                  Este país ainda não tem geografia por setor configurada — o setor continuará como "Nenhum".
+                </p>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-gray-700 mb-1">Região (opcional):</label>
+                    <select
+                      value={editSelectedRegionId}
+                      onChange={(e) => { setEditSelectedRegionId(e.target.value); setEditShippingSectorId(''); }}
+                      disabled={isLoadingGeo}
+                      className="w-full p-2.5 border border-gray-300 rounded-xl font-bold"
+                    >
+                      <option value="">Todas as regiões</option>
+                      {geoRegions.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-gray-700 mb-1">Setor:</label>
+                    <select
+                      value={editShippingSectorId}
+                      onChange={(e) => setEditShippingSectorId(e.target.value)}
+                      disabled={isLoadingGeo}
+                      className="w-full p-2.5 border border-gray-300 rounded-xl font-bold"
+                    >
+                      <option value="">Nenhum setor</option>
+                      {editSectorOptions.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="pt-3 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditingWarehouse(null)}
+                disabled={isSavingSector}
+                className="px-4 py-2 border border-gray-300 font-bold text-gray-700 rounded-xl hover:bg-gray-50 cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveSector}
+                disabled={isSavingSector}
+                className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white font-extrabold rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isSavingSector ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" /> Salvando...
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-4 h-4" /> Salvar
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

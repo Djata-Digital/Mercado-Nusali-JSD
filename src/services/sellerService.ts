@@ -68,17 +68,19 @@ export const SellerService = {
     return SellerApi.getInventory();
   },
 
+  async getTransferableInventory(): Promise<ApiResponse<any>> {
+    return SellerApi.getTransferableInventory();
+  },
+
   async getTransfers(): Promise<ApiResponse<any>> {
     return SellerApi.getTransfers();
   },
 
   async requestTransfer(data: {
-    productId: string;
-    variantId?: string;
+    sourceInventoryId: string;
     toWarehouseId: string;
     quantity: number;
     deliveryMode?: string;
-    pickupSnapshotJson?: any;
   }): Promise<ApiResponse<any>> {
     return SellerApi.requestTransfer(data);
   },
@@ -131,6 +133,16 @@ export const SellerService = {
   // Meus Clientes (Fase 1 Operacional) — CRM mínimo real.
   async getCustomers(): Promise<ApiResponse<any[]>> {
     return SellerApi.getCustomers();
+  },
+
+  // Disputas reais do vendedor (correção da auditoria — antes era mock).
+  async getDisputes(): Promise<ApiResponse<any[]>> {
+    return SellerApi.getDisputes();
+  },
+
+  // Fase M1-C — resposta REAL do vendedor numa disputa.
+  async sendDisputeMessage(disputeId: string, message: string): Promise<ApiResponse<any>> {
+    return SellerApi.sendDisputeMessage(disputeId, message);
   },
 
   // Financials & Wallet

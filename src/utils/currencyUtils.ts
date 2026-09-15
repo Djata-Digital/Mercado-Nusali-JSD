@@ -212,7 +212,13 @@ export function formatPriceWithConversion(
 
 export const formatCurrency = (
   amountInUSDOrLocal: number,
-  currency: CurrencyCode = 'XOF',
+  // Fase M1-D2.6 — `currency` aceita `string` além de CurrencyCode: os
+  // dados de moeda vindos da API são varchar geral (orders.currency,
+  // escrow_accounts.currency, returns.currency), e o corpo desta função JÁ
+  // trata qualquer string (o `find(...)?.currencySymbol || currency` e o
+  // `return` de fallback cobrem moedas desconhecidas). As funções irmãs
+  // (getLiveExchangeRate, convertCurrency) já usavam `CurrencyCode | string`.
+  currency: CurrencyCode | string = 'XOF',
   isBaseUSD: boolean = false
 ): string => {
   // Correção crítica (Pedidos de Venda derrubando a página inteira):

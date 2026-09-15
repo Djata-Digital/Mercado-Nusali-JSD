@@ -4,7 +4,7 @@ import { useCart } from '../hooks/useCart';
 import { usePreferences } from '../context/PreferencesContext';
 import { useCountries } from '../hooks/useCountries';
 import { formatCurrency } from '../utils/currencyUtils';
-import { ShippingService } from '../services/shippingService';
+import { calculateMultiSellerFreight } from '../utils/multiSellerFreight';
 import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } from 'lucide-react';
 
 export const CartView: React.FC = () => {
@@ -68,24 +68,25 @@ export const CartView: React.FC = () => {
       return;
     }
     setShippingQuote((prev) => ({ ...(prev || { loading: true, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF' }), loading: true }));
-    const totalWeight = cart.reduce((sum, item) => sum + item.product.weightKg! * item.quantity, 0);
-    ShippingService.calculateFreight({
+    // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
+    // vendedor; cada vendedor é uma entrega/child order independente no
+    // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
+    // calculateMultiSellerFreight agrupa por sellerId e soma 1 cotação por
+    // grupo — NUNCA 1 cotação para o carrinho inteiro (que ignorava todos
+    // os vendedores exceto o do primeiro item, subestimando o frete real).
+    calculateMultiSellerFreight(cart, {
       originCountry,
       destinationCountry: selectedCountry.toUpperCase(),
-      weightKg: totalWeight,
       currency: cart[0]?.product?.currency || 'XOF',
-      storeId: cart[0]?.product?.storeId || cart[0]?.product?.seller?.storeId,
-      sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
-      productSubtotal: cartTotal,
-    }).then((res) => {
+    }).then((aggregated) => {
       if (!isMounted) return;
-      if (res.success && res.data) {
+      if (aggregated.available) {
         setShippingQuote({
-          loading: false, available: true, shippingChargedToBuyer: res.data.shippingChargedToBuyer, currency: res.data.currency,
-          estimatedMinDays: res.data.estimatedMinDays, estimatedMaxDays: res.data.estimatedMaxDays,
+          loading: false, available: true, shippingChargedToBuyer: aggregated.shippingChargedToBuyer, currency: cart[0]?.product?.currency || 'XOF',
+          estimatedMinDays: aggregated.estimatedMinDays, estimatedMaxDays: aggregated.estimatedMaxDays,
         });
       } else {
-        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: res.error?.message || 'Frete indisponível para este destino.' });
+        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: aggregated.errorMessage || 'Frete indisponível para este destino.' });
       }
     });
     return () => { isMounted = false; };
@@ -156,7 +157,7 @@ export const CartView: React.FC = () => {
               const itemSubtotal = unitPrice * item.quantity;
 
               return (
-                <div key={`${item.product.id}-${item.selectedColor || ''}-${item.selectedSize || ''}-${item.selectedKit?.id || ''}`} className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div key={item.id || `${item.product.id}-${item.selectedColor || ''}-${item.selectedSize || ''}-${item.selectedKit?.id || ''}`} className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                   <div className="flex items-start gap-4 flex-1">
                     <img
                       src={item.product.image}
@@ -217,14 +218,14 @@ export const CartView: React.FC = () => {
                   <div className="flex items-center justify-between w-full sm:w-auto sm:justify-end gap-6 pt-2 sm:pt-0 border-t sm:border-none border-gray-100">
                     <div className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-gray-50">
                       <button
-                        onClick={() => updateCartQuantity(item.product.id, item.quantity - 1)}
+                        onClick={() => updateCartQuantity(item.id || item.product.id, item.quantity - 1)}
                         className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold"
                       >
                         -
                       </button>
                       <span className="px-3 py-1 text-xs font-bold text-gray-900">{item.quantity}</span>
                       <button
-                        onClick={() => updateCartQuantity(item.product.id, item.quantity + 1)}
+                        onClick={() => updateCartQuantity(item.id || item.product.id, item.quantity + 1)}
                         className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold"
                       >
                         +
@@ -250,7 +251,7 @@ export const CartView: React.FC = () => {
                     </div>
 
                     <button
-                      onClick={() => removeFromCart(item.product.id)}
+                      onClick={() => removeFromCart(item.id || item.product.id)}
                       className="text-gray-400 hover:text-red-600 p-1 transition"
                       title="Excluir item"
                     >

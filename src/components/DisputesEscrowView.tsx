@@ -17,10 +17,30 @@ export const DisputesEscrowView: React.FC = () => {
 
   // Form state for new dispute
   const [isOpeningForm, setIsOpeningForm] = useState(false);
-  const [targetOrderId, setTargetOrderId] = useState(orders[0]?.id || 'NSL-8941203');
-  const [reason, setReason] = useState('Produto divergente ou com avaria');
+  // Fase M1-A (B5) — REMOVIDO o fallback fixo 'NSL-8941203' (pedido
+  // fictício que nunca existiu de verdade). `orders` vem de um hook
+  // assíncrono (useOrders) — no primeiro render ele quase sempre ainda
+  // está vazio, então o valor inicial tem que ser vazio também; o efeito
+  // abaixo preenche com o pedido real assim que a lista carregar. Nenhuma
+  // chamada a createDispute pode acontecer com targetOrderId vazio (guarda
+  // no submit do botão E no início de handleCreateDispute).
+  const [targetOrderId, setTargetOrderId] = useState('');
+  // Fase M1-C (achado M1-A #1, correção incidental autorizada) — o valor
+  // inicial não correspondia a NENHUMA <option> real do select abaixo
+  // ("Produto divergente ou com avaria" nunca existiu como opção); agora é
+  // literalmente a primeira option real, então o valor pré-selecionado
+  // sempre corresponde ao que o <select> mostra.
+  const [reason, setReason] = useState('Produto divergente ou com defeito de fábrica');
   const [description, setDescription] = useState('');
   const [isCreatingDispute, setIsCreatingDispute] = useState(false);
+
+  // Preenche targetOrderId com um pedido REAL assim que `orders` carregar —
+  // nunca sobrescreve uma escolha que o comprador já tenha feito no <select>.
+  useEffect(() => {
+    if (!targetOrderId && orders.length > 0) {
+      setTargetOrderId(orders[0].id);
+    }
+  }, [orders, targetOrderId]);
 
   const loadDisputes = async () => {
     setIsLoading(true);
@@ -47,16 +67,25 @@ export const DisputesEscrowView: React.FC = () => {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || !activeDispute) return;
+    const trimmed = chatInput.trim();
+    if (!trimmed || !activeDispute) return;
 
     setIsSendingMessage(true);
     try {
-      const res = await BuyerService.sendDisputeMessage(activeDispute.id, chatInput.trim());
+      const res = await BuyerService.sendDisputeMessage(activeDispute.id, trimmed);
       if (res.success && res.data) {
-        activeDispute.messages.push(res.data);
+        // Fase M1-C — atualização imutável (nunca mais mutar
+        // activeDispute.messages diretamente): garante que o React
+        // re-renderize a partir da mensagem REALMENTE persistida
+        // (res.data), nunca de um objeto local otimista.
+        const persisted = res.data;
+        setDisputes(prev => prev.map(d => (
+          d.id === activeDispute.id ? { ...d, messages: [...(d.messages || []), persisted] } : d
+        )));
         setChatInput('');
         showToast('Mensagem enviada na sala de mediação!');
       } else {
+        // Nunca mostra toast de sucesso quando a persistência falha.
         showToast(res.message || 'Erro ao enviar mensagem.');
       }
     } catch {
@@ -68,6 +97,11 @@ export const DisputesEscrowView: React.FC = () => {
 
   const handleCreateDispute = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Fase M1-A (B5) — guarda de segurança: nunca chamar createDispute sem
+    // um pedido real selecionado (defesa em profundidade além do botão
+    // desabilitado abaixo, para o caso de submit disparado por outro meio,
+    // ex.: Enter em algum campo).
+    if (!targetOrderId) return;
     if (!description.trim()) return;
 
     setIsCreatingDispute(true);
@@ -156,13 +190,18 @@ export const DisputesEscrowView: React.FC = () => {
                 <select
                   value={targetOrderId}
                   onChange={(e) => setTargetOrderId(e.target.value)}
-                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold text-gray-800 focus:ring-2 focus:ring-red-500 focus:outline-hidden"
+                  disabled={orders.length === 0}
+                  className="w-full bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 text-xs font-semibold text-gray-800 focus:ring-2 focus:ring-red-500 focus:outline-hidden disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {orders.map((o: any) => (
-                    <option key={o.id} value={o.id}>
-                      Pedido #{o.id} - {formatCurrency(o.totalAmount ?? o.total ?? 0, selectedCurrency)}
-                    </option>
-                  ))}
+                  {orders.length === 0 ? (
+                    <option value="">Carregando seus pedidos...</option>
+                  ) : (
+                    orders.map((o: any) => (
+                      <option key={o.id} value={o.id}>
+                        Pedido #{o.id} - {formatCurrency(o.totalAmount ?? o.total ?? 0, selectedCurrency)}
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 
@@ -202,8 +241,8 @@ export const DisputesEscrowView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isCreatingDispute}
-                  className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-md"
+                  disabled={isCreatingDispute || !targetOrderId}
+                  className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isCreatingDispute ? <RefreshCw className="w-4 h-4 animate-spin" /> : 'Confirmar Abertura'}
                 </button>
@@ -255,7 +294,7 @@ export const DisputesEscrowView: React.FC = () => {
                   <div className="flex items-center justify-between text-[11px] text-gray-500 pt-1 border-t border-gray-200/60">
                     <span>{d.date}</span>
                     <span className="font-extrabold text-gray-900">
-                      {formatCurrency(d.amount, d.currency || selectedCurrency)}
+                      {formatCurrency(d.claimAmount, d.currency || selectedCurrency)}
                     </span>
                   </div>
                 </div>
@@ -283,9 +322,23 @@ export const DisputesEscrowView: React.FC = () => {
 
                 <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-right shrink-0">
                   <span className="text-[10px] font-bold text-emerald-800 block">Valor Protegido sob Custódia:</span>
-                  <span className="text-base font-black text-emerald-700">
-                    {formatCurrency(activeDispute.amount, activeDispute.currency || selectedCurrency)}
-                  </span>
+                  {/* Fase M1-A (B1) — escrowAmount é o dinheiro REALMENTE em
+                      custódia agora (nunca claimAmount, que é só o valor
+                      alegado pelo comprador). `null` acontece quando o
+                      escrow já foi liberado/estornado — nesse caso não há
+                      mais nada "protegido" para este pedido, e mostrar
+                      R$0,00 seria repetir o mesmo bug que estamos
+                      corrigindo (pareceria que o valor sumiu/é zero, não
+                      que ele já não está mais em custódia). */}
+                  {activeDispute.escrowAmount !== null && activeDispute.escrowAmount !== undefined ? (
+                    <span className="text-base font-black text-emerald-700">
+                      {formatCurrency(activeDispute.escrowAmount, activeDispute.escrowCurrency || activeDispute.currency || selectedCurrency)}
+                    </span>
+                  ) : (
+                    <span className="text-xs font-bold text-gray-500">
+                      Escrow já {activeDispute.escrowStatus === 'refunded' ? 'estornado' : activeDispute.escrowStatus === 'released' ? 'liberado' : 'não encontrado'}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -302,22 +355,27 @@ export const DisputesEscrowView: React.FC = () => {
                 </h3>
 
                 <div className="bg-gray-50 rounded-xl p-4 max-h-72 overflow-y-auto space-y-3 border border-gray-100">
-                  {activeDispute.messages && activeDispute.messages.map((m: any) => (
+                  {/* Fase M1-C — shape REAL de dispute_messages
+                      (senderRole/message/createdAt); nunca mais o mock
+                      {sender, senderName, text, timestamp}. */}
+                  {activeDispute.messages && activeDispute.messages.map((m) => (
                     <div
                       key={m.id}
                       className={`p-3 rounded-xl max-w-md text-xs space-y-1 ${
-                        m.sender === 'buyer'
+                        m.senderRole === 'buyer'
                           ? 'bg-blue-600 text-white ml-auto'
-                          : m.sender === 'mediator'
+                          : m.senderRole === 'mediator' || m.senderRole === 'admin'
                           ? 'bg-indigo-900 text-yellow-300 mx-auto border border-yellow-400/40 text-center'
                           : 'bg-white text-gray-800 border border-gray-200 mr-auto'
                       }`}
                     >
                       <div className="flex items-center justify-between gap-3 text-[10px] opacity-80 font-semibold">
-                        <span>{m.senderName}</span>
-                        <span>{m.timestamp}</span>
+                        <span>
+                          {m.senderRole === 'buyer' ? 'Você' : m.senderRole === 'seller' ? (activeDispute.sellerName || 'Vendedor') : 'Mediação Nusali'}
+                        </span>
+                        <span>{new Date(m.createdAt).toLocaleString('pt-BR')}</span>
                       </div>
-                      <p className="leading-relaxed">{m.text}</p>
+                      <p className="leading-relaxed">{m.message}</p>
                     </div>
                   ))}
                 </div>

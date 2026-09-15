@@ -128,8 +128,6 @@ export const Header: React.FC = () => {
   const categoryMenuRef = useRef<HTMLDivElement>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
 
-  const userLocation = { city: 'Bissau', country: selectedCountry };
-
   const pendingDisputesCount = disputes.filter(
     (d: any) => d.status === 'opened' || d.status === 'under_admin_review'
   ).length;
@@ -500,8 +498,13 @@ export const Header: React.FC = () => {
               <MapPin className="w-4 h-4 text-emerald-400" />
               <div className="flex flex-col text-left">
                 <span className={`text-[10px] leading-3 ${curTheme.addressSubtext}`}>Enviar para</span>
+                {/* Correção crítica (bug cosmético): não existe cidade real do
+                    comprador disponível aqui — "Bissau" era um valor fixo,
+                    exibido mesmo quando o país selecionado era outro (ex.:
+                    "Bissau, Brasil"). Mostra só o país real (currentCountry
+                    já deriva de selectedCountry), nunca uma cidade inventada. */}
                 <span className={`font-semibold leading-3 ${curTheme.addressMaintext}`}>
-                  {userLocation.city}, {currentCountry.name}
+                  {currentCountry.name}
                 </span>
               </div>
             </button>
@@ -773,11 +776,14 @@ export const Header: React.FC = () => {
                         <span className="bg-blue-100 text-blue-900 text-[9px] font-black px-1.5 py-0.5 rounded">
                           {activeRole}
                         </span>
-                        {user?.isVerifiedSeller && (
-                          <span className="bg-emerald-100 text-emerald-800 text-[9px] font-black px-1.5 py-0.5 rounded flex items-center gap-0.5">
-                            <ShieldCheck className="w-3 h-3" /> Vendedor Verificado
-                          </span>
-                        )}
+                        {/* Fase M1-D2.6 — badge "Vendedor Verificado" removido:
+                            lia `user.isVerifiedSeller`, campo que NUNCA existiu
+                            em nenhuma resposta de API (a condição era sempre
+                            undefined → o badge nunca renderizava). Um indicador
+                            de KYC, se desejado, deve ser ligado a
+                            `user.kycStatus === 'verified'` numa fase de UI
+                            dedicada — não introduzido aqui para não alterar o
+                            visual. */}
                       </div>
                     </div>
 
@@ -832,7 +838,12 @@ export const Header: React.FC = () => {
                       >
                         <LayoutDashboard className="w-4 h-4 text-emerald-700" /> Painel Admin Global
                       </button>
-                    ) : user?.role === 'SELLER' || user?.role === 'STORE_MANAGER' || user?.role === 'SELLER_STAFF' ? (
+                    ) : user?.role === 'SELLER' ? (
+                    /* Fase M1-D2.6 — removidos `|| 'STORE_MANAGER' || 'SELLER_STAFF'`:
+                       nenhum desses valores existe em users.role no backend
+                       (BUYER, SELLER, ADMIN, COUNTRY_REPRESENTATIVE,
+                       REGIONAL_SUPERVISOR, LOGISTICS_OPERATOR, SUPPORT_AGENT,
+                       FINANCE) — a comparação era sempre falsa. */
                       <button
                         onClick={() => {
                           switchActiveRole('SELLER');

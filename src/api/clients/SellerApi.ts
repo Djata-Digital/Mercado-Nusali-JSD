@@ -39,6 +39,33 @@ export class SellerApi {
     return apiClient.patch(`/seller/stores/${id}`, data);
   }
 
+  // FASE D15-C2 — origem operacional (endereço estruturado + geografia de
+  // frete por setor, fundação D15-A/C). Reutiliza updateStore acima para
+  // gravar operationalAddressId — nenhum método novo necessário para isso.
+  static async getAddresses(): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/addresses');
+  }
+
+  static async createAddress(data: {
+    recipientName: string; street: string; number?: string; complement?: string; neighborhood?: string;
+    city: string; state?: string; countryCode: string; zipCode?: string; phone?: string;
+    shippingSectorId?: string | null; isDefault?: boolean;
+  }): Promise<ApiResponse<any>> {
+    return apiClient.post('/seller/addresses', data);
+  }
+
+  static async updateAddress(id: string, data: any): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/seller/addresses/${id}`, data);
+  }
+
+  static async getShippingRegions(country: string): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/shipping/regions', { params: { country } });
+  }
+
+  static async getShippingSectors(country: string, regionId?: string): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/shipping/sectors', { params: regionId ? { country, region: regionId } : { country } });
+  }
+
   // Team
   static async getTeam(): Promise<ApiResponse<any>> {
     return apiClient.get('/seller/team');
@@ -61,17 +88,25 @@ export class SellerApi {
     return apiClient.get('/seller/inventory');
   }
 
+  // FASE D16-E5 — read-model dedicado: uma opção por inventory row
+  // SELLER_LOCATION real e transferível (produto/variante/loja já
+  // resolvidos pelo backend) — nunca derivado de products.attributesJson.
+  static async getTransferableInventory(): Promise<ApiResponse<any>> {
+    return apiClient.get('/seller/inventory/transferable');
+  }
+
   static async getTransfers(): Promise<ApiResponse<any>> {
     return apiClient.get('/seller/inventory/transfers');
   }
 
+  // FASE D16-E5 — origem sempre uma inventory row EXATA (sourceInventoryId);
+  // productId/variantId/pickupSnapshotJson não são mais aceitos aqui — o
+  // backend deriva tudo a partir da própria inventory (ver auditoria D16-E5).
   static async requestTransfer(data: {
-    productId: string;
-    variantId?: string;
+    sourceInventoryId: string;
     toWarehouseId: string;
     quantity: number;
     deliveryMode?: string;
-    pickupSnapshotJson?: any;
   }): Promise<ApiResponse<any>> {
     return apiClient.post('/seller/inventory/transfers', data);
   }
@@ -120,6 +155,20 @@ export class SellerApi {
   // dos pedidos pagos do próprio vendedor (ver computeSellerCustomers no backend).
   static async getCustomers(): Promise<ApiResponse<any[]>> {
     return apiClient.get('/seller/customers');
+  }
+
+  // Correção (auditoria "painel do vendedor" — disputas nunca apareciam):
+  // GET /seller/disputes é real e escopado ao vendedor autenticado (nunca
+  // aceita sellerId do cliente).
+  static async getDisputes(): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/disputes');
+  }
+
+  // Fase M1-C — primeira resposta REAL do vendedor numa disputa (antes só
+  // era possível ler). Ownership provada no backend (disputeMessageService),
+  // nunca aqui — este cliente só encaminha a mensagem.
+  static async sendDisputeMessage(disputeId: string, message: string): Promise<ApiResponse<any>> {
+    return apiClient.post(`/seller/disputes/${disputeId}/messages`, { message });
   }
 
   static async updateOrderStatus(

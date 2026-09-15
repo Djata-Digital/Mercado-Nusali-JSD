@@ -1,5 +1,5 @@
 import { apiClient, ApiResponse } from '../apiClient';
-import { OrderFilters, PaginatedResponse } from '../types';
+import { OrderFilters, PaginatedResponse, CreateOrderFromCartResult } from '../types';
 
 export class OrdersApi {
   static async list(params?: OrderFilters): Promise<ApiResponse<PaginatedResponse<any>>> {
@@ -10,7 +10,11 @@ export class OrdersApi {
     return apiClient.get(`/orders/${id}`);
   }
 
-  static async create(data: any): Promise<ApiResponse<any>> {
+  // Fase M1-D1 — retorno tipado explicitamente (CreateOrderFromCartResult,
+  // discriminado por `mode`), espelhando OrderService.createOrderFromCart.
+  // `data` permanece `any` de propósito (fora do escopo desta fase — o
+  // payload de entrada não muda) e CheckoutView.tsx não foi alterado (M1-D2).
+  static async create(data: any): Promise<ApiResponse<CreateOrderFromCartResult>> {
     return apiClient.post('/orders', data);
   }
 

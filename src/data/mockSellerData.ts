@@ -57,6 +57,8 @@ export interface SellerStoreData {
   categoryId?: string;
   businessHoursJson?: any;
   addressJson?: any;
+  /** FASE D15-C2 — origem operacional explícita (stores.operational_address_id). Nunca inferida por isDefault/primeiro endereço. Ainda não conectada a shipmentService/checkout. */
+  operationalAddressId?: string | null;
 }
 
 export interface SellerTeamMember {
@@ -112,6 +114,8 @@ export interface SellerOrderData {
   selectedVariantImage?: string;
   quantity: number;
   unitPrice: number;
+  /** Subtotal real do item (order_items.subtotal) — autoritativo, nunca derivado de totalAmount (que inclui frete). */
+  subtotal?: number | null;
   totalAmount: number;
   /** Comissão real do marketplace sobre o pedido (orders.marketplace_commission). Nomenclatura canônica — nunca "commissionFee". */
   marketplaceCommission?: number | null;
@@ -128,7 +132,8 @@ export interface SellerOrderData {
   status: OrderStatus;
   escrowStatus: EscrowStatus;
   escrowReleaseDate?: string; // nunca enviado pelo backend hoje
-  shippingCarrier?: string; // nunca enviado pelo backend hoje
+  /** Nome real da transportadora (shipments.carrierId -> carriers.name, fallback shipments.carrier) — resolvido por GET /seller/orders via carrierResolver.ts. */
+  shippingCarrier?: string | null;
   trackingCode?: string;
   createdAt: string;
   /** Histórico estruturado de eventos — o backend real nunca envia isso hoje. Sempre trate como [] quando ausente, nunca invente eventos. */

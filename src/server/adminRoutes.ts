@@ -46,6 +46,12 @@ import {
   shippingRates,
   shippingZones,
   carriers,
+  shippingRegions,
+  shippingSectors,
+  shippingRoutes,
+  shippingServices,
+  shippingRouteRates,
+  fulfillmentLocations,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull, or, gte, lte, ne, inArray } from 'drizzle-orm';
@@ -72,6 +78,16 @@ import { resolveCarrierNames, pickCarrierName } from './modules/logistics/carrie
 import { processPayoutStatusChange } from './modules/wallet/payoutService.js';
 import { resolveDispute, RefundValidationError } from './modules/payments/refundService.js';
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
+import {
+  validateShippingRouteRateInput,
+  // FASE D16-E3 — MESMA validação/derivação já usada pelo endereço
+  // operacional do seller (shippingGeographyService.ts): país-do-setor vs
+  // país-do-recurso, setor ativo, região sempre derivada — nunca uma
+  // segunda regra divergente para warehouse.
+  validateAddressSectorAssignment,
+  deriveShippingRegionFromSector,
+} from './modules/shipping/shippingGeographyService.js';
+import { ensureWarehouseFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
 
 export const adminRouter = Router();
 
@@ -1159,6 +1175,45 @@ function logAdminAction(userName: string, userRole: string, action: string, enti
 // ==========================================
 // 1. OVERVIEW & KPIS (REAL POSTGRESQL METRICS)
 // ==========================================
+// Fase M1-A (B4) — CORREÇÃO: o literal 'resolved' nunca existe em
+// disputes.status (valores reais: open, in_mediation, resolved_buyer,
+// resolved_seller, cancelled — ver schema.ts). A checagem negativa
+// `!== 'resolved'` era sempre verdadeira, contando 100% das disputas
+// (inclusive já resolvidas/canceladas) como "ativas". Corrigido para
+// whitelist explícita (fail-close: só os 2 estados que representam disputa
+// em andamento contam como ativa) em vez de outra negação genérica que
+// poderia repetir o mesmo tipo de erro no futuro. Exportada para o mesmo
+// padrão de testabilidade do resto desta fase.
+export const ACTIVE_DISPUTE_STATUSES = ['open', 'in_mediation'];
+
+// Fase M1-A (C1) — mesma whitelist de "dinheiro ainda em custódia" já usada
+// em buyerRoutes.ts (GET /buyer/disputes)/refundService.ts/paymentService.ts:
+// status IN ('held','eligible'). Auditado explicitamente (não assumido):
+// 'eligible' está documentado no comentário do schema mas NUNCA é escrito
+// por nenhum código hoje — incluído mesmo assim por segurança/consistência
+// com os outros pontos do sistema que já tratam os dois como equivalentes.
+// 'released'/'refunded' são estados TERMINAIS — dinheiro já saiu da
+// custódia da plataforma (para o vendedor ou de volta ao comprador) —
+// excluídos deliberadamente da soma.
+export const ADMIN_IN_CUSTODY_ESCROW_STATUSES = ['held', 'eligible'];
+
+/**
+ * Fase M1-A (C1) — agregado REAL por moeda de dinheiro ainda em custódia
+ * (nunca somado entre moedas diferentes — escrow_accounts.currency é um
+ * valor livre por linha, sem conversão cambial nenhuma no sistema).
+ * Extraída como função exportada só para ser testável diretamente (mesmo
+ * padrão de `enrichDisputesWithEscrowAmount` em buyerRoutes.ts) — nenhuma
+ * mudança de comportamento em relação à query original.
+ */
+export async function getEscrowInCustodyByCurrency(db: any): Promise<{ currency: string; amount: number }[]> {
+  const rows = await db
+    .select({ currency: escrowAccounts.currency, total: sql<string>`COALESCE(SUM(${escrowAccounts.amount}), 0)` })
+    .from(escrowAccounts)
+    .where(inArray(escrowAccounts.status, ADMIN_IN_CUSTODY_ESCROW_STATUSES))
+    .groupBy(escrowAccounts.currency);
+  return rows.map((r: any) => ({ currency: r.currency, amount: Number(r.total) })).filter((r: any) => r.amount > 0);
+}
+
 adminRouter.get('/overview', async (req: Request, res: Response) => {
   try {
     const db = getDb();
@@ -1172,6 +1227,7 @@ adminRouter.get('/overview', async (req: Request, res: Response) => {
       allWarehouses,
       allOrders,
       recentAuditLogs,
+      escrowInCustodyByCurrency,
     ] = await Promise.all([
       db.select().from(users),
       db.select().from(sellers),
@@ -1180,17 +1236,30 @@ adminRouter.get('/overview', async (req: Request, res: Response) => {
       db.select().from(warehouses),
       db.select().from(orders),
       db.select().from(auditLogs).orderBy(desc(auditLogs.createdAt)).limit(10),
+      getEscrowInCustodyByCurrency(db),
     ]);
 
     const activeUsersCount = allUsers.length;
     const verifiedSellersCount = allSellers.length;
     const pendingKycCount = pendingKycUsers.length;
-    const activeDisputesCount = allDisputes.filter((d: any) => d.status !== 'resolved').length;
+    const activeDisputesCount = allDisputes.filter((d: any) => ACTIVE_DISPUTE_STATUSES.includes(d.status)).length;
     const activeHubsCount = allWarehouses.length;
     const totalOrdersCount = allOrders.length;
 
     const totalGmvAmount = allOrders.reduce((sum: number, o: any) => sum + (Number(o.totalAmount) || 0), 0);
     const totalGmvFormatted = totalGmvAmount > 0 ? `${totalGmvAmount.toLocaleString('pt-PT')} XOF` : '0 XOF';
+
+    // Fase M1-A (C1) — estrutura por moeda (já calculada por
+    // getEscrowInCustodyByCurrency) é a fonte AUTORITATIVA (nunca soma
+    // BRL+XOF+etc. num único número). `escrowInCustodyFormatted` (string)
+    // é preservado por compatibilidade — quando há mais de uma moeda em
+    // custódia, concatena os totais em vez de inventar uma conversão
+    // cambial; quando não há nenhuma linha em custódia, mostra '0 XOF'
+    // (mesma convenção neutra já usada por totalGmvFormatted acima para
+    // "sem dado" nesta mesma rota).
+    const escrowInCustodyFormatted = escrowInCustodyByCurrency.length === 0
+      ? '0 XOF'
+      : escrowInCustodyByCurrency.map((r: any) => `${r.amount.toLocaleString('pt-PT')} ${r.currency}`).join(' + ');
 
     return res.json({
       success: true,
@@ -1202,7 +1271,12 @@ adminRouter.get('/overview', async (req: Request, res: Response) => {
           verifiedSellersCount,
           pendingKycCount,
           activeDisputesCount,
-          escrowInCustodyFormatted: '0 XOF',
+          escrowInCustodyFormatted,
+          // Fase M1-A (C1) — campo estruturado NOVO (compatibilidade: o
+          // campo antigo acima continua existindo com o mesmo nome/tipo
+          // string). Autoritativo para qualquer consumidor futuro que
+          // precise do valor exato por moeda em vez da string formatada.
+          escrowInCustodyByCurrency,
           activeHubsCount,
           securityAlertsCount: 0,
         },
@@ -2349,14 +2423,33 @@ adminRouter.post('/disputes/:id/resolve', requireDisputeResolvePermission, async
 // ==========================================
 // 6. WAREHOUSES & LOGISTICS HUBS
 // ==========================================
+
+// FASE D16-E3 — read model do warehouse com a geografia de setor SEMPRE
+// derivada em tempo de leitura (mesmo princípio de formatOperationalAddress
+// em sellerRoutes.ts): shippingRegionId/shippingRegionName nunca são uma
+// coluna própria, só o resultado de olhar o setor -> região agora.
+function formatWarehouse(row: any, sectorInfo: { sector: any; region: any } | null) {
+  return {
+    ...row,
+    shippingSectorId: row.shippingSectorId || null,
+    shippingSectorName: sectorInfo?.sector?.name || null,
+    shippingRegionId: sectorInfo?.region?.id || null,
+    shippingRegionName: sectorInfo?.region?.name || null,
+  };
+}
+
 adminRouter.get('/warehouses', async (req: Request, res: Response) => {
   try {
     const db = getDb();
     if (db) {
       const rows = await db.select().from(warehouses).orderBy(desc(warehouses.createdAt));
+      const formatted = await Promise.all(rows.map(async (r: any) => {
+        const sectorInfo = await deriveShippingRegionFromSector(db, r.shippingSectorId);
+        return formatWarehouse(r, sectorInfo);
+      }));
       return res.json({
         success: true,
-        data: rows,
+        data: formatted,
       });
     }
     return res.json({ success: true, data: [] });
@@ -2368,7 +2461,7 @@ adminRouter.get('/warehouses', async (req: Request, res: Response) => {
 adminRouter.post('/warehouses', async (req: Request, res: Response) => {
   try {
     const db = getDb();
-    const { name, code, countryCode, country, city, address, managerName, staffCount } = req.body;
+    const { name, code, countryCode, country, city, address, managerName, staffCount, shippingSectorId } = req.body;
 
     const resolvedCountryCode = (countryCode || country || '').toString().trim().toUpperCase();
 
@@ -2377,6 +2470,19 @@ adminRouter.post('/warehouses', async (req: Request, res: Response) => {
         success: false,
         message: 'Código, Nome, País (countryCode), Cidade e Endereço são obrigatórios.',
       });
+    }
+
+    // FASE D16-E3 — mesma validação/derivação já usada para o endereço
+    // operacional do seller: setor opcional (null é sempre válido — países
+    // sem geografia por setor continuam funcionando), mas quando informado
+    // precisa existir, estar ativo e pertencer ao MESMO país do warehouse.
+    // Nunca confia só no frontend.
+    const cleanShippingSectorId = shippingSectorId ? String(shippingSectorId).trim() : null;
+    if (cleanShippingSectorId && db) {
+      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode: resolvedCountryCode, shippingSectorId: cleanShippingSectorId });
+      if (!('ok' in sectorValidation)) {
+        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+      }
     }
 
     const whId = `wh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -2390,6 +2496,7 @@ adminRouter.post('/warehouses', async (req: Request, res: Response) => {
       managerName: managerName ? String(managerName).trim() : null,
       staffCount: staffCount ? Number(staffCount) : null,
       status: 'active',
+      shippingSectorId: cleanShippingSectorId,
       createdAt: new Date(),
     };
 
@@ -2397,13 +2504,91 @@ adminRouter.post('/warehouses', async (req: Request, res: Response) => {
       await db.insert(warehouses).values(newWh);
     }
 
+    const sectorInfo = db ? await deriveShippingRegionFromSector(db, cleanShippingSectorId) : null;
+
     return res.json({
       success: true,
       message: `HUB Logístico "${name}" cadastrado com sucesso!`,
-      data: newWh,
+      data: formatWarehouse(newWh, sectorInfo),
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// FASE D16-E3 — único campo editável nesta fase é a geografia de setor
+// (o objetivo explícito desta fase); demais campos do warehouse continuam
+// sem endpoint de edição, exatamente como antes.
+adminRouter.patch('/warehouses/:id', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const [existing] = await db.select().from(warehouses).where(eq(warehouses.id, req.params.id)).limit(1);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: { code: 'WAREHOUSE_NOT_FOUND', message: 'Armazém/HUB não encontrado.' } });
+    }
+
+    const { shippingSectorId } = req.body ?? {};
+    if (shippingSectorId === undefined) {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'Nenhum campo editável foi informado (shippingSectorId).' } });
+    }
+
+    // null explícito remove o setor (permitido — compatibilidade/opt-out).
+    const nextShippingSectorId = shippingSectorId ? String(shippingSectorId).trim() : null;
+    if (nextShippingSectorId) {
+      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode: existing.countryCode, shippingSectorId: nextShippingSectorId });
+      if (!('ok' in sectorValidation)) {
+        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+      }
+    }
+
+    await db.transaction(async (tx: any) => {
+      await tx.update(warehouses).set({ shippingSectorId: nextShippingSectorId }).where(eq(warehouses.id, existing.id));
+
+      // FASE D16-E3 (seção 5) — se este warehouse já tem uma
+      // fulfillment_location (ou passa a ter agora), sincroniza o campo
+      // geográfico dela na MESMA transação — nunca deixa a location
+      // existente com um shippingSectorId desatualizado depois que o admin
+      // muda o setor, e nunca deixa o warehouse atualizado com a location
+      // parcialmente sincronizada.
+      await ensureWarehouseFulfillmentLocation(existing.id, tx);
+    });
+
+    const [updated] = await db.select().from(warehouses).where(eq(warehouses.id, existing.id)).limit(1);
+    const sectorInfo = await deriveShippingRegionFromSector(db, updated.shippingSectorId);
+
+    return res.json({
+      success: true,
+      message: 'Geografia do armazém/HUB atualizada com sucesso!',
+      data: formatWarehouse(updated, sectorInfo),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// GET /admin/fulfillment-locations — FASE D15-C3. Leitura administrativa da
+// fundação de múltiplas origens físicas de estoque (fulfillment_locations).
+// Nunca cria/edita — só lista o que já existe (as locations nascem via
+// ensureStoreFulfillmentLocation/ensureWarehouseFulfillmentLocation, nunca
+// por esta rota). Filtros: locationType, country, active.
+adminRouter.get('/fulfillment-locations', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { locationType, country, active } = req.query;
+    const conditions: any[] = [];
+    if (locationType) conditions.push(eq(fulfillmentLocations.locationType, String(locationType)));
+    if (country) conditions.push(eq(fulfillmentLocations.countryCode, String(country).trim().toUpperCase()));
+    if (active !== undefined) conditions.push(eq(fulfillmentLocations.isActive, active === 'true'));
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+
+    const rows = await db.select().from(fulfillmentLocations).where(whereClause).orderBy(asc(fulfillmentLocations.locationType), asc(fulfillmentLocations.name));
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
   }
 });
 
@@ -3059,6 +3244,13 @@ adminRouter.get('/categories', async (req: Request, res: Response) => {
       isActive: cat.isActive,
       prods: countsMap.get(cat.id) || countsMap.get(cat.slug) || 0,
       status: cat.isActive ? 'Ativa' : 'Inativa',
+      // Correção crítica (comissão da categoria "sempre 10%"): este endpoint
+      // nunca devolvia commissionRate — o Admin editava um campo que nem
+      // sequer refletia o valor real, e o payload de salvar nunca o incluía
+      // (ver AdminCategoriesManager.tsx). categories.commissionRate já
+      // existe e já é aceito por PATCH /admin/categories/:id; faltava só
+      // expor no GET. numeric do Postgres/Drizzle chega como string ou null.
+      commissionRate: cat.commissionRate,
       createdAt: cat.createdAt,
     }));
 
@@ -3073,10 +3265,23 @@ adminRouter.post('/categories', requireAuth, async (req: AuthRequest, res: Respo
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
 
-    const { name, slug, icon, parentId, displayOrder, isActive } = req.body ?? {};
+    const { name, slug, icon, parentId, displayOrder, isActive, commissionRate } = req.body ?? {};
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       throw new AdminRequestError(400, 'O nome da categoria é obrigatório.');
+    }
+
+    // Fase "Comissão percentual + logística real": mesma validação já usada
+    // em PATCH /admin/categories/:id — SEMPRE percentual (nunca valor fixo
+    // em dinheiro), null/ausente deixa a categoria sem taxa própria (cai
+    // para sellers.commissionRate, depois o global).
+    let categoryCommissionRate: string | null = null;
+    if (commissionRate !== undefined && commissionRate !== null && commissionRate !== '') {
+      const rate = Number(commissionRate);
+      if (isNaN(rate) || rate < 0 || rate > 100) {
+        throw new AdminRequestError(400, 'A comissão da categoria deve ser um percentual entre 0 e 100.');
+      }
+      categoryCommissionRate = String(rate);
     }
 
     const cleanName = name.trim();
@@ -3112,6 +3317,7 @@ adminRouter.post('/categories', requireAuth, async (req: AuthRequest, res: Respo
       parentId: realParentId,
       displayOrder: Number(displayOrder) || 0,
       isActive: isActive !== false,
+      commissionRate: categoryCommissionRate,
       createdAt: new Date(),
     };
 
@@ -3124,6 +3330,7 @@ adminRouter.post('/categories', requireAuth, async (req: AuthRequest, res: Respo
         parentId: newCategory.parentId,
         displayOrder: newCategory.displayOrder,
         isActive: newCategory.isActive,
+        commissionRate: newCategory.commissionRate,
       },
     });
 
@@ -4514,6 +4721,364 @@ adminRouter.delete('/shipping-rates/:id', requireShippingRateManager, async (req
     await writeRealAudit(req, 'SHIPPING_RATE_DELETED', 'shipping_rate', id, { before: existing });
     return res.json({ success: true, message: 'Tarifa de frete removida.' });
   } catch (error: any) {
+    return sendAdminError(res, error);
+  }
+});
+
+// ==========================================
+// FASE D15-A — FUNDAÇÃO DE ROTAS DE FRETE POR SETOR
+// ==========================================
+// Sistema PARALELO ao bloco de /shipping-rates acima (país↔país, modelo
+// antigo, ainda o único usado pelo checkout real). Nada aqui é lido por
+// ShippingCalculatorService/orderService.ts nesta fase — integração real é
+// fase futura (D15-B). GET usa requireLogisticsStaff (leitura); mutações de
+// tarifa/rota usam requireShippingRateManager — mesmos gates já usados pelo
+// bloco de tarifas antigo, por serem exatamente o mesmo domínio de acesso.
+
+adminRouter.get('/shipping/regions', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { country, active } = req.query;
+    const conditions: any[] = [];
+    if (country) conditions.push(eq(shippingRegions.countryCode, String(country).trim().toUpperCase()));
+    if (active !== undefined) conditions.push(eq(shippingRegions.isActive, active === 'true'));
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+
+    const rows = await db.select().from(shippingRegions).where(whereClause).orderBy(asc(shippingRegions.countryCode), asc(shippingRegions.name));
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+adminRouter.get('/shipping/sectors', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { country, region, active } = req.query;
+    const conditions: any[] = [];
+    if (country) conditions.push(eq(shippingSectors.countryCode, String(country).trim().toUpperCase()));
+    if (region) conditions.push(eq(shippingSectors.regionId, String(region)));
+    if (active !== undefined) conditions.push(eq(shippingSectors.isActive, active === 'true'));
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+
+    const rows = await db.select().from(shippingSectors).where(whereClause).orderBy(asc(shippingSectors.countryCode), asc(shippingSectors.name));
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// GET /admin/shipping/services — FASE D15-B. Não existia no D15-A (a
+// fundação criou/gravou serviços, mas nunca expôs uma forma de listá-los
+// via API) — sem isto não há como popular o seletor de serviço nem as
+// colunas Standard/Economy/Express da tabela de rotas no painel admin.
+// Mesmo padrão exato de /shipping/regions e /shipping/sectors — não é uma
+// API redundante, é a única forma de listar shipping_services hoje.
+adminRouter.get('/shipping/services', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { country, active } = req.query;
+    const conditions: any[] = [];
+    if (country) conditions.push(eq(shippingServices.countryCode, String(country).trim().toUpperCase()));
+    if (active !== undefined) conditions.push(eq(shippingServices.isActive, active === 'true'));
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+
+    const rows = await db.select().from(shippingServices).where(whereClause).orderBy(asc(shippingServices.countryCode), asc(shippingServices.code));
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// GET /admin/shipping/routes — SEMPRE paginado (1.521 linhas de GB sozinho;
+// nunca devolvido inteiro cegamente). Filtros: country, region (setor de
+// origem OU destino pertence à região), originRegion/destinationRegion
+// (lado específico — FASE D15-B, o painel admin precisa distinguir "região
+// de origem" de "região de destino", o que `region` sozinho não permite),
+// originSector, destinationSector, service (rota tem tarifa ATIVA desse
+// serviço), active (da própria rota), hasRate (tem ao menos 1 tarifa ativa,
+// qualquer serviço), q (FASE D15-B — busca textual por nome de setor,
+// origem ou destino).
+adminRouter.get('/shipping/routes', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { country, region, originRegion, destinationRegion, originSector, destinationSector, service, active, hasRate, q, page, limit } = req.query;
+    const conditions: any[] = [];
+    if (country) conditions.push(eq(shippingRoutes.countryCode, String(country).trim().toUpperCase()));
+    if (originSector) conditions.push(eq(shippingRoutes.originSectorId, String(originSector)));
+    if (destinationSector) conditions.push(eq(shippingRoutes.destinationSectorId, String(destinationSector)));
+    if (active !== undefined) conditions.push(eq(shippingRoutes.isActive, active === 'true'));
+
+    const emptyPage = () => res.json({ success: true, data: [], pagination: { total: 0, page: 1, limit: Number(limit) || 50, totalPages: 0 } });
+
+    if (region) {
+      const regionSectorRows = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(eq(shippingSectors.regionId, String(region)));
+      const sectorIds = regionSectorRows.map((r: any) => r.id);
+      if (sectorIds.length === 0) return emptyPage();
+      conditions.push(or(inArray(shippingRoutes.originSectorId, sectorIds), inArray(shippingRoutes.destinationSectorId, sectorIds)));
+    }
+    if (originRegion) {
+      const rows = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(eq(shippingSectors.regionId, String(originRegion)));
+      const ids = rows.map((r: any) => r.id);
+      if (ids.length === 0) return emptyPage();
+      conditions.push(inArray(shippingRoutes.originSectorId, ids));
+    }
+    if (destinationRegion) {
+      const rows = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(eq(shippingSectors.regionId, String(destinationRegion)));
+      const ids = rows.map((r: any) => r.id);
+      if (ids.length === 0) return emptyPage();
+      conditions.push(inArray(shippingRoutes.destinationSectorId, ids));
+    }
+    if (q && String(q).trim()) {
+      const term = `%${String(q).trim()}%`;
+      const matchingSectors = await db.select({ id: shippingSectors.id }).from(shippingSectors).where(sql`${shippingSectors.name} ILIKE ${term}`);
+      const ids = matchingSectors.map((r: any) => r.id);
+      if (ids.length === 0) return emptyPage();
+      conditions.push(or(inArray(shippingRoutes.originSectorId, ids), inArray(shippingRoutes.destinationSectorId, ids)));
+    }
+
+    if (service) {
+      conditions.push(sql`EXISTS (SELECT 1 FROM shipping_route_rates srr WHERE srr.route_id = ${shippingRoutes.id} AND srr.service_id = ${String(service)} AND srr.is_active = true)`);
+    } else if (hasRate === 'true') {
+      conditions.push(sql`EXISTS (SELECT 1 FROM shipping_route_rates srr WHERE srr.route_id = ${shippingRoutes.id} AND srr.is_active = true)`);
+    } else if (hasRate === 'false') {
+      conditions.push(sql`NOT EXISTS (SELECT 1 FROM shipping_route_rates srr WHERE srr.route_id = ${shippingRoutes.id} AND srr.is_active = true)`);
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : sql`true`;
+    const pageNum = Math.max(1, Number(page) || 1);
+    const limitNum = Math.min(200, Math.max(1, Number(limit) || 50));
+    const offset = (pageNum - 1) * limitNum;
+
+    const [rows, totalRows] = await Promise.all([
+      db.select().from(shippingRoutes).where(whereClause)
+        .orderBy(asc(shippingRoutes.countryCode), asc(shippingRoutes.originSectorId), asc(shippingRoutes.destinationSectorId))
+        .limit(limitNum).offset(offset),
+      db.select({ count: sql<number>`count(*)::int` }).from(shippingRoutes).where(whereClause),
+    ]);
+
+    const total = totalRows[0]?.count || 0;
+
+    // FASE D15-B: enriquece a página atual (nunca as 1.521 de uma vez) com
+    // nome dos setores e quais serviços já têm tarifa ATIVA — sem isso o
+    // painel admin não teria como mostrar "Bissau | Gabú | ... | Standard:
+    // Não configurado" sem N+1 chamadas por linha. Continua sendo a MESMA
+    // rota/endpoint — só o payload ganhou campos a mais (nunca remove nada
+    // do formato já usado pelo teste D15-A).
+    const sectorIds = Array.from(new Set(rows.flatMap((r: any) => [r.originSectorId, r.destinationSectorId])));
+    const routeIds = rows.map((r: any) => r.id);
+    const [sectorRows, configuredPairs] = await Promise.all([
+      sectorIds.length > 0
+        ? db.select({ id: shippingSectors.id, name: shippingSectors.name, regionId: shippingSectors.regionId }).from(shippingSectors).where(inArray(shippingSectors.id, sectorIds))
+        : Promise.resolve([]),
+      routeIds.length > 0
+        ? db.select({ routeId: shippingRouteRates.routeId, serviceCode: shippingServices.code })
+            .from(shippingRouteRates)
+            .innerJoin(shippingServices, eq(shippingServices.id, shippingRouteRates.serviceId))
+            .where(and(inArray(shippingRouteRates.routeId, routeIds), eq(shippingRouteRates.isActive, true)))
+        : Promise.resolve([]),
+    ]);
+    const sectorMap = new Map((sectorRows as any[]).map((s: any) => [s.id, s]));
+    // Agrega em memória (no máximo `limitNum` rotas × 3 serviços por página —
+    // nunca vale a pena um array_agg em SQL só para isso).
+    const configuredMap = new Map<string, string[]>();
+    for (const pair of configuredPairs as any[]) {
+      const list = configuredMap.get(pair.routeId) || [];
+      if (!list.includes(pair.serviceCode)) list.push(pair.serviceCode);
+      configuredMap.set(pair.routeId, list);
+    }
+
+    const enrichedRows = rows.map((r: any) => ({
+      ...r,
+      originSectorName: sectorMap.get(r.originSectorId)?.name || null,
+      destinationSectorName: sectorMap.get(r.destinationSectorId)?.name || null,
+      configuredServiceCodes: configuredMap.get(r.id) || [],
+    }));
+
+    return res.json({
+      success: true,
+      data: enrichedRows,
+      pagination: { total, page: pageNum, limit: limitNum, totalPages: Math.ceil(total / limitNum) },
+    });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+adminRouter.get('/shipping/routes/:id', requireLogisticsStaff, async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const { id } = req.params;
+    const [route] = await db.select().from(shippingRoutes).where(eq(shippingRoutes.id, id)).limit(1);
+    if (!route) return res.status(404).json({ success: false, error: { code: 'SHIPPING_ROUTE_NOT_FOUND', message: 'Rota não encontrada.' } });
+
+    const [originSector] = await db.select().from(shippingSectors).where(eq(shippingSectors.id, route.originSectorId)).limit(1);
+    const [destinationSector] = await db.select().from(shippingSectors).where(eq(shippingSectors.id, route.destinationSectorId)).limit(1);
+    const rawRates = await db.select().from(shippingRouteRates).where(eq(shippingRouteRates.routeId, id))
+      .orderBy(asc(shippingRouteRates.serviceId), asc(shippingRouteRates.minWeightKg));
+
+    // FASE D15-B: resolve o nome/código do serviço em cada tarifa e devolve
+    // TODOS os serviços do país da rota (mesmo os sem nenhuma tarifa ainda)
+    // — o drawer "Gerenciar" do admin precisa mostrar STANDARD/ECONOMY/
+    // EXPRESS mesmo quando "Não configurado". Sempre a MESMA rota/endpoint,
+    // só com mais campos no payload.
+    const services = await db.select().from(shippingServices).where(eq(shippingServices.countryCode, route.countryCode)).orderBy(asc(shippingServices.code));
+    const serviceMap = new Map(services.map((s: any) => [s.id, s]));
+    const rates = rawRates.map((r: any) => ({
+      ...r,
+      serviceCode: serviceMap.get(r.serviceId)?.code || null,
+      serviceName: serviceMap.get(r.serviceId)?.name || null,
+    }));
+
+    return res.json({ success: true, data: { ...route, originSector, destinationSector, services, rates } });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// PATCH /admin/shipping/routes/:id — SOMENTE isActive/deletedAt. Nunca um
+// DELETE físico (regra 5 do D15-A: rotas históricas não desaparecem).
+adminRouter.patch('/shipping/routes/:id', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { id } = req.params;
+    const { isActive, deletedAt } = req.body ?? {};
+
+    const [existing] = await db.select().from(shippingRoutes).where(eq(shippingRoutes.id, id)).limit(1);
+    if (!existing) throw new AdminRequestError(404, 'Rota não encontrada.');
+
+    const updateData: any = { updatedAt: new Date() };
+    if (isActive !== undefined) updateData.isActive = Boolean(isActive);
+    if (deletedAt !== undefined) updateData.deletedAt = deletedAt ? new Date(deletedAt) : null;
+
+    if (Object.keys(updateData).length === 1) {
+      throw new AdminRequestError(400, 'Nenhum campo válido informado (isActive ou deletedAt).');
+    }
+
+    await db.update(shippingRoutes).set(updateData).where(eq(shippingRoutes.id, id));
+    const [updated] = await db.select().from(shippingRoutes).where(eq(shippingRoutes.id, id)).limit(1);
+
+    await writeRealAudit(req, 'admin.shipping_route.updated', 'shipping_routes', id, updateData);
+    return res.json({ success: true, message: 'Rota atualizada com sucesso.', data: updated });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// POST /admin/shipping/rates — cria tarifa nova. Toda validação roda dentro
+// da MESMA transação da escrita (validateShippingRouteRateInput), nunca
+// confiando no frontend: route/service existem, mesmo país, moeda coerente
+// com o mercado, sem overlap de faixa ativa no mesmo período de vigência.
+adminRouter.post('/shipping/rates', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { routeId, serviceId, minWeightKg, maxWeightKg, amount, currency, isActive, validFrom, validUntil } = req.body ?? {};
+
+    const created = await db.transaction(async (tx: any) => {
+      const validation = await validateShippingRouteRateInput(tx, {
+        routeId: String(routeId || ''),
+        serviceId: String(serviceId || ''),
+        minWeightKg: Number(minWeightKg),
+        maxWeightKg: Number(maxWeightKg),
+        amount: Number(amount),
+        currency: String(currency || ''),
+        validFrom: validFrom || null,
+        validUntil: validUntil || null,
+      });
+      if (!('ok' in validation)) {
+        throw new AdminRequestError(400, validation.error);
+      }
+
+      const newRate = {
+        id: `shprate_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+        routeId: String(routeId),
+        serviceId: String(serviceId),
+        minWeightKg: String(Number(minWeightKg)),
+        maxWeightKg: String(Number(maxWeightKg)),
+        amount: String(Number(amount)),
+        currency: String(currency).trim().toUpperCase(),
+        isActive: isActive !== false,
+        validFrom: validFrom ? new Date(validFrom) : null,
+        validUntil: validUntil ? new Date(validUntil) : null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+      await tx.insert(shippingRouteRates).values(newRate);
+      return newRate;
+    });
+
+    await writeRealAudit(req, 'admin.shipping_route_rate.created', 'shipping_route_rates', created.id, created);
+    return res.status(201).json({ success: true, message: 'Tarifa criada com sucesso.', data: created });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// PATCH /admin/shipping/rates/:id — atualização parcial, revalidando tudo
+// (exclui a própria tarifa da checagem de overlap).
+adminRouter.patch('/shipping/rates/:id', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const { id } = req.params;
+    const body = req.body ?? {};
+
+    const updated = await db.transaction(async (tx: any) => {
+      const [existing] = await tx.select().from(shippingRouteRates).where(eq(shippingRouteRates.id, id)).limit(1);
+      if (!existing) throw new AdminRequestError(404, 'Tarifa não encontrada.');
+
+      const merged = {
+        routeId: body.routeId !== undefined ? String(body.routeId) : existing.routeId,
+        serviceId: body.serviceId !== undefined ? String(body.serviceId) : existing.serviceId,
+        minWeightKg: body.minWeightKg !== undefined ? Number(body.minWeightKg) : Number(existing.minWeightKg),
+        maxWeightKg: body.maxWeightKg !== undefined ? Number(body.maxWeightKg) : Number(existing.maxWeightKg),
+        amount: body.amount !== undefined ? Number(body.amount) : Number(existing.amount),
+        currency: body.currency !== undefined ? String(body.currency) : existing.currency,
+        validFrom: body.validFrom !== undefined ? (body.validFrom || null) : existing.validFrom,
+        validUntil: body.validUntil !== undefined ? (body.validUntil || null) : existing.validUntil,
+      };
+
+      const validation = await validateShippingRouteRateInput(tx, merged, { excludeRateId: id });
+      if (!('ok' in validation)) {
+        throw new AdminRequestError(400, validation.error);
+      }
+
+      const updateData: any = {
+        routeId: merged.routeId,
+        serviceId: merged.serviceId,
+        minWeightKg: String(merged.minWeightKg),
+        maxWeightKg: String(merged.maxWeightKg),
+        amount: String(merged.amount),
+        currency: merged.currency.trim().toUpperCase(),
+        validFrom: merged.validFrom ? new Date(merged.validFrom) : null,
+        validUntil: merged.validUntil ? new Date(merged.validUntil) : null,
+        updatedAt: new Date(),
+      };
+      if (body.isActive !== undefined) updateData.isActive = Boolean(body.isActive);
+
+      await tx.update(shippingRouteRates).set(updateData).where(eq(shippingRouteRates.id, id));
+      const [row] = await tx.select().from(shippingRouteRates).where(eq(shippingRouteRates.id, id)).limit(1);
+      return row;
+    });
+
+    await writeRealAudit(req, 'admin.shipping_route_rate.updated', 'shipping_route_rates', id, updated);
+    return res.json({ success: true, message: 'Tarifa atualizada com sucesso.', data: updated });
+  } catch (error) {
     return sendAdminError(res, error);
   }
 });

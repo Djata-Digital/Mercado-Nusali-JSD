@@ -25,11 +25,12 @@ import { useCountries } from '../hooks/useCountries';
 import { PixPaymentModal } from './PixPaymentModal';
 import { PixService } from '../services/pixService';
 import { convertToBRL, PixTransaction } from '../utils/pixEngine';
-import { ShippingService } from '../services/shippingService';
+import { calculateMultiSellerFreight } from '../utils/multiSellerFreight';
 
 import { OrdersApi } from '../api/clients/OrdersApi';
-import { PaymentsApi } from '../api/clients/PaymentsApi';
 import { BuyerService } from '../services/buyerService';
+import { CreateOrderFromCartResult } from '../api/types';
+import { resolveCheckoutPaymentTarget, resolveCheckoutConfirmationUrl, initiateCheckoutPixPayment } from '../services/checkoutPaymentRouting';
 
 export const CheckoutView: React.FC = () => {
   const navigate = useNavigate();
@@ -147,7 +148,6 @@ export const CheckoutView: React.FC = () => {
 
   // Real Pix Modal state
   const [isPixModalOpen, setIsPixModalOpen] = useState(false);
-  const [activeOrderId, setActiveOrderId] = useState<string>('');
   const [pixInitiateData, setPixInitiateData] = useState<any>(null);
   // Correção crítica (checkout "carrinho vazio" depois de gerar PIX):
   // createOrderFromCart APAGA cartItems na mesma transação que cria o
@@ -156,7 +156,22 @@ export const CheckoutView: React.FC = () => {
   // MODE para ORDER MODE: nunca mais decide "carrinho vazio" olhando para
   // `cart` (que pode legitimamente já estar vazio), e um clique
   // repetido/retry reaproveita o MESMO pedido em vez de criar outro.
-  const [confirmedOrder, setConfirmedOrder] = useState<any>(null);
+  //
+  // Fase M1-D2 — tipado explicitamente com CreateOrderFromCartResult (nunca
+  // mais `any`). O discriminante `mode` é a ÚNICA autoridade usada abaixo
+  // para decidir identidade de pagamento/navegação — nunca inferido por
+  // `orders?.length`/`purchaseGroup?.id`/presença acidental de campos.
+  const [confirmedOrder, setConfirmedOrder] = useState<CreateOrderFromCartResult | null>(null);
+
+  // Fase M1-D2 — alvo de polling do PixPaymentModal, SEMPRE derivado de
+  // `confirmedOrder.mode` (nunca um id guardado separadamente que poderia
+  // ficar dessincronizado). Quando confirmedOrder ainda não existe (modal
+  // fechado, ver PixPaymentModal isOpen=false abaixo), o valor 'legacy'
+  // vazio é inofensivo — o modal nunca chega a usá-lo enquanto isOpen=false.
+  const pixPollTarget: { mode: 'legacy'; orderId: string } | { mode: 'purchase_group'; purchaseGroupId: string } =
+    confirmedOrder?.mode === 'purchase_group'
+      ? { mode: 'purchase_group', purchaseGroupId: confirmedOrder.purchaseGroup.id }
+      : { mode: 'legacy', orderId: confirmedOrder?.id || '' };
 
   const [freightQuote, setFreightQuote] = useState<{
     shippingCost: number;
@@ -178,7 +193,12 @@ export const CheckoutView: React.FC = () => {
   });
 
   const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || 'BR').toUpperCase();
-  const destCountry = (address.countryCode || address.country || country || 'BR').toUpperCase();
+  // Fase M1-D2.6 — `address.countryCode` removido do fallback: o estado
+  // `address` (DeliveryAddress) só carrega `country` (o mapeamento em
+  // BuyerService.getAddresses -> setAddress nunca preenche countryCode); o
+  // fallback era morto (sempre undefined). O `country` explícito só é
+  // adicionado ao PAYLOAD enviado à API (`{ ...address, countryCode: country }`).
+  const destCountry = (address.country || country || 'BR').toUpperCase();
   const isCrossBorder = originCountry !== destCountry;
   const CARD_PAYMENTS_ENABLED = false;
 
@@ -202,26 +222,29 @@ export const CheckoutView: React.FC = () => {
         }
         return;
       }
-      const totalWeight = cart.reduce((sum, item) => sum + item.product.weightKg! * item.quantity, 0);
-      const res = await ShippingService.calculateFreight({
+      // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
+      // vendedor; cada vendedor é uma entrega/child order independente no
+      // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
+      // calculateMultiSellerFreight agrupa por sellerId e soma 1 cotação
+      // por grupo — NUNCA 1 cotação para o carrinho inteiro (que ignorava
+      // todos os vendedores exceto o do primeiro item). Fail-closed: se
+      // qualquer grupo falhar, o resultado inteiro vem available:false
+      // (nunca um total parcial/subestimado).
+      const aggregated = await calculateMultiSellerFreight(cart, {
         originCountry,
         destinationCountry: destCountry,
-        weightKg: totalWeight,
         currency: orderCurrency,
-        storeId: cart[0]?.product?.storeId || cart[0]?.product?.seller?.storeId,
-        sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
-        productSubtotal: cartTotal,
       });
 
       if (!isMounted) return;
 
-      if (res.success && res.data) {
+      if (aggregated.available) {
         setFreightQuote({
-          shippingCost: res.data.shippingCost,
-          shippingChargedToBuyer: res.data.shippingChargedToBuyer,
-          shippingSellerSubsidy: res.data.shippingSellerSubsidy,
-          estimatedMinDays: res.data.estimatedMinDays,
-          estimatedMaxDays: res.data.estimatedMaxDays,
+          shippingCost: aggregated.shippingCost,
+          shippingChargedToBuyer: aggregated.shippingChargedToBuyer,
+          shippingSellerSubsidy: aggregated.shippingSellerSubsidy,
+          estimatedMinDays: aggregated.estimatedMinDays,
+          estimatedMaxDays: aggregated.estimatedMaxDays,
           available: true,
           loading: false,
         });
@@ -234,7 +257,7 @@ export const CheckoutView: React.FC = () => {
           estimatedMaxDays: 0,
           available: false,
           loading: false,
-          error: res.error?.message || 'Frete não disponível para o endereço informado.',
+          error: aggregated.errorMessage || 'Frete não disponível para o endereço informado.',
         });
       }
     };
@@ -243,6 +266,7 @@ export const CheckoutView: React.FC = () => {
     return () => {
       isMounted = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originCountry, destCountry, cartTotal, orderCurrency]);
 
   const customsDuty = 0; // Removed 8% fake tax - national is 0, international is pending
@@ -318,23 +342,37 @@ export const CheckoutView: React.FC = () => {
         setConfirmedOrder(createdOrder);
       }
 
+      // Fase M1-D2 — resolveCheckoutPaymentTarget é a ÚNICA função que lê
+      // `createdOrder.mode` para decidir identidade de pagamento/navegação
+      // (nunca orders?.length/purchaseGroup?.id/presença acidental de
+      // campos). Em modo purchase_group, o alvo é SEMPRE purchaseGroup.id —
+      // nenhum child order id é usado como payment id, navigation id ou
+      // retry id, nem aqui nem em src/services/checkoutPaymentRouting.ts.
+      const paymentTarget = resolveCheckoutPaymentTarget(createdOrder);
+
       // 2. Non-PIX payment: navigate directly to confirmation
       if (paymentMethod !== 'pix') {
         clearCart();
         setIsProcessing(false);
-        navigate(`/orders/${createdOrder.id}/confirmation`, { state: { order: createdOrder } });
+        navigate(resolveCheckoutConfirmationUrl(paymentTarget), {
+          // Discrimina em `createdOrder.mode` (não em `paymentTarget.mode`)
+          // para o TypeScript estreitar a união CreateOrderFromCartResult e
+          // liberar o acesso a `createdOrder.purchaseGroup` — os dois campos
+          // `mode` são sempre idênticos por construção (paymentTarget deriva
+          // de createdOrder.mode em resolveCheckoutPaymentTarget).
+          state: createdOrder.mode === 'purchase_group' ? { purchaseGroup: createdOrder.purchaseGroup } : { order: createdOrder },
+        });
         return;
       }
 
-      // 3. PIX payment: Initiate Asaas Payment via POST /api/v1/payments/initiate
-      // (idempotente no backend: uma segunda chamada para o mesmo
-      // orderId+provider reaproveita o payment pendente existente, nunca
-      // cria um segundo — ver paymentService.ts)
-      const payRes = await PaymentsApi.initiate({
-        orderId: createdOrder.id,
-        method: 'pix',
-        provider: 'asaas',
-      });
+      // 3. PIX payment: initiateCheckoutPixPayment roteia SEMPRE pelo mode
+      // (legacy -> POST /payments/initiate; purchase_group -> SEMPRE POST
+      // /payments/purchase-groups/:purchaseGroupId/initiate) — inclusive em
+      // retry, já que paymentTarget é recalculado a partir do MESMO
+      // createdOrder.mode a cada tentativa. Ambos os caminhos já são
+      // idempotentes NO BACKEND (paymentService.ts) — nenhuma idempotência
+      // financeira nova foi implementada aqui.
+      const payRes = await initiateCheckoutPixPayment(paymentTarget, { method: 'pix', provider: 'asaas' });
 
       if (!payRes.success || !payRes.data) {
         const errCode = payRes.error?.code || '';
@@ -373,8 +411,9 @@ export const CheckoutView: React.FC = () => {
         return;
       }
 
-      // 4. Open Real Asaas Pix Modal
-      setActiveOrderId(createdOrder.id);
+      // 4. Open Real Asaas Pix Modal — o modal deriva o alvo de polling
+      // (pollTarget) direto de confirmedOrder no render abaixo, nunca de um
+      // id guardado separadamente aqui.
       setPixInitiateData(payRes.data);
       setIsPixModalOpen(true);
       setIsProcessing(false);
@@ -386,10 +425,20 @@ export const CheckoutView: React.FC = () => {
     }
   };
 
-  const handlePixPaymentSuccess = (updatedOrder: any) => {
+  // Fase M1-D2 — a navegação NUNCA decide o modo pelo shape de `freshData`
+  // (o objeto recém-lido pelo polling do modal): a autoridade é sempre
+  // `confirmedOrder.mode`, guardado desde a criação do pedido/group e nunca
+  // alterado entre tentativas. Em purchase_group, a URL usa SEMPRE
+  // purchaseGroup.id — nenhum child order id é aceito aqui, nem como
+  // fallback.
+  const handlePixPaymentSuccess = (freshData: any) => {
     setIsPixModalOpen(false);
     clearCart();
-    navigate(`/orders/${updatedOrder.id || activeOrderId}/confirmation`, { state: { order: updatedOrder } });
+    if (confirmedOrder?.mode === 'purchase_group') {
+      navigate(`/purchase-groups/${confirmedOrder.purchaseGroup.id}/confirmation`, { state: { purchaseGroup: freshData } });
+    } else if (confirmedOrder) {
+      navigate(`/orders/${confirmedOrder.id}/confirmation`, { state: { order: freshData } });
+    }
   };
 
   // Correção pré-piloto (race condition): nunca tratar "carrinho ainda
@@ -437,7 +486,7 @@ export const CheckoutView: React.FC = () => {
         <PixPaymentModal
           isOpen={isPixModalOpen}
           onClose={() => setIsPixModalOpen(false)}
-          orderId={activeOrderId}
+          pollTarget={pixPollTarget}
           paymentData={pixInitiateData}
           onPaymentSuccess={handlePixPaymentSuccess}
         />
@@ -445,12 +494,26 @@ export const CheckoutView: React.FC = () => {
         {!isPixModalOpen && (
           <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-6 text-center space-y-4">
             <ShieldCheck className="w-10 h-10 text-emerald-600 mx-auto" />
+            {/* Fase M1-D2 — em modo purchase_group, os campos de raiz
+                (id/orderNumber/totalAmount/currency) são compatibilidade
+                retroativa do PRIMEIRO child (ver orderService.ts) — nunca
+                representam a compra inteira. A exibição usa
+                purchaseGroup.id/totalAmount/currency, as únicas fontes
+                corretas do valor total e da identidade real da compra. */}
             <div>
-              <h2 className="text-lg font-black text-gray-900">Pedido criado com sucesso</h2>
-              <p className="text-xs text-gray-500 mt-1">Pedido Nº {confirmedOrder.orderNumber || confirmedOrder.id}</p>
+              <h2 className="text-lg font-black text-gray-900">
+                {confirmedOrder.mode === 'purchase_group' ? 'Compra criada com sucesso' : 'Pedido criado com sucesso'}
+              </h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {confirmedOrder.mode === 'purchase_group'
+                  ? `Compra Nº ${confirmedOrder.purchaseGroup.id}`
+                  : `Pedido Nº ${confirmedOrder.orderNumber || confirmedOrder.id}`}
+              </p>
             </div>
             <div className="text-2xl font-black text-gray-900">
-              {formatPrice(Number(confirmedOrder.totalAmount), confirmedOrder.currency).formatted}
+              {confirmedOrder.mode === 'purchase_group'
+                ? formatPrice(Number(confirmedOrder.purchaseGroup.totalAmount), confirmedOrder.purchaseGroup.currency as CurrencyCode).formatted
+                : formatPrice(Number(confirmedOrder.totalAmount), confirmedOrder.currency as CurrencyCode).formatted}
             </div>
 
             {errorMessage ? (
@@ -481,7 +544,7 @@ export const CheckoutView: React.FC = () => {
       <PixPaymentModal
         isOpen={isPixModalOpen}
         onClose={() => setIsPixModalOpen(false)}
-        orderId={activeOrderId}
+        pollTarget={pixPollTarget}
         paymentData={pixInitiateData}
         onPaymentSuccess={handlePixPaymentSuccess}
       />

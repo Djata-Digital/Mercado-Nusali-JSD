@@ -18,11 +18,14 @@ import {
   stores,
   escrowAccounts,
   disputes,
+  purchaseGroups,
+  payments,
 } from '../../../db/schema.js';
 import { eq, and, desc, asc, sql, inArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
+import { InventoryService } from '../inventory/inventoryService.js';
 import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor } from '../shipping/shippingCalculatorService.js';
 import { categories, platformSettings, countries } from '../../../db/schema.js';
 import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
@@ -40,13 +43,106 @@ export interface CreateOrderRequestDTO {
   countryCode?: string;
 }
 
+// Fase M1-D1 — contrato explícito de createOrderFromCart. `CreatedOrder` é
+// exatamente o objeto que insertOrderForGroup() já retornava (nenhum campo
+// novo, nenhum removido) — só nomeado e exportado para que o contrato de
+// resposta pare de ser um objeto anônimo `any`.
+export interface CreatedOrderItem {
+  productId: string;
+  variantId: string | null;
+  productTitle: string;
+  productSku: string | null;
+  variantTitle: string | null;
+  quantity: number;
+  unitPrice: number;
+  subtotal: number;
+  sellerId: string | null;
+  storeId: string | null;
+  productImage: string | null;
+  inventoryId: string;
+  warehouseId: string | null;
+  fulfillmentMode: string;
+}
+
+export interface CreatedOrder {
+  id: string;
+  orderNumber: string;
+  buyerId: string;
+  sellerId: string | null;
+  subtotal: number;
+  shippingFee: number;
+  shippingCost: number;
+  shippingSellerSubsidy: number;
+  shippingMarketplaceSubsidy: number;
+  marketplaceCommission: number;
+  sellerNetAmount: number;
+  totalAmount: number;
+  currency: string;
+  status: string;
+  paymentMethod: string | null;
+  paymentStatus: string;
+  escrowStatus: string;
+  shippingAddress: any;
+  items: CreatedOrderItem[];
+  purchaseGroupId: string | null;
+  createdAt: string;
+}
+
+export interface CreatedPurchaseGroupSummary {
+  id: string;
+  buyerId: string;
+  currency: string;
+  totalAmount: number;
+  status: string;
+}
+
+// Discriminante `mode` reaproveita o MESMO nome/valores já usados em
+// paymentService.ts (resolveFundingPaymentForOrder: `mode: 'legacy' |
+// 'purchase_group'`) para a idêntica distinção — nenhum nome novo
+// inventado. Contrato ADITIVO: todo campo de `CreatedOrder` no nível raiz
+// (id, totalAmount, currency, purchaseGroupId=null, etc.) continua presente
+// em AMBOS os modos, exatamente como antes desta fase — nenhum consumidor
+// legado que ainda lê `result.id`/`result.totalAmount` direto quebra.
+// `purchaseGroup`/`orders` só existem no modo 'purchase_group' — nenhum
+// consumidor novo deve usar `orders[0].id` como identidade financeira do
+// group; a identidade real é `purchaseGroup.id` (== `purchaseGroupId`).
+export type CreateOrderFromCartResult =
+  | (CreatedOrder & { mode: 'legacy' })
+  | (CreatedOrder & { mode: 'purchase_group'; purchaseGroup: CreatedPurchaseGroupSummary; orders: CreatedOrder[] });
+
+/**
+ * Fase M1-D3 — deriva o status logístico consolidado de um pedido a partir
+ * dos status dos seus shipments. Extraída (sem mudança de comportamento) de
+ * buildEnrichedOrder para ser reaproveitada por getPurchaseGroupById — a
+ * tela de confirmação multi-seller precisa do MESMO status de entrega por
+ * child order, e uma segunda cópia divergente da regra seria pior. É pura,
+ * READ-ONLY, sem nenhum efeito financeiro.
+ */
+export function deriveLogisticsStatus(
+  shipmentStatuses: (string | null | undefined)[],
+  fallbackOrderStatus: string | null | undefined
+): string {
+  const statuses = shipmentStatuses.map((s) => (s || '').toUpperCase());
+  if (statuses.length === 0) {
+    return (fallbackOrderStatus || 'PREPARING').toUpperCase();
+  }
+  if (statuses.length === 1) {
+    return (statuses[0] || fallbackOrderStatus || 'PREPARING').toUpperCase();
+  }
+  if (statuses.every((s) => s === 'DELIVERED')) return 'DELIVERED';
+  if (statuses.some((s) => s === 'OUT_FOR_DELIVERY')) return 'OUT_FOR_DELIVERY';
+  if (statuses.some((s) => s === 'IN_TRANSIT')) return 'IN_TRANSIT';
+  if (statuses.some((s) => s === 'SHIPPED')) return 'SHIPPED';
+  return 'READY_TO_SHIP';
+}
+
 export class OrderService {
   // `executor` opcional: permite testar esta função contra um Postgres
   // Docker isolado (mesmo padrão já usado em payoutService/refundService),
   // sem depender do pool singleton getDb() (SSL fixo, incompatível com
   // Docker). Em produção, executor é sempre undefined e o comportamento é
   // idêntico ao anterior.
-  static async createOrderFromCart(data: CreateOrderRequestDTO, executor?: any) {
+  static async createOrderFromCart(data: CreateOrderRequestDTO, executor?: any): Promise<CreateOrderFromCartResult> {
     const db = executor ?? getDb();
     if (!db) {
       throw new Error('Banco de dados indisponível.');
@@ -410,22 +506,21 @@ export class OrderService {
       // explicitamente grava um valor ali depois (hoje não há tela
       // admin/seller para isso — se uma for construída no futuro, vazio deve
       // continuar significando NULL, nunca um percentual "de fábrica").
+      //
+      // FASE B (multi-vendedor) — o bloco abaixo (config compartilhada) é
+      // lido UMA VEZ só, independente de quantos vendedores o carrinho tiver
+      // — nunca duplicado por seller. O cálculo de comissão/frete/financials
+      // em si (que PRECISA ser por vendedor) foi extraído para
+      // computeGroupFinancials, reaproveitada tanto pelo caminho legado
+      // (1 grupo = o carrinho inteiro) quanto pelo caminho novo (1 grupo por
+      // vendedor) — garante que o resultado para 1 vendedor é idêntico,
+      // centavo por centavo, nos dois caminhos.
       let globalDefaultCommissionRate: number | null = null;
       const defaultCommissionRows = await tx.select().from(platformSettings).where(eq(platformSettings.key, 'defaultSellerCommissionPercent')).limit(1);
       if (defaultCommissionRows.length > 0) {
         const parsed = Number(defaultCommissionRows[0].valueJson);
         if (!isNaN(parsed) && parsed >= 0) globalDefaultCommissionRate = parsed;
       }
-
-      let sellerCommissionRate: number | null = null;
-      if (primarySellerId) {
-        const sellerRows = await tx.select().from(sellers).where(eq(sellers.id, primarySellerId)).limit(1);
-        if (sellerRows.length > 0 && sellerRows[0].commissionRate !== null && sellerRows[0].commissionRate !== undefined) {
-          sellerCommissionRate = Number(sellerRows[0].commissionRate);
-        }
-      }
-      // Autoridade do seller, na ausência de comissão específica por categoria.
-      const sellerLevelFallbackRate = sellerCommissionRate ?? globalDefaultCommissionRate;
 
       const categoryIdsInOrder = Array.from(new Set(verifiedItems.map((i) => i.categoryId).filter((c): c is string => Boolean(c))));
       const categoryCommissionMap = new Map<string, number>();
@@ -438,28 +533,15 @@ export class OrderService {
         }
       }
 
-      let marketplaceCommissionPrecomputed = 0;
-      // Só para exibição/auditoria quando não há comissão por categoria em
-      // NENHUM item — o snapshot real do pedido usa o valor calculado por
-      // item de qualquer forma.
-      let sellerCommissionRateForSnapshot: number | null = sellerLevelFallbackRate;
-      for (const item of verifiedItems) {
-        const categoryRate = item.categoryId ? categoryCommissionMap.get(item.categoryId) : undefined;
-        const effectiveRate = categoryRate !== undefined ? categoryRate : sellerLevelFallbackRate;
-        if (effectiveRate === null || effectiveRate === undefined) {
-          throw new Error(
-            `COMMISSION_NOT_CONFIGURED: Não há comissão configurada (nem por categoria, nem por vendedor, nem padrão da plataforma) para o produto "${item.productTitle}". Pedido bloqueado — configure a comissão antes de vender este item.`
-          );
-        }
-        marketplaceCommissionPrecomputed += Math.round((item.subtotal * (effectiveRate / 100)) * 100) / 100;
-      }
-      marketplaceCommissionPrecomputed = Math.round(marketplaceCommissionPrecomputed * 100) / 100;
-
       // orderCurrency já foi resolvida e validada no início da transação —
       // reaproveitada aqui (mesmo nome curto usado no resto da função).
       const currency = orderCurrency;
 
       // Requirement 2: Determine origin from actual inventory allocation (Warehouse/Store) and detect multi-origin
+      // FASE B: esta checagem continua sendo feita sobre TODOS os itens do
+      // carrinho, independente de vendedor — nunca relaxada. Um checkout
+      // multi-vendedor cujos vendedores despacham de países diferentes
+      // continua bloqueado exatamente como hoje.
       const itemOrigins = new Set<string>();
       for (const item of verifiedItems) {
         let itemOrigin: string | null = null;
@@ -498,203 +580,367 @@ export class OrderService {
 
       // destinationCountry já foi resolvido e validado (existe + está
       // ativo) logo no início da transação, antes do loop de itens — reaproveitado aqui.
-
-      // Requirement 6: Calculate real total weight from product/variant weight (NO 0.5kg fallback).
-      // Peso volumétrico (se dimensões + divisor configurado existirem) é
-      // aplicado POR ITEM antes de multiplicar pela quantidade e somar — o
-      // billableWeight de cada parcela, não do pedido inteiro combinado.
       const volumetricDivisor = await getVolumetricDivisor(tx);
-      const totalWeightKg = verifiedItems.reduce((acc, i) => {
-        const { billableWeightKg } = computeBillableWeightKg(i.weightKg, i.dimensionsCm, volumetricDivisor);
-        return acc + billableWeightKg * i.quantity;
-      }, 0);
 
-      // Requirement 2 & 3: Calculate freight via service & BLOCK order if freight rate unavailable
-      const freightRes = await ShippingCalculatorService.calculateFreight({
-        storeId: primaryStoreId || undefined,
-        sellerId: primarySellerId || undefined,
-        originCountry,
-        destinationCountry,
-        weightKg: totalWeightKg,
-        currency,
-        productSubtotal: realSubtotal,
-      }, tx);
+      // FASE B (multi-vendedor) — feature flag fail-closed, MESMO padrão já
+      // usado por autoReleaseEnabled (escrowAutoReleaseService.ts): ausência
+      // ou qualquer valor diferente do boolean literal `true` significa
+      // DESATIVADO. Nunca lido/escrito em nenhum outro lugar deste arquivo.
+      const multiSellerSettingRows = await tx
+        .select({ valueJson: platformSettings.valueJson })
+        .from(platformSettings)
+        .where(eq(platformSettings.key, 'multiSellerCheckoutEnabled'))
+        .limit(1);
+      const multiSellerCheckoutEnabled = multiSellerSettingRows.length > 0 && multiSellerSettingRows[0].valueJson === true;
 
-      if (!freightRes.available) {
-        throw new Error(
-          `SHIPPING_RATE_NOT_AVAILABLE: ${freightRes.errorMessage || 'Frete indisponível para esta localização. Pedido cancelado.'}`
-        );
+      // Com a flag desativada, um carrinho com mais de 1 vendedor distinto é
+      // rejeitado AQUI — antes de qualquer escrita (nenhum INSERT/UPDATE
+      // aconteceu até este ponto) — nunca dividido silenciosamente pelo
+      // caminho legado.
+      const distinctSellerIds = Array.from(new Set(verifiedItems.map((i) => i.sellerId).filter((s): s is string => Boolean(s))));
+      if (!multiSellerCheckoutEnabled && distinctSellerIds.length > 1) {
+        throw new Error('MULTI_SELLER_CHECKOUT_DISABLED: Este carrinho contém produtos de mais de um vendedor, e o checkout multi-vendedor ainda não está habilitado nesta plataforma.');
       }
 
-      const financials = ShippingCalculatorService.calculateOrderFinancials({
-        productSubtotal: realSubtotal,
-        shippingCost: freightRes.shippingCost,
-        shippingChargedToBuyer: freightRes.shippingChargedToBuyer,
-        shippingSellerSubsidy: freightRes.shippingSellerSubsidy,
-        shippingMarketplaceSubsidy: freightRes.shippingMarketplaceSubsidy,
-        // Nunca usado de fato: precomputedCommissionAmount abaixo já é o
-        // valor real (por item, validado — pedido teria sido bloqueado por
-        // COMMISSION_NOT_CONFIGURED se algum item não tivesse comissão).
-        // Só serve de fallback teórico se commissionBase for <= 0.
-        commissionRatePercent: sellerCommissionRateForSnapshot ?? 0,
-        precomputedCommissionAmount: marketplaceCommissionPrecomputed,
-        customsDuty: 0,
-        buyerDiscounts: 0,
-      });
+      /**
+       * Calcula subtotal/peso/comissão/frete/financials de UM grupo de itens
+       * (todos do mesmo vendedor no caminho novo; o carrinho inteiro no
+       * caminho legado) — NUNCA escreve nada, só lê (sellers.commissionRate,
+       * tarifa de frete via ShippingCalculatorService). Reaproveitada pelos
+       * dois caminhos para que o resultado de 1 vendedor seja idêntico,
+       * centavo por centavo, nos dois.
+       */
+      async function computeGroupFinancials(items: typeof verifiedItems, groupSellerId: string | null) {
+        const groupSubtotal = items.reduce((s, i) => s + i.subtotal, 0);
+        const groupStoreId = items.find((i) => i.storeId)?.storeId || null;
+        const groupWeightKg = items.reduce((acc, i) => {
+          const { billableWeightKg } = computeBillableWeightKg(i.weightKg, i.dimensionsCm, volumetricDivisor);
+          return acc + billableWeightKg * i.quantity;
+        }, 0);
 
-      // Generate Order Identifiers
-      const orderId = `ord_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const orderNumber = `NSL-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+        let groupSellerCommissionRate: number | null = null;
+        if (groupSellerId) {
+          const sellerRows = await tx.select().from(sellers).where(eq(sellers.id, groupSellerId)).limit(1);
+          if (sellerRows.length > 0 && sellerRows[0].commissionRate !== null && sellerRows[0].commissionRate !== undefined) {
+            groupSellerCommissionRate = Number(sellerRows[0].commissionRate);
+          }
+        }
+        // Autoridade do seller, na ausência de comissão específica por categoria.
+        const groupFallbackRate = groupSellerCommissionRate ?? globalDefaultCommissionRate;
 
-      // Insert Order Header
-      await tx.insert(orders).values({
-        id: orderId,
-        orderNumber,
-        buyerId: userId,
-        sellerId: primarySellerId,
-        storeId: primaryStoreId,
-        subtotal: String(financials.productSubtotal),
-        shippingFee: String(financials.shippingChargedToBuyer),
-        shippingCost: String(financials.shippingCost),
-        shippingChargedToBuyer: String(financials.shippingChargedToBuyer),
-        shippingSellerSubsidy: String(financials.shippingSellerSubsidy),
-        shippingMarketplaceSubsidy: String(financials.shippingMarketplaceSubsidy),
-        shippingPayer: freightRes.shippingPayer,
-        shippingRateSource: freightRes.rateSource,
-        shippingRateId: freightRes.rateId || null,
-        commissionRateSnapshot: String(financials.commissionRateSnapshot),
-        commissionBase: String(financials.commissionBase),
-        marketplaceCommission: String(financials.marketplaceCommission),
-        sellerNetAmount: String(financials.sellerNetAmount),
-        discountAmount: '0.00',
-        customsDuty: '0.00',
-        totalAmount: String(financials.buyerPaidTotal),
-        currency,
-        status: 'pending_payment',
-        paymentMethod: paymentMethod || null,
-        paymentStatus: 'pending',
-        escrowStatus: 'pending',
-        shippingAddressJson: targetAddress,
-        billingAddressJson: targetAddress,
-        countryCode: destinationCountry,
-        notes: notes || null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
+        let groupCommission = 0;
+        for (const item of items) {
+          const categoryRate = item.categoryId ? categoryCommissionMap.get(item.categoryId) : undefined;
+          const effectiveRate = categoryRate !== undefined ? categoryRate : groupFallbackRate;
+          if (effectiveRate === null || effectiveRate === undefined) {
+            throw new Error(
+              `COMMISSION_NOT_CONFIGURED: Não há comissão configurada (nem por categoria, nem por vendedor, nem padrão da plataforma) para o produto "${item.productTitle}". Pedido bloqueado — configure a comissão antes de vender este item.`
+            );
+          }
+          groupCommission += Math.round((item.subtotal * (effectiveRate / 100)) * 100) / 100;
+        }
+        groupCommission = Math.round(groupCommission * 100) / 100;
 
-      // Insert Order Items
-      for (const item of verifiedItems) {
-        if (!item.inventoryId || !item.fulfillmentMode) {
-          throw new Error(`ALLOCATION_FAILED: Origem de estoque (inventory_id) não alocada para o item "${item.productTitle}".`);
+        const groupFreightRes = await ShippingCalculatorService.calculateFreight({
+          storeId: groupStoreId || undefined,
+          sellerId: groupSellerId || undefined,
+          originCountry,
+          destinationCountry,
+          weightKg: groupWeightKg,
+          currency,
+          productSubtotal: groupSubtotal,
+        }, tx);
+
+        if (!groupFreightRes.available) {
+          throw new Error(
+            `SHIPPING_RATE_NOT_AVAILABLE: ${groupFreightRes.errorMessage || 'Frete indisponível para esta localização. Pedido cancelado.'}`
+          );
         }
 
-        await tx.insert(orderItems).values({
-          id: `oi_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          orderId,
-          productId: item.productId,
-          variantId: item.variantId,
-          productTitle: item.productTitle,
-          productSku: item.productSku,
-          variantTitle: item.variantTitle,
-          quantity: item.quantity,
-          unitPrice: String(item.unitPrice),
-          subtotal: String(item.subtotal),
-          sellerId: item.sellerId,
-          storeId: item.storeId,
-          productImage: item.productImage,
-          attributesJson: item.attributesJson,
-          inventoryId: item.inventoryId,
-          warehouseId: item.warehouseId,
-          fulfillmentMode: item.fulfillmentMode,
-          status: 'pending_preparation',
-          createdAt: new Date(),
+        const groupFinancials = ShippingCalculatorService.calculateOrderFinancials({
+          productSubtotal: groupSubtotal,
+          shippingCost: groupFreightRes.shippingCost,
+          shippingChargedToBuyer: groupFreightRes.shippingChargedToBuyer,
+          shippingSellerSubsidy: groupFreightRes.shippingSellerSubsidy,
+          shippingMarketplaceSubsidy: groupFreightRes.shippingMarketplaceSubsidy,
+          // Nunca usado de fato: precomputedCommissionAmount abaixo já é o
+          // valor real (por item, validado — pedido teria sido bloqueado por
+          // COMMISSION_NOT_CONFIGURED se algum item não tivesse comissão).
+          // Só serve de fallback teórico se commissionBase for <= 0.
+          commissionRatePercent: groupFallbackRate ?? 0,
+          precomputedCommissionAmount: groupCommission,
+          customsDuty: 0,
+          buyerDiscounts: 0,
         });
+
+        return { financials: groupFinancials, freightRes: groupFreightRes, storeId: groupStoreId };
       }
 
-      // Insert Order Status History
-      await tx.insert(orderStatusHistory).values({
-        id: `osh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        orderId,
-        previousStatus: null,
-        newStatus: 'pending_payment',
-        reason: 'Pedido criado no checkout aguardando pagamento.',
-        changedBy: userId,
-        createdAt: new Date(),
-      });
+      /**
+       * Grava UM order filho (orders + order_items + orderStatusHistory +
+       * stock_reservations + inventory + inventory_movements) a partir de um
+       * grupo já calculado por computeGroupFinancials — nunca decide
+       * valores, só persiste.
+       */
+      async function insertOrderForGroup(
+        items: typeof verifiedItems,
+        groupSellerId: string | null,
+        groupStoreId: string | null,
+        financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>,
+        freightRes: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>,
+        purchaseGroupId: string | null
+      ) {
+        const orderId = `ord_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const orderNumber = `NSL-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
-      // Reserve Stock: Create stock_reservations, update inventory.quantityReserved, record inventoryMovements
-      const expiresAt = new Date();
-      expiresAt.setMinutes(expiresAt.getMinutes() + 30);
+        await tx.insert(orders).values({
+          id: orderId,
+          orderNumber,
+          buyerId: userId,
+          sellerId: groupSellerId,
+          storeId: groupStoreId,
+          purchaseGroupId,
+          subtotal: String(financials.productSubtotal),
+          shippingFee: String(financials.shippingChargedToBuyer),
+          shippingCost: String(financials.shippingCost),
+          shippingChargedToBuyer: String(financials.shippingChargedToBuyer),
+          shippingSellerSubsidy: String(financials.shippingSellerSubsidy),
+          shippingMarketplaceSubsidy: String(financials.shippingMarketplaceSubsidy),
+          shippingPayer: freightRes.shippingPayer,
+          shippingRateSource: freightRes.rateSource,
+          shippingRateId: freightRes.rateId || null,
+          commissionRateSnapshot: String(financials.commissionRateSnapshot),
+          commissionBase: String(financials.commissionBase),
+          marketplaceCommission: String(financials.marketplaceCommission),
+          sellerNetAmount: String(financials.sellerNetAmount),
+          discountAmount: '0.00',
+          customsDuty: '0.00',
+          totalAmount: String(financials.buyerPaidTotal),
+          currency,
+          status: 'pending_payment',
+          paymentMethod: paymentMethod || null,
+          paymentStatus: 'pending',
+          escrowStatus: 'pending',
+          shippingAddressJson: targetAddress,
+          billingAddressJson: targetAddress,
+          countryCode: destinationCountry,
+          notes: notes || null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
 
-      for (const item of verifiedItems) {
-        if (!item.inventoryId || !item.fulfillmentMode) {
-          throw new Error(`RESERVATION_FAILED: Origem de estoque (inventory_id) não alocada para a reserva do item "${item.productTitle}".`);
+        // Insert Order Items — SOMENTE os itens deste grupo (nunca de outro vendedor)
+        for (const item of items) {
+          if (!item.inventoryId || !item.fulfillmentMode) {
+            throw new Error(`ALLOCATION_FAILED: Origem de estoque (inventory_id) não alocada para o item "${item.productTitle}".`);
+          }
+
+          await tx.insert(orderItems).values({
+            id: `oi_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            orderId,
+            productId: item.productId,
+            variantId: item.variantId,
+            productTitle: item.productTitle,
+            productSku: item.productSku,
+            variantTitle: item.variantTitle,
+            quantity: item.quantity,
+            unitPrice: String(item.unitPrice),
+            subtotal: String(item.subtotal),
+            sellerId: item.sellerId,
+            storeId: item.storeId,
+            productImage: item.productImage,
+            attributesJson: item.attributesJson,
+            inventoryId: item.inventoryId,
+            warehouseId: item.warehouseId,
+            fulfillmentMode: item.fulfillmentMode,
+            status: 'pending_preparation',
+            createdAt: new Date(),
+          });
         }
 
-        await tx.insert(stockReservations).values({
-          id: `sr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        // Insert Order Status History
+        await tx.insert(orderStatusHistory).values({
+          id: `osh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           orderId,
-          productId: item.productId,
-          variantId: item.variantId,
-          inventoryId: item.inventoryId,
-          warehouseId: item.warehouseId,
-          fulfillmentMode: item.fulfillmentMode,
-          quantity: item.quantity,
-          expiresAt,
-          status: 'active',
+          previousStatus: null,
+          newStatus: 'pending_payment',
+          reason: 'Pedido criado no checkout aguardando pagamento.',
+          changedBy: userId,
           createdAt: new Date(),
         });
 
-        // 2. Increase inventory.quantityReserved (do NOT touch quantityOnHand)
-        await tx
-          .update(inventory)
-          .set({
-            quantityReserved: sql`${inventory.quantityReserved} + ${item.quantity}`,
-            updatedAt: new Date(),
-          })
-          .where(eq(inventory.id, item.inventoryId));
+        // Reserve Stock: Create stock_reservations, update inventory.quantityReserved, record inventoryMovements
+        const expiresAt = new Date();
+        expiresAt.setMinutes(expiresAt.getMinutes() + 30);
 
-        // 3. inventory_movements
-        await tx.insert(inventoryMovements).values({
-          id: `mov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          inventoryId: item.inventoryId,
-          warehouseId: item.warehouseId,
-          productId: item.productId,
-          variantId: item.variantId,
-          type: 'RESERVATION',
-          quantity: -item.quantity,
-          reason: `Reserva para pedido ${orderNumber}`,
-          referenceId: orderId,
-          performedBy: userId,
-          createdAt: new Date(),
-        });
+        for (const item of items) {
+          if (!item.inventoryId || !item.fulfillmentMode) {
+            throw new Error(`RESERVATION_FAILED: Origem de estoque (inventory_id) não alocada para a reserva do item "${item.productTitle}".`);
+          }
+
+          await tx.insert(stockReservations).values({
+            id: `sr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            orderId,
+            productId: item.productId,
+            variantId: item.variantId,
+            inventoryId: item.inventoryId,
+            warehouseId: item.warehouseId,
+            fulfillmentMode: item.fulfillmentMode,
+            quantity: item.quantity,
+            expiresAt,
+            status: 'active',
+            createdAt: new Date(),
+          });
+
+          // 2. Increase inventory.quantityReserved (do NOT touch quantityOnHand)
+          await tx
+            .update(inventory)
+            .set({
+              quantityReserved: sql`${inventory.quantityReserved} + ${item.quantity}`,
+              updatedAt: new Date(),
+            })
+            .where(eq(inventory.id, item.inventoryId));
+
+          // 3. inventory_movements
+          await tx.insert(inventoryMovements).values({
+            id: `mov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+            inventoryId: item.inventoryId,
+            warehouseId: item.warehouseId,
+            productId: item.productId,
+            variantId: item.variantId,
+            type: 'RESERVATION',
+            quantity: -item.quantity,
+            reason: `Reserva para pedido ${orderNumber}`,
+            referenceId: orderId,
+            performedBy: userId,
+            createdAt: new Date(),
+          });
+        }
+
+        return {
+          id: orderId,
+          orderNumber,
+          buyerId: userId,
+          sellerId: groupSellerId,
+          subtotal: financials.productSubtotal,
+          shippingFee: financials.shippingChargedToBuyer,
+          shippingCost: financials.shippingCost,
+          shippingSellerSubsidy: financials.shippingSellerSubsidy,
+          shippingMarketplaceSubsidy: financials.shippingMarketplaceSubsidy,
+          marketplaceCommission: financials.marketplaceCommission,
+          sellerNetAmount: financials.sellerNetAmount,
+          totalAmount: financials.buyerPaidTotal,
+          currency,
+          status: 'pending_payment',
+          paymentMethod: paymentMethod || null,
+          paymentStatus: 'pending',
+          escrowStatus: 'pending',
+          shippingAddress: targetAddress,
+          items,
+          purchaseGroupId,
+          createdAt: new Date().toISOString(),
+        };
       }
 
-      // Clear cart items AFTER successful commit
+      let createdOrders: any[];
+      let purchaseGroupResult: { id: string; buyerId: string; currency: string; totalAmount: number; status: string } | null = null;
+
+      if (!multiSellerCheckoutEnabled) {
+        // ===== CAMINHO LEGADO — comportamento inalterado: 1 grupo = o
+        // carrinho inteiro, sellerId = primarySellerId (mesma variável já
+        // rastreada durante a verificação de itens acima, nunca
+        // recomputada) — nenhum purchase_group é criado. =====
+        const { financials, freightRes, storeId } = await computeGroupFinancials(verifiedItems, primarySellerId);
+        const order = await insertOrderForGroup(verifiedItems, primarySellerId, storeId, financials, freightRes, null);
+        createdOrders = [order];
+      } else {
+        // ===== CAMINHO NOVO (Fase B) — 1 purchase_group + exatamente 1
+        // order por vendedor distinto, mesmo quando há só 1 vendedor. =====
+        const missingSeller = verifiedItems.find((i) => !i.sellerId);
+        if (missingSeller) {
+          throw new Error(`ORDER_ITEM_SELLER_REQUIRED: O produto "${missingSeller.productTitle}" não possui vendedor associado — checkout multi-vendedor exige que todo item tenha um vendedor real.`);
+        }
+
+        const bySeller = new Map<string, typeof verifiedItems>();
+        for (const item of verifiedItems) {
+          const key = item.sellerId as string;
+          if (!bySeller.has(key)) bySeller.set(key, []);
+          bySeller.get(key)!.push(item);
+        }
+
+        // Fase 1: calcula (somente leitura) o financeiro de CADA vendedor
+        // ANTES de qualquer escrita — precisamos da soma para criar o
+        // purchase_group já com o total certo.
+        const groupComputations: Array<{
+          sellerId: string;
+          items: typeof verifiedItems;
+          storeId: string | null;
+          financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>;
+          freightRes: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>;
+        }> = [];
+        for (const [sellerId, items] of bySeller) {
+          const { financials, freightRes, storeId } = await computeGroupFinancials(items, sellerId);
+          groupComputations.push({ sellerId, items, storeId, financials, freightRes });
+        }
+
+        // SUM(order.totalAmount) = purchase_group.totalAmount por construção
+        // (soma dos MESMOS valores já arredondados que viram cada order) —
+        // arredondado de novo só para eliminar ruído de ponto flutuante da
+        // soma em si (nunca recalcula nenhum valor de order).
+        const purchaseGroupTotal = Math.round(groupComputations.reduce((s, g) => s + g.financials.buyerPaidTotal, 0) * 100) / 100;
+        const purchaseGroupId = `pgrp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+        await tx.insert(purchaseGroups).values({
+          id: purchaseGroupId,
+          buyerId: userId,
+          currency,
+          totalAmount: String(purchaseGroupTotal),
+          status: 'pending_payment',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+
+        createdOrders = [];
+        for (const g of groupComputations) {
+          const order = await insertOrderForGroup(g.items, g.sellerId, g.storeId, g.financials, g.freightRes, purchaseGroupId);
+          createdOrders.push(order);
+        }
+
+        purchaseGroupResult = {
+          id: purchaseGroupId,
+          buyerId: userId,
+          currency,
+          totalAmount: purchaseGroupTotal,
+          status: 'pending_payment',
+        };
+      }
+
+      // Clear cart items AFTER all order(s) do checkout foram criados com sucesso.
       await tx.delete(cartItems).where(eq(cartItems.cartId, userCart.id));
 
-      logger.info({ orderId, orderNumber, total: financials.buyerPaidTotal }, 'Order created successfully in PostgreSQL');
+      logger.info(
+        { orderIds: createdOrders.map((o) => o.id), purchaseGroupId: purchaseGroupResult?.id || null, total: createdOrders.reduce((s, o) => s + o.totalAmount, 0) },
+        'Order(s) created successfully in PostgreSQL'
+      );
 
+      if (!purchaseGroupResult) {
+        // Caminho legado: MESMOS campos de sempre (nenhum removido, nenhum
+        // consumidor existente quebra) + `mode: 'legacy'` ADICIONADO (Fase
+        // M1-D1) — discriminante explícito puramente aditivo, para que um
+        // consumidor NOVO nunca precise adivinhar pela ausência de
+        // `purchaseGroup`/`orders`.
+        return { ...createdOrders[0], mode: 'legacy' as const };
+      }
+
+      // Caminho novo: mantém compatibilidade retroativa (todos os campos do
+      // PRIMEIRO order, no nível raiz, exatamente como no formato antigo) e
+      // ADICIONA mode/purchaseGroup/orders — consumidores que ainda ignoram
+      // esses campos extras continuam funcionando sem nenhuma alteração.
       return {
-        id: orderId,
-        orderNumber,
-        buyerId: userId,
-        subtotal: financials.productSubtotal,
-        shippingFee: financials.shippingChargedToBuyer,
-        shippingCost: financials.shippingCost,
-        shippingSellerSubsidy: financials.shippingSellerSubsidy,
-        shippingMarketplaceSubsidy: financials.shippingMarketplaceSubsidy,
-        marketplaceCommission: financials.marketplaceCommission,
-        sellerNetAmount: financials.sellerNetAmount,
-        totalAmount: financials.buyerPaidTotal,
-        currency,
-        status: 'pending_payment',
-        paymentMethod: paymentMethod || null,
-        paymentStatus: 'pending',
-        escrowStatus: 'pending',
-        shippingAddress: targetAddress,
-        items: verifiedItems,
-        createdAt: new Date().toISOString(),
+        ...createdOrders[0],
+        mode: 'purchase_group' as const,
+        purchaseGroup: purchaseGroupResult,
+        orders: createdOrders,
       };
     });
   }
@@ -748,21 +994,9 @@ export class OrderService {
 
     const primaryShipment = shpWithEvents[0] || null;
 
-    let derivedLogisticsStatus = (primaryShipment?.status || ord.status || 'PREPARING').toUpperCase();
-    if (shpWithEvents.length > 1) {
-      const statuses = shpWithEvents.map((s) => (s.status || '').toUpperCase());
-      if (statuses.every((s) => s === 'DELIVERED')) {
-        derivedLogisticsStatus = 'DELIVERED';
-      } else if (statuses.some((s) => s === 'OUT_FOR_DELIVERY')) {
-        derivedLogisticsStatus = 'OUT_FOR_DELIVERY';
-      } else if (statuses.some((s) => s === 'IN_TRANSIT')) {
-        derivedLogisticsStatus = 'IN_TRANSIT';
-      } else if (statuses.some((s) => s === 'SHIPPED')) {
-        derivedLogisticsStatus = 'SHIPPED';
-      } else {
-        derivedLogisticsStatus = 'READY_TO_SHIP';
-      }
-    }
+    // Fase M1-D3 — regra idêntica à anterior, agora via helper compartilhado
+    // deriveLogisticsStatus (reaproveitado por getPurchaseGroupById).
+    const derivedLogisticsStatus = deriveLogisticsStatus(shpWithEvents.map((s) => s.status), ord.status);
 
     return {
       ...ord,
@@ -822,6 +1056,122 @@ export class OrderService {
     return await this.buildEnrichedOrder(db, orderRows[0]);
   }
 
+  /**
+   * Fase M1-D1 — leitura READ-ONLY de um purchase_group para reload/recarregar
+   * a tela de confirmação multi-seller (ex.: /purchase-groups/:id/confirmation).
+   * Ownership NÃO é checada aqui (mesmo padrão de getOrderById/getOrderById
+   * acima — quem chama decide o que fazer com `group.buyerId`; a rota
+   * buyerRoutes.ts é quem recusa acesso a um group de outro buyer).
+   *
+   * Deliberadamente NUNCA inclui: providerRawResponse, idempotencyKey,
+   * qrCode/qrCodeBase64/pix (esses só existem na resposta do PRÓPRIO
+   * initiatePurchaseGroupPayment, que já é idempotente e re-chamável em caso
+   * de reload — nenhuma duplicação de fonte de verdade aqui), nem qualquer
+   * campo de wallet/escrow interno.
+   */
+  static async getPurchaseGroupById(purchaseGroupId: string) {
+    const db = getDb();
+    if (!db) return null;
+
+    const groupRows = await db.select().from(purchaseGroups).where(eq(purchaseGroups.id, purchaseGroupId)).limit(1);
+    const group = groupRows[0];
+    if (!group) return null;
+
+    const childOrders = await db.select().from(orders).where(eq(orders.purchaseGroupId, purchaseGroupId)).orderBy(asc(orders.createdAt));
+    const orderIds = childOrders.map((o: any) => o.id);
+    const sellerIds = [...new Set(childOrders.map((o: any) => o.sellerId).filter((id: any): id is string => !!id))];
+
+    const [itemRows, sellerRows, paymentRows, shipmentRows, activeDisputeRows] = await Promise.all([
+      orderIds.length > 0
+        ? db.select().from(orderItems).where(inArray(orderItems.orderId, orderIds))
+        : Promise.resolve([]),
+      sellerIds.length > 0
+        ? db.select({ id: sellers.id, companyName: sellers.companyName, tradingName: sellers.tradingName }).from(sellers).where(inArray(sellers.id, sellerIds))
+        : Promise.resolve([]),
+      db.select().from(payments).where(eq(payments.purchaseGroupId, purchaseGroupId)).orderBy(desc(payments.createdAt)),
+      // Fase M1-D3 — status de entrega POR child (cada pedido do group tem
+      // shipments independentes). READ-ONLY, nenhum efeito financeiro.
+      orderIds.length > 0
+        ? db.select({ orderId: shipments.orderId, status: shipments.status, trackingNumber: shipments.trackingNumber }).from(shipments).where(inArray(shipments.orderId, orderIds))
+        : Promise.resolve([]),
+      orderIds.length > 0
+        ? db.select({ orderId: disputes.orderId }).from(disputes).where(and(inArray(disputes.orderId, orderIds), inArray(disputes.status, ['open', 'in_mediation'])))
+        : Promise.resolve([]),
+    ]);
+
+    const itemsByOrder = new Map<string, any[]>();
+    for (const item of itemRows as any[]) {
+      const list = itemsByOrder.get(item.orderId) || [];
+      list.push({
+        id: item.id,
+        productId: item.productId,
+        productTitle: item.productTitle,
+        productImage: item.productImage,
+        quantity: item.quantity,
+        unitPrice: Number(item.unitPrice),
+        subtotal: Number(item.subtotal),
+      });
+      itemsByOrder.set(item.orderId, list);
+    }
+    const sellerNameById = new Map<string, string>((sellerRows as any[]).map((s) => [s.id, s.tradingName || s.companyName]));
+
+    const shipmentsByOrder = new Map<string, { status: string | null; trackingNumber: string | null }[]>();
+    for (const s of shipmentRows as any[]) {
+      const list = shipmentsByOrder.get(s.orderId) || [];
+      list.push({ status: s.status, trackingNumber: s.trackingNumber });
+      shipmentsByOrder.set(s.orderId, list);
+    }
+    const orderIdsWithActiveDispute = new Set<string>((activeDisputeRows as any[]).map((d) => d.orderId));
+
+    const ordersOut = (childOrders as any[]).map((o) => {
+      const shp = shipmentsByOrder.get(o.id) || [];
+      return {
+        id: o.id,
+        orderNumber: o.orderNumber,
+        sellerId: o.sellerId,
+        sellerName: o.sellerId ? sellerNameById.get(o.sellerId) || null : null,
+        status: o.status,
+        paymentStatus: o.paymentStatus,
+        escrowStatus: o.escrowStatus,
+        // Fase M1-D3 — status de entrega consolidado deste child (mesma
+        // regra de buildEnrichedOrder) + rastreio + flag de disputa ativa.
+        // A tela de confirmação NUNCA agrega esses status de forma
+        // persistente nem os usa para dinheiro (só apresentação).
+        logisticsStatus: deriveLogisticsStatus(shp.map((s) => s.status), o.status),
+        trackingCode: shp.find((s) => s.trackingNumber)?.trackingNumber || o.trackingCode || null,
+        hasActiveDispute: orderIdsWithActiveDispute.has(o.id),
+        totalAmount: Number(o.totalAmount),
+        currency: o.currency,
+        createdAt: o.createdAt,
+        items: itemsByOrder.get(o.id) || [],
+      };
+    });
+
+    // Estado de pagamento MÍNIMO — nunca o provider raw response, nunca a
+    // idempotencyKey, nunca o QR (ver nota da função). Prioriza o payment
+    // 'primary' (financiamento real do group) sobre um 'candidate' antigo.
+    const primaryPayment = (paymentRows as any[]).find((p) => p.settlementRole === 'primary') || (paymentRows as any[])[0] || null;
+    const payment = primaryPayment
+      ? {
+          status: primaryPayment.status as string,
+          provider: primaryPayment.provider as string | null,
+          method: primaryPayment.method as string,
+          processing: primaryPayment.provider === 'asaas' && !primaryPayment.transactionRef && primaryPayment.status === 'pending',
+        }
+      : null;
+
+    return {
+      id: group.id,
+      buyerId: group.buyerId,
+      currency: group.currency,
+      totalAmount: Number(group.totalAmount),
+      status: group.status,
+      createdAt: group.createdAt,
+      orders: ordersOut,
+      payment,
+    };
+  }
+
   static async confirmDelivery(orderId: string, userId: string, shipmentId?: string) {
     await ShipmentService.confirmDeliveryByBuyer(orderId, userId, shipmentId);
     return this.getOrderById(orderId);
@@ -863,52 +1213,16 @@ export class OrderService {
         createdAt: new Date(),
       });
 
-      // Release active stock reservations and decrement quantityReserved in inventory
-      const activeReservations = await tx
-        .select()
-        .from(stockReservations)
-        .where(and(eq(stockReservations.orderId, orderId), eq(stockReservations.status, 'active')));
-
-      for (const res of activeReservations) {
-        await tx
-          .update(stockReservations)
-          .set({ status: 'released' })
-          .where(eq(stockReservations.id, res.id));
-
-        let invRows;
-        if (res.variantId) {
-          invRows = await tx
-            .select()
-            .from(inventory)
-            .where(and(eq(inventory.productId, res.productId), eq(inventory.variantId, res.variantId)));
-        } else {
-          invRows = await tx.select().from(inventory).where(eq(inventory.productId, res.productId));
-        }
-
-        if (invRows.length > 0) {
-          const inv = invRows[0];
-          await tx
-            .update(inventory)
-            .set({
-              quantityReserved: sql`GREATEST(0, ${inventory.quantityReserved} - ${res.quantity})`,
-              updatedAt: new Date(),
-            })
-            .where(eq(inventory.id, inv.id));
-
-          await tx.insert(inventoryMovements).values({
-            id: `mov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            warehouseId: inv.warehouseId,
-            productId: res.productId,
-            variantId: res.variantId,
-            type: 'RELEASE',
-            quantity: res.quantity,
-            reason: `Cancelamento do pedido ${ord.orderNumber}`,
-            referenceId: orderId,
-            performedBy: userId,
-            createdAt: new Date(),
-          });
-        }
-      }
+      // Libera as reservas ativas do pedido usando o inventoryId EXATO já
+      // persistido em cada stockReservations row — nunca "qualquer
+      // inventory" por productId/variantId (bug corrigido: quando o mesmo
+      // produto tem mais de uma linha de inventory, ex.: SELLER_LOCATION +
+      // NUSALI_HUB, buscar pelo par productId/variantId e pegar a primeira
+      // linha podia liberar a reserva na localização física errada).
+      // InventoryService.releaseStock() já é a implementação correta (usa
+      // res.inventoryId diretamente) e aceita `tx` como executor, então
+      // roda dentro desta mesma transação sem duplicar lógica.
+      await InventoryService.releaseStock(orderId, tx);
     });
 
     return this.getOrderById(orderId);

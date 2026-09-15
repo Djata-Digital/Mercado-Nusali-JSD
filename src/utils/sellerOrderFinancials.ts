@@ -12,7 +12,13 @@
  * (`marketplaceCommission`, `sellerNetAmount`), quando existir, continua sendo exibido.
  */
 export interface SellerOrderFinancialInput {
-  amount: number | string;
+  // Fix (diagnóstico "Produtos (Subtotal): R$ 0,00") — `amount` nunca existiu
+  // em nenhuma camada real do contrato (nem no banco, nem em SellerOrderData,
+  // nem na resposta de GET /seller/orders); o campo autoritativo é
+  // order_items.subtotal, agora exposto por GET /seller/orders como `subtotal`.
+  // Opcional/nullable (mesmo padrão dos demais campos desta interface) para
+  // bater estruturalmente com SellerOrderData sem exigir cast em quem chama.
+  subtotal?: number | string | null;
   commissionRateSnapshot?: number | string | null;
   marketplaceCommission?: number | string | null;
   shippingSellerSubsidy?: number | string | null;
@@ -52,7 +58,10 @@ function toNumberOrNull(v: number | string | null | undefined): number | null {
 }
 
 export function computeSellerOrderFinancialBreakdown(order: SellerOrderFinancialInput): SellerOrderFinancialBreakdown {
-  const subtotal = Number(order.amount) || 0;
+  // Valor autoritativo já persistido em order_items.subtotal — nunca
+  // derivado de totalAmount (que inclui frete) nem recalculado a partir de
+  // unitPrice*quantity aqui (o backend é a única fonte).
+  const subtotal = Number(order.subtotal) || 0;
   const commissionRate = toNumberOrNull(order.commissionRateSnapshot);
   const commissionRateLabel = commissionRate !== null ? `${commissionRate}%` : 'Taxa não registrada';
 

@@ -1,4 +1,5 @@
 import { apiClient, ApiResponse } from '../api/apiClient';
+import { PurchaseGroupDetail } from '../api/types';
 
 export interface BuyerProfile {
   id: string;
@@ -47,12 +48,13 @@ export interface BuyerCoupon {
   isClaimed: boolean;
 }
 
+// Fase M1-C — shape REAL de dispute_messages (nunca mais o mock
+// {sender, senderName, text, timestamp} que não existe em nenhuma tabela).
 export interface BuyerDisputeMessage {
   id: string;
-  sender: 'buyer' | 'seller' | 'mediator';
-  senderName: string;
-  text: string;
-  timestamp: string;
+  senderRole: 'buyer' | 'seller' | 'admin' | 'mediator';
+  message: string;
+  createdAt: string;
 }
 
 export interface BuyerDispute {
@@ -63,9 +65,22 @@ export interface BuyerDispute {
   sellerName: string;
   reason: string;
   description: string;
-  amount: number;
+  // Fase M1-A (B1) — `claimAmount` é o valor ALEGADO pelo comprador ao
+  // abrir a disputa (campo real de disputes.claim_amount); nunca o mesmo
+  // conceito que `escrowAmount` (dinheiro REALMENTE em custódia agora).
+  claimAmount: number;
+  // Dinheiro em custódia AGORA para o order desta disputa —
+  // GET /buyer/disputes já calcula isso a partir de escrow_accounts (nunca
+  // fabricado no frontend). `null` = sem escrow correspondente OU escrow já
+  // não representa custódia (released/refunded) — nunca reaproveitar
+  // claimAmount como se fosse o valor protegido.
+  escrowAmount: number | null;
+  escrowCurrency: string | null;
+  escrowStatus: string | null;
   currency?: string;
-  status: 'open' | 'in_mediation' | 'resolved' | 'closed';
+  // Fase M1-A — corrigido para os valores REAIS de disputes.status
+  // (schema.ts); 'resolved'/'closed' nunca existiram na base real.
+  status: 'open' | 'in_mediation' | 'resolved_buyer' | 'resolved_seller' | 'cancelled';
   date: string;
   messages: BuyerDisputeMessage[];
 }
@@ -200,6 +215,13 @@ export const BuyerService = {
     return apiClient.post('/buyer/orders', data);
   },
 
+  // Fase M1-D1 — leitura da compra multi-seller (para reload da tela de
+  // confirmação, ainda não implementada — M1-D2). Ownership sempre provada
+  // no backend; group de outro buyer nunca é retornado.
+  async getPurchaseGroupById(id: string): Promise<ApiResponse<PurchaseGroupDetail>> {
+    return apiClient.get<PurchaseGroupDetail>(`/buyer/purchase-groups/${id}`);
+  },
+
   async confirmOrderDelivery(id: string): Promise<ApiResponse<any>> {
     return apiClient.post(`/buyer/orders/${id}/confirm-delivery`);
   },
@@ -265,16 +287,18 @@ export const BuyerService = {
     return apiClient.get<BuyerDispute[]>('/buyer/disputes');
   },
 
-  async getDisputeById(id: string): Promise<ApiResponse<any>> {
-    return apiClient.get(`/buyer/disputes/${id}`);
-  },
+  // Fase M1-D1 — getDisputeById REMOVIDO (achado M1-A/M1-C): chamava
+  // GET /buyer/disputes/:id, rota que nunca existiu no backend (dead code
+  // desde antes de qualquer fase auditada); confirmado ZERO consumidores em
+  // todo o frontend (só disputeService.ts o encaminhava, também sem
+  // nenhum chamador real — removido junto, ver disputeService.ts).
 
   async createDispute(data: { orderId: string; reason: string; description: string }): Promise<ApiResponse<any>> {
     return apiClient.post('/buyer/disputes', data);
   },
 
-  async sendDisputeMessage(disputeId: string, text: string): Promise<ApiResponse<any>> {
-    return apiClient.post(`/buyer/disputes/${disputeId}/messages`, { text });
+  async sendDisputeMessage(disputeId: string, message: string): Promise<ApiResponse<BuyerDisputeMessage>> {
+    return apiClient.post(`/buyer/disputes/${disputeId}/messages`, { message });
   },
 
   // 10. Notifications
