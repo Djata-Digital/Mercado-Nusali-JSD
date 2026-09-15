@@ -2255,11 +2255,14 @@ sellerRouter.get('/inventory/transferable', async (req: AuthRequest, res: Respon
       db.select().from(products).where(inArray(products.id, productIds)),
       variantIds.length > 0 ? db.select().from(productVariants).where(inArray(productVariants.id, variantIds)) : Promise.resolve([]),
       flocIds.length > 0 ? db.select().from(fulfillmentLocations).where(inArray(fulfillmentLocations.id, flocIds)) : Promise.resolve([]),
+      // FASE D16-E6.1 — só soma PENDING aqui. IN_TRANSIT já decrementou
+      // fromInventory.quantityOnHand fisicamente (markTransferInTransit) —
+      // somar de novo seria dupla subtração (onHand já reflete a saída).
       db.select({ fromInventoryId: inventoryTransfers.fromInventoryId, qty: inventoryTransfers.quantity })
         .from(inventoryTransfers)
         .where(and(
           inArray(inventoryTransfers.fromInventoryId, inventoryIds),
-          or(eq(inventoryTransfers.status, 'PENDING'), eq(inventoryTransfers.status, 'IN_TRANSIT'))
+          eq(inventoryTransfers.status, 'PENDING')
         )),
     ]);
 
@@ -2353,12 +2356,28 @@ sellerRouter.get('/inventory', async (req: AuthRequest, res: Response) => {
     const productIds = Array.from(new Set(rows.map((r: any) => r.productId)));
     const variantIds = Array.from(new Set(rows.map((r: any) => r.variantId).filter(Boolean))) as string[];
 
-    const [productRows, variantRows] = await Promise.all([
+    // FASE D16-E6.1 — "Meu Estoque" precisa refletir transferências PENDING
+    // ainda comprometidas mas fisicamente na loja: onHand só é decrementado
+    // quando a transferência vira IN_TRANSIT (retirada física real — ver
+    // markTransferInTransit). Por isso soma só PENDING aqui — nunca
+    // IN_TRANSIT, que já saiu de onHand (dupla subtração), mesmo cuidado
+    // já aplicado em GET /inventory/transferable.
+    const inventoryIds = rows.map((r: any) => r.id);
+    const [productRows, variantRows, pendingRows] = await Promise.all([
       productIds.length > 0 ? db.select().from(products).where(inArray(products.id, productIds)) : Promise.resolve([]),
       variantIds.length > 0 ? db.select().from(productVariants).where(inArray(productVariants.id, variantIds)) : Promise.resolve([]),
+      inventoryIds.length > 0
+        ? db.select({ fromInventoryId: inventoryTransfers.fromInventoryId, qty: inventoryTransfers.quantity })
+            .from(inventoryTransfers)
+            .where(and(inArray(inventoryTransfers.fromInventoryId, inventoryIds), eq(inventoryTransfers.status, 'PENDING')))
+        : Promise.resolve([]),
     ]);
     const productMap = new Map((productRows as any[]).map((p: any) => [p.id, p]));
     const variantMap = new Map((variantRows as any[]).map((v: any) => [v.id, v]));
+    const pendingMap = new Map<string, number>();
+    for (const p of pendingRows as any[]) {
+      pendingMap.set(p.fromInventoryId, (pendingMap.get(p.fromInventoryId) || 0) + (Number(p.qty) || 0));
+    }
 
     const enriched = rows.map((r: any) => {
       const product = productMap.get(r.productId);
@@ -2373,6 +2392,7 @@ sellerRouter.get('/inventory', async (req: AuthRequest, res: Response) => {
         size: variant?.size || null,
         capacity: variant?.capacity || null,
         variantAttributesJson: (variant?.attributesJson && typeof variant.attributesJson === 'object') ? variant.attributesJson : null,
+        pendingTransferQuantity: pendingMap.get(r.id) || 0,
       };
     });
 

@@ -460,7 +460,13 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                   const prod = productsList.find((p) => String(p.id) === String(inv.productId));
                   const onHand = Number(inv.quantityOnHand) || 0;
                   const reserved = Number(inv.quantityReserved) || 0;
-                  const available = Math.max(0, onHand - reserved);
+                  // FASE D16-E6.1 — pendingTransferQuantity aqui é só PENDING
+                  // (loja física ainda intacta, mas comprometida). Nunca
+                  // soma IN_TRANSIT: aquele já saiu de onHand (decrementado
+                  // em markTransferInTransit) — somar de novo seria dupla
+                  // subtração do mesmo estoque.
+                  const pending = Number(inv.pendingTransferQuantity) || 0;
+                  const available = Math.max(0, onHand - reserved - pending);
                   const variantLabel = inv.variantId
                     ? formatVariantIdentity({
                         color: inv.color,

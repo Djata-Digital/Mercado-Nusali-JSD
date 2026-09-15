@@ -3,7 +3,7 @@ import {
   inventory, inventoryMovements, stockReservations, products, warehouses, inventoryTransfers, sellers,
   productVariants, fulfillmentLocations, stores, addresses,
 } from '../../../db/schema.js';
-import { eq, and, sql, desc, or } from 'drizzle-orm';
+import { eq, and, sql, desc, or, isNull } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 // FASE D16-E3 — mesma função já usada por GET /seller/fulfillment-locations
 // e pelos writers de inventory de D16-E2, agora também para vincular o
@@ -390,141 +390,239 @@ export class InventoryService {
   }
 
   /**
-   * Cancels a PENDING or IN_TRANSIT transfer request.
-   * Immediately releases committed pending transfer stock.
+   * FASE D16-E6.1 — cancelamento só é permitido a partir de PENDING (a
+   * mercadoria nunca saiu fisicamente da loja nesse estado — o decremento
+   * físico só acontece em markTransferInTransit). A partir de IN_TRANSIT a
+   * retirada física já ocorreu (onHand já decrementado), então cancelar
+   * deixaria de existir um caminho de devolução nesta fase — bloqueado
+   * explicitamente em vez de silenciosamente "esquecer" estoque que já
+   * saiu. RECEIVED continua terminal (like antes). CANCELLED é idempotente
+   * (repetir a chamada não é um erro).
+   *
+   * Lock (`.for('update')`) na linha da transferência: sem ele, uma
+   * corrida real existiria contra markTransferInTransit/confirmHubTransfer
+   * concorrentes (ex.: cancelar exatamente no instante em que a retirada
+   * física é confirmada) — a leitura "solta" antiga poderia ver PENDING e
+   * marcar CANCELLED depois que o estoque já tinha sido fisicamente
+   * decrementado por outra transação, perdendo a rastreabilidade daquele
+   * estoque. Com o lock, as duas transações serializam pela MESMA linha.
    */
   static async cancelTransferToHub(transferId: string, actingId: string, isSeller: boolean = false) {
     const db = getDb();
     if (!db) throw new Error('Banco de dados indisponível.');
 
-    const [trf] = await db.select().from(inventoryTransfers).where(eq(inventoryTransfers.id, transferId)).limit(1);
-    if (!trf) throw new Error(`Transferência ${transferId} não encontrada.`);
+    return await db.transaction(async (tx: any) => {
+      const [trf] = await tx.select().from(inventoryTransfers).where(eq(inventoryTransfers.id, transferId)).for('update').limit(1);
+      if (!trf) throw new Error(`Transferência ${transferId} não encontrada.`);
 
-    if (trf.status === 'RECEIVED') {
-      throw new Error('Transferências já recebidas no HUB não podem ser canceladas.');
-    }
-    if (trf.status === 'CANCELLED') {
-      return { success: true, message: 'Transferência já estava cancelada.' };
-    }
+      if (trf.status === 'RECEIVED') {
+        throw new Error('CANNOT_CANCEL_RECEIVED: Transferências já recebidas no HUB não podem ser canceladas.');
+      }
+      if (trf.status === 'CANCELLED') {
+        return { success: true, message: 'Transferência já estava cancelada.' };
+      }
+      if (trf.status === 'IN_TRANSIT') {
+        throw new Error('CANNOT_CANCEL_IN_TRANSIT: A mercadoria já saiu fisicamente da loja (em trânsito) — não é possível cancelar nesta etapa.');
+      }
 
-    if (isSeller && trf.sellerId !== actingId) {
-      throw new Error('FORBIDDEN: Você não tem permissão para cancelar esta transferência.');
-    }
+      if (isSeller && trf.sellerId !== actingId) {
+        throw new Error('FORBIDDEN: Você não tem permissão para cancelar esta transferência.');
+      }
 
-    await db
-      .update(inventoryTransfers)
-      .set({
-        status: 'CANCELLED',
-      })
-      .where(eq(inventoryTransfers.id, trf.id));
+      // Só chega aqui se status === 'PENDING' — produto nunca saiu
+      // fisicamente da loja, nenhuma mutação de inventory é necessária.
+      await tx
+        .update(inventoryTransfers)
+        .set({
+          status: 'CANCELLED',
+        })
+        .where(eq(inventoryTransfers.id, trf.id));
 
-    return {
-      success: true,
-      message: `Transferência ${trf.trackingCode || trf.id} cancelada com sucesso.`,
-    };
+      return {
+        success: true,
+        message: `Transferência ${trf.trackingCode || trf.id} cancelada com sucesso.`,
+      };
+    });
   }
 
   /**
-   * Marks a transfer as IN_TRANSIT. Only allowed from PENDING status.
-   * Does NOT move physical stock.
+   * FASE D16-E6.1 — PENDING -> IN_TRANSIT agora representa a RETIRADA
+   * FÍSICA real (antes era um rótulo sem efeito de estoque). Decrementa
+   * fromInventory.quantityOnHand EXATAMENTE trf.quantity, dentro de uma
+   * única transação com lock de linha (mesmo padrão `.for('update')` já
+   * usado em requestTransferToHub) tanto na transferência quanto na
+   * inventory de origem — nunca lidas "soltas" fora da tx.
+   *
+   * Idempotência: se a transferência já está IN_TRANSIT (ex.: duplo clique,
+   * ou duas chamadas concorrentes), a segunda chamada NUNCA decrementa de
+   * novo — o lock na linha da transferência serializa as duas, e a segunda
+   * enxerga o status já atualizado assim que a primeira commita.
+   *
+   * Usa SEMPRE trf.fromInventoryId (nunca productId) para localizar a
+   * origem exata — mesmo princípio de sourceInventoryId do D16-E5.
    */
   static async markTransferInTransit(transferId: string, adminUserId: string) {
     const db = getDb();
     if (!db) throw new Error('Banco de dados indisponível.');
 
-    const [trf] = await db.select().from(inventoryTransfers).where(eq(inventoryTransfers.id, transferId)).limit(1);
-    if (!trf) throw new Error(`Transferência ${transferId} não encontrada.`);
+    return await db.transaction(async (tx: any) => {
+      // A/B. localizar e travar a linha da transferência.
+      const [trf] = await tx.select().from(inventoryTransfers).where(eq(inventoryTransfers.id, transferId)).for('update').limit(1);
+      if (!trf) throw new Error(`Transferência ${transferId} não encontrada.`);
 
-    if (trf.status !== 'PENDING') {
-      throw new Error(`Apenas transferências com status "PENDING" podem ser marcadas como em trânsito (Status atual: ${trf.status}).`);
-    }
+      // Idempotência — nunca decrementa duas vezes.
+      if (trf.status === 'IN_TRANSIT') {
+        return {
+          success: true,
+          message: `Transferência ${trf.trackingCode || trf.id} já estava em trânsito.`,
+          alreadyInTransit: true,
+        };
+      }
+      if (trf.status === 'RECEIVED') {
+        throw new Error('CANNOT_MARK_IN_TRANSIT_RECEIVED: Esta transferência já foi recebida no HUB.');
+      }
+      if (trf.status === 'CANCELLED') {
+        throw new Error('CANNOT_MARK_IN_TRANSIT_CANCELLED: Esta transferência foi cancelada.');
+      }
+      if (trf.status !== 'PENDING') {
+        throw new Error(`Apenas transferências com status "PENDING" podem ser marcadas como em trânsito (Status atual: ${trf.status}).`);
+      }
 
-    await db
-      .update(inventoryTransfers)
-      .set({
-        status: 'IN_TRANSIT',
-      })
-      .where(eq(inventoryTransfers.id, trf.id));
+      // D/E. localizar e travar a inventory de origem EXATA (nunca por
+      // productId — sempre trf.fromInventoryId).
+      if (!trf.fromInventoryId) {
+        throw new Error('TRANSFER_SOURCE_MISSING: Esta transferência não tem uma origem de estoque válida.');
+      }
+      const [sourceInv] = await tx.select().from(inventory).where(eq(inventory.id, trf.fromInventoryId)).for('update').limit(1);
+      if (!sourceInv) {
+        throw new Error('SOURCE_INVENTORY_NOT_FOUND: Estoque de origem desta transferência não foi encontrado.');
+      }
 
-    return {
-      success: true,
-      message: `Transferência ${trf.trackingCode || trf.id} marcada como em trânsito com sucesso.`,
-    };
+      // F. defesa em profundidade — mesmas invariantes já validadas na
+      // solicitação (D16-E5), revalidadas aqui porque o tempo passou entre
+      // PENDING e a retirada física.
+      if (sourceInv.sellerId !== trf.sellerId) {
+        throw new Error('SOURCE_INVENTORY_OWNER_MISMATCH: A origem desta transferência não pertence mais ao vendedor esperado.');
+      }
+      if (sourceInv.productId !== trf.productId) {
+        throw new Error('SOURCE_INVENTORY_PRODUCT_MISMATCH: A origem desta transferência não corresponde mais ao produto esperado.');
+      }
+      const sameVariant = trf.variantId ? sourceInv.variantId === trf.variantId : !sourceInv.variantId;
+      if (!sameVariant) {
+        throw new Error('SOURCE_INVENTORY_VARIANT_MISMATCH: A origem desta transferência não corresponde mais à variante esperada.');
+      }
+      if (sourceInv.locationType !== 'SELLER_LOCATION') {
+        throw new Error('SOURCE_INVENTORY_INVALID_LOCATION: A origem desta transferência não é mais uma localização de loja válida.');
+      }
+
+      // G. disponibilidade física suficiente para a retirada.
+      if ((sourceInv.quantityOnHand - sourceInv.quantityReserved) < trf.quantity) {
+        throw new Error(
+          `INSUFFICIENT_STOCK: Estoque físico insuficiente na origem para confirmar a retirada (Em estoque: ${sourceInv.quantityOnHand}, Reservado: ${sourceInv.quantityReserved}, Necessário: ${trf.quantity}).`
+        );
+      }
+
+      // H. decrementa EXATAMENTE trf.quantity — a mercadoria saiu fisicamente da loja.
+      await tx
+        .update(inventory)
+        .set({
+          quantityOnHand: sourceInv.quantityOnHand - trf.quantity,
+          updatedAt: new Date(),
+        })
+        .where(eq(inventory.id, sourceInv.id));
+
+      await tx.insert(inventoryMovements).values({
+        id: `mov_${Date.now()}_pickup_${Math.random().toString(36).substring(2, 5)}`,
+        inventoryId: sourceInv.id,
+        warehouseId: null,
+        productId: trf.productId,
+        variantId: trf.variantId,
+        type: 'TRANSFER_OUT',
+        quantity: -trf.quantity,
+        reason: `Retirada física confirmada para HUB ${trf.toWarehouseId} (Transferência ${trf.trackingCode || trf.id})`,
+        performedBy: adminUserId,
+        createdAt: new Date(),
+      });
+
+      // I. status -> IN_TRANSIT.
+      await tx
+        .update(inventoryTransfers)
+        .set({
+          status: 'IN_TRANSIT',
+        })
+        .where(eq(inventoryTransfers.id, trf.id));
+
+      await InventoryService.syncProductStockSummary(trf.productId, tx);
+
+      return {
+        success: true,
+        message: `Transferência ${trf.trackingCode || trf.id} marcada como em trânsito — retirada física confirmada.`,
+      };
+    });
   }
 
   /**
-   * Confirms receipt of a stock transfer by Admin/Hub staff, moving stock from seller location to Nusali HUB location.
+   * FASE D16-E6.1 — RECEIVED não decrementa mais a loja: a retirada física
+   * (decremento de fromInventory.quantityOnHand) já aconteceu em
+   * markTransferInTransit (PENDING -> IN_TRANSIT). Esta função agora só
+   * incrementa o HUB e marca RECEIVED — exige IN_TRANSIT explicitamente
+   * (nunca aceita PENDING diretamente, que pularia a retirada física).
+   *
+   * Lock (`.for('update')`) na transferência E na linha HUB (existente ou
+   * "nenhuma encontrada" — nesse caso não há linha para travar, mas a
+   * trava na transferência já serializa duas chamadas concorrentes para o
+   * MESMO transferId): sem isso, duas confirmações concorrentes da MESMA
+   * transferência poderiam ambas ler status != RECEIVED antes de qualquer
+   * commit e ambas incrementarem o HUB — com o lock, a segunda só lê a
+   * linha depois que a primeira commitar, vendo RECEIVED e sendo rejeitada.
    */
   static async confirmHubTransfer(transferId: string, adminUserId: string) {
     const db = getDb();
     if (!db) throw new Error('Banco de dados indisponível.');
 
     return await db.transaction(async (tx: any) => {
-      const [trf] = await tx.select().from(inventoryTransfers).where(eq(inventoryTransfers.id, transferId)).limit(1);
+      // B. lock da transferência.
+      const [trf] = await tx.select().from(inventoryTransfers).where(eq(inventoryTransfers.id, transferId)).for('update').limit(1);
       if (!trf) throw new Error(`Transferência ${transferId} não encontrada.`);
 
       if (trf.status === 'RECEIVED') {
-        throw new Error('Esta transferência já foi recebida e processada anteriormente.');
+        throw new Error('CANNOT_RECEIVE_ALREADY_RECEIVED: Esta transferência já foi recebida e processada anteriormente.');
       }
       if (trf.status === 'CANCELLED') {
-        throw new Error('Esta transferência foi cancelada e não pode ser recebida.');
+        throw new Error('CANNOT_RECEIVE_CANCELLED: Esta transferência foi cancelada e não pode ser recebida.');
+      }
+      // C/D. exige IN_TRANSIT explicitamente — nunca aceita PENDING direto
+      // (pular a retirada física deixaria a loja com onHand nunca
+      // decrementado, mesmo com estoque já contabilizado no HUB).
+      if (trf.status !== 'IN_TRANSIT') {
+        throw new Error(`CANNOT_RECEIVE_NOT_IN_TRANSIT: Só é possível confirmar recebimento de transferências em trânsito (Status atual: ${trf.status}). Confirme a retirada física primeiro.`);
       }
 
-      // Find seller inventory
-      const [sellerInv] = await tx
-        .select()
-        .from(inventory)
-        .where(eq(inventory.id, trf.fromInventoryId))
-        .limit(1);
-
-      if (!sellerInv || (sellerInv.quantityOnHand - sellerInv.quantityReserved) < trf.quantity) {
-        throw new Error('Estoque no estabelecimento de origem insuficiente para registrar o recebimento.');
-      }
-
-      // 1. Deduct quantity from seller location
-      const newSellerOnHand = sellerInv.quantityOnHand - trf.quantity;
-      await tx
-        .update(inventory)
-        .set({
-          quantityOnHand: newSellerOnHand,
-          updatedAt: new Date(),
-        })
-        .where(eq(inventory.id, sellerInv.id));
-
-      // Record TRANSFER_OUT movement for seller
-      await tx.insert(inventoryMovements).values({
-        id: `mov_${Date.now()}_out_${Math.random().toString(36).substring(2, 5)}`,
-        inventoryId: sellerInv.id,
-        warehouseId: null,
-        productId: trf.productId,
-        variantId: trf.variantId,
-        type: 'TRANSFER_OUT',
-        quantity: -trf.quantity,
-        reason: `Envio para HUB ${trf.toWarehouseId} (Transferência ${trf.trackingCode || trf.id})`,
-        performedBy: adminUserId,
-        createdAt: new Date(),
-      });
-
-      // 2. Find or create HUB inventory
+      // F. HUB de destino — ownership explícito (produto + variante + seller
+      // + warehouse + locationType), nunca dependendo apenas da invariância
+      // indireta de productId ser único por seller.
       const hubConditions = [
         eq(inventory.productId, trf.productId),
         eq(inventory.locationType, 'NUSALI_HUB'),
         eq(inventory.warehouseId, trf.toWarehouseId),
+        eq(inventory.sellerId, trf.sellerId),
       ];
-      if (trf.variantId) {
-        hubConditions.push(eq(inventory.variantId, trf.variantId));
-      }
+      hubConditions.push(trf.variantId ? eq(inventory.variantId, trf.variantId) : isNull(inventory.variantId));
 
-      let [hubInv] = await tx.select().from(inventory).where(and(...hubConditions)).limit(1);
+      // Lock da linha HUB existente (se houver) ANTES do read-modify-write —
+      // impede duas transferências diferentes para o MESMO produto/variante/
+      // warehouse/seller de perderem incremento uma da outra.
+      let [hubInv] = await tx.select().from(inventory).where(and(...hubConditions)).for('update').limit(1);
+
+      // Origem física correta do HUB (fulfillment_locations do warehouse de
+      // destino) — resolvida sempre, mas só aplicada à linha efetivamente
+      // usada/criada por ESTA transferência, nunca um backfill global de
+      // inventories históricas não relacionadas.
+      const fulfillmentLocation = await ensureWarehouseFulfillmentLocation(trf.toWarehouseId, tx);
 
       let targetHubInvId = hubInv?.id;
       if (!hubInv) {
-        // FASE D16-E3 — inventory HUB NOVO recebe a origem física real
-        // (fulfillment_locations do warehouse de destino), mesmo princípio
-        // já aplicado a SELLER_LOCATION em D16-E2. Nunca faz backfill de uma
-        // linha HUB já existente (ver seção 8 do enunciado) — só a criação
-        // de uma linha nova participa disso, dentro da MESMA transação.
-        const fulfillmentLocation = await ensureWarehouseFulfillmentLocation(trf.toWarehouseId, tx);
+        // FASE D16-E3 — inventory HUB NOVO recebe a origem física real.
         targetHubInvId = `inv_hub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         await tx.insert(inventory).values({
           id: targetHubInvId,
@@ -545,6 +643,10 @@ export class InventoryService {
           .update(inventory)
           .set({
             quantityOnHand: hubInv.quantityOnHand + trf.quantity,
+            // Corrige a fulfillmentLocationId da linha TOCADA por esta
+            // transferência quando ainda ausente/divergente — nunca um
+            // backfill de outras linhas HUB não relacionadas.
+            fulfillmentLocationId: fulfillmentLocation?.id || hubInv.fulfillmentLocationId || null,
             updatedAt: new Date(),
           })
           .where(eq(inventory.id, hubInv.id));
@@ -564,7 +666,7 @@ export class InventoryService {
         createdAt: new Date(),
       });
 
-      // 3. Mark transfer RECEIVED
+      // G. Mark transfer RECEIVED
       await tx
         .update(inventoryTransfers)
         .set({
@@ -573,7 +675,8 @@ export class InventoryService {
         })
         .where(eq(inventoryTransfers.id, trf.id));
 
-      // 4. Sync product stock summary
+      // Sync product stock summary (HUB mudou; loja já tinha sido
+      // sincronizada em markTransferInTransit).
       await InventoryService.syncProductStockSummary(trf.productId, tx);
 
       logger.info({ transferId: trf.id, productId: trf.productId, quantity: trf.quantity }, 'Hub stock transfer confirmed');
