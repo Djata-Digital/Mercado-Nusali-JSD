@@ -87,7 +87,7 @@ import {
   validateAddressSectorAssignment,
   deriveShippingRegionFromSector,
 } from './modules/shipping/shippingGeographyService.js';
-import { listFulfillmentLocationsForSeller } from './modules/logistics/fulfillmentLocationService.js';
+import { listFulfillmentLocationsForSeller, ensureStoreFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -1046,6 +1046,95 @@ sellerRouter.get('/stores', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// FASE D16-E4 — erro de validação de endereço/setor com status/code, mesmo
+// padrão já usado em CartOperationError (buyerRoutes.ts): lançar dentro de
+// uma db.transaction() faz o ROLLBACK acontecer sozinho; a borda HTTP só
+// traduz para { error } na hora de responder.
+class AddressValidationError extends Error {
+  status: number;
+  code: string;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/**
+ * FASE D16-E4 — núcleo reutilizável de "criar um endereço business real para
+ * o usuário autenticado", extraído de POST /seller/addresses para também
+ * poder ser chamado (dentro da MESMA transação) pela criação atômica de
+ * loja com origem operacional. MESMA validação/mapeamento de campos em
+ * ambos os chamadores — nunca uma segunda regra divergente. `executor` é
+ * `db` (chamada avulsa) OU `tx` (dentro da transação de criação de loja).
+ *
+ * Mapeamento de campos (nenhum dado fictício inventado):
+ *   recipientName/street/city -> obrigatórios, exigidos do chamador
+ *   number -> 'S/N' quando ausente (mesmo fallback já usado por este
+ *     endpoint desde antes desta fase — convenção real "Sem Número", nunca
+ *     um valor inventado)
+ *   state -> a própria cidade quando ausente (mesmo fallback pré-existente)
+ *   phone -> string vazia quando ausente (mesmo comportamento pré-existente)
+ *   countryCode -> sempre o país JÁ RESOLVIDO pelo chamador (nunca aceito
+ *     cru do body sem validação, para nunca divergir do país da loja/seller)
+ *   shippingSectorId -> null quando ausente; quando presente, validado via
+ *     validateAddressSectorAssignment (nunca uma segunda regra de país)
+ *   userId, addressType='business' -> sempre controlados pelo chamador
+ *     (sessão autenticada), nunca aceitos do corpo da requisição.
+ */
+async function createBusinessAddressForUser(
+  executor: any,
+  userId: string,
+  input: {
+    recipientName?: string; street?: string; number?: string; complement?: string;
+    neighborhood?: string; city?: string; state?: string; countryCode?: string;
+    zipCode?: string; phone?: string; shippingSectorId?: string | null; isDefault?: boolean;
+  },
+  fallbackCountryCode: string
+): Promise<any> {
+  const {
+    recipientName, street, number, complement, neighborhood, city, state,
+    countryCode: rawCountryCode, zipCode, phone, shippingSectorId, isDefault,
+  } = input;
+
+  if (!recipientName || !String(recipientName).trim() || !street || !String(street).trim() || !city || !String(city).trim()) {
+    throw new AddressValidationError(400, 'MISSING_FIELDS', 'Nome do responsável, rua e cidade são obrigatórios.');
+  }
+
+  const countryCode = String(rawCountryCode || fallbackCountryCode || 'GW').trim().toUpperCase();
+
+  if (shippingSectorId) {
+    const sectorValidation = await validateAddressSectorAssignment(executor, { countryCode, shippingSectorId: String(shippingSectorId) });
+    if (!('ok' in sectorValidation)) {
+      throw new AddressValidationError(400, 'SHIPPING_SECTOR_INVALID', sectorValidation.error);
+    }
+  }
+
+  const newId = `addr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  await executor.insert(addresses).values({
+    id: newId,
+    userId, // NUNCA aceito do corpo — sempre resolvido pelo chamador a partir da sessão autenticada.
+    recipientName: String(recipientName).trim(),
+    street: String(street).trim(),
+    number: String(number || 'S/N').trim(),
+    complement: complement ? String(complement).trim() : null,
+    neighborhood: neighborhood ? String(neighborhood).trim() : null,
+    city: String(city).trim(),
+    state: state ? String(state).trim() : String(city).trim(),
+    countryCode,
+    zipCode: zipCode ? String(zipCode).trim() : null,
+    phone: String(phone || '').trim(),
+    isDefault: Boolean(isDefault),
+    addressType: 'business', // SEMPRE controlado pelo backend — nunca aceito do corpo.
+    shippingSectorId: shippingSectorId ? String(shippingSectorId) : null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  } as any);
+
+  const [inserted] = await executor.select().from(addresses).where(eq(addresses.id, newId)).limit(1);
+  return inserted;
+}
+
 sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -1080,6 +1169,12 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       email: rawEmail,
       businessHoursJson: rawBusinessHoursJson,
       businessHours: rawBusinessHours,
+      // FASE D16-E4 — origem operacional estruturada, opcional e backward-
+      // compatible: quando enviado, a store nasce já com operationalAddressId
+      // real (endereço business + setor validado), criados ATOMICAMENTE com
+      // a própria store. Ausente = comportamento idêntico a antes (nenhum
+      // address criado, operationalAddressId permanece NULL).
+      operationalAddress: rawOperationalAddress,
     } = req.body;
 
     const logoUrl = rawLogoUrl || rawLogo || null;
@@ -1125,7 +1220,7 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
     const storeId = `store_${Date.now()}`;
     const storeSlug = slug || name.trim().toLowerCase().replace(/[^a-z0-9]/g, '-');
 
-    const newStore = {
+    const newStore: any = {
       id: storeId,
       sellerId: seller.id,
       name: name.trim(),
@@ -1138,11 +1233,48 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       addressJson,
       businessHoursJson,
       status: 'active',
+      operationalAddressId: null,
     };
 
-    await db.insert(storesTable).values(newStore);
+    // FASE D16-E4 — criação ATÔMICA de address + store quando o seller já
+    // informa a origem operacional no próprio cadastro (nunca 2 requests
+    // separados como fluxo principal). Endereço criado ANTES da store (FK
+    // stores.operational_address_id -> addresses.id exige que o endereço já
+    // exista); qualquer falha (setor inválido, país divergente, etc.) faz a
+    // TRANSAÇÃO inteira reverter — nunca fica uma store órfã sem endereço
+    // nem um endereço órfão sem store.
+    let operationalAddressRow: any = null;
+    const wantsOperationalAddress = rawOperationalAddress && typeof rawOperationalAddress === 'object';
+
+    if (wantsOperationalAddress) {
+      await db.transaction(async (tx: any) => {
+        // País SEMPRE o da loja já resolvido acima — nunca um país
+        // divergente vindo do corpo do endereço (evita a mesma classe de
+        // bug que validateOperationalAddressGeography já protege no PATCH).
+        operationalAddressRow = await createBusinessAddressForUser(
+          tx,
+          req.user!.id,
+          { ...rawOperationalAddress, countryCode },
+          countryCode
+        );
+        newStore.operationalAddressId = operationalAddressRow.id;
+
+        await tx.insert(storesTable).values(newStore);
+
+        // FASE D16-E4 (seção 9) — como a origem já é válida desde a
+        // criação, a fulfillment_location da store pode existir desde já,
+        // na MESMA transação (ensureStoreFulfillmentLocation já aceita
+        // executor/tx desde D15-C3 — nenhuma mudança nela). Loja criada SEM
+        // origem continua exatamente como antes: location só nasce sob
+        // demanda (GET /seller/fulfillment-locations), nunca aqui.
+        await ensureStoreFulfillmentLocation(storeId, tx);
+      });
+    } else {
+      await db.insert(storesTable).values(newStore);
+    }
 
     const addr = addressJson && typeof addressJson === 'object' ? (addressJson as any) : {};
+    const sectorInfo = operationalAddressRow ? await deriveShippingRegionFromSector(db, operationalAddressRow.shippingSectorId) : null;
     const formattedStoreData = {
       ...newStore,
       logo: logoUrl || '',
@@ -1158,6 +1290,14 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       addressJson,
       businessHours: businessHoursJson,
       businessHoursJson,
+      // FASE D16-E4 — mesmo formato já usado por formatOperationalAddress,
+      // para a UI mostrar "Origem Definida" IMEDIATAMENTE, sem precisar de
+      // um segundo fetch. Região sempre DERIVADA do setor, nunca persistida.
+      operationalAddressId: newStore.operationalAddressId,
+      shippingSectorId: operationalAddressRow?.shippingSectorId || null,
+      shippingSectorName: sectorInfo?.sector?.name || null,
+      shippingRegionId: sectorInfo?.region?.id || null,
+      shippingRegionName: sectorInfo?.region?.name || null,
     };
 
     return res.json({
@@ -1166,6 +1306,9 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       data: formattedStoreData,
     });
   } catch (error: any) {
+    if (error instanceof AddressValidationError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao criar loja.' });
   }
 });
@@ -1434,46 +1577,11 @@ sellerRouter.post('/addresses', async (req: AuthRequest, res: Response) => {
     const seller = await resolveSeller(req);
     if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não cadastrado.' });
 
-    const {
-      recipientName, street, number, complement, neighborhood, city, state,
-      countryCode: rawCountryCode, zipCode, phone, shippingSectorId, isDefault,
-    } = req.body ?? {};
-
-    if (!recipientName || !String(recipientName).trim() || !street || !String(street).trim() || !city || !String(city).trim()) {
-      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'Nome do responsável, rua e cidade são obrigatórios.' } });
-    }
-
-    const countryCode = String(rawCountryCode || seller.countryCode || 'GW').trim().toUpperCase();
-
-    if (shippingSectorId) {
-      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode, shippingSectorId: String(shippingSectorId) });
-      if (!('ok' in sectorValidation)) {
-        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
-      }
-    }
-
-    const newId = `addr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    await db.insert(addresses).values({
-      id: newId,
-      userId: req.user!.id, // NUNCA aceito do corpo — sempre a sessão autenticada.
-      recipientName: String(recipientName).trim(),
-      street: String(street).trim(),
-      number: String(number || 'S/N').trim(),
-      complement: complement ? String(complement).trim() : null,
-      neighborhood: neighborhood ? String(neighborhood).trim() : null,
-      city: String(city).trim(),
-      state: state ? String(state).trim() : String(city).trim(),
-      countryCode,
-      zipCode: zipCode ? String(zipCode).trim() : null,
-      phone: String(phone || '').trim(),
-      isDefault: Boolean(isDefault),
-      addressType: 'business', // SEMPRE controlado pelo backend — nunca aceito do corpo.
-      shippingSectorId: shippingSectorId ? String(shippingSectorId) : null,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    } as any);
-
-    const [inserted] = await db.select().from(addresses).where(eq(addresses.id, newId)).limit(1);
+    // FASE D16-E4 — núcleo extraído para createBusinessAddressForUser,
+    // reutilizado também pela criação atômica de loja com origem
+    // operacional (POST /stores) — mesma validação, mesmo mapeamento de
+    // campos, nunca uma segunda regra divergente.
+    const inserted = await createBusinessAddressForUser(db, req.user!.id, req.body ?? {}, seller.countryCode);
     const sectorInfo = await deriveShippingRegionFromSector(db, inserted.shippingSectorId);
 
     return res.status(201).json({
@@ -1482,6 +1590,9 @@ sellerRouter.post('/addresses', async (req: AuthRequest, res: Response) => {
       data: formatOperationalAddress(inserted, sectorInfo),
     });
   } catch (error: any) {
+    if (error instanceof AddressValidationError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao cadastrar endereço operacional.' });
   }
 });

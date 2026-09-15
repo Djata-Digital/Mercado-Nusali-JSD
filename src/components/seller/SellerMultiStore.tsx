@@ -22,6 +22,7 @@ import { countriesConfig } from '../../utils/currencyUtils';
 import { useCountries } from '../../hooks/useCountries';
 import { uploadService } from '../../services/uploadService';
 import { apiClient } from '../../api/apiClient';
+import { SellerApi } from '../../api/clients/SellerApi';
 import { SellerOperationalAddressManager } from './SellerOperationalAddressManager';
 
 interface SellerMultiStoreProps {
@@ -49,6 +50,8 @@ interface CategoryItem {
   name: string;
   isActive?: boolean;
 }
+
+interface GeoOption { id: string; name: string; code: string; regionId?: string }
 
 interface DaySchedule {
   isOpen: boolean;
@@ -147,6 +150,52 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
   const [banner, setBanner] = useState('');
   const [businessHours, setBusinessHours] = useState<BusinessHoursState>(initialBusinessHours());
 
+  // FASE D16-E4 — geografia operacional (Região/Setor) SÓ para criação de
+  // loja nova (edição de uma loja já existente continua usando o drawer
+  // dedicado SellerOperationalAddressManager, que já lida com múltiplos
+  // endereços salvos). MESMO padrão de SellerOperationalAddressManager.tsx:
+  // `selectedRegionId` é estado SÓ de UI (filtra os setores mostrados) —
+  // NUNCA enviado ao backend; só `shippingSectorId` é de fato persistido.
+  const [geoRegions, setGeoRegions] = useState<GeoOption[]>([]);
+  const [geoSectors, setGeoSectors] = useState<GeoOption[]>([]);
+  const [isLoadingGeo, setIsLoadingGeo] = useState(false);
+  const [selectedRegionId, setSelectedRegionId] = useState('');
+  const [shippingSectorId, setShippingSectorId] = useState('');
+
+  const fetchStoreGeography = async (countryCode: string) => {
+    setIsLoadingGeo(true);
+    try {
+      const [regionsRes, sectorsRes] = await Promise.all([
+        SellerApi.getShippingRegions(countryCode),
+        SellerApi.getShippingSectors(countryCode),
+      ]);
+      // Geografia por setor é OPT-IN — países sem ela devolvem listas
+      // vazias, e o formulário simplesmente não mostra Região/Setor.
+      setGeoRegions(regionsRes.success ? regionsRes.data || [] : []);
+      setGeoSectors(sectorsRes.success ? sectorsRes.data || [] : []);
+    } catch {
+      setGeoRegions([]);
+      setGeoSectors([]);
+    } finally {
+      setIsLoadingGeo(false);
+    }
+  };
+
+  // Trocar país recarrega a geografia correspondente e limpa a seleção
+  // anterior (região/setor de um país nunca fazem sentido para outro) — só
+  // relevante no modo CRIAÇÃO (editingStore não usa estes campos).
+  useEffect(() => {
+    if (isModalOpen && !editingStore && country) {
+      setSelectedRegionId('');
+      setShippingSectorId('');
+      fetchStoreGeography(country);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isModalOpen, editingStore, country]);
+
+  const hasSectorGeography = geoRegions.length > 0;
+  const sectorOptionsForStore = selectedRegionId ? geoSectors.filter((s) => s.regionId === selectedRegionId) : geoSectors;
+
   // Uploading state
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [isUploadingBanner, setIsUploadingBanner] = useState(false);
@@ -164,6 +213,8 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
     setLogo('');
     setBanner('');
     setBusinessHours(initialBusinessHours());
+    setSelectedRegionId('');
+    setShippingSectorId('');
     setIsModalOpen(true);
   };
 
@@ -287,6 +338,20 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
       showToast('Selecione uma categoria válida para a loja.');
       return;
     }
+    // FASE D16-E4 — país com geografia por setor configurada: exige uma
+    // seleção válida de Região + Setor antes de concluir o cadastro (nunca
+    // bloqueia países sem geografia, onde os campos nem aparecem).
+    if (!editingStore && hasSectorGeography && !shippingSectorId) {
+      showToast('Selecione a região e o setor de origem desta loja.');
+      return;
+    }
+    // Endereço físico real é obrigatório para virar uma origem logística
+    // válida — nunca preenchido com um valor inventado (ex.: repetir a
+    // cidade) só para satisfazer a coluna NOT NULL do endereço.
+    if (!editingStore && shippingSectorId && !address.trim()) {
+      showToast('Informe o Endereço Físico para definir esta loja como origem logística.');
+      return;
+    }
 
     const selectedCategoryObj = categoriesList.find((c) => c.id === selectedCategoryId);
     const categoryName = selectedCategoryObj?.name || '';
@@ -339,6 +404,23 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
         openingHours: hoursSummary,
         businessHoursJson: finalBusinessHoursJson,
         addressJson: { phone: phone.trim(), city: city.trim(), address: address.trim(), email: email.trim() },
+        // FASE D16-E4 — quando um setor real foi escolhido, a loja nasce
+        // JÁ com origem operacional estruturada (endereço + setor validados
+        // e associados atomicamente no backend, POST /seller/stores).
+        // Nome/endereço/telefone reaproveitados dos próprios campos deste
+        // formulário — nunca um dado inventado. Ausente = comportamento
+        // idêntico a antes (operationalAddressId permanece NULL).
+        ...(shippingSectorId
+          ? {
+              operationalAddress: {
+                recipientName: name.trim(),
+                street: address.trim(),
+                city: city.trim(),
+                phone: phone.trim(),
+                shippingSectorId,
+              },
+            }
+          : {}),
         exchangePolicy: '',
         warrantyPolicy: '',
         returnPolicy: '',
@@ -608,6 +690,48 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
                   )}
                 </div>
               </div>
+
+              {/* FASE D16-E4 — Região/Setor: SÓ na criação de loja nova (a
+                  edição de uma loja já existente continua no drawer
+                  dedicado "Definir Origem"/SellerOperationalAddressManager).
+                  Região é SOMENTE estado de UI (filtra os setores mostrados
+                  abaixo); só o Setor é de fato enviado ao backend. Ausente
+                  para países sem geografia por setor configurada — nunca
+                  bloqueia o cadastro nesse caso. */}
+              {!editingStore && hasSectorGeography && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 bg-emerald-50/60 border border-emerald-200 rounded-xl">
+                  <div className="sm:col-span-2 flex items-center gap-1.5 text-emerald-800 font-black text-[11px] uppercase tracking-wide">
+                    <MapPin className="w-3.5 h-3.5" /> Origem Logística (Região / Setor) *
+                  </div>
+                  <div>
+                    <label className="block text-gray-700 font-bold mb-1">Região</label>
+                    <select
+                      value={selectedRegionId}
+                      onChange={(e) => { setSelectedRegionId(e.target.value); setShippingSectorId(''); }}
+                      disabled={isLoadingGeo}
+                      className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-bold disabled:opacity-60"
+                    >
+                      <option value="">Todas as regiões</option>
+                      {geoRegions.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-gray-700 font-bold mb-1">Setor *</label>
+                    <select
+                      value={shippingSectorId}
+                      onChange={(e) => setShippingSectorId(e.target.value)}
+                      disabled={isLoadingGeo}
+                      className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-bold disabled:opacity-60"
+                    >
+                      <option value="">Selecione um setor</option>
+                      {sectorOptionsForStore.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </div>
+                  <p className="sm:col-span-2 text-[11px] text-emerald-800">
+                    Define a origem física real desta loja para cálculo de frete e escolha de estoque — necessário porque {countriesConfig[country]?.name || country} já tem geografia de setores configurada.
+                  </p>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
