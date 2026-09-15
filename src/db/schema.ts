@@ -458,8 +458,19 @@ export const warehouses = pgTable('warehouses', {
   managerName: varchar('manager_name', { length: 255 }),
   staffCount: integer('staff_count').default(1),
   status: varchar('status', { length: 50 }).notNull().default('active'),
+  // FASE D16-E3 — origem geográfica estruturada do HUB, mesmo princípio já
+  // usado por addresses.shippingSectorId: nullable/opt-in (países sem
+  // geografia por setor continuam funcionando com isto sempre NULL, nenhum
+  // warehouse histórico exige backfill), ON DELETE RESTRICT (um setor usado
+  // por algum warehouse nunca pode ser removido fisicamente — só
+  // desativado). Deliberadamente SEM um shippingRegionId paralelo: a região
+  // é SEMPRE derivada de shipping_sectors.region_id na leitura (mesma regra
+  // de addresses/fulfillment_locations) — nunca duas fontes divergentes.
+  shippingSectorId: varchar('shipping_sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (table) => ({
+  warehouses_shipping_sector_idx: index('warehouses_shipping_sector_idx').on(table.shippingSectorId),
+}));
 
 export const inventory = pgTable('inventory', {
   id: varchar('id', { length: 255 }).primaryKey(),

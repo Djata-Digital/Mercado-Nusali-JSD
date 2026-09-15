@@ -2,6 +2,10 @@ import { getDb } from '../../../db/index.js';
 import { inventory, inventoryMovements, stockReservations, products, warehouses, inventoryTransfers, sellers } from '../../../db/schema.js';
 import { eq, and, sql, desc, or } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
+// FASE D16-E3 — mesma função já usada por GET /seller/fulfillment-locations
+// e pelos writers de inventory de D16-E2, agora também para vincular o
+// inventory HUB NOVO à origem física real do warehouse de destino.
+import { ensureWarehouseFulfillmentLocation } from '../logistics/fulfillmentLocationService.js';
 
 export class InventoryService {
   /**
@@ -420,6 +424,12 @@ export class InventoryService {
 
       let targetHubInvId = hubInv?.id;
       if (!hubInv) {
+        // FASE D16-E3 — inventory HUB NOVO recebe a origem física real
+        // (fulfillment_locations do warehouse de destino), mesmo princípio
+        // já aplicado a SELLER_LOCATION em D16-E2. Nunca faz backfill de uma
+        // linha HUB já existente (ver seção 8 do enunciado) — só a criação
+        // de uma linha nova participa disso, dentro da MESMA transação.
+        const fulfillmentLocation = await ensureWarehouseFulfillmentLocation(trf.toWarehouseId, tx);
         targetHubInvId = `inv_hub_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         await tx.insert(inventory).values({
           id: targetHubInvId,
@@ -431,6 +441,7 @@ export class InventoryService {
           quantityOnHand: trf.quantity,
           quantityReserved: 0,
           minimumStockLevel: 0,
+          fulfillmentLocationId: fulfillmentLocation?.id || null,
           createdAt: new Date(),
           updatedAt: new Date(),
         });

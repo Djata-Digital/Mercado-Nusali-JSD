@@ -111,6 +111,11 @@ export class AdminApi {
     return apiClient.post('/admin/warehouses', data);
   }
 
+  // FASE D16-E3 — único campo editável nesta fase é a geografia de setor.
+  static async updateWarehouseShippingSector(id: string, shippingSectorId: string | null): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/warehouses/${id}`, { shippingSectorId });
+  }
+
   // Inventory Transfers & Fulfillment
   static async getInventoryTransfers(): Promise<ApiResponse<any>> {
     return apiClient.get('/admin/inventory/transfers');

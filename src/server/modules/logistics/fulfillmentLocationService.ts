@@ -111,11 +111,18 @@ export async function ensureStoreFulfillmentLocation(storeId: string, executor?:
 
 /**
  * Garante (cria ou atualiza) UMA fulfillment_location do tipo
- * NUSALI_WAREHOUSE para o armazém informado — nunca duplica. sellerId fica
- * SEMPRE null (HUB compartilhado). addressId/shippingSectorId ficam SEMPRE
- * null nesta fase: warehouses ainda não tem addressId/shippingSectorId
- * estruturado (confirmado por auditoria — só city/address/countryCode
- * texto livre) — nada é inventado para preencher essa lacuna.
+ * NUSALI_WAREHOUSE para o armazém informado — nunca duplica. sellerId/
+ * storeId/addressId ficam SEMPRE null (HUB compartilhado, nunca um endereço
+ * de usuário — ver auditoria D16-E3: addresses.userId é obrigatória, não
+ * serve para infraestrutura da plataforma).
+ *
+ * FASE D16-E3 — shippingSectorId passa a ser SEMPRE espelhado a partir de
+ * warehouse.shippingSectorId (nullable/opt-in, mesmo princípio de
+ * ensureStoreFulfillmentLocation com stores.operationalAddressId): sempre
+ * refrescado a partir do estado ATUAL do warehouse — nunca uma cópia
+ * congelada que possa divergir silenciosamente depois que o admin muda o
+ * setor. Warehouse sem setor definido (histórico ou opt-out) continua
+ * gerando shippingSectorId=null aqui, exatamente como antes.
  */
 export async function ensureWarehouseFulfillmentLocation(warehouseId: string, executor?: any): Promise<FulfillmentLocationRow> {
   const db = executor ?? getDb();
@@ -127,11 +134,13 @@ export async function ensureWarehouseFulfillmentLocation(warehouseId: string, ex
   const id = deterministicWarehouseLocationId(warehouseId);
   const name = `HUB: ${warehouse.name}`;
   const now = new Date();
+  const shippingSectorId = warehouse.shippingSectorId || null;
 
   const existing = await db.select().from(fulfillmentLocations).where(eq(fulfillmentLocations.warehouseId, warehouseId)).limit(1);
   if (existing.length > 0) {
     await db.update(fulfillmentLocations).set({
       countryCode: warehouse.countryCode,
+      shippingSectorId,
       name,
       updatedAt: now,
     }).where(eq(fulfillmentLocations.id, existing[0].id));
@@ -144,7 +153,7 @@ export async function ensureWarehouseFulfillmentLocation(warehouseId: string, ex
       warehouseId,
       addressId: null,
       countryCode: warehouse.countryCode,
-      shippingSectorId: null,
+      shippingSectorId,
       name,
       isActive: true,
       createdAt: now,

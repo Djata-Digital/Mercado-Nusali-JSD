@@ -137,6 +137,10 @@ export const AdminService = {
     return AdminApi.createWarehouse(data);
   },
 
+  async updateWarehouseShippingSector(id: string, shippingSectorId: string | null): Promise<ApiResponse<any>> {
+    return AdminApi.updateWarehouseShippingSector(id, shippingSectorId);
+  },
+
   async getInventoryTransfers(): Promise<ApiResponse<any>> {
     return AdminApi.getInventoryTransfers();
   },

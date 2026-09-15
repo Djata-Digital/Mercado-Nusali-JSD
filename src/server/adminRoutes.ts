@@ -80,7 +80,14 @@ import { resolveDispute, RefundValidationError } from './modules/payments/refund
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
 import {
   validateShippingRouteRateInput,
+  // FASE D16-E3 — MESMA validação/derivação já usada pelo endereço
+  // operacional do seller (shippingGeographyService.ts): país-do-setor vs
+  // país-do-recurso, setor ativo, região sempre derivada — nunca uma
+  // segunda regra divergente para warehouse.
+  validateAddressSectorAssignment,
+  deriveShippingRegionFromSector,
 } from './modules/shipping/shippingGeographyService.js';
+import { ensureWarehouseFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
 
 export const adminRouter = Router();
 
@@ -2416,14 +2423,33 @@ adminRouter.post('/disputes/:id/resolve', requireDisputeResolvePermission, async
 // ==========================================
 // 6. WAREHOUSES & LOGISTICS HUBS
 // ==========================================
+
+// FASE D16-E3 — read model do warehouse com a geografia de setor SEMPRE
+// derivada em tempo de leitura (mesmo princípio de formatOperationalAddress
+// em sellerRoutes.ts): shippingRegionId/shippingRegionName nunca são uma
+// coluna própria, só o resultado de olhar o setor -> região agora.
+function formatWarehouse(row: any, sectorInfo: { sector: any; region: any } | null) {
+  return {
+    ...row,
+    shippingSectorId: row.shippingSectorId || null,
+    shippingSectorName: sectorInfo?.sector?.name || null,
+    shippingRegionId: sectorInfo?.region?.id || null,
+    shippingRegionName: sectorInfo?.region?.name || null,
+  };
+}
+
 adminRouter.get('/warehouses', async (req: Request, res: Response) => {
   try {
     const db = getDb();
     if (db) {
       const rows = await db.select().from(warehouses).orderBy(desc(warehouses.createdAt));
+      const formatted = await Promise.all(rows.map(async (r: any) => {
+        const sectorInfo = await deriveShippingRegionFromSector(db, r.shippingSectorId);
+        return formatWarehouse(r, sectorInfo);
+      }));
       return res.json({
         success: true,
-        data: rows,
+        data: formatted,
       });
     }
     return res.json({ success: true, data: [] });
@@ -2435,7 +2461,7 @@ adminRouter.get('/warehouses', async (req: Request, res: Response) => {
 adminRouter.post('/warehouses', async (req: Request, res: Response) => {
   try {
     const db = getDb();
-    const { name, code, countryCode, country, city, address, managerName, staffCount } = req.body;
+    const { name, code, countryCode, country, city, address, managerName, staffCount, shippingSectorId } = req.body;
 
     const resolvedCountryCode = (countryCode || country || '').toString().trim().toUpperCase();
 
@@ -2444,6 +2470,19 @@ adminRouter.post('/warehouses', async (req: Request, res: Response) => {
         success: false,
         message: 'Código, Nome, País (countryCode), Cidade e Endereço são obrigatórios.',
       });
+    }
+
+    // FASE D16-E3 — mesma validação/derivação já usada para o endereço
+    // operacional do seller: setor opcional (null é sempre válido — países
+    // sem geografia por setor continuam funcionando), mas quando informado
+    // precisa existir, estar ativo e pertencer ao MESMO país do warehouse.
+    // Nunca confia só no frontend.
+    const cleanShippingSectorId = shippingSectorId ? String(shippingSectorId).trim() : null;
+    if (cleanShippingSectorId && db) {
+      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode: resolvedCountryCode, shippingSectorId: cleanShippingSectorId });
+      if (!('ok' in sectorValidation)) {
+        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+      }
     }
 
     const whId = `wh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -2457,6 +2496,7 @@ adminRouter.post('/warehouses', async (req: Request, res: Response) => {
       managerName: managerName ? String(managerName).trim() : null,
       staffCount: staffCount ? Number(staffCount) : null,
       status: 'active',
+      shippingSectorId: cleanShippingSectorId,
       createdAt: new Date(),
     };
 
@@ -2464,10 +2504,64 @@ adminRouter.post('/warehouses', async (req: Request, res: Response) => {
       await db.insert(warehouses).values(newWh);
     }
 
+    const sectorInfo = db ? await deriveShippingRegionFromSector(db, cleanShippingSectorId) : null;
+
     return res.json({
       success: true,
       message: `HUB Logístico "${name}" cadastrado com sucesso!`,
-      data: newWh,
+      data: formatWarehouse(newWh, sectorInfo),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// FASE D16-E3 — único campo editável nesta fase é a geografia de setor
+// (o objetivo explícito desta fase); demais campos do warehouse continuam
+// sem endpoint de edição, exatamente como antes.
+adminRouter.patch('/warehouses/:id', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+
+    const [existing] = await db.select().from(warehouses).where(eq(warehouses.id, req.params.id)).limit(1);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: { code: 'WAREHOUSE_NOT_FOUND', message: 'Armazém/HUB não encontrado.' } });
+    }
+
+    const { shippingSectorId } = req.body ?? {};
+    if (shippingSectorId === undefined) {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'Nenhum campo editável foi informado (shippingSectorId).' } });
+    }
+
+    // null explícito remove o setor (permitido — compatibilidade/opt-out).
+    const nextShippingSectorId = shippingSectorId ? String(shippingSectorId).trim() : null;
+    if (nextShippingSectorId) {
+      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode: existing.countryCode, shippingSectorId: nextShippingSectorId });
+      if (!('ok' in sectorValidation)) {
+        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+      }
+    }
+
+    await db.transaction(async (tx: any) => {
+      await tx.update(warehouses).set({ shippingSectorId: nextShippingSectorId }).where(eq(warehouses.id, existing.id));
+
+      // FASE D16-E3 (seção 5) — se este warehouse já tem uma
+      // fulfillment_location (ou passa a ter agora), sincroniza o campo
+      // geográfico dela na MESMA transação — nunca deixa a location
+      // existente com um shippingSectorId desatualizado depois que o admin
+      // muda o setor, e nunca deixa o warehouse atualizado com a location
+      // parcialmente sincronizada.
+      await ensureWarehouseFulfillmentLocation(existing.id, tx);
+    });
+
+    const [updated] = await db.select().from(warehouses).where(eq(warehouses.id, existing.id)).limit(1);
+    const sectorInfo = await deriveShippingRegionFromSector(db, updated.shippingSectorId);
+
+    return res.json({
+      success: true,
+      message: 'Geografia do armazém/HUB atualizada com sucesso!',
+      data: formatWarehouse(updated, sectorInfo),
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
