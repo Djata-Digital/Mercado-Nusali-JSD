@@ -207,6 +207,66 @@ export interface MultiVariantSummary {
   lines: Array<{ variantId: string; variant: ProductVariant; quantity: number; lineTotal: number }>;
 }
 
+/**
+ * FASE D16-D3 — galeria PERSISTENTE: todas as imagens gerais do produto MAIS
+ * a imagem de cada cor real ficam sempre visíveis, independente de qual cor
+ * está selecionada no momento. Antes, trocar de cor RECONSTRUÍA a lista
+ * (só a imagem da cor ativa + gerais), fazendo as outras cores "sumirem" da
+ * galeria — esta função corrige isso na fonte, de forma pura.
+ *
+ * Fonte de dados (nunca outra): `productImages` (product.galleryImages) para
+ * as gerais, `variants[].imageUrl` para as de cor — nunca
+ * `availableColors`/`variant.image` (mock-only) nem `variants[0]`.
+ */
+export interface GalleryMediaItem {
+  url: string;
+  type: 'image';
+  source: 'general' | 'variant';
+  /**
+   * Cor associada a esta imagem, só quando o vínculo é INEQUÍVOCO (uma
+   * única cor real usa esta URL entre as variantes ativas). Ambígua (2+
+   * cores compartilhando a mesma URL) ou sem eixo de cor -> undefined,
+   * nunca uma adivinhação.
+   */
+  color?: string;
+}
+
+export function buildPersistentProductGallery(
+  productImages: string[] | undefined | null,
+  variants: ProductVariant[] | undefined | null
+): GalleryMediaItem[] {
+  const result: GalleryMediaItem[] = [];
+  const seenUrls = new Set<string>();
+
+  // 1. Imagens gerais do produto, na ordem existente — sempre primeiro.
+  (productImages || []).forEach((url) => {
+    if (!url || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    result.push({ url, type: 'image', source: 'general' });
+  });
+
+  // 2. Imagens de variante — uma miniatura por URL única, associada à cor
+  // só quando exatamente 1 cor real usa aquela URL.
+  const active = getActiveVariants(variants);
+  const colorsByUrl = new Map<string, Set<string>>();
+  active.forEach((v) => {
+    if (!v.imageUrl) return;
+    if (!colorsByUrl.has(v.imageUrl)) colorsByUrl.set(v.imageUrl, new Set());
+    if (v.color) colorsByUrl.get(v.imageUrl)!.add(v.color);
+  });
+
+  active.forEach((v) => {
+    const url = v.imageUrl;
+    if (!url || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    const colors = colorsByUrl.get(url);
+    const unambiguousColor = colors && colors.size === 1 ? Array.from(colors)[0] : undefined;
+    result.push({ url, type: 'image', source: 'variant', color: unambiguousColor });
+  });
+
+  return result;
+}
+
 export function computeMultiVariantSummary(
   variants: ProductVariant[] | undefined | null,
   variantQuantities: Record<string, number> | undefined | null

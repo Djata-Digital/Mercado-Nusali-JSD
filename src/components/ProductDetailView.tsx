@@ -59,6 +59,7 @@ import {
   getVariantMaxQuantity,
   getSelectionGuardMessage,
   computeMultiVariantSummary,
+  buildPersistentProductGallery,
 } from '../utils/productVariantBuyer';
 
 export const ProductDetailView: React.FC = () => {
@@ -176,12 +177,32 @@ export const ProductDetailView: React.FC = () => {
   // variants[0], nunca uma escolha ambígua entre várias.
   const buyNowSingleLine = multiVariantSummary.lines.length === 1 ? multiVariantSummary.lines[0] : null;
 
-  // Handler for color selection with media index reset
+  // Handler for color selection (thumbnail no painel de opções, D16-C2).
+  // FASE D16-D3 — a galeria agora é PERSISTENTE (todas as cores sempre
+  // visíveis), então trocar de cor não "reseta" a galeria: em vez disso,
+  // navega para a miniatura já existente daquela cor (item 3 do enunciado).
   const handleSelectColor = (colorName: string) => {
     setSelectedColor(colorName);
     // Trocar de cor invalida um tamanho que só existia na cor anterior.
     setSelectedSize((prev) => (getSizesForColor(product?.variants, colorName).includes(prev) ? prev : ''));
-    setSelectedMediaIndex(0);
+    const matchingMediaIndex = mediaItems.findIndex((m: any) => m.color === colorName);
+    setSelectedMediaIndex(matchingMediaIndex >= 0 ? matchingMediaIndex : 0);
+  };
+
+  // FASE D16-D3 (itens 1/2/4 do enunciado) — clicar numa miniatura da
+  // galeria lateral sempre troca a imagem principal; SÓ seleciona uma cor
+  // quando aquela miniatura está vinculada de forma INEQUÍVOCA a uma cor
+  // real (buildPersistentProductGallery nunca marca `color` em imagens
+  // gerais nem em URLs compartilhadas por 2+ cores). Nunca apaga quantidades
+  // de outras cores (não mexe em variantQuantities).
+  const handleSelectMediaThumbnail = (idx: number) => {
+    setSelectedMediaIndex(idx);
+    const item = mediaItems[idx] as any;
+    if (item?.type === 'image' && item.color && item.color !== selectedColor) {
+      const colorName = item.color as string;
+      setSelectedColor(colorName);
+      setSelectedSize((prev) => (getSizesForColor(product?.variants, colorName).includes(prev) ? prev : ''));
+    }
   };
 
   // Estoque: produto simples continua usando product.stock (já é live,
@@ -194,42 +215,30 @@ export const ProductDetailView: React.FC = () => {
     ? (!needsVariantSelection && !isVariantAvailable(activeVariant))
     : currentVariantStock <= 0;
 
-  // Build unified media items array (images + short videos) synchronized with selected color/variant
+  // Build unified media items array (images + short videos). FASE D16-D3 —
+  // a parte de IMAGENS agora é PERSISTENTE: todas as imagens gerais do
+  // produto + a imagem de CADA cor real ficam sempre na lista, independente
+  // de qual cor está selecionada agora (buildPersistentProductGallery,
+  // productVariantBuyer.ts). Nunca mais reconstruída/removida ao trocar de
+  // cor — só a seleção (índice ativo) muda, nunca o conjunto.
   const mediaItems: MediaItem[] = useMemo(() => {
     if (!product) return [];
 
     const items: MediaItem[] = [];
 
-    // 1. Determine images for selected color variation. A imagem da
-    // COR (variant.imageUrl, D16-C2) tem prioridade enquanto aquela cor
-    // estiver selecionada — nunca apaga a galeria geral, só a antecede.
-    let rawImages: string[] = [];
-    if (activeVariant?.galleryImages && activeVariant.galleryImages.length > 0) {
-      rawImages = activeVariant.galleryImages;
-    } else if (selectedColorGroup?.imageUrl) {
-      rawImages = [selectedColorGroup.imageUrl, ...(product.galleryImages || [])];
-    } else if (activeVariant?.imageUrl) {
-      rawImages = [activeVariant.imageUrl, ...(product.galleryImages || [])];
-    } else if (product.galleryImages && product.galleryImages.length > 0) {
-      rawImages = product.galleryImages;
-    } else {
-      rawImages = [product.image];
-    }
+    const persistentImages = buildPersistentProductGallery(product.galleryImages, product.variants);
+    const uniqueImages = persistentImages.length > 0 ? persistentImages : [{ url: product.image, type: 'image' as const, source: 'general' as const }];
 
-    // Deduplicate images while keeping order
-    const uniqueImages: string[] = [];
-    rawImages.forEach((img) => {
-      if (img && !uniqueImages.includes(img)) {
-        uniqueImages.push(img);
-      }
-    });
-
-    uniqueImages.forEach((url, idx) => {
+    uniqueImages.forEach((img, idx) => {
       items.push({
         type: 'image',
-        url,
-        title: `${product.title} - ${selectedColor ? `${selectedColor} - ` : ''}Foto ${idx + 1}`,
-      });
+        url: img.url,
+        title: `${product.title}${img.color ? ` - ${img.color}` : ''} - Foto ${idx + 1}`,
+        // Campo local (fora do tipo global MediaItem) usado só para resolver
+        // a cor ao clicar numa miniatura da galeria (D16-D3) — nunca enviado
+        // a nenhum backend, nunca usado como variantId/SKU.
+        ...(img.color ? { color: img.color } : {}),
+      } as MediaItem);
     });
 
     // 2. Short Videos (from active variant, or base product)
@@ -252,7 +261,7 @@ export const ProductDetailView: React.FC = () => {
             thumbnail:
               typeof vid === 'object' && vid.thumbnail
                 ? vid.thumbnail
-                : uniqueImages[0] || product.image,
+                : uniqueImages[0]?.url || product.image,
           });
         }
       });
@@ -262,7 +271,7 @@ export const ProductDetailView: React.FC = () => {
         url: product.shortVideo.url,
         title: product.shortVideo.title || 'Vídeo Demonstrativo do Produto',
         duration: product.shortVideo.duration || '0:25',
-        thumbnail: product.shortVideo.thumbnail || uniqueImages[0] || product.image,
+        thumbnail: product.shortVideo.thumbnail || uniqueImages[0]?.url || product.image,
       });
     } else if (product.videoUrl) {
       items.push({
@@ -270,12 +279,12 @@ export const ProductDetailView: React.FC = () => {
         url: product.videoUrl,
         title: 'Vídeo Demonstrativo do Produto',
         duration: '0:30',
-        thumbnail: uniqueImages[0] || product.image,
+        thumbnail: uniqueImages[0]?.url || product.image,
       });
     }
 
     return items;
-  }, [product, selectedColorGroup, activeVariant, selectedColor]);
+  }, [product, activeVariant, selectedColor]);
 
   // Dynamic Description and Specs based on selected variant
   const activeDescription = useMemo(() => {
@@ -680,7 +689,7 @@ export const ProductDetailView: React.FC = () => {
                   <button
                     key={idx}
                     type="button"
-                    onClick={() => setSelectedMediaIndex(idx)}
+                    onClick={() => handleSelectMediaThumbnail(idx)}
                     className={`relative w-16 h-16 rounded-lg border-2 overflow-hidden shrink-0 bg-white transition cursor-pointer p-0.5 ${
                       isSelected
                         ? 'border-blue-600 ring-2 ring-blue-500/20 shadow-xs'
