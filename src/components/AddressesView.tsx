@@ -72,19 +72,39 @@ export const AddressesView: React.FC = () => {
     loadAddresses();
   }, []);
 
-  // Carrega Região/Setor sempre que o país do FORMULÁRIO muda — países sem
-  // geografia por setor cadastrada (ex.: BR) simplesmente devolvem listas
-  // vazias, e o formulário não exige/mostra Região/Setor (opt-in por dados,
-  // nunca um `if (country === 'GW')` hardcoded).
-  useEffect(() => {
-    if (!isModalOpen || !formCountry) return;
-    BuyerService.getShippingRegions(formCountry).then((res) => {
-      setRegions(res.success ? res.data || [] : []);
-    }).catch(() => setRegions([]));
-    BuyerService.getShippingSectors(formCountry).then((res) => {
-      setSectors(res.success ? res.data || [] : []);
-    }).catch(() => setSectors([]));
-  }, [isModalOpen, formCountry]);
+  // FASE D16-F2.1 — CORREÇÃO: bug real observado no staging (Região/Setor
+  // nunca apareciam ao abrir "Novo Endereço" com país já GW). A versão
+  // anterior carregava Região/Setor a partir de um useEffect reativo a
+  // [isModalOpen, formCountry] — mesmo padrão que a origem operacional do
+  // SELLER (SellerOperationalAddressManager.tsx) NÃO usa: lá o carregamento
+  // depende só de [storeId, storeCountryCode] (props estáveis), nunca do
+  // modal abrir/fechar. Elimina TODA a categoria de risco "o efeito
+  // reativo não disparou a tempo/na ordem esperada" trocando por chamada
+  // IMPERATIVA disparada diretamente nos 3 pontos reais que precisam dela
+  // (abrir criar, abrir editar, trocar país no select) — o carregamento
+  // agora acontece no MESMO evento que muda o país/abre o modal, nunca
+  // dependente de um efeito reagir depois.
+  const loadGeographyForCountry = async (countryCode: string) => {
+    if (!countryCode) {
+      setRegions([]);
+      setSectors([]);
+      return;
+    }
+    try {
+      const [regionsRes, sectorsRes] = await Promise.all([
+        BuyerService.getShippingRegions(countryCode),
+        BuyerService.getShippingSectors(countryCode),
+      ]);
+      // Geografia por setor é OPT-IN — países sem ela (ex.: BR) simplesmente
+      // devolvem listas vazias, e o formulário não exige/mostra Região/Setor
+      // (opt-in por dados, nunca um `if (country === 'GW')` hardcoded).
+      setRegions(regionsRes.success ? regionsRes.data || [] : []);
+      setSectors(sectorsRes.success ? sectorsRes.data || [] : []);
+    } catch {
+      setRegions([]);
+      setSectors([]);
+    }
+  };
 
   const hasSectorGeography = regions.length > 0;
   const sectorOptions = selectedRegionId ? sectors.filter((s) => s.regionId === selectedRegionId) : sectors;
@@ -107,9 +127,16 @@ export const AddressesView: React.FC = () => {
     setEditingAddressId(null);
     resetForm();
     setIsModalOpen(true);
+    // FASE D16-F2.1 — dispara a busca de geografia AGORA, no mesmo evento
+    // que abre o modal, com o país que realmente vai ser usado
+    // (selectedCountry) — nunca depende de um efeito reativo disparar
+    // depois. Corrige o bug real do staging: modal abria com país já GW
+    // (valor inicial) e Região/Setor nunca apareciam.
+    loadGeographyForCountry(selectedCountry);
   };
 
   const handleOpenEdit = (addr: any) => {
+    const addrCountry = (addr.country || addr.countryCode || selectedCountry) as CountryCode;
     setEditingAddressId(addr.id);
     setFormRecipient(addr.recipientName || '');
     setFormStreet(addr.street || '');
@@ -117,7 +144,7 @@ export const AddressesView: React.FC = () => {
     setFormComplement(addr.complement || '');
     setFormCity(addr.city || '');
     setFormZip(addr.zipCode || '');
-    setFormCountry((addr.country || addr.countryCode || selectedCountry) as CountryCode);
+    setFormCountry(addrCountry);
     setFormPhone(addr.phone || '');
     setFormShippingSectorId(addr.shippingSectorId || '');
     // Pré-seleciona a região a partir do shippingRegionId JÁ DERIVADO pela
@@ -125,6 +152,7 @@ export const AddressesView: React.FC = () => {
     setSelectedRegionId(addr.shippingRegionId || '');
     setFormError(null);
     setIsModalOpen(true);
+    loadGeographyForCountry(addrCountry);
   };
 
   const handleSaveAddress = async (e: React.FormEvent) => {
@@ -399,9 +427,13 @@ export const AddressesView: React.FC = () => {
                       // FASE D16-F2 — trocar o país invalida região/setor
                       // escolhidos (pertenciam ao país anterior) — nunca
                       // permite um setor de outro país permanecer selecionado.
-                      setFormCountry(e.target.value as CountryCode);
+                      const newCountry = e.target.value as CountryCode;
+                      setFormCountry(newCountry);
                       setSelectedRegionId('');
                       setFormShippingSectorId('');
+                      // FASE D16-F2.1 — recarrega a geografia do país novo
+                      // imperativamente (mesmo motivo do handleOpenCreate).
+                      loadGeographyForCountry(newCountry);
                     }}
                     className="w-full px-3 py-2 bg-gray-50 border border-gray-300 rounded-xl text-xs text-gray-900 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
                   >
