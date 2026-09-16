@@ -26,7 +26,7 @@ import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
 import { InventoryService } from '../inventory/inventoryService.js';
-import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor } from '../shipping/shippingCalculatorService.js';
+import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor, resolveShippingPayerPolicy } from '../shipping/shippingCalculatorService.js';
 import { categories, platformSettings, countries } from '../../../db/schema.js';
 import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
 import { userProfiles } from '../../../db/schema.js';
@@ -35,7 +35,14 @@ import { resolveCarrierNames, pickCarrierName } from '../logistics/carrierResolv
 // FASE D16-F2 — fundação geográfica do endereço de entrega do comprador.
 // Reaproveita a MESMA validação já usada pela origem operacional do seller
 // (D15-C2/D16-E3/E4) — nunca uma segunda regra de setor/região divergente.
-import { validateAddressSectorAssignment } from '../shipping/shippingGeographyService.js';
+import { validateAddressSectorAssignment, countryHasActiveShippingSectors } from '../shipping/shippingGeographyService.js';
+// FASE D16-F6.2 — smart fulfillment (F4 planeja a melhor origem por custo
+// real de frete, F5 reserva com lock+revalidação sob a MESMA transação) —
+// usados SOMENTE quando multiSellerCheckoutEnabled=true; o caminho legado
+// (split cego + frete país/zona) permanece 100% intocado quando a flag
+// estiver desligada.
+import { resolveFulfillmentCandidates } from '../shipping/fulfillmentCandidateResolverService.js';
+import { reserveFulfillmentInventory } from '../inventory/fulfillmentReservationService.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -321,6 +328,45 @@ export class OrderService {
         throw new Error('SHIPPING_CURRENCY_REQUIRED: A moeda do pedido é obrigatória para o cálculo de frete.');
       }
 
+      // FASE D16-F6.2 — feature flag lida AQUI (movida de mais abaixo, antes
+      // do único lugar que decidia só "1 order vs N orders") porque agora
+      // TAMBÉM decide COMO cada cart line escolhe sua origem de estoque
+      // (split cego legado vs. F4/F5 smart fulfillment) — decisão que
+      // precisa estar disponível já no loop de itens abaixo. MESMO padrão
+      // fail-closed de sempre (autoReleaseEnabled): ausência ou qualquer
+      // valor diferente do boolean literal `true` = DESATIVADO. Com a flag
+      // desligada, o restante desta função continua bit-a-bit idêntico ao
+      // comportamento anterior a esta fase.
+      const multiSellerSettingRows = await tx
+        .select({ valueJson: platformSettings.valueJson })
+        .from(platformSettings)
+        .where(eq(platformSettings.key, 'multiSellerCheckoutEnabled'))
+        .limit(1);
+      const multiSellerCheckoutEnabled = multiSellerSettingRows.length > 0 && multiSellerSettingRows[0].valueJson === true;
+
+      // FASE D16-F6.2, seção 2 — destino para F4/F3: EXCLUSIVAMENTE
+      // targetAddress.shippingSectorId (já resolvido do endereço
+      // selecionado/addressId/padrão acima, e já validado — real, ativo, do
+      // país certo — pela checagem de validateAddressSectorAssignment mais
+      // abaixo antes deste ponto seria ideal, mas F2 já valida no momento em
+      // que o setor é ATRIBUÍDO ao endereço, não aqui; esta função nunca
+      // infere setor por cidade nem cai para o endereço padrão se outro foi
+      // selecionado — targetAddress já É o endereço final escolhido).
+      // Fail-closed: sem setor, o fluxo novo não pode chamar F4 (que exige
+      // destinationShippingSectorId) — nunca inventa fallback geográfico.
+      let destinationShippingSectorId: string | null = null;
+      if (multiSellerCheckoutEnabled) {
+        destinationShippingSectorId = targetAddress?.shippingSectorId || null;
+        if (!destinationShippingSectorId) {
+          const countryRequiresGeography = await countryHasActiveShippingSectors(tx, destinationCountry);
+          throw new Error(
+            countryRequiresGeography
+              ? `DESTINATION_SHIPPING_SECTOR_REQUIRED: O endereço de entrega selecionado não tem um setor de frete definido, e "${destinationCountry}" exige geografia por setor para o checkout inteligente. Selecione/edite o endereço com um setor válido.`
+              : `DESTINATION_SHIPPING_SECTOR_REQUIRED: Não há geografia de frete por setor configurada para "${destinationCountry}" ainda — o checkout inteligente (F4/F5) não pode operar nesta região.`
+          );
+        }
+      }
+
       let realSubtotal = 0;
       const verifiedItems: Array<{
         productId: string;
@@ -342,6 +388,18 @@ export class OrderService {
         dimensionsCm?: { length: number; width: number; height: number };
         categoryId: string | null;
         originCountry?: string;
+        // FASE D16-F6.2 — snapshots logísticos (0029), preenchidos SOMENTE
+        // pelo caminho novo (F4/F3); permanecem undefined (-> NULL no
+        // insert) no caminho legado, exatamente como a fase F6.1 exigiu.
+        fulfillmentLocationId?: string | null;
+        originShippingSectorId?: string | null;
+        shippingRouteId?: string | null;
+        shippingServiceId?: string | null;
+        shippingServiceCode?: string | null;
+        shippingRateId?: string | null;
+        unitWeightKg?: number | null;
+        totalWeightKg?: number | null;
+        shippingAmount?: number | null;
       }> = [];
 
       let primarySellerId: string | null = null;
@@ -415,6 +473,82 @@ export class OrderService {
 
         const reqQty = Number(ci.quantity) || 1;
 
+        if (multiSellerCheckoutEnabled) {
+          // ==========================================================
+          // FASE D16-F6.2 — CAMINHO NOVO: F4 escolhe UMA ÚNICA origem
+          // capaz de atender a quantidade INTEIRA da linha do carrinho
+          // (nunca split) por CUSTO REAL de frete (F3), nunca por
+          // preferência HUB/STORE. Nenhuma reserva acontece aqui — F4 é
+          // só planejamento; a reserva real (F5) só ocorre depois que
+          // TODAS as linhas do carrinho já tiverem um plano, em ordem
+          // global de lock (seção 5 do enunciado, mais abaixo).
+          // ==========================================================
+          if (!prod.sellerId) {
+            throw new Error(`ORDER_ITEM_SELLER_REQUIRED: O produto "${prod.title}" não possui vendedor associado — o checkout inteligente exige que todo item tenha um vendedor real.`);
+          }
+
+          const f4Result = await resolveFulfillmentCandidates({
+            sellerId: prod.sellerId,
+            productId: prod.id,
+            variantId: ci.variantId || null,
+            quantity: reqQty,
+            destinationShippingSectorId: destinationShippingSectorId as string,
+            countryCode: destinationCountry,
+          }, tx);
+
+          if (f4Result.ok === false) {
+            const failureCode: string = f4Result.code;
+            const failureMessage: string = f4Result.message;
+            throw new Error(`FULFILLMENT_RESOLUTION_FAILED: ${failureCode} - ${failureMessage}`);
+          }
+          const bestCandidate = f4Result.bestCandidate;
+          if (!bestCandidate) {
+            throw new Error(
+              `INSUFFICIENT_AVAILABLE_STOCK: Nenhuma origem de estoque consegue sozinha atender a quantidade solicitada (${reqQty}) do produto "${prod.title}" para o destino selecionado (sem combinar origens nesta fase).`
+            );
+          }
+
+          const itemSubtotal = unitPrice * reqQty;
+
+          if (!primarySellerId && prod.sellerId) primarySellerId = prod.sellerId;
+          if (!primaryStoreId && bestCandidate.storeId) primaryStoreId = bestCandidate.storeId;
+
+          verifiedItems.push({
+            productId: prod.id,
+            variantId: ci.variantId || null,
+            productTitle: prod.title,
+            productSku: variantSku || prod.id || null,
+            variantTitle,
+            quantity: reqQty,
+            unitPrice,
+            subtotal: itemSubtotal,
+            sellerId: prod.sellerId || null,
+            storeId: bestCandidate.storeId || null,
+            productImage: prod.image || null,
+            attributesJson: ci.selectedAttributesJson || null,
+            inventoryId: bestCandidate.inventoryId,
+            warehouseId: bestCandidate.warehouseId || null,
+            fulfillmentMode: bestCandidate.locationType === 'NUSALI_HUB' ? 'NUSALI_FULFILLMENT' : 'SELLER_FULFILLMENT',
+            weightKg: itemWeightKg,
+            dimensionsCm: itemDimensionsCm,
+            categoryId: prod.categoryId || null,
+            fulfillmentLocationId: bestCandidate.fulfillmentLocationId,
+            originShippingSectorId: bestCandidate.originShippingSectorId,
+            shippingRouteId: bestCandidate.routeId,
+            shippingServiceId: bestCandidate.serviceId,
+            shippingServiceCode: bestCandidate.serviceCode,
+            shippingRateId: bestCandidate.rateId,
+            unitWeightKg: bestCandidate.unitWeightKg,
+            totalWeightKg: bestCandidate.totalWeightKg,
+            shippingAmount: bestCandidate.shippingAmount,
+          });
+          continue;
+        }
+
+        // ==========================================================
+        // CAMINHO LEGADO — intocado (split cego HUB>STORE por linha de
+        // carrinho, ativo somente quando multiSellerCheckoutEnabled=false).
+        // ==========================================================
         // Query real inventory table for this productId + strict variantId (No cross-variant fallback)
         let inventoryRows: any[];
         if (ci.variantId) {
@@ -612,17 +746,8 @@ export class OrderService {
       // ativo) logo no início da transação, antes do loop de itens — reaproveitado aqui.
       const volumetricDivisor = await getVolumetricDivisor(tx);
 
-      // FASE B (multi-vendedor) — feature flag fail-closed, MESMO padrão já
-      // usado por autoReleaseEnabled (escrowAutoReleaseService.ts): ausência
-      // ou qualquer valor diferente do boolean literal `true` significa
-      // DESATIVADO. Nunca lido/escrito em nenhum outro lugar deste arquivo.
-      const multiSellerSettingRows = await tx
-        .select({ valueJson: platformSettings.valueJson })
-        .from(platformSettings)
-        .where(eq(platformSettings.key, 'multiSellerCheckoutEnabled'))
-        .limit(1);
-      const multiSellerCheckoutEnabled = multiSellerSettingRows.length > 0 && multiSellerSettingRows[0].valueJson === true;
-
+      // multiSellerCheckoutEnabled já foi lida mais acima (antes do loop de
+      // itens — FASE D16-F6.2), reaproveitada aqui sem re-consultar.
       // Com a flag desativada, um carrinho com mais de 1 vendedor distinto é
       // rejeitado AQUI — antes de qualquer escrita (nenhum INSERT/UPDATE
       // aconteceu até este ponto) — nunca dividido silenciosamente pelo
@@ -640,7 +765,17 @@ export class OrderService {
        * dois caminhos para que o resultado de 1 vendedor seja idêntico,
        * centavo por centavo, nos dois.
        */
-      async function computeGroupFinancials(items: typeof verifiedItems, groupSellerId: string | null) {
+      async function computeGroupFinancials(
+        items: typeof verifiedItems,
+        groupSellerId: string | null,
+        // FASE D16-F6.2 — quando informado, PULA a chamada ao motor legado
+        // (ShippingCalculatorService.calculateFreight) e usa este resultado
+        // já pronto no lugar (soma de cotações F3 + mesma resolveShippingPayerPolicy
+        // do motor legado, via computeSmartFulfillmentFreightRes abaixo).
+        // Nenhuma outra parte desta função muda: comissão/subtotal/peso
+        // continuam EXATAMENTE o mesmo cálculo para os dois caminhos.
+        precomputedFreightRes?: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>
+      ) {
         const groupSubtotal = items.reduce((s, i) => s + i.subtotal, 0);
         const groupStoreId = items.find((i) => i.storeId)?.storeId || null;
         const groupWeightKg = items.reduce((acc, i) => {
@@ -671,7 +806,7 @@ export class OrderService {
         }
         groupCommission = Math.round(groupCommission * 100) / 100;
 
-        const groupFreightRes = await ShippingCalculatorService.calculateFreight({
+        const groupFreightRes = precomputedFreightRes ?? await ShippingCalculatorService.calculateFreight({
           storeId: groupStoreId || undefined,
           sellerId: groupSellerId || undefined,
           originCountry,
@@ -707,19 +842,50 @@ export class OrderService {
       }
 
       /**
-       * Grava UM order filho (orders + order_items + orderStatusHistory +
-       * stock_reservations + inventory + inventory_movements) a partir de um
-       * grupo já calculado por computeGroupFinancials — nunca decide
-       * valores, só persiste.
+       * FASE D16-F6.2 — RATE SOURCE = F3 (soma das cotações reais já
+       * resolvidas por item pelo F4, cada uma na origem efetivamente
+       * escolhida), PAYER POLICY = a MESMA regra existente
+       * (resolveShippingPayerPolicy, extraída do motor legado em
+       * shippingCalculatorService.ts sem nenhuma alteração de comportamento)
+       * — nunca uma segunda política divergente. Produz um objeto no MESMO
+       * formato de ShippingCalculatorService.calculateFreight para que
+       * computeGroupFinancials/insertOrderRow não precisem saber a origem.
        */
-      async function insertOrderForGroup(
+      async function computeSmartFulfillmentFreightRes(
         items: typeof verifiedItems,
+        groupStoreId: string | null,
+        groupSellerId: string | null
+      ): Promise<Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>> {
+        const shippingCost = Math.round(items.reduce((s, i) => s + (Number(i.shippingAmount) || 0), 0) * 100) / 100;
+        const policy = await resolveShippingPayerPolicy(shippingCost, { storeId: groupStoreId, sellerId: groupSellerId }, tx);
+        return {
+          shippingCost,
+          shippingChargedToBuyer: policy.shippingChargedToBuyer,
+          shippingSellerSubsidy: policy.shippingSellerSubsidy,
+          shippingMarketplaceSubsidy: policy.shippingMarketplaceSubsidy,
+          shippingPayer: policy.shippingPayer,
+          policyMode: policy.policyMode,
+          estimatedMinDays: 0,
+          estimatedMaxDays: 0,
+          // Distinto de qualquer rateSource legado ('ZONE_SPECIFIC'/'INTERNAL_ZONE')
+          // de propósito — nunca usar orders.shippingRateId legado para
+          // representar F3 (o rastro real por item vive em
+          // order_items.shippingRateId, um por origem).
+          rateSource: 'F3_SECTOR_ROUTE',
+          rateId: undefined,
+          currency,
+          available: true,
+        };
+      }
+
+      /** Insere APENAS a linha de `orders` do grupo — nunca decide valores, só persiste. */
+      async function insertOrderRow(
         groupSellerId: string | null,
         groupStoreId: string | null,
         financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>,
         freightRes: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>,
         purchaseGroupId: string | null
-      ) {
+      ): Promise<{ orderId: string; orderNumber: string }> {
         const orderId = `ord_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         const orderNumber = `NSL-${Date.now().toString(36).toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
 
@@ -759,7 +925,17 @@ export class OrderService {
           updatedAt: new Date(),
         });
 
-        // Insert Order Items — SOMENTE os itens deste grupo (nunca de outro vendedor)
+        return { orderId, orderNumber };
+      }
+
+      /**
+       * Insere order_items do grupo — SOMENTE os itens deste grupo (nunca de
+       * outro vendedor). Os 9 campos de snapshot logístico (D16-F6.1) vêm do
+       * próprio `item` (preenchidos pelo F4/F5 no caminho novo; `undefined`
+       * -> NULL no caminho legado, exatamente como F6.1 exigiu — nenhum
+       * reread de catálogo/tarifa depois do fato).
+       */
+      async function insertOrderItemsForGroup(orderId: string, items: typeof verifiedItems) {
         for (const item of items) {
           if (!item.inventoryId || !item.fulfillmentMode) {
             throw new Error(`ALLOCATION_FAILED: Origem de estoque (inventory_id) não alocada para o item "${item.productTitle}".`);
@@ -785,10 +961,21 @@ export class OrderService {
             fulfillmentMode: item.fulfillmentMode,
             status: 'pending_preparation',
             createdAt: new Date(),
-          });
+            fulfillmentLocationId: item.fulfillmentLocationId ?? null,
+            originShippingSectorId: item.originShippingSectorId ?? null,
+            shippingRouteId: item.shippingRouteId ?? null,
+            shippingServiceId: item.shippingServiceId ?? null,
+            shippingServiceCode: item.shippingServiceCode ?? null,
+            shippingRateId: item.shippingRateId ?? null,
+            unitWeightKg: item.unitWeightKg != null ? String(item.unitWeightKg) : null,
+            totalWeightKg: item.totalWeightKg != null ? String(item.totalWeightKg) : null,
+            shippingAmount: item.shippingAmount != null ? String(item.shippingAmount) : null,
+          } as any);
         }
+      }
 
-        // Insert Order Status History
+      /** Insere a linha única de orderStatusHistory de criação do pedido. */
+      async function insertOrderStatusHistoryRow(orderId: string) {
         await tx.insert(orderStatusHistory).values({
           id: `osh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           orderId,
@@ -798,8 +985,17 @@ export class OrderService {
           changedBy: userId,
           createdAt: new Date(),
         });
+      }
 
-        // Reserve Stock: Create stock_reservations, update inventory.quantityReserved, record inventoryMovements
+      /**
+       * Reserva de estoque LEGADA (caminho antigo, `multiSellerCheckoutEnabled=
+       * false` — nunca usada pelo caminho novo, que reserva via F5 em ordem
+       * global ANTES de order_items existir — ver orquestração mais abaixo).
+       * Comportamento idêntico ao que já existia: sem `.for('update')`
+       * (achado pré-existente de D16-F1, fora de escopo desta fase para o
+       * caminho legado).
+       */
+      async function reserveStockForGroupLegacy(orderId: string, orderNumber: string, items: typeof verifiedItems) {
         const expiresAt = new Date();
         expiresAt.setMinutes(expiresAt.getMinutes() + 30);
 
@@ -846,7 +1042,17 @@ export class OrderService {
             createdAt: new Date(),
           });
         }
+      }
 
+      /** Monta o objeto de retorno de UM order filho — nunca decide valores, só projeta. */
+      function buildCreatedOrderResult(
+        orderId: string,
+        orderNumber: string,
+        groupSellerId: string | null,
+        financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>,
+        items: typeof verifiedItems,
+        purchaseGroupId: string | null
+      ) {
         return {
           id: orderId,
           orderNumber,
@@ -870,6 +1076,30 @@ export class OrderService {
           purchaseGroupId,
           createdAt: new Date().toISOString(),
         };
+      }
+
+      /**
+       * Grava UM order filho completo (orders + order_items + orderStatusHistory
+       * + reserva LEGADA) a partir de um grupo já calculado por
+       * computeGroupFinancials — orquestra as 4 fases acima na MESMA ordem de
+       * sempre. Usada SOMENTE pelo caminho legado (multiSellerCheckoutEnabled=
+       * false) — o caminho novo (F6.2) orquestra as fases na ordem exigida
+       * pela seção 8 do enunciado (orders de TODOS os grupos primeiro, F5 em
+       * ordem global depois, order_items só após toda reserva confirmada).
+       */
+      async function insertOrderForGroup(
+        items: typeof verifiedItems,
+        groupSellerId: string | null,
+        groupStoreId: string | null,
+        financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>,
+        freightRes: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>,
+        purchaseGroupId: string | null
+      ) {
+        const { orderId, orderNumber } = await insertOrderRow(groupSellerId, groupStoreId, financials, freightRes, purchaseGroupId);
+        await insertOrderItemsForGroup(orderId, items);
+        await insertOrderStatusHistoryRow(orderId);
+        await reserveStockForGroupLegacy(orderId, orderNumber, items);
+        return buildCreatedOrderResult(orderId, orderNumber, groupSellerId, financials, items, purchaseGroupId);
       }
 
       let createdOrders: any[];
@@ -900,7 +1130,10 @@ export class OrderService {
 
         // Fase 1: calcula (somente leitura) o financeiro de CADA vendedor
         // ANTES de qualquer escrita — precisamos da soma para criar o
-        // purchase_group já com o total certo.
+        // purchase_group já com o total certo. FASE D16-F6.2: quando o
+        // fluxo é smart fulfillment (todo item já carrega .shippingAmount
+        // do F4), o frete do grupo é a SOMA das cotações F3 reais + a
+        // MESMA política de pagador de sempre — nunca o motor legado.
         const groupComputations: Array<{
           sellerId: string;
           items: typeof verifiedItems;
@@ -909,7 +1142,9 @@ export class OrderService {
           freightRes: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>;
         }> = [];
         for (const [sellerId, items] of bySeller) {
-          const { financials, freightRes, storeId } = await computeGroupFinancials(items, sellerId);
+          const groupStoreId = items.find((i) => i.storeId)?.storeId || null;
+          const smartFreightRes = await computeSmartFulfillmentFreightRes(items, groupStoreId, sellerId);
+          const { financials, freightRes, storeId } = await computeGroupFinancials(items, sellerId, smartFreightRes);
           groupComputations.push({ sellerId, items, storeId, financials, freightRes });
         }
 
@@ -930,10 +1165,111 @@ export class OrderService {
           updatedAt: new Date(),
         });
 
-        createdOrders = [];
+        // ==========================================================
+        // FASE D16-F6.2, seções 4/5/6/7/8 — sequência exigida:
+        //   B. criar TODOS os child orders primeiro (F5 exige orderId
+        //      real por FK em stock_reservations — auditado em F6.0).
+        //   (dup) falha fechado se 2 linhas do MESMO order apontarem
+        //      para o MESMO inventoryId — nunca combina silenciosamente.
+        //   C. reservar via F5 em UMA lista GLOBAL (todos os vendedores
+        //      juntos), ordenada por inventoryId ASC lexicográfico —
+        //      evita deadlock entre 2 checkouts concorrentes com a MESMA
+        //      dupla de inventories em ordem inversa no carrinho.
+        //   D. se qualquer F5 falhar -> throw aqui propaga para fora do
+        //      db.transaction() e reverte TUDO (orders inclusive, nunca
+        //      commitados) — nunca split, nunca troca de candidate no
+        //      meio de um plano já parcialmente reservado.
+        //   E. só DEPOIS que TODAS as reservas tiverem sucesso, inserir
+        //      order_items finais + orderStatusHistory.
+        // ==========================================================
+        const groupOrderRows: Array<{
+          sellerId: string;
+          items: typeof verifiedItems;
+          financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>;
+          orderId: string;
+          orderNumber: string;
+        }> = [];
         for (const g of groupComputations) {
-          const order = await insertOrderForGroup(g.items, g.sellerId, g.storeId, g.financials, g.freightRes, purchaseGroupId);
-          createdOrders.push(order);
+          const { orderId, orderNumber } = await insertOrderRow(g.sellerId, g.storeId, g.financials, g.freightRes, purchaseGroupId);
+          groupOrderRows.push({ sellerId: g.sellerId, items: g.items, financials: g.financials, orderId, orderNumber });
+        }
+
+        type PlannedReservation = {
+          orderId: string;
+          sellerId: string;
+          productId: string;
+          variantId: string | null;
+          inventoryId: string;
+          fulfillmentLocationId: string;
+          quantity: number;
+        };
+        const globalReservationPlan: PlannedReservation[] = [];
+        for (const g of groupOrderRows) {
+          const seenInventoryIds = new Set<string>();
+          for (const item of g.items) {
+            if (!item.inventoryId) {
+              throw new Error(`ALLOCATION_FAILED: Origem de estoque (inventory_id) não alocada para o item "${item.productTitle}".`);
+            }
+            if (seenInventoryIds.has(item.inventoryId)) {
+              throw new Error(
+                `DUPLICATE_INVENTORY_IN_ORDER: Mais de uma linha deste pedido aponta para a mesma origem de estoque (inventoryId=${item.inventoryId}) — combinação automática de linhas não é suportada nesta implementação.`
+              );
+            }
+            seenInventoryIds.add(item.inventoryId);
+            if (!item.fulfillmentLocationId) {
+              throw new Error(`ALLOCATION_FAILED: fulfillmentLocationId ausente para o item "${item.productTitle}" (esperado do planejamento F4).`);
+            }
+            globalReservationPlan.push({
+              orderId: g.orderId,
+              sellerId: item.sellerId as string,
+              productId: item.productId,
+              variantId: item.variantId,
+              inventoryId: item.inventoryId,
+              fulfillmentLocationId: item.fulfillmentLocationId,
+              quantity: item.quantity,
+            });
+          }
+        }
+
+        // Ordem global de lock — mesma chave (inventoryId ASC) para
+        // QUALQUER checkout concorrente, independentemente da ordem dos
+        // itens no carrinho de cada comprador. Nunca reserva imediatamente
+        // na ordem do carrinho (risco de deadlock documentado em F6.0).
+        globalReservationPlan.sort((a, b) => (a.inventoryId < b.inventoryId ? -1 : a.inventoryId > b.inventoryId ? 1 : 0));
+
+        for (const planned of globalReservationPlan) {
+          // CRÍTICO: EXCLUSIVAMENTE o `tx` real desta transação — nunca
+          // `db`/getDb() — para que F5 NUNCA abra sua própria transaction
+          // durante o checkout (contrato já validado em F5/F5.1).
+          const reservation = await reserveFulfillmentInventory({
+            orderId: planned.orderId,
+            sellerId: planned.sellerId,
+            productId: planned.productId,
+            variantId: planned.variantId,
+            inventoryId: planned.inventoryId,
+            fulfillmentLocationId: planned.fulfillmentLocationId,
+            quantity: planned.quantity,
+          }, tx);
+
+          if (reservation.ok === false) {
+            // Concorrência real: outra transação consumiu a candidate entre
+            // o planejamento (F4) e a reserva (F5). Nunca continua com as
+            // demais, nunca faz split, nunca troca de candidate no meio de
+            // um plano já parcialmente reservado — propaga e deixa o
+            // db.transaction() reverter TUDO (orders inclusive). O caller
+            // pode tentar de novo do zero; F4 planejará com o estoque
+            // já atualizado.
+            const conflictCode: string = reservation.code;
+            const conflictMessage: string = reservation.message;
+            throw new Error(`FULFILLMENT_RESERVATION_CONFLICT: ${conflictCode} - ${conflictMessage}`);
+          }
+        }
+
+        createdOrders = [];
+        for (const g of groupOrderRows) {
+          await insertOrderItemsForGroup(g.orderId, g.items);
+          await insertOrderStatusHistoryRow(g.orderId);
+          createdOrders.push(buildCreatedOrderResult(g.orderId, g.orderNumber, g.sellerId, g.financials, g.items, purchaseGroupId));
         }
 
         purchaseGroupResult = {
