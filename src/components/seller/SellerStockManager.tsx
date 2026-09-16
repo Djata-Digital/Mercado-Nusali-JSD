@@ -105,6 +105,18 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
   }, [inventoryList]);
 
   // 3. Compute Product Summary Across All Locations
+  //
+  // FASE D16-E6.2 — antes, esta agregação só somava onHand/reserved por
+  // localização e nunca sabia da existência de transferências PENDING
+  // (comprometidas mas ainda fisicamente na loja) ou IN_TRANSIT (já saiu
+  // fisicamente da loja, ainda não chegou no HUB — D16-E6.1 decrementa a
+  // loja exatamente nesse momento). Resultado: durante IN_TRANSIT, as
+  // unidades "desapareciam" do resumo (nem loja nem HUB as contavam mais).
+  // pendingTransferQuantity/inTransitQuantity vêm PRONTOS do backend por
+  // inventory row exata (GET /seller/inventory, FASE D16-E6.1/E6.2) — nunca
+  // recalculados aqui, só somados por produto (agregação pura, isolada por
+  // fromInventoryId exato desde a origem backend, nunca vazando entre
+  // variantes/lojas/sellers/produtos diferentes).
   const productSummaries = useMemo(() => {
     const map = new Map<string, any>();
 
@@ -118,6 +130,8 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
         image: prod.image || (prod.images && prod.images[0]) || null,
         sellerOnHand: 0,
         sellerReserved: 0,
+        sellerPending: 0,
+        sellerInTransit: 0,
         hubOnHand: 0,
         hubReserved: 0,
       });
@@ -136,6 +150,8 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
           image: null,
           sellerOnHand: 0,
           sellerReserved: 0,
+          sellerPending: 0,
+          sellerInTransit: 0,
           hubOnHand: 0,
           hubReserved: 0,
         };
@@ -151,20 +167,27 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
       } else {
         entry.sellerOnHand += onHand;
         entry.sellerReserved += reserved;
+        entry.sellerPending += Number(inv.pendingTransferQuantity) || 0;
+        entry.sellerInTransit += Number(inv.inTransitQuantity) || 0;
       }
     });
 
     return Array.from(map.values()).map((e) => {
-      const totalOnHand = e.sellerOnHand + e.hubOnHand;
+      const sellerAvailable = Math.max(0, e.sellerOnHand - e.sellerReserved - e.sellerPending);
+      const hubAvailable = Math.max(0, e.hubOnHand - e.hubReserved);
       const totalReserved = e.sellerReserved + e.hubReserved;
-      const totalAvailable = Math.max(0, totalOnHand - totalReserved);
+      // TOTAL DA REDE — inclui EM TRÂNSITO de propósito (nunca renomear
+      // "Total Físico" para incluir isso: físico é só loja+HUB armazenados
+      // agora; rede é tudo sob responsabilidade logística Nusali).
+      const totalNetworkStock = e.sellerOnHand + e.hubOnHand + e.sellerInTransit;
+      const totalAvailable = sellerAvailable + hubAvailable;
       return {
         ...e,
-        totalOnHand,
+        sellerAvailable,
+        hubAvailable,
         totalReserved,
+        totalNetworkStock,
         totalAvailable,
-        sellerAvailable: Math.max(0, e.sellerOnHand - e.sellerReserved),
-        hubAvailable: Math.max(0, e.hubOnHand - e.hubReserved),
       };
     });
   }, [productsList, inventoryList]);
@@ -333,7 +356,7 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
               <Boxes className="w-5 h-5 text-emerald-600" /> Resumo Geral de Estoque por Produto
             </h2>
             <p className="text-xs text-gray-500 font-medium">
-              Visão consolidação multilocais (Estabelecimento Físico + HUBs Nusali).
+              Visão consolidada multilocal (Estabelecimento + HUBs Nusali + Em Trânsito).
             </p>
           </div>
           <span className="text-xs font-mono font-bold bg-emerald-100 text-emerald-900 px-3 py-1 rounded-full">
@@ -348,7 +371,8 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                 <th className="p-3">Produto</th>
                 <th className="p-3 text-center">Estabelecimento (Físico)</th>
                 <th className="p-3 text-center">Nusali HUBs</th>
-                <th className="p-3 text-center">Total Físico</th>
+                <th className="p-3 text-center">Em Trânsito</th>
+                <th className="p-3 text-center">Total da Rede</th>
                 <th className="p-3 text-center">Reservado Vendas</th>
                 <th className="p-3 text-center">Total Disponível</th>
               </tr>
@@ -356,13 +380,13 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
             <tbody className="divide-y divide-gray-100 font-medium">
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="p-8 text-center text-gray-400 font-bold">
+                  <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
                     Carregando resumo de estoque...
                   </td>
                 </tr>
               ) : productSummaries.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="p-8 text-center text-gray-400 font-bold">
+                  <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
                     Nenhum produto cadastrado no catálogo.
                   </td>
                 </tr>
@@ -400,7 +424,14 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                         Livre: {summary.hubAvailable} un.
                       </span>
                     </td>
-                    <td className="p-3 text-center font-black text-gray-900">{summary.totalOnHand} un.</td>
+                    <td className="p-3 text-center">
+                      {summary.sellerInTransit > 0 ? (
+                        <span className="font-bold text-blue-900 block">{summary.sellerInTransit} un.</span>
+                      ) : (
+                        <span className="text-gray-400 font-semibold">0 un.</span>
+                      )}
+                    </td>
+                    <td className="p-3 text-center font-black text-gray-900">{summary.totalNetworkStock} un.</td>
                     <td className="p-3 text-center font-bold text-amber-700">{summary.totalReserved} un.</td>
                     <td className="p-3 text-center">
                       <span className="inline-block px-3 py-1 bg-emerald-100 text-emerald-900 rounded-full font-black text-xs">
