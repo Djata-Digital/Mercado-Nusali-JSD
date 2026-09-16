@@ -204,6 +204,13 @@
       "when": 1789440399532,
       "tag": "0028_crazy_wild_child",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1789572838350,
+      "tag": "0029_light_the_call",
+      "breakpoints": true
     }
   ]
 }

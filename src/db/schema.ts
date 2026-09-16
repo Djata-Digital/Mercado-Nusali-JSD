@@ -870,6 +870,44 @@ export const orderItems = pgTable('order_items', {
   inventoryId: varchar('inventory_id', { length: 255 }).references(() => inventory.id, { onDelete: 'set null' }),
   warehouseId: varchar('warehouse_id', { length: 255 }).references(() => warehouses.id, { onDelete: 'set null' }),
   shipmentId: varchar('shipment_id', { length: 255 }).references(() => shipments.id, { onDelete: 'set null' }),
+  // FASE D16-F6.1 (fundação de schema) — snapshots logísticos imutáveis da
+  // decisão de fulfillment (F2->F3->F4->F5) tomada no checkout, para
+  // reconstruir depois exatamente o que aconteceu sem depender de reler
+  // tarifa/setor/rota/serviço no estado ATUAL (que pode mudar ou ser
+  // desativado depois). NULLABLE de propósito — nenhum pedido existente é
+  // retroativamente preenchido (zero backfill) e nenhum writer novo é criado
+  // nesta fase (F6 ainda não integra o checkout). ON DELETE RESTRICT nas 5
+  // FKs abaixo: mesma convenção já usada em toda a cadeia de frete por setor
+  // (fulfillment_locations/shipping_sectors/shipping_routes/
+  // shipping_services/shipping_route_rates só são desativadas — isActive=
+  // false — nunca fisicamente deletadas, ver comentário da FASE D15-A mais
+  // abaixo) — deliberadamente diferente do SET NULL usado acima em
+  // inventoryId/warehouseId/shipmentId (esses são estado operacional
+  // corrente, que pode legitimamente ficar obsoleto; os campos abaixo são a
+  // decisão logística CONGELADA do checkout, que nunca deve perder seu
+  // ponteiro de rastreabilidade por causa de uma deleção física alheia).
+  // destinationShippingSectorId deliberadamente NÃO existe aqui: já
+  // congelado dentro de orders.shippingAddressJson (D16-F2). currency
+  // também não é repetida aqui: orders.currency continua a única
+  // autoridade monetária do child order.
+  fulfillmentLocationId: varchar('fulfillment_location_id', { length: 255 }).references(() => fulfillmentLocations.id, { onDelete: 'restrict' }),
+  originShippingSectorId: varchar('origin_shipping_sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  shippingRouteId: varchar('shipping_route_id', { length: 255 }).references(() => shippingRoutes.id, { onDelete: 'restrict' }),
+  shippingServiceId: varchar('shipping_service_id', { length: 255 }).references(() => shippingServices.id, { onDelete: 'restrict' }),
+  // Snapshot textual deliberado (nunca só a FK acima): o histórico não deve
+  // depender de reler shipping_services.code atual para saber qual serviço
+  // foi realmente usado no checkout.
+  shippingServiceCode: varchar('shipping_service_code', { length: 100 }),
+  shippingRateId: varchar('shipping_rate_id', { length: 255 }).references(() => shippingRouteRates.id, { onDelete: 'restrict' }),
+  // Snapshots escalares deliberados (nunca só a FK/estado atual do produto):
+  // peso e valor cobrado no momento real do checkout, imunes a uma edição
+  // posterior do peso do produto/variante ou da tarifa. Mesma precisão/
+  // escala já usada no projeto para peso (shipping_route_rates.min/max_
+  // weight_kg) e valores monetários (orders.shipping_fee, shipping_route_
+  // rates.amount).
+  unitWeightKg: numeric('unit_weight_kg', { precision: 8, scale: 3 }),
+  totalWeightKg: numeric('total_weight_kg', { precision: 8, scale: 3 }),
+  shippingAmount: numeric('shipping_amount', { precision: 12, scale: 2 }),
   fulfillmentMode: varchar('fulfillment_mode', { length: 50 }).notNull().default('SELLER_FULFILLMENT'), // NUSALI_FULFILLMENT, SELLER_FULFILLMENT
   status: varchar('status', { length: 50 }).notNull().default('pending_preparation'), // pending_preparation, preparing, ready_to_ship, shipped, cancelled
   createdAt: timestamp('created_at').defaultNow().notNull(),
