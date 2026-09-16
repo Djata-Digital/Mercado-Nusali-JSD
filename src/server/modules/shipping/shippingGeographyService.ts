@@ -491,6 +491,12 @@ export async function validateAddressSectorAssignment(
   if (sector.isActive === false) {
     return { error: `SHIPPING_SECTOR_INACTIVE: o setor "${sector.name}" está inativo e não pode ser usado como origem operacional.` };
   }
+  // FASE D16-F2 — região inativa também bloqueia o setor (uma região
+  // desativada tira de operação todos os setores nela, mesmo que o setor em
+  // si ainda esteja marcado isActive=true individualmente).
+  if (region.isActive === false) {
+    return { error: `SHIPPING_REGION_INACTIVE: a região "${region.name}" está inativa e o setor "${sector.name}" não pode ser usado.` };
+  }
   const addressCountry = String(input.countryCode || '').trim().toUpperCase();
   if (sector.countryCode !== addressCountry) {
     return { error: `SHIPPING_SECTOR_COUNTRY_MISMATCH: o setor "${sector.name}" pertence a "${sector.countryCode}", mas o endereço é de "${addressCountry}".` };
@@ -503,6 +509,23 @@ export async function validateAddressSectorAssignment(
   }
 
   return { ok: true };
+}
+
+/**
+ * FASE D16-F2 — determina, a partir dos DADOS (nunca hardcode de país), se
+ * um país tem geografia operacional por setor configurada (setores ativos
+ * cadastrados). Usada para decidir se um endereço de ENTREGA do comprador
+ * deve exigir shippingSectorId — nunca um `if (country === 'GW')`.
+ */
+export async function countryHasActiveShippingSectors(executor: any, countryCode: string): Promise<boolean> {
+  const country = String(countryCode || '').trim().toUpperCase();
+  if (!country) return false;
+  const rows = await executor
+    .select({ id: shippingSectors.id })
+    .from(shippingSectors)
+    .where(and(eq(shippingSectors.countryCode, country), eq(shippingSectors.isActive, true)))
+    .limit(1);
+  return rows.length > 0;
 }
 
 /**

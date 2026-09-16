@@ -285,6 +285,12 @@ export interface DeliveryAddress {
   state: string;
   country: CountryCode;
   phone: string;
+  // FASE D16-F2 — fundação geográfica do endereço de ENTREGA. Referência
+  // logística autoritativa (shipping_sectors), nunca substitui os campos
+  // textuais acima. Opcional/opt-in: países sem geografia por setor (ex.:
+  // BR) continuam com isto sempre undefined/null. Ainda NÃO usado para
+  // calcular frete — só validado e mantido disponível no pedido.
+  shippingSectorId?: string | null;
 }
 
 export type PaymentMethodType =

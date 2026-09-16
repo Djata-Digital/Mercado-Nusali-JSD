@@ -32,6 +32,10 @@ import { isProductAvailableForCountry, eligibilityReason } from '../catalog/prod
 import { userProfiles } from '../../../db/schema.js';
 import { updateBuyerTaxId } from '../buyer/buyerProfileService.js';
 import { resolveCarrierNames, pickCarrierName } from '../logistics/carrierResolver.js';
+// FASE D16-F2 — fundação geográfica do endereço de entrega do comprador.
+// Reaproveita a MESMA validação já usada pela origem operacional do seller
+// (D15-C2/D16-E3/E4) — nunca uma segunda regra de setor/região divergente.
+import { validateAddressSectorAssignment } from '../shipping/shippingGeographyService.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -172,6 +176,11 @@ export class OrderService {
           country: a.countryCode,
           zipCode: a.zipCode || '',
           phone: a.phone,
+          // FASE D16-F2 — fundação geográfica do endereço de entrega: o
+          // objeto resolvido precisa manter shippingSectorId do endereço
+          // persistido selecionado (addressId), nunca perdê-lo neste mapeamento.
+          // Ainda NÃO usado para calcular frete nesta fase.
+          shippingSectorId: a.shippingSectorId || null,
         };
       }
     }
@@ -196,6 +205,8 @@ export class OrderService {
           country: a.countryCode,
           zipCode: a.zipCode || '',
           phone: a.phone,
+          // FASE D16-F2 — idem, para o endereço PADRÃO do comprador.
+          shippingSectorId: a.shippingSectorId || null,
         };
       }
     }
@@ -242,6 +253,25 @@ export class OrderService {
       }
       if (destinationCountryRow.isActive !== true) {
         throw new Error(`DESTINATION_COUNTRY_INACTIVE: O Mercado Nusali ainda não está disponível para entregas em ${destinationCountryRow.name}.`);
+      }
+
+      // FASE D16-F2 — fundação geográfica do endereço de entrega. Ainda NÃO
+      // usado para calcular frete/selecionar inventory nesta fase — só
+      // fecha o bypass de validação: se ALGUM shippingSectorId chegou no
+      // objeto resolvido (persistido via addressId/padrão, OU inline —
+      // "Precisamos evitar bypass", D16-F2 seção 6), ele precisa
+      // corresponder de verdade a um setor real, ativo, do MESMO país do
+      // destino — nunca aceito sem checagem só porque veio de um endereço
+      // "selecionado". Endereço sem setor continua 100% válido (opt-in,
+      // nunca exigido aqui — exigir/usar para frete é fase futura).
+      if (targetAddress?.shippingSectorId) {
+        const sectorValidation = await validateAddressSectorAssignment(tx, {
+          countryCode: destinationCountry,
+          shippingSectorId: String(targetAddress.shippingSectorId),
+        });
+        if (!('ok' in sectorValidation)) {
+          throw new Error(`SHIPPING_SECTOR_INVALID: ${sectorValidation.error}`);
+        }
       }
 
       // Correção crítica (CPF/CNPJ não chega ao Asaas): o checkout captura o

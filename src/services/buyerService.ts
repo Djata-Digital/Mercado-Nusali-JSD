@@ -202,6 +202,17 @@ export const BuyerService = {
     return apiClient.patch(`/buyer/addresses/${id}/default`);
   },
 
+  // FASE D16-F2 — fundação geográfica do endereço de entrega: mesmo padrão
+  // já usado por SellerApi.getShippingRegions/getShippingSectors (D15-C2),
+  // agora também para o comprador (endpoints somente leitura, isActive=true).
+  async getShippingRegions(country: string): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/buyer/shipping/regions', { params: { country } });
+  },
+
+  async getShippingSectors(country: string, regionId?: string): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/buyer/shipping/sectors', { params: regionId ? { country, region: regionId } : { country } });
+  },
+
   // 4. Orders & Tracking
   async getOrders(): Promise<ApiResponse<any[]>> {
     return apiClient.get<any[]>('/buyer/orders');

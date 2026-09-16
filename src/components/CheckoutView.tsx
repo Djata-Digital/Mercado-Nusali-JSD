@@ -85,7 +85,13 @@ export const CheckoutView: React.FC = () => {
     state: '',
     country: selectedCountry,
     phone: '',
+    shippingSectorId: null,
   });
+
+  // FASE D16-F2 — só para EXIBIÇÃO (nunca enviado ao backend): rótulo
+  // humano do setor/região logística do endereço padrão carregado, quando
+  // existir. address.shippingSectorId (acima) é o valor real submetido.
+  const [addressSectorLabel, setAddressSectorLabel] = useState<{ sector: string; region: string } | null>(null);
 
   // Load real user address from PostgreSQL on mount
   React.useEffect(() => {
@@ -104,7 +110,13 @@ export const CheckoutView: React.FC = () => {
           state: defaultAddr.state || '',
           country: (defaultAddr.country || defaultAddr.countryCode || selectedCountry) as CountryCode,
           phone: defaultAddr.phone || '',
+          shippingSectorId: defaultAddr.shippingSectorId || null,
         });
+        setAddressSectorLabel(
+          defaultAddr.shippingSectorId
+            ? { sector: defaultAddr.shippingSectorName || '', region: defaultAddr.shippingRegionName || '' }
+            : null
+        );
       }
     }).catch(() => {});
   }, [selectedCountry]);
@@ -327,6 +339,10 @@ export const CheckoutView: React.FC = () => {
             DESTINATION_COUNTRY_NOT_FOUND: 'O país informado no endereço de entrega não é reconhecido pelo Mercado Nusali.',
             DESTINATION_COUNTRY_INACTIVE: 'O Mercado Nusali ainda não está disponível para entregas neste país.',
             CART_CURRENCY_MISMATCH: 'Os produtos deste carrinho usam moedas diferentes e não podem ser pagos juntos.',
+            // FASE D16-F2 — só deveria acontecer se o país foi trocado sem
+            // recarregar a página (o onChange já limpa shippingSectorId);
+            // mensagem amigável como rede de segurança, nunca "undefined".
+            SHIPPING_SECTOR_INVALID: 'O setor de entrega salvo não é válido para o país selecionado. Atualize seu endereço em "Meus Endereços" e tente novamente.',
           };
           const rawMsg = res.error?.message || res.message || 'Erro ao processar checkout.';
           const msg = friendlyMessages[code] || (rawMsg.includes('undefined') ? 'Não foi possível confirmar o país de entrega. Verifique o endereço e tente novamente.' : rawMsg);
@@ -592,7 +608,13 @@ export const CheckoutView: React.FC = () => {
                     onChange={(e) => {
                       const newCountry = e.target.value as CountryCode;
                       setCountry(newCountry);
-                      setAddress({ ...address, country: newCountry });
+                      // FASE D16-F2 — trocar o país invalida o setor logístico
+                      // carregado (ele pertence ao país anterior); nunca deixa
+                      // um shippingSectorId órfão seguir para o pedido (o
+                      // backend rejeitaria com SHIPPING_SECTOR_INVALID na hora
+                      // de finalizar — mais claro limpar aqui, na hora da troca).
+                      setAddress({ ...address, country: newCountry, shippingSectorId: null });
+                      setAddressSectorLabel(null);
                       // countriesConfig cobre só os 8 países legados — para um
                       // país real fora dele (ex.: GM, SN) simplesmente não
                       // reatribui o método de pagamento, em vez de quebrar.
@@ -633,6 +655,15 @@ export const CheckoutView: React.FC = () => {
                 {cartAllowedCountries !== null && cartAllowedCountries.length === 0 && (
                   <p className="text-[11px] text-red-600 mt-1 font-semibold">
                     Os itens deste carrinho não têm nenhum destino de entrega em comum. Remova algum item para continuar.
+                  </p>
+                )}
+                {/* FASE D16-F2 — só exibição: setor/região logística já
+                    configurados no endereço padrão do comprador (cadastrados
+                    em "Meus Endereços"). Nunca editável aqui — checkout não é
+                    redesenhado para incluir o seletor de setor. */}
+                {addressSectorLabel && (
+                  <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1 mt-1.5 font-semibold">
+                    Setor de entrega: {addressSectorLabel.region ? `${addressSectorLabel.region} • ` : ''}{addressSectorLabel.sector}
                   </p>
                 )}
               </div>

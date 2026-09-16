@@ -41,6 +41,8 @@ import {
   productVariants,
   reviews,
   reviewImages,
+  shippingRegions,
+  shippingSectors,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
@@ -52,6 +54,15 @@ import { postBuyerDisputeMessage, DisputeMessageValidationError } from './module
 import { ACTIVE_DISPUTE_STATUSES } from './adminRoutes.js';
 import { updateBuyerTaxId, BuyerProfileValidationError } from './modules/buyer/buyerProfileService.js';
 import { isProductAvailableForCountry, eligibilityReason } from './modules/catalog/productEligibilityService.js';
+// FASE D16-F2 — fundação geográfica do endereço de ENTREGA do comprador.
+// Reaproveita INTEGRALMENTE os mesmos helpers já usados pela origem
+// operacional do seller (D15-C2/D16-E3/E4) — nunca uma segunda regra de
+// validação de setor/região divergente.
+import {
+  validateAddressSectorAssignment,
+  deriveShippingRegionFromSector,
+  countryHasActiveShippingSectors,
+} from './modules/shipping/shippingGeographyService.js';
 // FASE D16-D2 — mesma fonte de estoque AO VIVO por variante já usada pelo
 // catálogo (D16-C2): nunca product_variants.stock, nunca uma segunda fórmula.
 import { computeLiveVariantStock } from './modules/catalog/catalogService.js';
@@ -573,6 +584,33 @@ buyerRouter.delete('/security/sessions/:id', requireAuth, async (req: AuthReques
 // 3. ADDRESSES (REAL DB CRUD)
 // ==========================================
 
+// FASE D16-F2 — mesmo formato de saída já usado pela origem operacional do
+// seller (formatOperationalAddress em sellerRoutes.ts): shippingRegionId/
+// shippingRegionName são sempre DERIVADOS em tempo de leitura a partir do
+// setor (nunca uma coluna própria em addresses — evitaria a divergência
+// region=X + sector=setor-de-Y).
+function formatBuyerAddress(row: any, sectorInfo: { sector: any; region: any } | null) {
+  return {
+    id: row.id,
+    recipientName: row.recipientName,
+    street: row.street,
+    number: row.number,
+    complement: row.complement || '',
+    neighborhood: row.neighborhood || '',
+    city: row.city,
+    state: row.state,
+    country: row.countryCode,
+    zipCode: row.zipCode || '',
+    phone: row.phone,
+    isDefault: row.isDefault,
+    addressType: row.addressType,
+    shippingSectorId: row.shippingSectorId || null,
+    shippingSectorName: sectorInfo?.sector?.name || null,
+    shippingRegionId: sectorInfo?.region?.id || null,
+    shippingRegionName: sectorInfo?.region?.name || null,
+  };
+}
+
 buyerRouter.get('/addresses', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -581,23 +619,14 @@ buyerRouter.get('/addresses', requireAuth, async (req: AuthRequest, res: Respons
     const userId = req.user!.id;
     const userAddresses = await db.select().from(addresses).where(eq(addresses.userId, userId)).orderBy(desc(addresses.isDefault), desc(addresses.createdAt));
 
+    const formatted = await Promise.all(userAddresses.map(async (a) => {
+      const sectorInfo = await deriveShippingRegionFromSector(db, a.shippingSectorId);
+      return formatBuyerAddress(a, sectorInfo);
+    }));
+
     return res.json({
       success: true,
-      data: userAddresses.map(a => ({
-        id: a.id,
-        recipientName: a.recipientName,
-        street: a.street,
-        number: a.number,
-        complement: a.complement || '',
-        neighborhood: a.neighborhood || '',
-        city: a.city,
-        state: a.state,
-        country: a.countryCode,
-        zipCode: a.zipCode || '',
-        phone: a.phone,
-        isDefault: a.isDefault,
-        addressType: a.addressType,
-      })),
+      data: formatted,
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, error: { code: 'ADDRESSES_FETCH_FAILED', message: error?.message || 'Erro ao buscar endereços.' } });
@@ -610,10 +639,33 @@ buyerRouter.post('/addresses', requireAuth, async (req: AuthRequest, res: Respon
     if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
 
     const userId = req.user!.id;
-    const { recipientName, street, number, complement, neighborhood, city, state, country, countryCode, zipCode, phone, isDefault } = req.body;
+    const { recipientName, street, number, complement, neighborhood, city, state, country, countryCode, zipCode, phone, isDefault, shippingSectorId } = req.body;
 
     if (!recipientName || !street || !city) {
       return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'Nome do destinatário, rua e cidade são obrigatórios.' } });
+    }
+
+    const resolvedCountryCode = (countryCode || country || 'GW').toUpperCase();
+
+    // FASE D16-F2 — fundação geográfica do endereço de ENTREGA. Nunca confia
+    // só na validação do frontend: mesma regra já usada pela origem
+    // operacional do seller (validateAddressSectorAssignment), aplicada aqui
+    // ao endereço de entrega do comprador. Baseado em DADOS (nunca
+    // `if (country === 'GW')`): só exige setor se o país realmente tiver
+    // geografia operacional por setor cadastrada — países sem ela (ex.: BR)
+    // continuam funcionando exatamente como antes.
+    const hasSectorGeography = await countryHasActiveShippingSectors(db, resolvedCountryCode);
+    if (hasSectorGeography && !shippingSectorId) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'SHIPPING_SECTOR_REQUIRED', message: 'Selecione o setor de entrega para o país informado.' },
+      });
+    }
+    if (shippingSectorId) {
+      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode: resolvedCountryCode, shippingSectorId: String(shippingSectorId) });
+      if (!('ok' in sectorValidation)) {
+        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+      }
     }
 
     const existingAddresses = await db.select().from(addresses).where(eq(addresses.userId, userId));
@@ -636,36 +688,24 @@ buyerRouter.post('/addresses', requireAuth, async (req: AuthRequest, res: Respon
         neighborhood: neighborhood ? String(neighborhood).trim() : null,
         city: city.trim(),
         state: state ? String(state).trim() : city.trim(),
-        countryCode: (countryCode || country || 'GW').toUpperCase(),
+        countryCode: resolvedCountryCode,
         zipCode: zipCode ? String(zipCode).trim() : null,
         phone: String(phone || '').trim(),
         isDefault: shouldBeDefault,
         addressType: 'shipping',
+        shippingSectorId: shippingSectorId ? String(shippingSectorId) : null,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
     });
 
     const [inserted] = await db.select().from(addresses).where(eq(addresses.id, newAddressId)).limit(1);
+    const sectorInfo = await deriveShippingRegionFromSector(db, inserted.shippingSectorId);
 
     return res.json({
       success: true,
       message: 'Endereço cadastrado com sucesso!',
-      data: {
-        id: inserted.id,
-        recipientName: inserted.recipientName,
-        street: inserted.street,
-        number: inserted.number,
-        complement: inserted.complement || '',
-        neighborhood: inserted.neighborhood || '',
-        city: inserted.city,
-        state: inserted.state,
-        country: inserted.countryCode,
-        zipCode: inserted.zipCode || '',
-        phone: inserted.phone,
-        isDefault: inserted.isDefault,
-        addressType: inserted.addressType,
-      },
+      data: formatBuyerAddress(inserted, sectorInfo),
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, error: { code: 'ADDRESS_CREATE_FAILED', message: error?.message || 'Erro ao cadastrar endereço.' } });
@@ -685,7 +725,40 @@ buyerRouter.put('/addresses/:id', requireAuth, async (req: AuthRequest, res: Res
       return res.status(404).json({ success: false, error: { code: 'ADDRESS_NOT_FOUND', message: 'Endereço não encontrado ou não pertence a você.' } });
     }
 
-    const { recipientName, street, number, complement, neighborhood, city, state, country, countryCode, zipCode, phone, isDefault } = req.body;
+    const { recipientName, street, number, complement, neighborhood, city, state, country, countryCode, zipCode, phone, isDefault, shippingSectorId } = req.body;
+
+    // FASE D16-F2 — mesmo padrão já usado por PATCH /seller/addresses/:id:
+    // funde país/setor EXISTENTES com o que veio no corpo, e valida a
+    // combinação FINAL — nunca aceita silenciosamente um setor que passou a
+    // pertencer a um país diferente do país final do endereço (ex.: trocar
+    // country sem também atualizar/limpar shippingSectorId). Só aciona essa
+    // validação quando o payload realmente toca country/countryCode/
+    // shippingSectorId — uma edição de campo não-geográfico (ex.: telefone)
+    // nunca é bloqueada por uma geografia que ela nem tentou mudar.
+    const touchesGeography = country !== undefined || countryCode !== undefined || shippingSectorId !== undefined;
+    if (touchesGeography) {
+      const finalCountryCode = (countryCode !== undefined || country !== undefined)
+        ? String(countryCode || country).toUpperCase()
+        : existing[0].countryCode;
+      const finalShippingSectorId = shippingSectorId !== undefined
+        ? (shippingSectorId ? String(shippingSectorId) : null)
+        : existing[0].shippingSectorId;
+
+      if (finalShippingSectorId) {
+        const sectorValidation = await validateAddressSectorAssignment(db, { countryCode: finalCountryCode, shippingSectorId: finalShippingSectorId });
+        if (!('ok' in sectorValidation)) {
+          return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+        }
+      } else {
+        const hasSectorGeography = await countryHasActiveShippingSectors(db, finalCountryCode);
+        if (hasSectorGeography) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'SHIPPING_SECTOR_REQUIRED', message: 'Selecione o setor de entrega para o país informado.' },
+          });
+        }
+      }
+    }
 
     await db.transaction(async (tx) => {
       if (isDefault) {
@@ -704,29 +777,18 @@ buyerRouter.put('/addresses/:id', requireAuth, async (req: AuthRequest, res: Res
         ...(zipCode !== undefined && { zipCode: zipCode ? String(zipCode).trim() : null }),
         ...(phone !== undefined && { phone: String(phone).trim() }),
         ...(isDefault !== undefined && { isDefault: Boolean(isDefault) }),
+        ...(shippingSectorId !== undefined && { shippingSectorId: shippingSectorId ? String(shippingSectorId) : null }),
         updatedAt: new Date(),
       }).where(and(eq(addresses.id, id), eq(addresses.userId, userId)));
     });
 
     const [updated] = await db.select().from(addresses).where(eq(addresses.id, id)).limit(1);
+    const sectorInfo = await deriveShippingRegionFromSector(db, updated.shippingSectorId);
 
     return res.json({
       success: true,
       message: 'Endereço atualizado com sucesso!',
-      data: {
-        id: updated.id,
-        recipientName: updated.recipientName,
-        street: updated.street,
-        number: updated.number,
-        complement: updated.complement || '',
-        neighborhood: updated.neighborhood || '',
-        city: updated.city,
-        state: updated.state,
-        country: updated.countryCode,
-        zipCode: updated.zipCode || '',
-        phone: updated.phone,
-        isDefault: updated.isDefault,
-      },
+      data: formatBuyerAddress(updated, sectorInfo),
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, error: { code: 'ADDRESS_UPDATE_FAILED', message: error?.message || 'Erro ao atualizar endereço.' } });
@@ -758,24 +820,15 @@ buyerRouter.delete('/addresses/:id', requireAuth, async (req: AuthRequest, res: 
     }
 
     const remainingAddresses = await db.select().from(addresses).where(eq(addresses.userId, userId)).orderBy(desc(addresses.isDefault));
+    const formattedRemaining = await Promise.all(remainingAddresses.map(async (a) => {
+      const sectorInfo = await deriveShippingRegionFromSector(db, a.shippingSectorId);
+      return formatBuyerAddress(a, sectorInfo);
+    }));
 
     return res.json({
       success: true,
       message: 'Endereço removido com sucesso.',
-      data: remainingAddresses.map(a => ({
-        id: a.id,
-        recipientName: a.recipientName,
-        street: a.street,
-        number: a.number,
-        complement: a.complement || '',
-        neighborhood: a.neighborhood || '',
-        city: a.city,
-        state: a.state,
-        country: a.countryCode,
-        zipCode: a.zipCode || '',
-        phone: a.phone,
-        isDefault: a.isDefault,
-      })),
+      data: formattedRemaining,
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, error: { code: 'ADDRESS_DELETE_FAILED', message: error?.message || 'Erro ao remover endereço.' } });
@@ -801,27 +854,64 @@ buyerRouter.patch('/addresses/:id/default', requireAuth, async (req: AuthRequest
     });
 
     const userAddresses = await db.select().from(addresses).where(eq(addresses.userId, userId)).orderBy(desc(addresses.isDefault));
+    const formattedUserAddresses = await Promise.all(userAddresses.map(async (a) => {
+      const sectorInfo = await deriveShippingRegionFromSector(db, a.shippingSectorId);
+      return formatBuyerAddress(a, sectorInfo);
+    }));
 
     return res.json({
       success: true,
       message: 'Endereço padrão de entrega definido com sucesso!',
-      data: userAddresses.map(a => ({
-        id: a.id,
-        recipientName: a.recipientName,
-        street: a.street,
-        number: a.number,
-        complement: a.complement || '',
-        neighborhood: a.neighborhood || '',
-        city: a.city,
-        state: a.state,
-        country: a.countryCode,
-        zipCode: a.zipCode || '',
-        phone: a.phone,
-        isDefault: a.isDefault,
-      })),
+      data: formattedUserAddresses,
     });
   } catch (error: any) {
 return res.status(500).json({ success: false, error: { code: 'SET_DEFAULT_ADDRESS_FAILED', message: error?.message || 'Erro ao definir endereço padrão.' } });
+  }
+});
+
+// ==========================================
+// 3.1 LEITURA DE GEOGRAFIA DE FRETE PARA O COMPRADOR (FASE D16-F2)
+// ==========================================
+// Mesmo padrão/mesma restrição já usados por GET /seller/shipping/regions e
+// /sectors (D15-C2): endpoints admin exigem requireLogisticsStaff, que o
+// comprador nunca tem — sem uma rota própria, o formulário de endereço de
+// entrega não teria como popular Região/Setor. Somente leitura, filtram
+// isActive=true, devolvem só id/name/code/regionId — nunca tarifa/rota.
+buyerRouter.get('/shipping/regions', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const country = String(req.query.country || '').trim().toUpperCase();
+    if (!country) return res.status(400).json({ success: false, error: { code: 'COUNTRY_REQUIRED', message: 'country é obrigatório.' } });
+
+    const rows = await db.select({
+      id: shippingRegions.id, name: shippingRegions.name, code: shippingRegions.code,
+    }).from(shippingRegions).where(and(eq(shippingRegions.countryCode, country), eq(shippingRegions.isActive, true)))
+      .orderBy(asc(shippingRegions.name));
+
+    return res.json({ success: true, data: rows });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar regiões.' });
+  }
+});
+
+buyerRouter.get('/shipping/sectors', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const country = String(req.query.country || '').trim().toUpperCase();
+    if (!country) return res.status(400).json({ success: false, error: { code: 'COUNTRY_REQUIRED', message: 'country é obrigatório.' } });
+
+    const conditions = [eq(shippingSectors.countryCode, country), eq(shippingSectors.isActive, true)];
+    if (req.query.region) conditions.push(eq(shippingSectors.regionId, String(req.query.region)));
+
+    const rows = await db.select({
+      id: shippingSectors.id, name: shippingSectors.name, code: shippingSectors.code, regionId: shippingSectors.regionId,
+    }).from(shippingSectors).where(and(...conditions)).orderBy(asc(shippingSectors.name));
+
+    return res.json({ success: true, data: rows });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar setores.' });
   }
 });
 
