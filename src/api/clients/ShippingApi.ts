@@ -13,6 +13,18 @@ export class ShippingApi {
     return apiClient.post('/shipping/calculate', data);
   }
 
+  // FASE D16-G2 — preview READ-ONLY via F4/F3 (smart fulfillment), separado
+  // e paralelo ao motor legado (`create`/calculate acima) — nunca reserva
+  // estoque, nunca substitui F6.2.
+  static async preview(params: {
+    productId: string;
+    variantId?: string | null;
+    quantity: number;
+    destinationShippingSectorId?: string | null;
+  }): Promise<ApiResponse<any>> {
+    return apiClient.get('/shipping/preview', { params });
+  }
+
   static async update(id: string, data: any): Promise<ApiResponse<any>> {
     return apiClient.patch(`/shipping/${id}`, data);
   }

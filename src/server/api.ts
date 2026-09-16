@@ -22,6 +22,7 @@ import { ProductCreationService } from './modules/catalog/productCreationService
 import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
+import { resolveShippingPreview } from './modules/shipping/shippingPreviewService.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 import { internalJobsRouter } from './modules/jobs/internalJobsRoutes.js';
 import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
@@ -135,6 +136,59 @@ apiRouter.post('/shipping/calculate', async (req: Request, res: Response) => {
         code: 'SHIPPING_CALCULATION_FAILED',
         message: err?.message || 'Erro ao calcular o frete.',
       },
+    });
+  }
+});
+
+// FASE D16-G2 — preview de entrega READ-ONLY via F4/F3 (smart fulfillment),
+// para a página de produto (e futuramente checkout). NUNCA chama F5 —
+// nenhuma reserva, nenhum efeito colateral. sellerId é SEMPRE resolvido do
+// produto no banco (resolveShippingPreview), nunca confiado ao frontend.
+// Distinto e paralelo a /shipping/calculate (motor legado, mantido intocado
+// para outros chamadores existentes — CartView/CheckoutView/
+// multiSellerFreight.ts).
+apiRouter.get('/shipping/preview', async (req: Request, res: Response) => {
+  try {
+    const { productId, variantId, quantity, destinationShippingSectorId } = req.query;
+
+    const result = await resolveShippingPreview({
+      productId: productId as string,
+      variantId: (variantId as string) || null,
+      quantity: Number(quantity),
+      destinationShippingSectorId: (destinationShippingSectorId as string) || null,
+    });
+
+    if (result.ok === false) {
+      return res.status(result.httpStatus).json({
+        success: false,
+        error: { code: result.code, message: result.message },
+      });
+    }
+
+    if (result.available === false) {
+      const unavailableCode = result.code;
+      const unavailableMessage = result.message;
+      return res.json({
+        success: true,
+        data: { available: false, code: unavailableCode, message: unavailableMessage },
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        available: true,
+        shippingAmount: result.shippingAmount,
+        currency: result.currency,
+        serviceCode: result.serviceCode,
+        serviceName: result.serviceName,
+        fulfillmentType: result.fulfillmentType,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'SHIPPING_PREVIEW_FAILED', message: err?.message || 'Erro ao calcular o preview de entrega.' },
     });
   }
 });

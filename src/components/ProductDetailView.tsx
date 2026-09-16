@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Heart,
@@ -45,7 +46,9 @@ import { usePreferences } from '../context/PreferencesContext';
 import { normalizeProduct } from '../utils/productUtils';
 import { getCountryFlag, getCountryName, formatCurrency } from '../utils/currencyUtils';
 import { useCountries } from '../hooks/useCountries';
-import { ShippingService } from '../services/shippingService';
+import { ShippingService, ShippingPreviewData } from '../services/shippingService';
+import { useAuth } from '../context/AuthContext';
+import { BuyerService } from '../services/buyerService';
 import { ProductMediaViewerModal, MediaItem } from './ProductMediaViewerModal';
 import { ProductShareModal } from './ProductShareModal';
 import { ProductKit, ProductColor, ProductVariant } from '../types';
@@ -67,6 +70,7 @@ export const ProductDetailView: React.FC = () => {
   const navigate = useNavigate();
   const isValidId = Boolean(id && id !== 'undefined' && id.trim() !== '');
   const { selectedCountry, formatPrice, showToast } = usePreferences();
+  const { isAuthenticated } = useAuth();
   // Melhoria pré-piloto (elegibilidade por país): passa o destino real do
   // comprador para o backend calcular disponibilidade — nunca inferida aqui.
   // Cobre acesso via URL direta a um produto que não aparece mais no
@@ -407,71 +411,100 @@ export const ProductDetailView: React.FC = () => {
 
   const [isAnsweringQuestion, setIsAnsweringQuestion] = useState(false);
 
-  // Fase "Comissão percentual + logística real" — Seção 10: a condição real
-  // de entrega (frete/prazo) precisa aparecer ANTES de Comprar/Adicionar ao
-  // carrinho, não só depois de clicar em Comprar. Usa o MESMO endpoint real
-  // (POST /api/v1/shipping/calculate) que o checkout já usa — nunca um
-  // cálculo paralelo no frontend.
+  // FASE D16-G2 — a condição real de entrega (frete) precisa aparecer ANTES
+  // de Comprar/Adicionar ao carrinho, não só depois de clicar em Comprar.
+  // Usa o MESMO motor de decisão logística real do checkout (F4/F3 — smart
+  // fulfillment, read-only, nunca reserva estoque) em vez do motor legado
+  // país/zona (achado D16-G0: staging tem tarifas reais só no modelo F3 por
+  // setor, então o motor legado sempre respondia SHIPPING_RATE_NOT_AVAILABLE
+  // mesmo com tarifa cadastrada). destinationCountry (selectedCountry, do
+  // PreferencesContext) continua sendo SOMENTE o destino real do comprador
+  // — D16-G1: catalogOriginFilter nunca entra aqui, nunca é confundido com
+  // destino de entrega.
   const { data: operationalCountriesForDelivery } = useCountries();
-  const [deliveryQuote, setDeliveryQuote] = useState<{
+
+  // Setor de entrega: EXCLUSIVAMENTE do endereço padrão real do comprador
+  // autenticado (fonte já usada por CheckoutView.tsx) — nunca inferido por
+  // cidade/texto. Convidado (ou autenticado sem nenhum endereço com setor)
+  // nunca chama o preview — mostra o estado explícito DELIVERY_SECTOR_REQUIRED
+  // (seção 3 do enunciado), nunca SHIPPING_RATE_NOT_AVAILABLE.
+  const { data: buyerAddresses } = useQuery({
+    queryKey: ['buyer-addresses-for-shipping-preview'],
+    queryFn: async () => {
+      const res = await BuyerService.getAddresses();
+      return res.success && Array.isArray(res.data) ? res.data : [];
+    },
+    enabled: isAuthenticated,
+    staleTime: 1000 * 60,
+  });
+  const defaultDeliveryAddress = useMemo(() => {
+    if (!buyerAddresses || buyerAddresses.length === 0) return null;
+    return buyerAddresses.find((a: any) => a.isDefault) || buyerAddresses[0];
+  }, [buyerAddresses]);
+  const destinationShippingSectorId: string | null = defaultDeliveryAddress?.shippingSectorId || null;
+
+  const [deliveryPreview, setDeliveryPreview] = useState<{
     loading: boolean;
     available: boolean;
-    shippingChargedToBuyer: number;
+    shippingAmount: number;
     currency: string;
-    estimatedMinDays: number;
-    estimatedMaxDays: number;
-    errorCode?: string;
-    errorMessage?: string;
+    serviceCode?: string;
+    serviceName?: string;
+    code?: string;
+    message?: string;
   } | null>(null);
 
   useEffect(() => {
     let isMounted = true;
-    const hasShippableData = Boolean(product?.weightKg && product.weightKg > 0 && originCountry && selectedCountry && product?.availableForCountry !== false);
-    if (!hasShippableData) {
-      setDeliveryQuote(null);
+
+    // Seção 4 — não calcula uma cotação definitiva enquanto o produto
+    // exigir variante e nenhuma válida estiver selecionada ainda.
+    if (needsVariantSelection || isUnavailableForDestination || product?.availableForCountry === false) {
+      setDeliveryPreview(null);
       return;
     }
-    setDeliveryQuote((prev) => ({ ...(prev || {
-      loading: true, available: false, shippingChargedToBuyer: 0, currency: productCurrency, estimatedMinDays: 0, estimatedMaxDays: 0,
-    }), loading: true }));
 
-    ShippingService.calculateFreight({
-      originCountry,
-      destinationCountry: selectedCountry,
-      weightKg: product!.weightKg!,
-      dimensionsCm: product!.dimensionsCm,
-      currency: productCurrency,
-      storeId: product!.storeId || undefined,
-      sellerId: product!.seller?.id || undefined,
-      productSubtotal: effectiveUnitPrice * quantity,
+    // Seção 3 — setor ausente é um estado PRÓPRIO, nunca "sem tarifa".
+    // Backend também valida isto de forma independente (defesa em
+    // profundidade) — aqui só evita uma requisição desnecessária.
+    if (!destinationShippingSectorId) {
+      setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: productCurrency, code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
+      return;
+    }
+
+    setDeliveryPreview((prev) => ({ ...(prev || { loading: true, available: false, shippingAmount: 0, currency: productCurrency }), loading: true }));
+
+    ShippingService.getPreview({
+      productId: product!.id,
+      variantId: activeVariant?.id || null,
+      quantity,
+      destinationShippingSectorId,
     }).then((res) => {
       if (!isMounted) return;
       if (res.success && res.data) {
-        setDeliveryQuote({
-          loading: false,
-          available: true,
-          shippingChargedToBuyer: res.data.shippingChargedToBuyer,
-          currency: res.data.currency,
-          estimatedMinDays: res.data.estimatedMinDays,
-          estimatedMaxDays: res.data.estimatedMaxDays,
-        });
+        const data: ShippingPreviewData = res.data;
+        if (data.available === true) {
+          setDeliveryPreview({
+            loading: false,
+            available: true,
+            shippingAmount: data.shippingAmount,
+            currency: data.currency,
+            serviceCode: data.serviceCode,
+            serviceName: data.serviceName,
+          });
+        } else {
+          const unavailableCode: string = data.code;
+          const unavailableMessage: string = data.message;
+          setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: productCurrency, code: unavailableCode, message: unavailableMessage });
+        }
       } else {
-        setDeliveryQuote({
-          loading: false,
-          available: false,
-          shippingChargedToBuyer: 0,
-          currency: productCurrency,
-          estimatedMinDays: 0,
-          estimatedMaxDays: 0,
-          errorCode: res.error?.code,
-          errorMessage: res.error?.message || 'Frete indisponível para este destino.',
-        });
+        setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: productCurrency, code: res.error?.code, message: res.error?.message || 'Frete indisponível para este destino no momento.' });
       }
     });
 
     return () => { isMounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [product?.id, product?.weightKg, originCountry, selectedCountry, quantity]);
+  }, [product?.id, activeVariant?.id, quantity, destinationShippingSectorId, needsVariantSelection, isUnavailableForDestination]);
 
   const deliveryDestinationCountry = operationalCountriesForDelivery?.find((c) => c.code === selectedCountry);
 
@@ -1186,9 +1219,12 @@ export const ProductDetailView: React.FC = () => {
           {/* Buy Box Card */}
           <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-xs space-y-4">
             {/* ENTREGA — condição real de frete, ANTES dos botões de compra.
-                Nunca "frete calculado no checkout": se já há peso/dimensões
-                do produto e um destino selecionado, o cálculo real já roda
-                aqui, pelo mesmo endpoint que o checkout usa. */}
+                FASE D16-G2: usa o preview smart fulfillment (F4/F3
+                read-only) em vez do motor legado — mesma decisão de origem
+                que o checkout (F6.2) realmente aplicaria, sem reservar
+                estoque. Nunca mostra código interno em vermelho para o
+                cliente (seção 9) — só as mensagens amigáveis já resolvidas
+                pelo backend. */}
             <div className="space-y-2 bg-gray-50 p-3 rounded-xl border border-gray-200">
               <div className="flex items-center gap-2 font-bold text-sm text-gray-900">
                 <Truck className="w-4.5 h-4.5 text-gray-700" />
@@ -1208,44 +1244,38 @@ export const ProductDetailView: React.FC = () => {
                 </p>
               )}
 
-              {!isUnavailableForDestination && !product.weightKg && (
-                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
-                  Este produto ainda não tem peso cadastrado pelo vendedor — não é possível calcular o frete nem finalizar a compra até que isso seja corrigido.
-                </p>
+              {!isUnavailableForDestination && needsVariantSelection && (
+                <p className="text-[11px] text-gray-600">Selecione as opções para calcular a entrega.</p>
               )}
 
-              {!isUnavailableForDestination && product.weightKg && !selectedCountry && (
-                <p className="text-[11px] text-gray-600">Informe seu destino para calcular a entrega.</p>
-              )}
-
-              {!isUnavailableForDestination && product.weightKg && selectedCountry && deliveryQuote?.loading && (
+              {!isUnavailableForDestination && !needsVariantSelection && deliveryPreview?.loading && (
                 <p className="text-xs text-gray-500 flex items-center gap-1.5">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Calculando frete...
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Calculando entrega...
                 </p>
               )}
 
-              {!isUnavailableForDestination && product.weightKg && selectedCountry && !deliveryQuote?.loading && deliveryQuote?.available && (
-                <>
-                  <div className="text-xs flex items-center justify-between">
-                    <span className="text-gray-500">Frete:</span>
-                    <span className="font-black text-emerald-700">
-                      {deliveryQuote.shippingChargedToBuyer > 0
-                        ? formatCurrency(deliveryQuote.shippingChargedToBuyer, deliveryQuote.currency as any)
-                        : 'GRÁTIS'}
-                    </span>
-                  </div>
-                  <div className="text-xs flex items-center justify-between">
-                    <span className="text-gray-500">Prazo estimado:</span>
-                    <span className="font-bold text-gray-900">
-                      {deliveryQuote.estimatedMinDays}–{deliveryQuote.estimatedMaxDays} dias úteis
-                    </span>
-                  </div>
-                </>
+              {!isUnavailableForDestination && !needsVariantSelection && !deliveryPreview?.loading && deliveryPreview?.available && (
+                <div className="text-xs flex items-center justify-between">
+                  <span className="text-gray-500">
+                    Frete{deliveryPreview.serviceCode ? ` (${deliveryPreview.serviceCode})` : ''}:
+                  </span>
+                  <span className="font-black text-emerald-700">
+                    {deliveryPreview.shippingAmount > 0
+                      ? formatCurrency(deliveryPreview.shippingAmount, deliveryPreview.currency as any)
+                      : 'GRÁTIS'}
+                  </span>
+                </div>
               )}
 
-              {!isUnavailableForDestination && product.weightKg && selectedCountry && !deliveryQuote?.loading && deliveryQuote && !deliveryQuote.available && (
+              {!isUnavailableForDestination && !needsVariantSelection && !deliveryPreview?.loading && deliveryPreview && deliveryPreview.available === false && deliveryPreview.code === 'DELIVERY_SECTOR_REQUIRED' && (
+                <p className="text-[11px] text-gray-600 bg-gray-100 border border-gray-200 rounded-lg p-2">
+                  {deliveryPreview.message || 'Selecione um endereço de entrega para calcular o frete.'}
+                </p>
+              )}
+
+              {!isUnavailableForDestination && !needsVariantSelection && !deliveryPreview?.loading && deliveryPreview && deliveryPreview.available === false && deliveryPreview.code !== 'DELIVERY_SECTOR_REQUIRED' && (
                 <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
-                  {deliveryQuote.errorMessage || 'Frete indisponível para este destino no momento.'}
+                  {deliveryPreview.message || 'Frete indisponível para este destino no momento.'}
                 </p>
               )}
             </div>
