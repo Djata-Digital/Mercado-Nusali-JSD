@@ -23,7 +23,7 @@ import { ProductCard } from './ProductCard';
 export const StorePublicView: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { showToast } = usePreferences();
+  const { showToast, selectedCountry, catalogOriginFilter } = usePreferences();
 
   const [activeTab, setActiveTab] = useState<'catalog' | 'about'>('catalog');
   const [searchFilter, setSearchFilter] = useState('');
@@ -33,8 +33,11 @@ export const StorePublicView: React.FC = () => {
   const { data: operationalCountries } = useCountries();
   // Produtos filtrados pelo relacionamento real storeId — nunca por heurística
   // de nome do seller. Só busca depois que sabemos o ID real da loja.
+  // FASE D16-G1 — TAMBÉM respeita destino+origem (mesmo gap de D16-G0): uma
+  // loja de um país excluído pelo filtro de origem naturalmente resulta em
+  // catálogo vazio aqui, sem esconder a loja em si.
   const { data: products = [], isLoading: productsLoading } = useProducts(
-    store ? { storeId: store.id } : undefined
+    store ? { storeId: store.id, country: selectedCountry, originCountryFilter: catalogOriginFilter } : undefined
   );
 
   if (storeLoading) {

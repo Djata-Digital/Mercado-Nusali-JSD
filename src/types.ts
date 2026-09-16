@@ -462,6 +462,10 @@ export interface FilterState {
   query: string;
   category: string;
   country?: CountryCode | 'all';
+  // FASE D16-G1 — filtro OPCIONAL de país de ORIGEM (products.countryCode),
+  // independente de `country` (destino/elegibilidade) — nunca o substitui.
+  // 'ALL'/ausente = sem filtro de origem.
+  originCountryFilter?: string;
   storeId?: string;
   priceMin?: number;
   priceMax?: number;

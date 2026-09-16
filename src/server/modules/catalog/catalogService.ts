@@ -1,5 +1,5 @@
 import { getDb } from '../../../db/index.js';
-import { products, categories, brands, productVariants, productImages, productAttributes, reviews, sellers, stores, inventory, orderItems, orders } from '../../../db/schema.js';
+import { products, categories, brands, productVariants, productImages, productAttributes, reviews, sellers, stores, inventory, orderItems, orders, countries } from '../../../db/schema.js';
 import { getCache, setCache, delCache } from '../../../db/redis.js';
 import { eq, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -131,6 +131,13 @@ export interface ProductQueryFilters {
   q?: string;
   category?: string;
   country?: string;
+  // FASE D16-G1 — filtro OPCIONAL e ADICIONAL de país de ORIGEM
+  // (products.countryCode), nunca substitui `country` (destino/elegibilidade
+  // — productEligibilityService.ts). 'ALL'/undefined/vazio = sem filtro de
+  // origem (mostra todas as origens já elegíveis para o destino). Ver
+  // auditoria D16-G0 — o conceito de "origem" já existe no schema
+  // (products.countryCode); isto só expõe um filtro adicional sobre ele.
+  originCountryFilter?: string;
   storeId?: string;
   brand?: string;
   minPrice?: number;
@@ -193,6 +200,21 @@ export class CatalogService {
         OR
         (${products.publishingScope} = 'international' AND ${products.targetCountriesJson} @> ${JSON.stringify([dest])}::jsonb)
       )`);
+    }
+
+    // FASE D16-G1 — filtro ADICIONAL de país de ORIGEM (products.countryCode).
+    // NUNCA substitui a condição de destino/elegibilidade acima — é sempre um
+    // AND sobre ela ("de qual origem, DENTRO do que já é elegível para o meu
+    // destino"). 'ALL'/ausente/vazio = nenhum filtro de origem. Country code
+    // inválido (não cadastrado em `countries`) é IGNORADO silenciosamente —
+    // nunca quebra a listagem nem esvazia o catálogo por um parâmetro de UI
+    // malformado; equivalente a não ter passado o filtro.
+    if (filters.originCountryFilter && filters.originCountryFilter.trim().toUpperCase() !== 'ALL') {
+      const origin = filters.originCountryFilter.trim().toUpperCase();
+      const [originCountryRow] = await db.select({ code: countries.code }).from(countries).where(eq(countries.code, origin)).limit(1);
+      if (originCountryRow) {
+        conditions.push(eq(products.countryCode, origin));
+      }
     }
 
     // Fase "Lojas oficiais reais": relacionamento real produto↔loja — nunca

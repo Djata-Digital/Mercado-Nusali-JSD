@@ -16,6 +16,9 @@ export interface PaginationParams {
 export interface ProductFilters extends PaginationParams {
   category?: string;
   country?: string;
+  // FASE D16-G1 — filtro OPCIONAL de país de ORIGEM, independente de
+  // `country` (destino/elegibilidade) — nunca o substitui.
+  originCountryFilter?: string;
   minPrice?: number;
   maxPrice?: number;
   freeShipping?: boolean;

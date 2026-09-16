@@ -45,6 +45,7 @@ export async function getProductsHandler(req: Request, res: Response) {
       q,
       category,
       country,
+      originCountryFilter,
       storeId,
       brand,
       minPrice,
@@ -60,6 +61,11 @@ export async function getProductsHandler(req: Request, res: Response) {
       q: q as string,
       category: category as string,
       country: resolveDestinationCountryFromRequest(req, country as string),
+      // FASE D16-G1 — filtro de origem é INDEPENDENTE do destino: nunca lido
+      // do header X-Country-Code (que representa exclusivamente o destino do
+      // comprador — ver resolveDestinationCountryFromRequest acima), sempre
+      // e somente explícito via querystring.
+      originCountryFilter: originCountryFilter as string,
       storeId: storeId as string,
       brand: brand as string,
       minPrice: minPrice ? Number(minPrice) : undefined,
