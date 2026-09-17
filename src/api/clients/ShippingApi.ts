@@ -25,6 +25,17 @@ export class ShippingApi {
     return apiClient.get('/shipping/preview', { params });
   }
 
+  // FASE D16-G3 — preview AGREGADO de frete para carrinho/checkout via
+  // F4/F3 (paralelo ao preview de produto único acima, D16-G2). NUNCA
+  // reserva estoque, nunca chama F5. Cada item leva só productId/variantId/
+  // quantity — seller/peso/tarifa são sempre resolvidos no backend.
+  static async previewCart(payload: {
+    destinationShippingSectorId?: string | null;
+    items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
+  }): Promise<ApiResponse<any>> {
+    return apiClient.post('/shipping/preview-cart', payload);
+  }
+
   static async update(id: string, data: any): Promise<ApiResponse<any>> {
     return apiClient.patch(`/shipping/${id}`, data);
   }

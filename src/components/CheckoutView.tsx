@@ -25,7 +25,7 @@ import { useCountries } from '../hooks/useCountries';
 import { PixPaymentModal } from './PixPaymentModal';
 import { PixService } from '../services/pixService';
 import { convertToBRL, PixTransaction } from '../utils/pixEngine';
-import { calculateMultiSellerFreight } from '../utils/multiSellerFreight';
+import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
 
 import { OrdersApi } from '../api/clients/OrdersApi';
 import { BuyerService } from '../services/buyerService';
@@ -189,8 +189,6 @@ export const CheckoutView: React.FC = () => {
     shippingCost: number;
     shippingChargedToBuyer: number;
     shippingSellerSubsidy: number;
-    estimatedMinDays: number;
-    estimatedMaxDays: number;
     available: boolean;
     loading: boolean;
     error?: string;
@@ -198,8 +196,6 @@ export const CheckoutView: React.FC = () => {
     shippingCost: 0,
     shippingChargedToBuyer: 0,
     shippingSellerSubsidy: 0,
-    estimatedMinDays: 1,
-    estimatedMaxDays: 3,
     available: true,
     loading: false,
   });
@@ -214,62 +210,79 @@ export const CheckoutView: React.FC = () => {
   const isCrossBorder = originCountry !== destCountry;
   const CARD_PAYMENTS_ENABLED = false;
 
+  // FASE D16-G3 — preview de frete via F4/F3 (mesma arquitetura do Cart/
+  // Product Detail) em vez do motor legado (calculateMultiSellerFreight/
+  // shipping_rates). Setor de entrega: EXCLUSIVAMENTE
+  // address.shippingSectorId, já carregado do endereço real do comprador
+  // (ver useEffect de BuyerService.getAddresses acima) — nunca inferido de
+  // country/texto.
   React.useEffect(() => {
     let isMounted = true;
     const fetchFreight = async () => {
+      if (cart.length === 0) return;
       setFreightQuote((prev) => ({ ...prev, loading: true, error: undefined }));
-      // Sem fallback fictício de 0.5kg: se algum item não tem peso real
-      // cadastrado, o frete não pode ser calculado — o backend já rejeita
-      // isso (PRODUCT_WEIGHT_REQUIRED), então detectamos aqui para dar um
-      // erro claro em vez de subestimar o peso silenciosamente.
-      const itemsMissingWeight = cart.filter((item) => !item.product.weightKg || item.product.weightKg <= 0);
-      if (itemsMissingWeight.length > 0) {
+
+      if (!address.shippingSectorId) {
         if (isMounted) {
-          setFreightQuote((prev) => ({
-            ...prev,
-            loading: false,
+          setFreightQuote({
+            shippingCost: 0,
+            shippingChargedToBuyer: 0,
+            shippingSellerSubsidy: 0,
             available: false,
-            error: 'Não é possível calcular o frete: um ou mais produtos do carrinho não têm peso cadastrado.',
-          }));
+            loading: false,
+            error: 'Selecione/atualize seu endereço de entrega para calcular o frete.',
+          });
         }
         return;
       }
+
       // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
       // vendedor; cada vendedor é uma entrega/child order independente no
       // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
-      // calculateMultiSellerFreight agrupa por sellerId e soma 1 cotação
-      // por grupo — NUNCA 1 cotação para o carrinho inteiro (que ignorava
-      // todos os vendedores exceto o do primeiro item). Fail-closed: se
+      // getCartPreview agrupa por sellerId (F4/F3) e soma 1 cotação por
+      // grupo — NUNCA 1 cotação para o carrinho inteiro. Fail-closed: se
       // qualquer grupo falhar, o resultado inteiro vem available:false
       // (nunca um total parcial/subestimado).
-      const aggregated = await calculateMultiSellerFreight(cart, {
-        originCountry,
-        destinationCountry: destCountry,
-        currency: orderCurrency,
+      const res = await ShippingService.getCartPreview({
+        destinationShippingSectorId: address.shippingSectorId,
+        items: cart.map((item) => ({
+          productId: item.product.id,
+          variantId: item.selectedVariantSku || null,
+          quantity: item.quantity,
+        })),
       });
 
       if (!isMounted) return;
 
-      if (aggregated.available) {
-        setFreightQuote({
-          shippingCost: aggregated.shippingCost,
-          shippingChargedToBuyer: aggregated.shippingChargedToBuyer,
-          shippingSellerSubsidy: aggregated.shippingSellerSubsidy,
-          estimatedMinDays: aggregated.estimatedMinDays,
-          estimatedMaxDays: aggregated.estimatedMaxDays,
-          available: true,
-          loading: false,
-        });
+      if (res.success && res.data) {
+        const data: CartShippingPreviewData = res.data;
+        if (data.available === true) {
+          setFreightQuote({
+            shippingCost: data.shippingCost,
+            shippingChargedToBuyer: data.shippingChargedToBuyer,
+            shippingSellerSubsidy: data.shippingSellerSubsidy,
+            available: true,
+            loading: false,
+          });
+        } else {
+          const unavailableMessage: string = data.message;
+          setFreightQuote({
+            shippingCost: 0,
+            shippingChargedToBuyer: 0,
+            shippingSellerSubsidy: 0,
+            available: false,
+            loading: false,
+            error: unavailableMessage,
+          });
+        }
       } else {
         setFreightQuote({
           shippingCost: 0,
           shippingChargedToBuyer: 0,
           shippingSellerSubsidy: 0,
-          estimatedMinDays: 0,
-          estimatedMaxDays: 0,
           available: false,
           loading: false,
-          error: aggregated.errorMessage || 'Frete não disponível para o endereço informado.',
+          error: res.error?.message || 'Frete não disponível para o endereço informado.',
         });
       }
     };
@@ -279,7 +292,7 @@ export const CheckoutView: React.FC = () => {
       isMounted = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [originCountry, destCountry, cartTotal, orderCurrency]);
+  }, [address.shippingSectorId, cart.length, cartTotal]);
 
   const customsDuty = 0; // Removed 8% fake tax - national is 0, international is pending
   const shippingFee = freightQuote.shippingChargedToBuyer;

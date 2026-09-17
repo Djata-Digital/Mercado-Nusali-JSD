@@ -22,7 +22,7 @@ import { ProductCreationService } from './modules/catalog/productCreationService
 import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
-import { resolveShippingPreview } from './modules/shipping/shippingPreviewService.js';
+import { resolveShippingPreview, resolveCartShippingPreview } from './modules/shipping/shippingPreviewService.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 import { internalJobsRouter } from './modules/jobs/internalJobsRoutes.js';
 import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
@@ -189,6 +189,71 @@ apiRouter.get('/shipping/preview', async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       error: { code: 'SHIPPING_PREVIEW_FAILED', message: err?.message || 'Erro ao calcular o preview de entrega.' },
+    });
+  }
+});
+
+// FASE D16-G3 — preview AGREGADO de frete para carrinho/checkout, via F4/F3
+// (mesma arquitetura de /shipping/preview acima, D16-G2 — nunca uma segunda
+// implementação). NUNCA chama F5, nunca reserva estoque, nunca cria
+// order/payment/escrow. Cada item do payload leva SOMENTE productId/
+// variantId/quantity — seller/preço/peso/tarifa são SEMPRE resolvidos no
+// banco (resolveCartShippingPreview -> resolveShippingPreviewLine), nunca
+// confiados ao cliente. Substitui, para CartView/CheckoutView, o preview
+// legado (calculateMultiSellerFreight/POST /shipping/calculate) — que
+// permanece intocado para não quebrar nenhum outro chamador ainda não
+// migrado (D16-G1.2, fase de zero-consumer audit fica para depois).
+apiRouter.post('/shipping/preview-cart', async (req: Request, res: Response) => {
+  try {
+    const { destinationShippingSectorId, items } = req.body ?? {};
+
+    if (!Array.isArray(items)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'CART_ITEMS_REQUIRED', message: 'items deve ser uma lista de {productId, variantId?, quantity}.' },
+      });
+    }
+
+    const result = await resolveCartShippingPreview({
+      destinationShippingSectorId: destinationShippingSectorId || null,
+      items: items.map((item: any) => ({
+        productId: item?.productId,
+        variantId: item?.variantId || null,
+        quantity: Number(item?.quantity),
+      })),
+    });
+
+    if (result.ok === false) {
+      return res.status(result.httpStatus).json({
+        success: false,
+        error: { code: result.code, message: result.message },
+      });
+    }
+
+    if (result.available === false) {
+      const unavailableCode = result.code;
+      const unavailableMessage = result.message;
+      return res.json({
+        success: true,
+        data: { available: false, code: unavailableCode, message: unavailableMessage },
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        available: true,
+        shippingChargedToBuyer: result.shippingChargedToBuyer,
+        shippingCost: result.shippingCost,
+        shippingSellerSubsidy: result.shippingSellerSubsidy,
+        currency: result.currency,
+        sellers: result.sellers,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'SHIPPING_PREVIEW_FAILED', message: err?.message || 'Erro ao calcular o preview de entrega do carrinho.' },
     });
   }
 });

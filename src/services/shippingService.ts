@@ -16,6 +16,28 @@ export interface ShippingPreviewUnavailable {
 }
 export type ShippingPreviewData = ShippingPreviewAvailable | ShippingPreviewUnavailable;
 
+// FASE D16-G3 — preview AGREGADO de carrinho/checkout (F3/F4, sem F5).
+export interface CartShippingPreviewSellerBreakdown {
+  sellerId: string;
+  storeId: string | null;
+  shippingAmount: number;
+  currency: string;
+}
+export interface CartShippingPreviewAvailable {
+  available: true;
+  shippingChargedToBuyer: number;
+  shippingCost: number;
+  shippingSellerSubsidy: number;
+  currency: string;
+  sellers: CartShippingPreviewSellerBreakdown[];
+}
+export interface CartShippingPreviewUnavailable {
+  available: false;
+  code: string;
+  message: string;
+}
+export type CartShippingPreviewData = CartShippingPreviewAvailable | CartShippingPreviewUnavailable;
+
 export const ShippingService = {
   async getShipments(): Promise<ApiResponse<any[]>> {
     return ShippingApi.list();
@@ -51,6 +73,40 @@ export const ShippingService = {
         error: {
           code: 'SHIPPING_PREVIEW_FAILED',
           message: err?.response?.data?.error?.message || err?.message || 'Erro ao calcular o preview de entrega.',
+        },
+      };
+    }
+  },
+
+  /**
+   * FASE D16-G3 — preview AGREGADO de frete para CartView/CheckoutView,
+   * via F4/F3 (mesma arquitetura do getPreview acima). Substitui, para
+   * esses dois consumidores, o motor legado (calculateFreight abaixo via
+   * multiSellerFreight.ts) — que permanece intocado para não quebrar outros
+   * chamadores ainda não migrados. Nunca reserva estoque, nunca chama F5.
+   */
+  async getCartPreview(payload: {
+    destinationShippingSectorId?: string | null;
+    items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
+  }): Promise<ApiResponse<CartShippingPreviewData>> {
+    try {
+      const res = await ShippingApi.previewCart(payload);
+      if (!res.success || !res.data) {
+        return {
+          success: false,
+          error: {
+            code: res.error?.code || 'SHIPPING_PREVIEW_FAILED',
+            message: res.error?.message || res.message || 'Não foi possível calcular o frete do carrinho.',
+          },
+        };
+      }
+      return { success: true, data: res.data };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: {
+          code: 'SHIPPING_PREVIEW_FAILED',
+          message: err?.response?.data?.error?.message || err?.message || 'Erro ao calcular o preview de entrega do carrinho.',
         },
       };
     }

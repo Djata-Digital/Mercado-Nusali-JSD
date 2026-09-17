@@ -1,10 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useCart } from '../hooks/useCart';
 import { usePreferences } from '../context/PreferencesContext';
 import { useCountries } from '../hooks/useCountries';
+import { useAuth } from '../context/AuthContext';
 import { formatCurrency } from '../utils/currencyUtils';
-import { calculateMultiSellerFreight } from '../utils/multiSellerFreight';
+import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
+import { BuyerService } from '../services/buyerService';
 import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } from 'lucide-react';
 
 export const CartView: React.FC = () => {
@@ -38,16 +41,33 @@ export const CartView: React.FC = () => {
 
   const couponDiscount = appliedCoupon?.includes('NUSALI10') ? cartTotal * 0.10 : 0;
 
-  // Fase "Comissão percentual + logística real": SEM cálculo financeiro
-  // paralelo no frontend. Mesmo endpoint real (POST /api/v1/shipping/calculate)
-  // que o checkout usa — nunca um valor fixo como os antigos "R$29,90".
+  // FASE D16-G3 — preview de frete via F4/F3 (mesma arquitetura já validada
+  // no Product Detail, D16-G2) em vez do motor legado
+  // (calculateMultiSellerFreight/shipping_rates). Setor de entrega:
+  // EXCLUSIVAMENTE o endereço padrão real do comprador autenticado (mesmo
+  // padrão de ProductDetailView.tsx) — nunca inferido por país/texto.
+  const { isAuthenticated } = useAuth();
+  const { data: buyerAddresses } = useQuery({
+    queryKey: ['buyer-addresses-for-shipping-preview'],
+    queryFn: async () => {
+      const res = await BuyerService.getAddresses();
+      return res.success && Array.isArray(res.data) ? res.data : [];
+    },
+    enabled: isAuthenticated,
+    staleTime: 1000 * 60,
+  });
+  const defaultDeliveryAddress = useMemo(() => {
+    if (!buyerAddresses || buyerAddresses.length === 0) return null;
+    return buyerAddresses.find((a: any) => a.isDefault) || buyerAddresses[0];
+  }, [buyerAddresses]);
+  const destinationShippingSectorId: string | null = defaultDeliveryAddress?.shippingSectorId || null;
+
   const [shippingQuote, setShippingQuote] = useState<{
     loading: boolean;
     available: boolean;
     shippingChargedToBuyer: number;
     currency: string;
-    estimatedMinDays?: number;
-    estimatedMaxDays?: number;
+    code?: string;
     errorMessage?: string;
   } | null>(null);
 
@@ -57,41 +77,42 @@ export const CartView: React.FC = () => {
       setShippingQuote(null);
       return;
     }
-    const itemsMissingWeight = cart.filter((i) => !i.product.weightKg || i.product.weightKg <= 0);
-    if (itemsMissingWeight.length > 0) {
-      setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: 'Um ou mais produtos do carrinho não têm peso cadastrado — não é possível calcular o frete.' });
+    const currency = cart[0]?.product?.currency || 'XOF';
+    if (!destinationShippingSectorId) {
+      setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency, code: 'DELIVERY_SECTOR_REQUIRED', errorMessage: 'Selecione/atualize seu endereço de entrega para calcular o frete.' });
       return;
     }
-    const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || '').toUpperCase();
-    if (!originCountry || !selectedCountry) {
-      setShippingQuote(null);
-      return;
-    }
-    setShippingQuote((prev) => ({ ...(prev || { loading: true, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF' }), loading: true }));
+    setShippingQuote((prev) => ({ ...(prev || { loading: true, available: false, shippingChargedToBuyer: 0, currency }), loading: true }));
     // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
     // vendedor; cada vendedor é uma entrega/child order independente no
     // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
-    // calculateMultiSellerFreight agrupa por sellerId e soma 1 cotação por
-    // grupo — NUNCA 1 cotação para o carrinho inteiro (que ignorava todos
-    // os vendedores exceto o do primeiro item, subestimando o frete real).
-    calculateMultiSellerFreight(cart, {
-      originCountry,
-      destinationCountry: selectedCountry.toUpperCase(),
-      currency: cart[0]?.product?.currency || 'XOF',
-    }).then((aggregated) => {
+    // getCartPreview agrupa por sellerId (F4/F3) e soma 1 cotação por
+    // grupo — NUNCA 1 cotação para o carrinho inteiro.
+    ShippingService.getCartPreview({
+      destinationShippingSectorId,
+      items: cart.map((item) => ({
+        productId: item.product.id,
+        variantId: item.selectedVariantSku || null,
+        quantity: item.quantity,
+      })),
+    }).then((res) => {
       if (!isMounted) return;
-      if (aggregated.available) {
-        setShippingQuote({
-          loading: false, available: true, shippingChargedToBuyer: aggregated.shippingChargedToBuyer, currency: cart[0]?.product?.currency || 'XOF',
-          estimatedMinDays: aggregated.estimatedMinDays, estimatedMaxDays: aggregated.estimatedMaxDays,
-        });
+      if (res.success && res.data) {
+        const data: CartShippingPreviewData = res.data;
+        if (data.available === true) {
+          setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: data.shippingChargedToBuyer, currency: data.currency });
+        } else {
+          const unavailableCode: string = data.code;
+          const unavailableMessage: string = data.message;
+          setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency, code: unavailableCode, errorMessage: unavailableMessage });
+        }
       } else {
-        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: aggregated.errorMessage || 'Frete indisponível para este destino.' });
+        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency, errorMessage: res.error?.message || 'Frete indisponível para este destino no momento.' });
       }
     });
     return () => { isMounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cart.length, selectedCountry, cartTotal]);
+  }, [cart.length, destinationShippingSectorId, cartTotal]);
 
   const shippingFee = shippingQuote?.available ? shippingQuote.shippingChargedToBuyer : 0;
   const finalTotal = cartTotal + shippingFee - couponDiscount;
@@ -144,11 +165,6 @@ export const CartView: React.FC = () => {
                 <Truck className="w-4 h-4 text-green-600" />
                 Entrega para {cartDestinationCountry ? `${cartDestinationCountry.flag} ${cartDestinationCountry.name}` : selectedCountry}
               </span>
-              {shippingQuote?.available && typeof shippingQuote.estimatedMinDays === 'number' && (
-                <span className="text-green-700 font-bold">
-                  {shippingQuote.estimatedMinDays}–{shippingQuote.estimatedMaxDays} dias úteis
-                </span>
-              )}
             </div>
 
             {/* Product row items */}
@@ -319,6 +335,8 @@ export const CartView: React.FC = () => {
                       <span>Frete:</span>
                       {shippingQuote?.loading ? (
                         <span className="text-gray-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Calculando...</span>
+                      ) : shippingQuote && !shippingQuote.available && shippingQuote.code === 'DELIVERY_SECTOR_REQUIRED' ? (
+                        <span className="text-gray-500 font-semibold text-[11px]">{shippingQuote.errorMessage}</span>
                       ) : shippingQuote && !shippingQuote.available ? (
                         <span className="text-red-600 font-semibold text-[11px]">{shippingQuote.errorMessage || 'Indisponível'}</span>
                       ) : shippingFee === 0 ? (
