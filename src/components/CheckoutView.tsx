@@ -834,8 +834,8 @@ export const CheckoutView: React.FC = () => {
                       <input type="text" value={newAddress.street} onChange={(e) => setNewAddress({ ...newAddress, street: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
                     </div>
                     <div>
-                      <label className="block font-semibold text-gray-700 mb-1">Número / Lote</label>
-                      <input type="text" value={newAddress.number} onChange={(e) => setNewAddress({ ...newAddress, number: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                      <label className="block font-semibold text-gray-700 mb-1">Número / Lote (opcional)</label>
+                      <input type="text" value={newAddress.number} onChange={(e) => setNewAddress({ ...newAddress, number: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                     </div>
                   </div>
                   <div className="sm:col-span-2">

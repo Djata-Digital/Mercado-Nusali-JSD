@@ -186,8 +186,11 @@ export function resolveCheckoutAddress(input: ResolveCheckoutAddressInput): Reso
   if (!na.sectorId) {
     return { ok: false, code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione a região e o setor de entrega deste endereço.' };
   }
-  if (!na.city.trim() || !na.street.trim() || !na.number.trim()) {
-    return { ok: false, code: 'ADDRESS_FIELDS_REQUIRED', message: 'Preencha cidade/localidade, rua/avenida e número deste endereço.' };
+  // FASE D16-H1.2 — número/lote NUNCA é obrigatório: existem endereços reais
+  // sem numeração (zonas rurais, lotes sem número oficial). Cidade e rua
+  // continuam obrigatórias; região/setor já validados acima.
+  if (!na.city.trim() || !na.street.trim()) {
+    return { ok: false, code: 'ADDRESS_FIELDS_REQUIRED', message: 'Preencha cidade/localidade e rua/avenida deste endereço.' };
   }
   return {
     ok: true,
