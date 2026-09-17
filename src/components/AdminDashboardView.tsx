@@ -27,7 +27,6 @@ import { AdminRefundsManager } from './admin/AdminRefundsManager';
 import { AdminDisputesManager } from './admin/AdminDisputesManager';
 import { AdminReturnsManager } from './admin/AdminReturnsManager';
 import { AdminLogisticsDashboard } from './admin/AdminLogisticsDashboard';
-import { AdminShippingRatesManager } from './admin/AdminShippingRatesManager';
 import { AdminShippingGeographyManager } from './admin/AdminShippingGeographyManager';
 import { AdminWarehousesManager } from './admin/AdminWarehousesManager';
 import { AdminCarriersManager } from './admin/AdminCarriersManager';
@@ -105,7 +104,6 @@ export const AdminDashboardView: React.FC = () => {
       group: 'Logística & Cadeia CPLP',
       items: [
         { id: 'logistics', label: 'Expedição & Entregas', icon: Truck },
-        { id: 'shipping_rates', label: 'Tarifas de Frete', icon: DollarSign },
         { id: 'shipping_geography', label: 'Rotas & Tarifas por Setor', icon: Route },
         { id: 'warehouses', label: 'HUBs & Armazéns', icon: Warehouse },
         { id: 'carriers', label: 'Transportadoras & Frotas', icon: Truck },
@@ -409,7 +407,6 @@ export const AdminDashboardView: React.FC = () => {
             {activeTab === 'disputes' && <AdminDisputesManager showToast={showToast} />}
             {activeTab === 'returns' && <AdminReturnsManager showToast={showToast} />}
             {activeTab === 'logistics' && <AdminLogisticsDashboard showToast={showToast} />}
-            {activeTab === 'shipping_rates' && <AdminShippingRatesManager showToast={showToast} />}
             {activeTab === 'shipping_geography' && <AdminShippingGeographyManager showToast={showToast} />}
             {activeTab === 'warehouses' && <AdminWarehousesManager showToast={showToast} />}
             {activeTab === 'carriers' && <AdminCarriersManager showToast={showToast} />}

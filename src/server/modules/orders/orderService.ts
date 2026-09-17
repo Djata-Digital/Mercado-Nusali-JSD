@@ -5,9 +5,6 @@ import {
   orderStatusHistory,
   products,
   productVariants,
-  inventory,
-  stockReservations,
-  inventoryMovements,
   warehouses,
   shipments,
   trackingEvents,
@@ -21,12 +18,12 @@ import {
   purchaseGroups,
   payments,
 } from '../../../db/schema.js';
-import { eq, and, desc, asc, sql, inArray } from 'drizzle-orm';
+import { eq, and, desc, asc, inArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
 import { InventoryService } from '../inventory/inventoryService.js';
-import { ShippingCalculatorService, computeBillableWeightKg, getVolumetricDivisor, resolveShippingPayerPolicy } from '../shipping/shippingCalculatorService.js';
+import { ShippingCalculatorService, resolveShippingPayerPolicy } from '../shipping/shippingCalculatorService.js';
 import { categories, platformSettings, countries } from '../../../db/schema.js';
 import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
 import { userProfiles } from '../../../db/schema.js';
@@ -68,9 +65,9 @@ export interface CreateOrderRequestDTO {
 }
 
 // Fase M1-D1 — contrato explícito de createOrderFromCart. `CreatedOrder` é
-// exatamente o objeto que insertOrderForGroup() já retornava (nenhum campo
-// novo, nenhum removido) — só nomeado e exportado para que o contrato de
-// resposta pare de ser um objeto anônimo `any`.
+// exatamente o objeto que buildCreatedOrderResult() já retornava (nenhum
+// campo novo, nenhum removido) — só nomeado e exportado para que o
+// contrato de resposta pare de ser um objeto anônimo `any`.
 export interface CreatedOrderItem {
   productId: string;
   variantId: string | null;
@@ -431,7 +428,6 @@ export class OrderService {
         );
       }
 
-      let realSubtotal = 0;
       const verifiedItems: Array<{
         productId: string;
         variantId: string | null;
@@ -537,191 +533,81 @@ export class OrderService {
 
         const reqQty = Number(ci.quantity) || 1;
 
-        {
-          // ==========================================================
-          // FASE D16-F6.2 — F4 escolhe UMA ÚNICA origem capaz de atender a
-          // quantidade INTEIRA da linha do carrinho (nunca split) por CUSTO
-          // REAL de frete (F3), nunca por preferência HUB/STORE. Nenhuma
-          // reserva acontece aqui — F4 é só planejamento; a reserva real
-          // (F5) só ocorre depois que TODAS as linhas do carrinho já
-          // tiverem um plano, em ordem global de lock (seção 5, mais
-          // abaixo).
-          //
-          // FASE D16-I2 — este branch (F4) agora é SEMPRE usado, para TODO
-          // checkout, inclusive single-seller com multiSellerCheckoutEnabled
-          // desligada (antes só rodava com a flag ligada). O "CAMINHO
-          // LEGADO" logo abaixo (split cego HUB>STORE) nunca mais é
-          // alcançado a partir daqui — fica como código morto nesta fase,
-          // preservado de propósito (D16-I1: remoção física fica para
-          // D16-I5, junto dos outros consumidores de shipping_rates/
-          // shipping_zones ainda existentes fora de orderService.ts).
-          if (!prod.sellerId) {
-            throw new Error(`ORDER_ITEM_SELLER_REQUIRED: O produto "${prod.title}" não possui vendedor associado — o checkout inteligente exige que todo item tenha um vendedor real.`);
-          }
-
-          const f4Result = await resolveFulfillmentCandidates({
-            sellerId: prod.sellerId,
-            productId: prod.id,
-            variantId: ci.variantId || null,
-            quantity: reqQty,
-            destinationShippingSectorId: destinationShippingSectorId as string,
-            countryCode: destinationCountry,
-          }, tx);
-
-          if (f4Result.ok === false) {
-            const failureCode: string = f4Result.code;
-            const failureMessage: string = f4Result.message;
-            throw new Error(`FULFILLMENT_RESOLUTION_FAILED: ${failureCode} - ${failureMessage}`);
-          }
-          const bestCandidate = f4Result.bestCandidate;
-          if (!bestCandidate) {
-            throw new Error(
-              `INSUFFICIENT_AVAILABLE_STOCK: Nenhuma origem de estoque consegue sozinha atender a quantidade solicitada (${reqQty}) do produto "${prod.title}" para o destino selecionado (sem combinar origens nesta fase).`
-            );
-          }
-
-          const itemSubtotal = unitPrice * reqQty;
-
-          if (!primarySellerId && prod.sellerId) primarySellerId = prod.sellerId;
-          if (!primaryStoreId && bestCandidate.storeId) primaryStoreId = bestCandidate.storeId;
-
-          verifiedItems.push({
-            productId: prod.id,
-            variantId: ci.variantId || null,
-            productTitle: prod.title,
-            productSku: variantSku || prod.id || null,
-            variantTitle,
-            quantity: reqQty,
-            unitPrice,
-            subtotal: itemSubtotal,
-            sellerId: prod.sellerId || null,
-            storeId: bestCandidate.storeId || null,
-            productImage: prod.image || null,
-            attributesJson: ci.selectedAttributesJson || null,
-            inventoryId: bestCandidate.inventoryId,
-            warehouseId: bestCandidate.warehouseId || null,
-            fulfillmentMode: bestCandidate.locationType === 'NUSALI_HUB' ? 'NUSALI_FULFILLMENT' : 'SELLER_FULFILLMENT',
-            weightKg: itemWeightKg,
-            dimensionsCm: itemDimensionsCm,
-            categoryId: prod.categoryId || null,
-            fulfillmentLocationId: bestCandidate.fulfillmentLocationId,
-            originShippingSectorId: bestCandidate.originShippingSectorId,
-            shippingRouteId: bestCandidate.routeId,
-            shippingServiceId: bestCandidate.serviceId,
-            shippingServiceCode: bestCandidate.serviceCode,
-            shippingRateId: bestCandidate.rateId,
-            unitWeightKg: bestCandidate.unitWeightKg,
-            totalWeightKg: bestCandidate.totalWeightKg,
-            shippingAmount: bestCandidate.shippingAmount,
-          });
-          continue;
+        // ==========================================================
+        // FASE D16-F6.2 — F4 escolhe UMA ÚNICA origem capaz de atender a
+        // quantidade INTEIRA da linha do carrinho (nunca split) por CUSTO
+        // REAL de frete (F3), nunca por preferência HUB/STORE. Nenhuma
+        // reserva acontece aqui — F4 é só planejamento; a reserva real
+        // (F5) só ocorre depois que TODAS as linhas do carrinho já
+        // tiverem um plano, em ordem global de lock (seção 5, mais
+        // abaixo).
+        //
+        // FASE D16-I2/D16-I5 — este é o ÚNICO caminho de resolução de
+        // item, para TODO checkout, inclusive single-seller com
+        // multiSellerCheckoutEnabled desligada. O antigo "caminho legado"
+        // (split cego HUB>STORE, sem F4/F3) foi removido fisicamente nesta
+        // fase — ficou inalcançável desde D16-I2, confirmado por auditoria
+        // (D16-I1) e testado com 0 chamadas ao motor legado (D16-I2/I3).
+        // ==========================================================
+        if (!prod.sellerId) {
+          throw new Error(`ORDER_ITEM_SELLER_REQUIRED: O produto "${prod.title}" não possui vendedor associado — o checkout inteligente exige que todo item tenha um vendedor real.`);
         }
 
-        // ==========================================================
-        // CAMINHO LEGADO — CÓDIGO MORTO a partir de D16-I2 (split cego
-        // HUB>STORE por linha de carrinho). O `continue;` acima garante que
-        // este trecho nunca mais executa (o branch F4 sempre roda e sempre
-        // termina o loop antes de chegar aqui). Mantido intocado/intacto de
-        // propósito — D16-I1 mapeou outros consumidores de
-        // ShippingCalculatorService/shipping_rates/shipping_zones que ainda
-        // existem fora de orderService.ts (admin, /shipping/calculate);
-        // remoção física deste bloco fica para D16-I5.
-        // ==========================================================
-        // Query real inventory table for this productId + strict variantId (No cross-variant fallback)
-        let inventoryRows: any[];
-        if (ci.variantId) {
-          inventoryRows = await tx
-            .select()
-            .from(inventory)
-            .where(and(eq(inventory.productId, ci.productId), eq(inventory.variantId, ci.variantId)));
-        } else {
-          inventoryRows = await tx
-            .select()
-            .from(inventory)
-            .where(eq(inventory.productId, ci.productId));
-        }
+        const f4Result = await resolveFulfillmentCandidates({
+          sellerId: prod.sellerId,
+          productId: prod.id,
+          variantId: ci.variantId || null,
+          quantity: reqQty,
+          destinationShippingSectorId: destinationShippingSectorId as string,
+          countryCode: destinationCountry,
+        }, tx);
 
-        // If no inventory record exists in PostgreSQL for this product/variant, throw explicit error
-        if (inventoryRows.length === 0) {
-          if (ci.variantId) {
-            throw new Error(
-              `INSUFFICIENT_STOCK: Estoque indisponível para a variante selecionada do produto "${prod.title}".`
-            );
-          }
+        if (f4Result.ok === false) {
+          const failureCode: string = f4Result.code;
+          const failureMessage: string = f4Result.message;
+          throw new Error(`FULFILLMENT_RESOLUTION_FAILED: ${failureCode} - ${failureMessage}`);
+        }
+        const bestCandidate = f4Result.bestCandidate;
+        if (!bestCandidate) {
           throw new Error(
-            `INVENTORY_NOT_INITIALIZED: Estoque não inicializado no controle do armazém para o produto "${prod.title}".`
+            `INSUFFICIENT_AVAILABLE_STOCK: Nenhuma origem de estoque consegue sozinha atender a quantidade solicitada (${reqQty}) do produto "${prod.title}" para o destino selecionado (sem combinar origens nesta fase).`
           );
         }
 
-        // Filter candidate rows that have available stock > 0
-        const candidateRows = inventoryRows.filter((inv) => inv.quantityOnHand - inv.quantityReserved > 0);
+        const itemSubtotal = unitPrice * reqQty;
 
-        // Sort candidates: NUSALI_HUB first (same country preference), then SELLER_LOCATION
-        candidateRows.sort((a, b) => {
-          if (a.locationType === 'NUSALI_HUB' && b.locationType !== 'NUSALI_HUB') return -1;
-          if (a.locationType !== 'NUSALI_HUB' && b.locationType === 'NUSALI_HUB') return 1;
+        if (!primarySellerId && prod.sellerId) primarySellerId = prod.sellerId;
+        if (!primaryStoreId && bestCandidate.storeId) primaryStoreId = bestCandidate.storeId;
 
-          if (a.locationType === 'NUSALI_HUB' && b.locationType === 'NUSALI_HUB') {
-            const whA = a.warehouseId ? whMap.get(a.warehouseId) : null;
-            const whB = b.warehouseId ? whMap.get(b.warehouseId) : null;
-            const destCountry = targetAddress?.countryCode || targetAddress?.country || 'GW';
-            const matchA = whA?.countryCode === destCountry ? 1 : 0;
-            const matchB = whB?.countryCode === destCountry ? 1 : 0;
-            if (matchA !== matchB) return matchB - matchA;
-          }
-          return 0;
+        verifiedItems.push({
+          productId: prod.id,
+          variantId: ci.variantId || null,
+          productTitle: prod.title,
+          productSku: variantSku || prod.id || null,
+          variantTitle,
+          quantity: reqQty,
+          unitPrice,
+          subtotal: itemSubtotal,
+          sellerId: prod.sellerId || null,
+          storeId: bestCandidate.storeId || null,
+          productImage: prod.image || null,
+          attributesJson: ci.selectedAttributesJson || null,
+          inventoryId: bestCandidate.inventoryId,
+          warehouseId: bestCandidate.warehouseId || null,
+          fulfillmentMode: bestCandidate.locationType === 'NUSALI_HUB' ? 'NUSALI_FULFILLMENT' : 'SELLER_FULFILLMENT',
+          weightKg: itemWeightKg,
+          dimensionsCm: itemDimensionsCm,
+          categoryId: prod.categoryId || null,
+          fulfillmentLocationId: bestCandidate.fulfillmentLocationId,
+          originShippingSectorId: bestCandidate.originShippingSectorId,
+          shippingRouteId: bestCandidate.routeId,
+          shippingServiceId: bestCandidate.serviceId,
+          shippingServiceCode: bestCandidate.serviceCode,
+          shippingRateId: bestCandidate.rateId,
+          unitWeightKg: bestCandidate.unitWeightKg,
+          totalWeightKg: bestCandidate.totalWeightKg,
+          shippingAmount: bestCandidate.shippingAmount,
         });
-
-        // Calculate total available across candidates
-        const totalAvail = candidateRows.reduce(
-          (acc, inv) => acc + Math.max(0, inv.quantityOnHand - inv.quantityReserved),
-          0
-        );
-
-        if (totalAvail < reqQty) {
-          throw new Error(
-            `INSUFFICIENT_STOCK: Estoque insuficiente no armazém para o produto "${prod.title}". Disponível: ${totalAvail}, Solicitado: ${reqQty}`
-          );
-        }
-
-        // Multi-location allocation: consume NUSALI_HUB first, then SELLER_LOCATION across multiple rows if needed
-        let remQty = reqQty;
-        for (const inv of candidateRows) {
-          const avail = Math.max(0, inv.quantityOnHand - inv.quantityReserved);
-          if (avail <= 0) continue;
-
-          const taken = Math.min(remQty, avail);
-          const fulfillmentMode = inv.locationType === 'NUSALI_HUB' ? 'NUSALI_FULFILLMENT' : 'SELLER_FULFILLMENT';
-          const itemSubtotal = unitPrice * taken;
-          realSubtotal += itemSubtotal;
-
-          if (!primarySellerId && prod.sellerId) primarySellerId = prod.sellerId;
-          if (!primaryStoreId && prod.storeId) primaryStoreId = prod.storeId;
-
-          verifiedItems.push({
-            productId: prod.id,
-            variantId: ci.variantId || null,
-            productTitle: prod.title,
-            productSku: variantSku || prod.id || null,
-            variantTitle,
-            quantity: taken,
-            unitPrice,
-            subtotal: itemSubtotal,
-            sellerId: prod.sellerId || null,
-            storeId: prod.storeId || null,
-            productImage: prod.image || null,
-            attributesJson: ci.selectedAttributesJson || null,
-            inventoryId: inv.id,
-            warehouseId: inv.warehouseId || null,
-            fulfillmentMode,
-            weightKg: itemWeightKg,
-            dimensionsCm: itemDimensionsCm,
-            categoryId: prod.categoryId || null,
-          });
-
-          remQty -= taken;
-          if (remQty === 0) break;
-        }
       }
 
       // Fase "Comissão percentual + logística real" (correção pós-relatório):
@@ -818,12 +704,6 @@ export class OrderService {
         );
       }
 
-      const originCountry = Array.from(itemOrigins)[0];
-
-      // destinationCountry já foi resolvido e validado (existe + está
-      // ativo) logo no início da transação, antes do loop de itens — reaproveitado aqui.
-      const volumetricDivisor = await getVolumetricDivisor(tx);
-
       // multiSellerCheckoutEnabled já foi lida mais acima (antes do loop de
       // itens — FASE D16-F6.2), reaproveitada aqui sem re-consultar.
       // Com a flag desativada, um carrinho com mais de 1 vendedor distinto é
@@ -836,30 +716,27 @@ export class OrderService {
       }
 
       /**
-       * Calcula subtotal/peso/comissão/frete/financials de UM grupo de itens
-       * (todos do mesmo vendedor no caminho novo; o carrinho inteiro no
-       * caminho legado) — NUNCA escreve nada, só lê (sellers.commissionRate,
-       * tarifa de frete via ShippingCalculatorService). Reaproveitada pelos
-       * dois caminhos para que o resultado de 1 vendedor seja idêntico,
-       * centavo por centavo, nos dois.
+       * Calcula subtotal/peso/comissão/financials de UM grupo de itens (1
+       * vendedor) — NUNCA escreve nada, só lê (sellers.commissionRate). O
+       * frete em si (freightRes) já vem PRONTO de
+       * computeSmartFulfillmentFreightRes (soma de cotações F3 reais já
+       * resolvidas por item via F4 + resolveShippingPayerPolicy) — nunca
+       * recalculado aqui.
+       *
+       * FASE D16-I5 — simplificada: `freightRes` deixou de ser opcional. O
+       * fallback ao motor legado (ShippingCalculatorService.calculateFreight
+       * via shipping_rates/shipping_zones) foi removido fisicamente — desde
+       * D16-I2 o único chamador desta função já sempre fornecia o resultado
+       * smart, tornando o fallback inalcançável (confirmado por auditoria
+       * D16-I1 e testes D16-I2/I3 com 0 chamadas ao motor legado).
        */
       async function computeGroupFinancials(
         items: typeof verifiedItems,
         groupSellerId: string | null,
-        // FASE D16-F6.2 — quando informado, PULA a chamada ao motor legado
-        // (ShippingCalculatorService.calculateFreight) e usa este resultado
-        // já pronto no lugar (soma de cotações F3 + mesma resolveShippingPayerPolicy
-        // do motor legado, via computeSmartFulfillmentFreightRes abaixo).
-        // Nenhuma outra parte desta função muda: comissão/subtotal/peso
-        // continuam EXATAMENTE o mesmo cálculo para os dois caminhos.
-        precomputedFreightRes?: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>
+        freightRes: Awaited<ReturnType<typeof computeSmartFulfillmentFreightRes>>
       ) {
         const groupSubtotal = items.reduce((s, i) => s + i.subtotal, 0);
         const groupStoreId = items.find((i) => i.storeId)?.storeId || null;
-        const groupWeightKg = items.reduce((acc, i) => {
-          const { billableWeightKg } = computeBillableWeightKg(i.weightKg, i.dimensionsCm, volumetricDivisor);
-          return acc + billableWeightKg * i.quantity;
-        }, 0);
 
         let groupSellerCommissionRate: number | null = null;
         if (groupSellerId) {
@@ -884,15 +761,7 @@ export class OrderService {
         }
         groupCommission = Math.round(groupCommission * 100) / 100;
 
-        const groupFreightRes = precomputedFreightRes ?? await ShippingCalculatorService.calculateFreight({
-          storeId: groupStoreId || undefined,
-          sellerId: groupSellerId || undefined,
-          originCountry,
-          destinationCountry,
-          weightKg: groupWeightKg,
-          currency,
-          productSubtotal: groupSubtotal,
-        }, tx);
+        const groupFreightRes = freightRes;
 
         if (!groupFreightRes.available) {
           throw new Error(
@@ -923,17 +792,18 @@ export class OrderService {
        * FASE D16-F6.2 — RATE SOURCE = F3 (soma das cotações reais já
        * resolvidas por item pelo F4, cada uma na origem efetivamente
        * escolhida), PAYER POLICY = a MESMA regra existente
-       * (resolveShippingPayerPolicy, extraída do motor legado em
-       * shippingCalculatorService.ts sem nenhuma alteração de comportamento)
-       * — nunca uma segunda política divergente. Produz um objeto no MESMO
-       * formato de ShippingCalculatorService.calculateFreight para que
-       * computeGroupFinancials/insertOrderRow não precisem saber a origem.
+       * (resolveShippingPayerPolicy, reaproveitada de shippingCalculatorService.ts
+       * sem nenhuma alteração de comportamento) — nunca uma segunda política
+       * divergente. Produz o objeto que computeGroupFinancials/insertOrderRow
+       * consomem, sem precisarem saber a origem (tipo inferido pelo próprio
+       * `return` abaixo — FASE D16-I5: já não existe mais um segundo formato
+       * legado, ShippingCalculatorService.calculateFreight, para espelhar).
        */
       async function computeSmartFulfillmentFreightRes(
         items: typeof verifiedItems,
         groupStoreId: string | null,
         groupSellerId: string | null
-      ): Promise<Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>> {
+      ) {
         const shippingCost = Math.round(items.reduce((s, i) => s + (Number(i.shippingAmount) || 0), 0) * 100) / 100;
         const policy = await resolveShippingPayerPolicy(shippingCost, { storeId: groupStoreId, sellerId: groupSellerId }, tx);
         return {
@@ -953,6 +823,11 @@ export class OrderService {
           rateId: undefined,
           currency,
           available: true,
+          // Nunca de fato undefined (available é sempre true aqui) — só para
+          // que o tipo inferido tenha o mesmo formato de campo opcional que
+          // o guard de computeGroupFinancials (`groupFreightRes.errorMessage`)
+          // já espera, sem precisar de um segundo tipo/interface só para isso.
+          errorMessage: undefined as string | undefined,
         };
       }
 
@@ -961,7 +836,7 @@ export class OrderService {
         groupSellerId: string | null,
         groupStoreId: string | null,
         financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>,
-        freightRes: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>,
+        freightRes: Awaited<ReturnType<typeof computeSmartFulfillmentFreightRes>>,
         purchaseGroupId: string | null
       ): Promise<{ orderId: string; orderNumber: string }> {
         const orderId = `ord_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -1065,63 +940,6 @@ export class OrderService {
         });
       }
 
-      /**
-       * Reserva de estoque LEGADA — FASE D16-I2: CÓDIGO MORTO (nada mais
-       * chama esta função; o caminho novo reserva via F5 em ordem global
-       * ANTES de order_items existir — ver orquestração mais abaixo).
-       * Comportamento idêntico ao que já existia: sem `.for('update')`
-       * (achado pré-existente de D16-F1, fora de escopo desta fase para o
-       * caminho legado).
-       */
-      async function reserveStockForGroupLegacy(orderId: string, orderNumber: string, items: typeof verifiedItems) {
-        const expiresAt = new Date();
-        expiresAt.setMinutes(expiresAt.getMinutes() + 30);
-
-        for (const item of items) {
-          if (!item.inventoryId || !item.fulfillmentMode) {
-            throw new Error(`RESERVATION_FAILED: Origem de estoque (inventory_id) não alocada para a reserva do item "${item.productTitle}".`);
-          }
-
-          await tx.insert(stockReservations).values({
-            id: `sr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            orderId,
-            productId: item.productId,
-            variantId: item.variantId,
-            inventoryId: item.inventoryId,
-            warehouseId: item.warehouseId,
-            fulfillmentMode: item.fulfillmentMode,
-            quantity: item.quantity,
-            expiresAt,
-            status: 'active',
-            createdAt: new Date(),
-          });
-
-          // 2. Increase inventory.quantityReserved (do NOT touch quantityOnHand)
-          await tx
-            .update(inventory)
-            .set({
-              quantityReserved: sql`${inventory.quantityReserved} + ${item.quantity}`,
-              updatedAt: new Date(),
-            })
-            .where(eq(inventory.id, item.inventoryId));
-
-          // 3. inventory_movements
-          await tx.insert(inventoryMovements).values({
-            id: `mov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-            inventoryId: item.inventoryId,
-            warehouseId: item.warehouseId,
-            productId: item.productId,
-            variantId: item.variantId,
-            type: 'RESERVATION',
-            quantity: -item.quantity,
-            reason: `Reserva para pedido ${orderNumber}`,
-            referenceId: orderId,
-            performedBy: userId,
-            createdAt: new Date(),
-          });
-        }
-      }
-
       /** Monta o objeto de retorno de UM order filho — nunca decide valores, só projeta. */
       function buildCreatedOrderResult(
         orderId: string,
@@ -1156,47 +974,20 @@ export class OrderService {
         };
       }
 
-      /**
-       * Grava UM order filho completo (orders + order_items + orderStatusHistory
-       * + reserva LEGADA) a partir de um grupo já calculado por
-       * computeGroupFinancials — orquestra as 4 fases acima na MESMA ordem de
-       * sempre. FASE D16-I2 — CÓDIGO MORTO a partir desta fase: nada mais
-       * chama esta função (o branch que a chamava foi removido da decisão
-       * abaixo). Mantida intacta de propósito — remoção física fica para
-       * D16-I5, junto do restante do caminho legado. O caminho novo (F6.2)
-       * orquestra as fases na ordem exigida pela seção 8 do enunciado
-       * (orders de TODOS os grupos primeiro, F5 em ordem global depois,
-       * order_items só após toda reserva confirmada).
-       */
-      async function insertOrderForGroup(
-        items: typeof verifiedItems,
-        groupSellerId: string | null,
-        groupStoreId: string | null,
-        financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>,
-        freightRes: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>,
-        purchaseGroupId: string | null
-      ) {
-        const { orderId, orderNumber } = await insertOrderRow(groupSellerId, groupStoreId, financials, freightRes, purchaseGroupId);
-        await insertOrderItemsForGroup(orderId, items);
-        await insertOrderStatusHistoryRow(orderId);
-        await reserveStockForGroupLegacy(orderId, orderNumber, items);
-        return buildCreatedOrderResult(orderId, orderNumber, groupSellerId, financials, items, purchaseGroupId);
-      }
-
       let createdOrders: any[];
       let purchaseGroupResult: { id: string; buyerId: string; currency: string; totalAmount: number; status: string } | null = null;
 
-      // FASE D16-I2 — o pipeline smart (F4/F5 + purchase_group) agora é
-      // usado para TODO checkout, inclusive single-seller com
-      // multiSellerCheckoutEnabled desligada (auditoria D16-I1 confirmou
-      // que isso já era a arquitetura oficial e testada — "1 purchase_group
-      // + exatamente 1 order por vendedor distinto, mesmo quando há só 1
-      // vendedor" — nunca uma terceira estrutura nova). O único papel
-      // restante da flag é a checagem MULTI_SELLER_CHECKOUT_DISABLED já
-      // feita mais acima (linha ~830), antes de qualquer escrita — o branch
-      // legado (single order, sem purchase_group) nunca mais é alcançado
-      // daqui; permanece definido acima (insertOrderForGroup) como código
-      // morto, removido fisicamente só em D16-I5.
+      // FASE D16-I2 — o pipeline smart (F4/F5 + purchase_group) é usado
+      // para TODO checkout, inclusive single-seller com
+      // multiSellerCheckoutEnabled desligada — "1 purchase_group +
+      // exatamente 1 order por vendedor distinto, mesmo quando há só 1
+      // vendedor", nunca uma terceira estrutura. O único papel da flag é a
+      // checagem MULTI_SELLER_CHECKOUT_DISABLED já feita mais acima, antes
+      // de qualquer escrita.
+      // FASE D16-I5 — o branch legado (single order, sem purchase_group,
+      // motor de frete país/zona) foi removido fisicamente: estava
+      // inalcançável desde D16-I2 (auditoria D16-I1, testado com 0
+      // chamadas ao motor legado em D16-I2/I3).
       {
         const missingSeller = verifiedItems.find((i) => !i.sellerId);
         if (missingSeller) {
@@ -1221,7 +1012,7 @@ export class OrderService {
           items: typeof verifiedItems;
           storeId: string | null;
           financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>;
-          freightRes: Awaited<ReturnType<typeof ShippingCalculatorService.calculateFreight>>;
+          freightRes: Awaited<ReturnType<typeof computeSmartFulfillmentFreightRes>>;
         }> = [];
         for (const [sellerId, items] of bySeller) {
           const groupStoreId = items.find((i) => i.storeId)?.storeId || null;

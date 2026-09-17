@@ -276,34 +276,11 @@ export class AdminApi {
     return apiClient.delete(`/admin/category-attributes/${attributeId}`);
   }
 
-  // Shipping Rates (Requirement 8)
-  static async getShippingRates(): Promise<ApiResponse<any[]>> {
-    return apiClient.get('/admin/shipping-rates');
-  }
-
-  static async createShippingRate(data: any): Promise<ApiResponse<any>> {
-    return apiClient.post('/admin/shipping-rates', data);
-  }
-
-  static async deleteShippingRate(id: string): Promise<ApiResponse<any>> {
-    return apiClient.delete(`/admin/shipping-rates/${id}`);
-  }
-
-  static async updateShippingRate(id: string, data: any): Promise<ApiResponse<any>> {
-    return apiClient.patch(`/admin/shipping-rates/${id}`, data);
-  }
-
-  static async toggleShippingRate(id: string, isActive?: boolean): Promise<ApiResponse<any>> {
-    return apiClient.patch(`/admin/shipping-rates/${id}/toggle`, isActive !== undefined ? { isActive } : {});
-  }
-
-  static async getShippingRateCoverage(params: { originCountry: string; destinationCountry: string; currency: string }): Promise<ApiResponse<any>> {
-    return apiClient.get('/admin/shipping-rates/coverage', { params });
-  }
-
-  static async simulateShippingRate(data: any): Promise<ApiResponse<any>> {
-    return apiClient.post('/admin/shipping-rates/simulate', data);
-  }
+  // FASE D16-I5 — métodos de Shipping Rates (país↔país, Requirement 8)
+  // removidos: eram o único cliente do painel admin legado
+  // (AdminShippingRatesManager.tsx, removido nesta fase) e das rotas
+  // /admin/shipping-rates* (removidas em adminRoutes.ts nesta mesma fase).
+  // Substituído integralmente pelo painel/rotas por setor abaixo.
 
   // FASE D15-B: rotas de frete por setor (país > região > setor > rota >
   // serviço > tarifa) — sistema PARALELO ao de shipping-rates acima

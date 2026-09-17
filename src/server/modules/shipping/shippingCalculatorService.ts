@@ -1,52 +1,14 @@
 import { getDb } from '../../../db/index.js';
-import { shippingRates, shippingZones, storeShippingPolicies, sellers, stores, platformSettings } from '../../../db/schema.js';
-import { eq, and, lte, gte } from 'drizzle-orm';
+import { storeShippingPolicies, sellers, stores, platformSettings } from '../../../db/schema.js';
+import { eq } from 'drizzle-orm';
 
-/**
- * Fase "Comissão percentual + logística real" — peso volumétrico.
- *
- * Não existia nenhum modelo de peso volumétrico antes desta fase (confirmado
- * por auditoria: nenhuma referência a "volumetric"/"cubagem" no código).
- * Fórmula padrão do setor (mesma usada por Correios/transportadoras):
- *
- *   volumetricWeightKg = (lengthCm × widthCm × heightCm) / divisor
- *   billableWeightKg   = max(actualWeightKg, volumetricWeightKg)
- *
- * O divisor é configurável via platformSettings (chave abaixo), nunca
- * hardcoded. Se não estiver configurado, o peso volumétrico simplesmente não
- * é calculado — billableWeight cai para o peso real, sem inventar divisor.
- */
-const VOLUMETRIC_DIVISOR_SETTING_KEY = 'shippingVolumetricDivisor';
+// FASE D16-I5 — VOLUMETRIC_DIVISOR_SETTING_KEY/getVolumetricDivisor/
+// computeBillableWeightKg (peso volumétrico) removidos: existiam
+// exclusivamente para o motor legado calculateFreight/getRawShippingRate
+// (também removidos nesta fase, comprovadamente sem consumidor runtime —
+// auditoria D16-I1/D16-I4/D16-I5). Nenhum outro módulo os chamava (F4/
+// fulfillmentCandidateResolverService.ts resolve peso por si só).
 const DEFAULT_SHIPPING_POLICY_SETTING_KEY = 'defaultShippingPolicyMode';
-
-export async function getVolumetricDivisor(executor?: any): Promise<number | null> {
-  const db = executor ?? getDb();
-  if (!db) return null;
-  try {
-    const rows = await db.select().from(platformSettings).where(eq(platformSettings.key, VOLUMETRIC_DIVISOR_SETTING_KEY)).limit(1);
-    if (rows.length === 0) return null;
-    const parsed = Number(rows[0].valueJson);
-    return !isNaN(parsed) && parsed > 0 ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-export function computeBillableWeightKg(
-  actualWeightKg: number,
-  dimensionsCm: { length: number; width: number; height: number } | undefined,
-  volumetricDivisor: number | null
-): { billableWeightKg: number; volumetricWeightKg: number | null } {
-  if (!dimensionsCm || !volumetricDivisor) {
-    return { billableWeightKg: actualWeightKg, volumetricWeightKg: null };
-  }
-  const { length, width, height } = dimensionsCm;
-  if (!length || !width || !height || length <= 0 || width <= 0 || height <= 0) {
-    return { billableWeightKg: actualWeightKg, volumetricWeightKg: null };
-  }
-  const volumetricWeightKg = Math.round(((length * width * height) / volumetricDivisor) * 1000) / 1000;
-  return { billableWeightKg: Math.max(actualWeightKg, volumetricWeightKg), volumetricWeightKg };
-}
 
 async function getDefaultShippingPolicyMode(executor?: any): Promise<string | null> {
   const db = executor ?? getDb();
@@ -61,37 +23,9 @@ async function getDefaultShippingPolicyMode(executor?: any): Promise<string | nu
   }
 }
 
-export interface CalculateFreightInput {
-  storeId?: string;
-  sellerId?: string;
-  originCountry: string;
-  destinationCountry: string;
-  originRegion?: string;
-  destinationRegion?: string;
-  destinationCity?: string;
-  weightKg: number;
-  dimensionsCm?: { length: number; width: number; height: number };
-  currency?: string;
-  productSubtotal: number;
-}
-
-export interface FreightCalculationResult {
-  shippingCost: number;
-  shippingChargedToBuyer: number;
-  shippingSellerSubsidy: number;
-  shippingMarketplaceSubsidy: number;
-  shippingPayer: 'buyer' | 'seller' | 'marketplace' | 'shared';
-  policyMode: string;
-  estimatedMinDays: number;
-  estimatedMaxDays: number;
-  rateSource: string;
-  rateId?: string;
-  currency: string;
-  available: boolean;
-  billableWeightKg?: number;
-  volumetricWeightKg?: number | null;
-  errorMessage?: string;
-}
+// FASE D16-I5 — CalculateFreightInput/FreightCalculationResult removidas:
+// eram exclusivamente a assinatura de calculateFreight/getRawShippingRate
+// (motor legado, removido nesta fase).
 
 export interface ShippingPayerPolicyResult {
   shippingChargedToBuyer: number;
@@ -212,262 +146,13 @@ export async function resolveShippingPayerPolicy(
 }
 
 export class ShippingCalculatorService {
-  /**
-   * Calculates raw shipping rate strictly from PostgreSQL shipping_rates table.
-   * Returns null if no active rate exists for origin, destination, and weight range.
-   */
-  /**
-   * Calculates raw shipping rate strictly from PostgreSQL shipping_rates table.
-   * Prioritizes City Specific > Region Specific > Generic Country Match.
-   * Returns null if no active rate exists for origin, destination, weight range, and currency.
-   */
-  static async getRawShippingRate(input: {
-    originCountry: string;
-    destinationCountry: string;
-    originRegion?: string;
-    destinationRegion?: string;
-    destinationCity?: string;
-    weightKg: number;
-    currency: string;
-  }, executor?: any): Promise<{ price: number; estimatedMinDays: number; estimatedMaxDays: number; rateId: string; source: string; currency: string } | null> {
-    const db = executor ?? getDb();
-    if (!db) return null;
-
-    if (!input.originCountry || !input.originCountry.trim()) return null;
-    if (!input.destinationCountry || !input.destinationCountry.trim()) return null;
-    if (!input.currency || !input.currency.trim()) return null;
-    if (!input.weightKg || Number(input.weightKg) <= 0) return null;
-
-    const origin = input.originCountry.trim().toUpperCase();
-    const destination = input.destinationCountry.trim().toUpperCase();
-    const weight = Number(input.weightKg);
-    const targetCurrency = input.currency.trim().toUpperCase();
-    const destCity = (input.destinationCity || '').trim().toLowerCase();
-    const destRegion = (input.destinationRegion || '').trim().toUpperCase();
-    const origRegion = (input.originRegion || '').trim().toUpperCase();
-
-    try {
-      const conditions = [
-        eq(shippingRates.originCountry, origin),
-        eq(shippingRates.destinationCountry, destination),
-        eq(shippingRates.currency, targetCurrency),
-        eq(shippingRates.isActive, true),
-        lte(shippingRates.minWeightKg, String(weight)),
-        gte(shippingRates.maxWeightKg, String(weight)),
-      ];
-
-      const rates = await db
-        .select()
-        .from(shippingRates)
-        .where(and(...conditions));
-
-      if (rates.length === 0) return null;
-
-      // Requirement 5 & 6: City Specific > Region Specific > Generic Country Match
-      const zoneIds = rates.map((r) => r.zoneId).filter((id): id is string => Boolean(id));
-      let zonesMap = new Map<string, any>();
-
-      if (zoneIds.length > 0) {
-        const zoneRows = await db
-          .select()
-          .from(shippingZones)
-          .where(and(eq(shippingZones.isActive, true)));
-        zonesMap = new Map(zoneRows.map((z) => [z.id, z]));
-      }
-
-      const scoredRates = rates.map((r) => {
-        let score = 10; // Generic country-to-country base score
-        const z = r.zoneId ? zonesMap.get(r.zoneId) : null;
-
-        if (z) {
-          if (destCity && z.city && z.city.trim().toLowerCase() === destCity) {
-            score = 100; // Exact city match via zone
-          } else if (destRegion && z.regionCode && z.regionCode.trim().toUpperCase() === destRegion) {
-            score = 50; // Exact region match via zone
-          }
-        } else {
-          if (destCity && r.destinationRegion && r.destinationRegion.trim().toLowerCase() === destCity) {
-            score = 90; // Direct city match
-          } else if (destRegion && r.destinationRegion && r.destinationRegion.trim().toUpperCase() === destRegion) {
-            score = 40; // Direct region match
-          }
-        }
-
-        if (origRegion && r.originRegion && r.originRegion.trim().toUpperCase() === origRegion) {
-          score += 5;
-        }
-
-        return { rate: r, score };
-      });
-
-      scoredRates.sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        // Secondary sort: narrower minWeight (more specific tier)
-        const wDiff = (Number(b.rate.minWeightKg) || 0) - (Number(a.rate.minWeightKg) || 0);
-        if (wDiff !== 0) return wDiff;
-        // Tertiary sort: lowest price
-        return (Number(a.rate.price) || 0) - (Number(b.rate.price) || 0);
-      });
-
-      const best = scoredRates[0].rate;
-      return {
-        price: Number(best.price),
-        estimatedMinDays: best.estimatedMinDays,
-        estimatedMaxDays: best.estimatedMaxDays,
-        rateId: best.id,
-        source: scoredRates[0].score >= 40 ? 'ZONE_SPECIFIC' : 'INTERNAL_ZONE',
-        currency: best.currency,
-      };
-    } catch (err) {
-      console.error('Error fetching shipping rate from DB:', err);
-    }
-
-    return null;
-  }
-
-  /**
-   * Main Freight Calculator API - computes raw cost from DB, applies store policy, and resolves subsidies.
-   */
-  static async calculateFreight(input: CalculateFreightInput, executor?: any): Promise<FreightCalculationResult> {
-    // Requirement 1: Weight is strictly required (> 0)
-    if (!input.weightKg || Number(input.weightKg) <= 0) {
-      return {
-        shippingCost: 0,
-        shippingChargedToBuyer: 0,
-        shippingSellerSubsidy: 0,
-        shippingMarketplaceSubsidy: 0,
-        shippingPayer: 'buyer',
-        policyMode: 'CUSTOMER_PAYS',
-        estimatedMinDays: 0,
-        estimatedMaxDays: 0,
-        rateSource: 'INTERNAL_ZONE',
-        currency: input.currency || '',
-        available: false,
-        errorMessage: 'PRODUCT_WEIGHT_REQUIRED: O peso do produto é obrigatório e deve ser maior que zero.',
-      };
-    }
-
-    // Requirement 4: Currency is strictly required
-    if (!input.currency || !input.currency.trim()) {
-      return {
-        shippingCost: 0,
-        shippingChargedToBuyer: 0,
-        shippingSellerSubsidy: 0,
-        shippingMarketplaceSubsidy: 0,
-        shippingPayer: 'buyer',
-        policyMode: 'CUSTOMER_PAYS',
-        estimatedMinDays: 0,
-        estimatedMaxDays: 0,
-        rateSource: 'INTERNAL_ZONE',
-        currency: '',
-        available: false,
-        errorMessage: 'SHIPPING_CURRENCY_REQUIRED: Moeda é obrigatória para cálculo de frete.',
-      };
-    }
-
-    // Requirement 2: Origin Country is strictly required
-    if (!input.originCountry || !input.originCountry.trim()) {
-      return {
-        shippingCost: 0,
-        shippingChargedToBuyer: 0,
-        shippingSellerSubsidy: 0,
-        shippingMarketplaceSubsidy: 0,
-        shippingPayer: 'buyer',
-        policyMode: 'CUSTOMER_PAYS',
-        estimatedMinDays: 0,
-        estimatedMaxDays: 0,
-        rateSource: 'INTERNAL_ZONE',
-        currency: input.currency,
-        available: false,
-        errorMessage: 'SHIPPING_ORIGIN_REQUIRED: País de origem é obrigatório para cálculo de frete.',
-      };
-    }
-
-    // Requirement 3: Destination Country is strictly required
-    if (!input.destinationCountry || !input.destinationCountry.trim()) {
-      return {
-        shippingCost: 0,
-        shippingChargedToBuyer: 0,
-        shippingSellerSubsidy: 0,
-        shippingMarketplaceSubsidy: 0,
-        shippingPayer: 'buyer',
-        policyMode: 'CUSTOMER_PAYS',
-        estimatedMinDays: 0,
-        estimatedMaxDays: 0,
-        rateSource: 'INTERNAL_ZONE',
-        currency: input.currency,
-        available: false,
-        errorMessage: 'SHIPPING_DESTINATION_REQUIRED: País de destino é obrigatório para cálculo de frete.',
-      };
-    }
-
-    const originCountry = input.originCountry.trim().toUpperCase();
-    const destinationCountry = input.destinationCountry.trim().toUpperCase();
-
-    // Peso volumétrico: só entra em jogo se houver dimensões E divisor
-    // configurado — nunca inventa nenhum dos dois.
-    const volumetricDivisor = await getVolumetricDivisor(executor);
-    const { billableWeightKg, volumetricWeightKg } = computeBillableWeightKg(
-      Number(input.weightKg),
-      input.dimensionsCm,
-      volumetricDivisor
-    );
-
-    const rawRate = await this.getRawShippingRate({
-      originCountry,
-      destinationCountry,
-      originRegion: input.originRegion,
-      destinationRegion: input.destinationRegion,
-      destinationCity: input.destinationCity,
-      weightKg: billableWeightKg,
-      currency: input.currency.trim().toUpperCase(),
-    }, executor);
-
-    if (!rawRate) {
-      return {
-        shippingCost: 0,
-        shippingChargedToBuyer: 0,
-        shippingSellerSubsidy: 0,
-        shippingMarketplaceSubsidy: 0,
-        shippingPayer: 'buyer',
-        policyMode: 'CUSTOMER_PAYS',
-        estimatedMinDays: 0,
-        estimatedMaxDays: 0,
-        rateSource: 'INTERNAL_ZONE',
-        currency: input.currency,
-        available: false,
-        errorMessage: 'SHIPPING_RATE_NOT_AVAILABLE: Não há tarifa de frete cadastrada para esta rota, localização e faixa de peso.',
-      };
-    }
-
-    const currency = rawRate.currency;
-    const shippingCost = rawRate.price;
-
-    // FASE D16-F6.2 — política de quem paga o frete extraída para
-    // resolveShippingPayerPolicy() (comportamento IDÊNTICO, nenhuma regra
-    // alterada) para poder ser reaproveitada pelo fluxo de smart fulfillment
-    // (F4/F5/F3), que determina `shippingCost` por uma fonte diferente (soma
-    // de cotações F3 por origem real) mas precisa da MESMA política de quem
-    // paga — nunca uma segunda regra divergente.
-    const policy = await resolveShippingPayerPolicy(shippingCost, { storeId: input.storeId, sellerId: input.sellerId }, executor);
-
-    return {
-      shippingCost,
-      shippingChargedToBuyer: policy.shippingChargedToBuyer,
-      shippingSellerSubsidy: policy.shippingSellerSubsidy,
-      shippingMarketplaceSubsidy: policy.shippingMarketplaceSubsidy,
-      shippingPayer: policy.shippingPayer,
-      policyMode: policy.policyMode,
-      estimatedMinDays: rawRate.estimatedMinDays,
-      estimatedMaxDays: rawRate.estimatedMaxDays,
-      rateSource: rawRate.source,
-      rateId: rawRate.rateId,
-      currency,
-      available: true,
-      billableWeightKg,
-      volumetricWeightKg,
-    };
-  }
+  // FASE D16-I5 — getRawShippingRate/calculateFreight removidos: motor
+  // legado de frete (shipping_rates/shipping_zones), comprovadamente sem
+  // consumidor runtime (auditoria D16-I1, runtime público eliminado em
+  // D16-I4, este último caminho interno — a chamada de orderService.ts —
+  // eliminado nesta fase). resolveShippingPayerPolicy() e
+  // calculateOrderFinancials() abaixo permanecem: usados pelo pipeline
+  // smart de fulfillment (F3/F4/F5).
 
   /**
    * Complete Financial Breakdown Calculator for Orders
