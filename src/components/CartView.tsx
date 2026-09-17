@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { formatCurrency } from '../utils/currencyUtils';
 import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
 import { BuyerService } from '../services/buyerService';
+import { sanitizeQuantityDigits, resolveQuantityInputValue, getCartItemAvailableStock } from '../utils/quantityInput';
 import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } from 'lucide-react';
 
 export const CartView: React.FC = () => {
@@ -25,6 +26,32 @@ export const CartView: React.FC = () => {
   const [couponCode, setCouponCode] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
   const [couponError, setCouponError] = useState('');
+
+  // FASE D16-H2 — quantidade digitável no carrinho (além dos botões −/+).
+  // `qtyDrafts` guarda o texto EM EDIÇÃO por item (permite vazio temporário
+  // durante a digitação); undefined = mostra item.quantity normalmente.
+  // Confirmado (clampado a [1, disponibilidade real da linha]) só no
+  // blur/Enter — nunca a cada tecla, nunca vira um request por keystroke.
+  // `qtyPending` evita disparar um segundo update para o MESMO item
+  // enquanto o anterior ainda está em voo (evita race condition simples de
+  // cliques/edições rápidas sucessivas na mesma linha).
+  const [qtyDrafts, setQtyDrafts] = useState<Record<string, string>>({});
+  const [qtyFeedback, setQtyFeedback] = useState<Record<string, string>>({});
+  const [qtyPending, setQtyPending] = useState<Record<string, boolean>>({});
+
+  const applyCartQuantity = async (itemKey: string, nextQty: number) => {
+    if (qtyPending[itemKey]) return;
+    setQtyPending((prev) => ({ ...prev, [itemKey]: true }));
+    try {
+      await updateCartQuantity(itemKey, nextQty);
+    } finally {
+      setQtyPending((prev) => {
+        const next = { ...prev };
+        delete next[itemKey];
+        return next;
+      });
+    }
+  };
 
   const handleApplyCoupon = (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,6 +98,21 @@ export const CartView: React.FC = () => {
     errorMessage?: string;
   } | null>(null);
 
+  // FASE D16-H2.1 — chave estável derivada dos itens CONFIRMADOS do
+  // carrinho (id, productId, variantId, quantity), para o efeito de preview
+  // de frete reagir diretamente a mudança de quantidade — nunca via
+  // cartTotal (preço) como proxy, que não muda se um item tiver preço 0 ou
+  // se dois deltas de preço se cancelarem entre itens diferentes. `cart` em
+  // si é uma referência instável (nova a cada fetch), por isso NUNCA vai
+  // direto no dependency array do efeito — só esta string derivada, que só
+  // muda quando o CONTEÚDO relevante muda de verdade (evita loop de
+  // requests). O array de itens só muda de valor quando updateQuantity
+  // (blur/Enter/±) resolve — nunca a cada tecla do draft em edição.
+  const shippingItemsKey = useMemo(
+    () => cart.map((item) => `${item.id || item.product.id}:${item.product.id}:${item.selectedVariantSku || ''}:${item.quantity}`).join('|'),
+    [cart]
+  );
+
   useEffect(() => {
     let isMounted = true;
     if (cart.length === 0) {
@@ -112,7 +154,7 @@ export const CartView: React.FC = () => {
     });
     return () => { isMounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cart.length, destinationShippingSectorId, cartTotal]);
+  }, [shippingItemsKey, destinationShippingSectorId]);
 
   const shippingFee = shippingQuote?.available ? shippingQuote.shippingChargedToBuyer : 0;
   const finalTotal = cartTotal + shippingFee - couponDiscount;
@@ -171,6 +213,35 @@ export const CartView: React.FC = () => {
             {cart.map((item) => {
               const unitPrice = item.unitPriceOverride || item.product.price;
               const itemSubtotal = unitPrice * item.quantity;
+              // FASE D16-H2 — chave estável desta linha (mesma usada pelas
+              // chamadas updateQuantity/removeItem existentes) e disponibilidade
+              // REAL desta variante/produto específico (nunca o estoque
+              // agregado do produto — ver getCartItemAvailableStock).
+              const itemKey = item.id || item.product.id;
+              const itemMaxQty = getCartItemAvailableStock(item);
+              const itemDraft = qtyDrafts[itemKey];
+              const itemFeedback = qtyFeedback[itemKey];
+              const itemDisplayValue = itemDraft !== undefined ? itemDraft : String(item.quantity);
+              const itemPending = !!qtyPending[itemKey];
+              const commitItemDraft = () => {
+                const draft = qtyDrafts[itemKey];
+                if (draft === undefined) return; // já confirmado (evita duplo commit de blur após Enter)
+                setQtyDrafts((prev) => {
+                  const next = { ...prev };
+                  delete next[itemKey];
+                  return next;
+                });
+                const { value, message } = resolveQuantityInputValue(draft, 1, itemMaxQty);
+                setQtyFeedback((prev) => {
+                  const next = { ...prev };
+                  if (message) next[itemKey] = message;
+                  else delete next[itemKey];
+                  return next;
+                });
+                if (value !== item.quantity) {
+                  applyCartQuantity(itemKey, value);
+                }
+              };
 
               return (
                 <div key={item.id || `${item.product.id}-${item.selectedColor || ''}-${item.selectedSize || ''}-${item.selectedKit?.id || ''}`} className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
@@ -232,20 +303,63 @@ export const CartView: React.FC = () => {
 
                   {/* Quantity & Price */}
                   <div className="flex items-center justify-between w-full sm:w-auto sm:justify-end gap-6 pt-2 sm:pt-0 border-t sm:border-none border-gray-100">
-                    <div className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-gray-50">
-                      <button
-                        onClick={() => updateCartQuantity(item.id || item.product.id, item.quantity - 1)}
-                        className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold"
-                      >
-                        -
-                      </button>
-                      <span className="px-3 py-1 text-xs font-bold text-gray-900">{item.quantity}</span>
-                      <button
-                        onClick={() => updateCartQuantity(item.id || item.product.id, item.quantity + 1)}
-                        className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold"
-                      >
-                        +
-                      </button>
+                    <div className="flex flex-col items-start sm:items-end gap-1">
+                      <div className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-gray-50">
+                        <button
+                          type="button"
+                          disabled={itemPending || item.quantity <= 1}
+                          onClick={() => {
+                            setQtyFeedback((prev) => {
+                              if (!(itemKey in prev)) return prev;
+                              const next = { ...prev };
+                              delete next[itemKey];
+                              return next;
+                            });
+                            applyCartQuantity(itemKey, item.quantity - 1);
+                          }}
+                          aria-label={`Diminuir quantidade de ${item.product.title}${item.selectedColor ? ` - ${item.selectedColor}` : ''}${item.selectedSize ? ` / ${item.selectedSize}` : ''}`}
+                          className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          -
+                        </button>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          disabled={itemPending}
+                          aria-label={`Quantidade de ${item.product.title}${item.selectedColor ? ` - ${item.selectedColor}` : ''}${item.selectedSize ? ` / ${item.selectedSize}` : ''}`}
+                          value={itemDisplayValue}
+                          onChange={(e) => {
+                            const digits = sanitizeQuantityDigits(e.target.value);
+                            setQtyDrafts((prev) => ({ ...prev, [itemKey]: digits }));
+                          }}
+                          onFocus={(e) => e.target.select()}
+                          onBlur={commitItemDraft}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') e.currentTarget.blur();
+                          }}
+                          className="w-10 px-1 py-1 text-xs font-bold text-gray-900 text-center bg-transparent focus:outline-hidden focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                        />
+                        <button
+                          type="button"
+                          disabled={itemPending || item.quantity >= itemMaxQty}
+                          onClick={() => {
+                            setQtyFeedback((prev) => {
+                              if (!(itemKey in prev)) return prev;
+                              const next = { ...prev };
+                              delete next[itemKey];
+                              return next;
+                            });
+                            applyCartQuantity(itemKey, item.quantity + 1);
+                          }}
+                          aria-label={`Aumentar quantidade de ${item.product.title}${item.selectedColor ? ` - ${item.selectedColor}` : ''}${item.selectedSize ? ` / ${item.selectedSize}` : ''}`}
+                          className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          +
+                        </button>
+                      </div>
+                      {itemFeedback && (
+                        <p className="text-[10px] text-amber-700 font-semibold max-w-[9rem] sm:text-right">{itemFeedback}</p>
+                      )}
                     </div>
 
                     <div className="text-right">

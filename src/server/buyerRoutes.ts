@@ -66,7 +66,10 @@ import {
 } from './modules/shipping/shippingGeographyService.js';
 // FASE D16-D2 — mesma fonte de estoque AO VIVO por variante já usada pelo
 // catálogo (D16-C2): nunca product_variants.stock, nunca uma segunda fórmula.
-import { computeLiveVariantStock } from './modules/catalog/catalogService.js';
+// FASE D16-H2 — computeLiveStockAndSales reaproveitada para o mesmo cálculo
+// (onHand-reserved) do lado de produto SIMPLES (sem variante), mesma fonte
+// única de verdade do catálogo — nunca uma segunda fórmula divergente.
+import { computeLiveVariantStock, computeLiveStockAndSales } from './modules/catalog/catalogService.js';
 
 export const buyerRouter = Router();
 buyerRouter.use(requireAuth);
@@ -937,6 +940,17 @@ export async function getFormattedUserCart(db: any, userId: string, destinationC
   const userCart = userCarts[0];
   const dbCartItems = await db.select().from(cartItems).where(eq(cartItems.cartId, userCart.id)).orderBy(desc(cartItems.createdAt));
 
+  // FASE D16-H2 — disponibilidade AO VIVO por linha, calculada em lote (2
+  // queries no total, não 1 por item): variante quando a linha tem
+  // variantId (nunca o estoque agregado do produto), produto simples
+  // quando não tem. Mesma fonte única de verdade (inventory) do catálogo.
+  const variantIdsInCart: string[] = Array.from(new Set<string>(dbCartItems.filter((ci: any) => ci.variantId).map((ci: any) => ci.variantId as string)));
+  const productIdsInCart: string[] = Array.from(new Set<string>(dbCartItems.map((ci: any) => ci.productId as string)));
+  const [variantStockMap, productStockMap] = await Promise.all([
+    computeLiveVariantStock(variantIdsInCart, db),
+    computeLiveStockAndSales(productIdsInCart, db),
+  ]);
+
   const itemsFormatted = [];
   let totalAmount = 0;
   let totalQuantityCount = 0;
@@ -1016,6 +1030,15 @@ export async function getFormattedUserCart(db: any, userId: string, destinationC
         image: varObj?.imageUrl || prod.image || '',
         brand: prod.brand || '',
         stock: Number(prod.stock || 0),
+        // FASE D16-H2 — disponibilidade AO VIVO desta linha específica
+        // (nunca o estoque agregado do produto quando ci.variantId existe):
+        // usado pelo carrinho para limitar a quantidade digitável/+/− à
+        // disponibilidade REAL (inventory), com mensagem clara em vez de
+        // falhar silenciosamente. O backend (handleUpdateCartItem) continua
+        // sendo a autoridade final na confirmação, independente disto.
+        availableStock: ci.variantId
+          ? (variantStockMap.get(ci.variantId) ?? 0)
+          : (productStockMap.get(ci.productId)?.availableStock ?? Number(prod.stock || 0)),
         sellerId: prod.sellerId,
         // Correção pós-deploy: faltavam storeId e shippingJson aqui — sem eles,
         // o carrinho não conseguia calcular peso/frete real do produto (o
@@ -1425,7 +1448,15 @@ export async function addItemsBatchForUser(
     // função — trata como conflito amigável (o comprador tenta de novo) em
     // vez de vazar um 500 genérico. Não é uma reescrita de arquitetura: só
     // reconhece o código de erro do Postgres para unique_violation.
-    if (e?.code === '23505') {
+    // FASE D16-H2 — correção: a versão do drizzle-orm em uso envolve o erro
+    // real do driver `pg` em DrizzleQueryError, colocando o `.code` real em
+    // `e.cause.code` (nunca em `e.code` diretamente) — a checagem original
+    // nunca disparava de verdade, deixando o unique_violation escapar como
+    // exceção não tratada. Achado ao investigar por que este teste de
+    // concorrência (D16-D2, item 7) passou a falhar depois que
+    // getFormattedUserCart ganhou 2 queries a mais (D16-H2): a corrida
+    // sempre existiu, só ficou mais fácil de reproduzir com o timing novo.
+    if (e?.code === '23505' || e?.cause?.code === '23505') {
       return { error: { status: 409, code: 'CART_CONCURRENT_UPDATE', message: 'O carrinho foi alterado ao mesmo tempo por outra requisição. Tente novamente.' } };
     }
     throw e;
@@ -1519,11 +1550,25 @@ const handleUpdateCartItem = async (req: AuthRequest, res: Response) => {
     if (isNaN(requestedQty) || requestedQty <= 0) {
       await db.delete(cartItems).where(eq(cartItems.id, targetId));
     } else {
-      // Mesma proteção de estoque do POST /cart/items (item 10.J).
+      // FASE D16-H2 — correção: esta proteção usava products.stock mesmo
+      // para linhas de VARIANTE (estoque agregado do produto, nunca a
+      // disponibilidade real daquela variante — ex.: Preta/M=40 e
+      // Preta/L=30 os dois eram limitados a 70). Agora usa a MESMA fonte
+      // variant-aware já usada em addSingleLineToCart (item 10.J):
+      // computeLiveVariantStock quando a linha tem variantId, senão
+      // computeLiveStockAndSales (onHand-reserved, nunca products.stock cru).
       const targetItem = itemRows[0] || (await db.select().from(cartItems).where(eq(cartItems.id, targetId)).limit(1))[0];
-      const prodRows = await db.select().from(products).where(eq(products.id, targetItem.productId)).limit(1);
-      const availableStock = Number(prodRows[0]?.stock);
-      const stockCap = !isNaN(availableStock) && availableStock >= 0 ? availableStock : Infinity;
+      let stockCap: number;
+      if (targetItem.variantId) {
+        const liveMap = await computeLiveVariantStock([targetItem.variantId], db);
+        stockCap = liveMap.get(targetItem.variantId) ?? 0;
+      } else {
+        const prodRows = await db.select().from(products).where(eq(products.id, targetItem.productId)).limit(1);
+        const liveMap = await computeLiveStockAndSales([targetItem.productId], db);
+        const live = liveMap.get(targetItem.productId);
+        const fallbackStock = Number(prodRows[0]?.stock);
+        stockCap = live?.availableStock ?? (!isNaN(fallbackStock) && fallbackStock >= 0 ? fallbackStock : Infinity);
+      }
       const newQty = Math.min(requestedQty, stockCap);
       await db.update(cartItems).set({
         quantity: newQty,

@@ -232,6 +232,13 @@ export interface Product {
   // que só precisam saber "este produto exige seleção de variante?" antes de
   // decidir entre adicionar direto ou levar ao detalhe (ex.: ProductCard).
   hasVariants?: boolean;
+  // FASE D16-H2 — disponibilidade AO VIVO (inventory) da linha específica no
+  // contexto do carrinho: quando o item tem variantId, é a disponibilidade
+  // DAQUELA variante (nunca o estoque agregado do produto); quando não tem,
+  // é a disponibilidade do produto simples. Ausente = desconhecido (o
+  // frontend não deve travar a digitação por isso — o backend continua
+  // autoridade final na confirmação).
+  availableStock?: number;
   shipping: {
     freeShipping: boolean;
     arrivesTomorrow: boolean;

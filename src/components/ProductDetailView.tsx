@@ -64,6 +64,7 @@ import {
   computeMultiVariantSummary,
   buildPersistentProductGallery,
 } from '../utils/productVariantBuyer';
+import { sanitizeQuantityDigits, resolveQuantityInputValue } from '../utils/quantityInput';
 
 export const ProductDetailView: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -126,6 +127,15 @@ export const ProductDetailView: React.FC = () => {
   // quando o produto muda (nunca ao trocar de cor — D16-D1, seção 6: trocar
   // Preta -> Branca -> Preta não pode apagar Preta/M=2).
   const [variantQuantities, setVariantQuantities] = useState<Record<string, number>>({});
+
+  // FASE D16-H2 — quantidade digitável por linha (além dos botões −/+).
+  // `variantQtyDrafts` guarda o texto EM EDIÇÃO (permite vazio temporário
+  // enquanto o comprador apaga "1" para digitar "20" — nunca força de volta
+  // um valor no meio da digitação); undefined = a linha não está sendo
+  // editada agora, mostra variantQuantities normalmente. Confirmado (e
+  // clampado a [0, disponibilidade real]) só no blur/Enter.
+  const [variantQtyDrafts, setVariantQtyDrafts] = useState<Record<string, string>>({});
+  const [variantQtyFeedback, setVariantQtyFeedback] = useState<Record<string, string>>({});
 
   // Reset a seleção sempre que o produto mudar (nunca herdar seleção de um
   // produto anterior ao navegar entre páginas de produto).
@@ -1127,12 +1137,48 @@ export const ProductDetailView: React.FC = () => {
                     // sincronizados com a ÚLTIMA linha tocada — nunca apaga
                     // quantidades de outras linhas/cores ao fazer isso.
                     setSelectedSize(s);
+                    // FASE D16-H2 — uma nova ação nesta linha (botão) limpa
+                    // qualquer aviso de "quantidade máxima" anterior.
+                    setVariantQtyFeedback((prev) => {
+                      if (!(varItem.id in prev)) return prev;
+                      const next = { ...prev };
+                      delete next[varItem.id];
+                      return next;
+                    });
                   };
+
+                  // FASE D16-H2 — quantidade digitável: `rowDraft` é o texto
+                  // EM EDIÇÃO (permite vazio temporário enquanto o comprador
+                  // apaga para digitar um novo valor); undefined = mostra
+                  // rowQty normalmente. Confirmado (e clampado a
+                  // [0, rowMax]) só no blur/Enter — nunca a cada tecla.
+                  const rowDraft = varItem ? variantQtyDrafts[varItem.id] : undefined;
+                  const rowFeedback = varItem ? variantQtyFeedback[varItem.id] : undefined;
+                  const rowDisplayValue = rowDraft !== undefined ? rowDraft : String(rowQty);
+                  const commitRowDraft = () => {
+                    if (!varItem) return;
+                    const draft = variantQtyDrafts[varItem.id];
+                    if (draft === undefined) return; // já confirmado (evita duplo commit de blur após Enter)
+                    setVariantQtyDrafts((prev) => {
+                      const next = { ...prev };
+                      delete next[varItem.id];
+                      return next;
+                    });
+                    const { value, message } = resolveQuantityInputValue(draft, 0, rowMax);
+                    applyRowQty(value);
+                    setVariantQtyFeedback((prev) => {
+                      const next = { ...prev };
+                      if (message) next[varItem.id] = message;
+                      else delete next[varItem.id];
+                      return next;
+                    });
+                  };
+                  const rowAriaLabel = `Quantidade de ${product.title}${selectedColor ? ` - ${selectedColor}` : ''} / ${s}`;
 
                   return (
                     <div
                       key={idx}
-                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-lg border transition ${
+                      className={`rounded-lg border transition ${
                         !rowAvailable
                           ? 'border-gray-200 bg-gray-50 opacity-60'
                           : rowQty > 0
@@ -1140,6 +1186,7 @@ export const ProductDetailView: React.FC = () => {
                           : 'border-gray-300 bg-white'
                       }`}
                     >
+                    <div className="flex items-center justify-between gap-3 px-3 py-2">
                       <div className="flex flex-col min-w-0">
                         <span className={`text-xs font-bold ${rowAvailable ? 'text-gray-900' : 'text-gray-400 line-through'}`}>
                           {s}
@@ -1164,20 +1211,43 @@ export const ProductDetailView: React.FC = () => {
                           type="button"
                           disabled={!rowAvailable || rowQty <= 0}
                           onClick={() => applyRowQty(rowQty - 1)}
+                          aria-label={`Diminuir ${rowAriaLabel}`}
                           className="px-2.5 py-1 text-gray-700 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed font-bold cursor-pointer disabled:cursor-not-allowed"
                         >
                           -
                         </button>
-                        <span className="px-3 py-1 text-xs font-bold text-gray-900 min-w-[2rem] text-center">{rowQty}</span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          aria-label={rowAriaLabel}
+                          disabled={!rowAvailable}
+                          value={rowDisplayValue}
+                          onChange={(e) => {
+                            if (!varItem) return;
+                            const digits = sanitizeQuantityDigits(e.target.value);
+                            setVariantQtyDrafts((prev) => ({ ...prev, [varItem.id]: digits }));
+                          }}
+                          onFocus={(e) => e.target.select()}
+                          onBlur={commitRowDraft}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') e.currentTarget.blur();
+                          }}
+                          className="w-10 px-1 py-1 text-xs font-bold text-gray-900 text-center bg-transparent focus:outline-hidden focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                        />
                         <button
                           type="button"
                           disabled={!rowAvailable || rowQty >= rowMax}
                           onClick={() => applyRowQty(rowQty + 1)}
+                          aria-label={`Aumentar ${rowAriaLabel}`}
                           className="px-2.5 py-1 text-gray-700 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed font-bold cursor-pointer"
                         >
                           +
                         </button>
                       </div>
+                    </div>
+                    {rowFeedback && (
+                      <p className="px-3 pb-2 text-[10px] text-amber-700 font-semibold">{rowFeedback}</p>
+                    )}
                     </div>
                   );
                 })}

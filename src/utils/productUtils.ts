@@ -172,6 +172,9 @@ export function normalizeProduct(p: any): Product {
       customsDutyEstimate: typeof p.shipping?.customsDutyEstimate === 'number' ? p.shipping.customsDutyEstimate : 0,
     },
     stock: typeof p.stock === 'number' ? p.stock : 0,
+    // FASE D16-H2 — repassa sem inventar: undefined quando a resposta não
+    // trouxe (o consumidor trata como "desconhecido", nunca como 0).
+    availableStock: typeof p.availableStock === 'number' ? p.availableStock : undefined,
     salesCount: typeof p.salesCount === 'number' ? p.salesCount : 0,
     description: p.description || '',
     specs: p.specs || {},
