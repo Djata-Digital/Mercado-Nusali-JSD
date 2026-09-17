@@ -48,6 +48,15 @@ export interface CreateOrderRequestDTO {
   userId: string;
   shippingAddress?: any;
   addressId?: string;
+  // FASE D16-H1.1 — separa a autoridade geográfica do endereço (sempre
+  // resolvida do banco quando addressId é usado, ou do objeto inline
+  // quando é um endereço novo específico deste pedido) do destinatário
+  // escolhido PARA ESTE pedido em particular (o próprio comprador, ou
+  // outra pessoa). Aplicado como override final, DEPOIS que
+  // targetAddress já foi resolvido — nunca substitui/adiciona nenhum
+  // campo geográfico (street/city/shippingSectorId/countryCode/...),
+  // somente recipientName/phone.
+  recipientOverride?: { name: string; phone: string; document?: string } | null;
   paymentMethod: string;
   notes?: string;
   currency?: string;
@@ -162,37 +171,52 @@ export class OrderService {
     const { userId, paymentMethod, notes } = data;
 
     // 1. Resolve Shipping Address
+    // FASE D16-H1.1 — endurece a resolução do endereço de entrega:
+    //   - Quando data.addressId é fornecido explicitamente, ele é a ÚNICA
+    //     fonte aceita para os campos geográficos — tem PRECEDÊNCIA sobre um
+    //     data.shippingAddress inline eventualmente presente no MESMO
+    //     payload (antes desta fase, um shippingAddress inline com .street
+    //     preenchido "vencia" mesmo com um addressId válido também presente
+    //     — um payload HTTP adulterado podia assim forjar rua/cidade/setor
+    //     mesmo selecionando um endereço cadastrado real).
+    //   - Se o addressId não existir ou não pertencer ao comprador
+    //     autenticado, o pedido é REJEITADO explicitamente — NUNCA cai
+    //     silenciosamente no endereço padrão do comprador (isso enviaria o
+    //     pedido para um endereço diferente do que foi de fato selecionado,
+    //     sem nenhum aviso ao comprador).
     let targetAddress = data.shippingAddress;
-    if ((!targetAddress || !targetAddress.street) && data.addressId) {
+    if (data.addressId) {
       const addrRows = await db
         .select()
         .from(addresses)
         .where(and(eq(addresses.id, data.addressId), eq(addresses.userId, userId)))
         .limit(1);
-      if (addrRows.length > 0) {
-        const a = addrRows[0];
-        targetAddress = {
-          recipientName: a.recipientName,
-          street: a.street,
-          number: a.number,
-          complement: a.complement || '',
-          neighborhood: a.neighborhood || '',
-          city: a.city,
-          state: a.state,
-          countryCode: a.countryCode,
-          country: a.countryCode,
-          zipCode: a.zipCode || '',
-          phone: a.phone,
-          // FASE D16-F2 — fundação geográfica do endereço de entrega: o
-          // objeto resolvido precisa manter shippingSectorId do endereço
-          // persistido selecionado (addressId), nunca perdê-lo neste mapeamento.
-          // Ainda NÃO usado para calcular frete nesta fase.
-          shippingSectorId: a.shippingSectorId || null,
-        };
+      if (addrRows.length === 0) {
+        throw new Error('ADDRESS_NOT_FOUND: O endereço selecionado não existe ou não pertence à sua conta.');
       }
-    }
-
-    if (!targetAddress || !targetAddress.street) {
+      const a = addrRows[0];
+      targetAddress = {
+        recipientName: a.recipientName,
+        street: a.street,
+        number: a.number,
+        complement: a.complement || '',
+        neighborhood: a.neighborhood || '',
+        city: a.city,
+        state: a.state,
+        countryCode: a.countryCode,
+        country: a.countryCode,
+        zipCode: a.zipCode || '',
+        phone: a.phone,
+        // FASE D16-F2 — fundação geográfica do endereço de entrega: o
+        // objeto resolvido precisa manter shippingSectorId do endereço
+        // persistido selecionado (addressId), nunca perdê-lo neste mapeamento.
+        // Ainda NÃO usado para calcular frete nesta fase.
+        shippingSectorId: a.shippingSectorId || null,
+      };
+    } else if (!targetAddress || !targetAddress.street) {
+      // Nenhum addressId e nenhum endereço inline utilizável foram
+      // fornecidos — único caso em que o fallback para o endereço padrão do
+      // comprador se aplica (comportamento pré-existente, preservado).
       const defaultAddrs = await db
         .select()
         .from(addresses)
@@ -216,6 +240,35 @@ export class OrderService {
           shippingSectorId: a.shippingSectorId || null,
         };
       }
+    }
+
+    // FASE D16-H1.1 — override de destinatário, aplicado por ÚLTIMO, DEPOIS
+    // que targetAddress já foi 100% resolvido (do banco via addressId, do
+    // banco via endereço padrão, ou do objeto inline para um endereço novo
+    // específico deste pedido). Nunca troca/adiciona nenhum campo
+    // geográfico (street/city/state/countryCode/country/zipCode/
+    // shippingSectorId) — só recipientName/phone. Isto separa a
+    // AUTORIDADE GEOGRÁFICA do endereço (sempre do banco quando addressId é
+    // usado — o cliente não pode falsificar setor/rua/cidade de um
+    // endereço salvo) da escolha de "quem recebe" para este pedido em
+    // particular (o próprio comprador, ou outra pessoa) — auditoria
+    // D16-H1.1, que encontrou o gap: antes desta fase, escolher "outra
+    // pessoa" para um endereço CADASTRADO exigia reconstruir o endereço
+    // inteiro no frontend (shippingAddress inline), enfraquecendo a
+    // validação de propriedade do addressId.
+    if (targetAddress && data.recipientOverride?.name && data.recipientOverride?.phone) {
+      targetAddress = {
+        ...targetAddress,
+        recipientName: data.recipientOverride.name,
+        phone: data.recipientOverride.phone,
+        // FASE D16-H1.1 — cpfOrTaxId só chega aqui quando o chamador (o
+        // pure function do frontend) já determinou que o destinatário É o
+        // próprio comprador; para "outra pessoa" o documento nunca é
+        // repassado, então a sincronização best-effort com
+        // userProfiles.taxId logo abaixo simplesmente não roda — nunca
+        // atribui ao comprador um documento que pertence a outra pessoa.
+        ...(data.recipientOverride.document ? { cpfOrTaxId: data.recipientOverride.document } : {}),
+      };
     }
 
     if (!targetAddress || !targetAddress.street || !targetAddress.recipientName) {

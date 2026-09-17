@@ -19,13 +19,21 @@ import {
   Zap,
   Loader2,
 } from 'lucide-react';
-import { PaymentMethodType, DeliveryAddress, PaymentDetails, CountryCode, CurrencyCode } from '../types';
+import { PaymentMethodType, PaymentDetails, CountryCode, CurrencyCode } from '../types';
 import { countriesConfig, formatCurrency } from '../utils/currencyUtils';
 import { useCountries } from '../hooks/useCountries';
+import { useAuth } from '../context/AuthContext';
 import { PixPaymentModal } from './PixPaymentModal';
 import { PixService } from '../services/pixService';
 import { convertToBRL, PixTransaction } from '../utils/pixEngine';
 import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
+import {
+  resolveCheckoutAddress,
+  SavedAddressLike,
+  NewAddressFormState,
+  CheckoutAddressMode,
+  CheckoutRecipientMode,
+} from '../utils/checkoutAddressResolver';
 
 import { OrdersApi } from '../api/clients/OrdersApi';
 import { BuyerService } from '../services/buyerService';
@@ -69,57 +77,86 @@ export const CheckoutView: React.FC = () => {
   const isAllNationalCart = cart.length > 0 && cart.every((i: any) => (i.product?.publishingScope || 'national') !== 'international');
   const isCountryLocked = cartAllowedCountries !== null && cartAllowedCountries.length <= 1;
 
-  // Address State initialized with empty/default fields, filled from DB on mount
-  const [address, setAddress] = useState<DeliveryAddress>({
-    recipientName: '',
-    cpfOrTaxId: '',
-    zipCode: '',
-    street: '',
-    number: '',
-    complement: '',
-    neighborhood: '',
-    // Correção pré-piloto: "Bissau"/"Bissau" eram fallback fixo, mostrado
-    // mesmo para país=Brasil — nunca inventar cidade/estado. Sem endereço
-    // real do comprador, o campo começa vazio e ele preenche.
-    city: '',
-    state: '',
-    country: selectedCountry,
-    phone: '',
-    shippingSectorId: null,
+  // FASE D16-H1 — Endereço de Entrega Selecionável + Destinatário do
+  // Pedido. Duas escolhas independentes (nunca acopladas): ONDE entregar
+  // (endereço cadastrado real, escolhido de uma lista — ou outro endereço,
+  // específico deste pedido, nunca salvo no perfil) e QUEM recebe (o
+  // próprio comprador ou outra pessoa). A resolução final (o objeto
+  // {shippingAddress} que realmente vai para OrdersApi.create — MESMO
+  // contrato que orderService.ts/F6.2 já aceita hoje, nenhuma mudança de
+  // backend) é feita por resolveCheckoutAddress (função pura, testável),
+  // nunca recalculada ad-hoc aqui.
+  const { user } = useAuth();
+
+  const [buyerAddresses, setBuyerAddresses] = useState<SavedAddressLike[]>([]);
+  const [isLoadingAddresses, setIsLoadingAddresses] = useState(true);
+  const [addressMode, setAddressMode] = useState<CheckoutAddressMode>('saved');
+  const [selectedSavedAddressId, setSelectedSavedAddressId] = useState<string | null>(null);
+
+  const [newAddress, setNewAddress] = useState<NewAddressFormState>({
+    regionId: null, sectorId: null, city: '', street: '', number: '', complement: '', neighborhood: '', zipCode: '',
   });
+  // Região→Setor do "outro endereço" — SEMPRE carregados da autoridade real
+  // do backend (GET /buyer/shipping/regions|sectors, D16-F2 — já existente,
+  // nunca hardcoded aqui).
+  const [newAddressRegions, setNewAddressRegions] = useState<Array<{ id: string; name: string; code: string }>>([]);
+  const [newAddressSectors, setNewAddressSectors] = useState<Array<{ id: string; name: string; code: string; regionId: string }>>([]);
+  const [isLoadingSectors, setIsLoadingSectors] = useState(false);
 
-  // FASE D16-F2 — só para EXIBIÇÃO (nunca enviado ao backend): rótulo
-  // humano do setor/região logística do endereço padrão carregado, quando
-  // existir. address.shippingSectorId (acima) é o valor real submetido.
-  const [addressSectorLabel, setAddressSectorLabel] = useState<{ sector: string; region: string } | null>(null);
+  const [recipientMode, setRecipientMode] = useState<CheckoutRecipientMode>('self');
+  const [recipientName, setRecipientName] = useState('');
+  const [recipientPhone, setRecipientPhone] = useState('');
+  const [documentValue, setDocumentValue] = useState('');
 
-  // Load real user address from PostgreSQL on mount
+  // Carrega os endereços reais do comprador (lista completa, não só o
+  // padrão) — mesma fonte já usada por CartView/ProductDetailView.
   React.useEffect(() => {
+    setIsLoadingAddresses(true);
     BuyerService.getAddresses().then((res) => {
-      if (res.success && Array.isArray(res.data) && res.data.length > 0) {
+      if (res.success && Array.isArray(res.data)) {
+        setBuyerAddresses(res.data);
         const defaultAddr = res.data.find((a: any) => a.isDefault) || res.data[0];
-        setAddress({
-          recipientName: defaultAddr.recipientName || '',
-          cpfOrTaxId: '',
-          zipCode: defaultAddr.zipCode || '',
-          street: defaultAddr.street || '',
-          number: defaultAddr.number || '',
-          complement: defaultAddr.complement || '',
-          neighborhood: defaultAddr.neighborhood || '',
-          city: defaultAddr.city || '',
-          state: defaultAddr.state || '',
-          country: (defaultAddr.country || defaultAddr.countryCode || selectedCountry) as CountryCode,
-          phone: defaultAddr.phone || '',
-          shippingSectorId: defaultAddr.shippingSectorId || null,
-        });
-        setAddressSectorLabel(
-          defaultAddr.shippingSectorId
-            ? { sector: defaultAddr.shippingSectorName || '', region: defaultAddr.shippingRegionName || '' }
-            : null
-        );
+        if (defaultAddr) setSelectedSavedAddressId(defaultAddr.id);
       }
+    }).catch(() => {}).finally(() => setIsLoadingAddresses(false));
+  }, []);
+
+  // Região→Setor do "outro endereço": região carrega quando o país muda;
+  // setor carrega quando a região muda (cascata real, nunca lista fixa).
+  React.useEffect(() => {
+    if (addressMode !== 'new') return;
+    BuyerService.getShippingRegions(country).then((res) => {
+      if (res.success && Array.isArray(res.data)) setNewAddressRegions(res.data);
     }).catch(() => {});
-  }, [selectedCountry]);
+  }, [addressMode, country]);
+
+  React.useEffect(() => {
+    if (addressMode !== 'new' || !newAddress.regionId) {
+      setNewAddressSectors([]);
+      return;
+    }
+    setIsLoadingSectors(true);
+    BuyerService.getShippingSectors(country, newAddress.regionId).then((res) => {
+      if (res.success && Array.isArray(res.data)) setNewAddressSectors(res.data);
+    }).catch(() => {}).finally(() => setIsLoadingSectors(false));
+  }, [addressMode, country, newAddress.regionId]);
+
+  const selectedSavedAddress = buyerAddresses.find((a) => a.id === selectedSavedAddressId) || null;
+
+  const resolvedAddress = React.useMemo(() => resolveCheckoutAddress({
+    addressMode,
+    selectedSavedAddress,
+    newAddress,
+    country,
+    recipientMode,
+    recipientName,
+    recipientPhone,
+    documentValue,
+    buyerName: user?.name || '',
+    buyerPhone: user?.phone || '',
+  }), [addressMode, selectedSavedAddress, newAddress, country, recipientMode, recipientName, recipientPhone, documentValue, user?.name, user?.phone]);
+
+  const resolvedShippingSectorId = resolvedAddress.ok ? resolvedAddress.displaySectorId : null;
 
   // Se o destino atual não está mais entre os permitidos (ex.: carrinho
   // mudou, ou o país padrão de navegação não é o único destino elegível),
@@ -129,7 +166,7 @@ export const CheckoutView: React.FC = () => {
     if (!cartAllowedCountries.includes(country)) {
       const next = cartAllowedCountries[0] as CountryCode;
       setCountry(next);
-      setAddress((prev) => ({ ...prev, country: next }));
+      setNewAddress((prev) => ({ ...prev, regionId: null, sectorId: null }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cartAllowedCountries]);
@@ -201,28 +238,28 @@ export const CheckoutView: React.FC = () => {
   });
 
   const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || 'BR').toUpperCase();
-  // Fase M1-D2.6 — `address.countryCode` removido do fallback: o estado
-  // `address` (DeliveryAddress) só carrega `country` (o mapeamento em
-  // BuyerService.getAddresses -> setAddress nunca preenche countryCode); o
-  // fallback era morto (sempre undefined). O `country` explícito só é
-  // adicionado ao PAYLOAD enviado à API (`{ ...address, countryCode: country }`).
-  const destCountry = (address.country || country || 'BR').toUpperCase();
+  // FASE D16-H1 — `destCountry` é SOMENTE o `country` do topo do checkout
+  // (destino comercial do pedido, já resolvido por D16-F2/D16-G1) — nunca
+  // mais lido de um objeto `address` solto, que agora é derivado
+  // (resolvedAddress) a partir do endereço/destinatário escolhidos.
+  const destCountry = (country || 'BR').toUpperCase();
   const isCrossBorder = originCountry !== destCountry;
   const CARD_PAYMENTS_ENABLED = false;
 
   // FASE D16-G3 — preview de frete via F4/F3 (mesma arquitetura do Cart/
   // Product Detail) em vez do motor legado (calculateMultiSellerFreight/
-  // shipping_rates). Setor de entrega: EXCLUSIVAMENTE
-  // address.shippingSectorId, já carregado do endereço real do comprador
-  // (ver useEffect de BuyerService.getAddresses acima) — nunca inferido de
-  // country/texto.
+  // shipping_rates). FASE D16-H1 — setor de entrega: EXCLUSIVAMENTE
+  // resolvedShippingSectorId, derivado do endereço/modo realmente
+  // selecionado (cadastrado OU outro endereço) — nunca inferido de
+  // country/texto, e recalcula sempre que o setor efetivo muda (trocar de
+  // endereço, trocar de setor no formulário de outro endereço, etc.).
   React.useEffect(() => {
     let isMounted = true;
     const fetchFreight = async () => {
       if (cart.length === 0) return;
       setFreightQuote((prev) => ({ ...prev, loading: true, error: undefined }));
 
-      if (!address.shippingSectorId) {
+      if (!resolvedShippingSectorId) {
         if (isMounted) {
           setFreightQuote({
             shippingCost: 0,
@@ -244,7 +281,7 @@ export const CheckoutView: React.FC = () => {
       // qualquer grupo falhar, o resultado inteiro vem available:false
       // (nunca um total parcial/subestimado).
       const res = await ShippingService.getCartPreview({
-        destinationShippingSectorId: address.shippingSectorId,
+        destinationShippingSectorId: resolvedShippingSectorId,
         items: cart.map((item) => ({
           productId: item.product.id,
           variantId: item.selectedVariantSku || null,
@@ -292,7 +329,7 @@ export const CheckoutView: React.FC = () => {
       isMounted = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [address.shippingSectorId, cart.length, cartTotal]);
+  }, [resolvedShippingSectorId, cart.length, cartTotal]);
 
   const customsDuty = 0; // Removed 8% fake tax - national is 0, international is pending
   const shippingFee = freightQuote.shippingChargedToBuyer;
@@ -314,6 +351,16 @@ export const CheckoutView: React.FC = () => {
       return;
     }
 
+    // FASE D16-H1 — mesma checagem de UX que já existia para país: o
+    // backend (OrderService.createOrderFromCart) sempre revalida endereço/
+    // setor de qualquer forma; isto só evita uma ida ao servidor quando já
+    // sabemos que o formulário está incompleto (endereço sem setor,
+    // destinatário sem nome/telefone, etc.).
+    if (resolvedAddress.ok === false) {
+      setErrorMessage(resolvedAddress.message);
+      return;
+    }
+
     setIsProcessing(true);
     setErrorMessage(null);
 
@@ -329,15 +376,25 @@ export const CheckoutView: React.FC = () => {
 
       if (!createdOrder) {
         // 1. Create Order in PostgreSQL
-        // Correção crítica de checkout: DeliveryAddress (types.ts) só tem o
-        // campo `country`, não `countryCode` — o backend (OrderService) lê
-        // primeiro `countryCode`, depois `country`, então já funcionava por
-        // fallback, mas enviar `countryCode` explicitamente aqui também
-        // (mesma convenção usada quando o endereço vem de addressId/endereço
-        // padrão, que sempre preenche as duas chaves) deixa o payload
-        // inequívoco, sem depender só do fallback.
+        // FASE D16-H1.1 — payload vem de resolvedAddress.payload
+        // (resolveCheckoutAddress, função pura), que separa EXPLICITAMENTE
+        // a autoridade geográfica do destinatário:
+        //   modo "endereço cadastrado" -> envia SOMENTE addressId (nunca
+        //     reconstrói rua/cidade/setor no frontend — o backend busca do
+        //     banco e valida addresses.userId === buyer autenticado);
+        //   modo "outro endereço" -> envia shippingAddress inline (é um
+        //     endereço específico deste pedido, nunca salvo no perfil);
+        //   recipientOverride -> SEMPRE separado, nunca embutido nos
+        //     campos geográficos (mesmo "eu mesmo" reafirma nome/telefone
+        //     do buyer explicitamente).
+        // orderService.ts (F6.2) já aceitava addressId+shippingAddress;
+        // recipientOverride foi adicionado nesta fase (D16-H1.1) como o
+        // MENOR campo aditivo necessário para não enfraquecer a validação
+        // de propriedade do addressId.
         const res = await OrdersApi.create({
-          shippingAddress: { ...address, countryCode: country },
+          addressId: resolvedAddress.payload.addressId || undefined,
+          shippingAddress: resolvedAddress.payload.shippingAddress ? { ...resolvedAddress.payload.shippingAddress, countryCode: country } : undefined,
+          recipientOverride: { name: resolvedAddress.payload.recipient.name, phone: resolvedAddress.payload.recipient.phone, document: resolvedAddress.payload.recipient.document || undefined },
           paymentMethod: paymentMethod,
           currency: orderCurrency,
           countryCode: country,
@@ -602,7 +659,7 @@ export const CheckoutView: React.FC = () => {
               <MapPin className="w-5 h-5 text-emerald-600" /> 1. Endereço de Destino e Destinatário
             </h2>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            <div className="grid grid-cols-1 gap-4 text-xs">
               <div>
                 <label className="block font-semibold text-gray-700 mb-1">País do Destinatário</label>
                 {isCountryLocked ? (
@@ -621,13 +678,12 @@ export const CheckoutView: React.FC = () => {
                     onChange={(e) => {
                       const newCountry = e.target.value as CountryCode;
                       setCountry(newCountry);
-                      // FASE D16-F2 — trocar o país invalida o setor logístico
-                      // carregado (ele pertence ao país anterior); nunca deixa
-                      // um shippingSectorId órfão seguir para o pedido (o
-                      // backend rejeitaria com SHIPPING_SECTOR_INVALID na hora
-                      // de finalizar — mais claro limpar aqui, na hora da troca).
-                      setAddress({ ...address, country: newCountry, shippingSectorId: null });
-                      setAddressSectorLabel(null);
+                      // FASE D16-H1 — trocar o país invalida a Região/Setor já
+                      // escolhidos do "outro endereço" (pertenciam ao país
+                      // anterior); nunca deixa um sectorId órfão seguir para o
+                      // pedido. O endereço CADASTRADO não precisa disso — cada
+                      // endereço salvo já carrega seu próprio país/setor reais.
+                      setNewAddress((prev) => ({ ...prev, regionId: null, sectorId: null }));
                       // countriesConfig cobre só os 8 países legados — para um
                       // país real fora dele (ex.: GM, SN) simplesmente não
                       // reatribui o método de pagamento, em vez de quebrar.
@@ -670,26 +726,6 @@ export const CheckoutView: React.FC = () => {
                     Os itens deste carrinho não têm nenhum destino de entrega em comum. Remova algum item para continuar.
                   </p>
                 )}
-                {/* FASE D16-F2 — só exibição: setor/região logística já
-                    configurados no endereço padrão do comprador (cadastrados
-                    em "Meus Endereços"). Nunca editável aqui — checkout não é
-                    redesenhado para incluir o seletor de setor. */}
-                {addressSectorLabel && (
-                  <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1 mt-1.5 font-semibold">
-                    Setor de entrega: {addressSectorLabel.region ? `${addressSectorLabel.region} • ` : ''}{addressSectorLabel.sector}
-                  </p>
-                )}
-              </div>
-
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">Cidade</label>
-                <input
-                  type="text"
-                  value={address.city}
-                  onChange={(e) => setAddress({ ...address, city: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  required
-                />
               </div>
             </div>
 
@@ -710,62 +746,146 @@ export const CheckoutView: React.FC = () => {
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">Nome Completo</label>
-                <input
-                  type="text"
-                  value={address.recipientName}
-                  onChange={(e) => setAddress({ ...address, recipientName: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  required
-                />
+            {/* FASE D16-H1 — Onde deseja receber este pedido? */}
+            <div className="pt-3 border-t border-gray-100 space-y-3">
+              <p className="text-xs font-bold text-gray-800">Onde deseja receber este pedido?</p>
+              <div className="flex flex-col sm:flex-row gap-2 text-xs">
+                <label className={`flex-1 flex items-center gap-2 border rounded-xl px-3 py-2 cursor-pointer ${addressMode === 'saved' ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                  <input type="radio" name="addressMode" checked={addressMode === 'saved'} onChange={() => setAddressMode('saved')} />
+                  <span className="font-semibold">Usar meu endereço cadastrado</span>
+                </label>
+                <label className={`flex-1 flex items-center gap-2 border rounded-xl px-3 py-2 cursor-pointer ${addressMode === 'new' ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                  <input type="radio" name="addressMode" checked={addressMode === 'new'} onChange={() => setAddressMode('new')} />
+                  <span className="font-semibold">Usar outro endereço</span>
+                </label>
               </div>
 
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">Documento de Identificação (NIF / BI / CPF)</label>
-                <input
-                  type="text"
-                  value={address.cpfOrTaxId}
-                  onChange={(e) => setAddress({ ...address, cpfOrTaxId: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">Telefone de Contacto (Com WhatsApp)</label>
-                <input
-                  type="text"
-                  value={address.phone}
-                  onChange={(e) => setAddress({ ...address, phone: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  required
-                />
-              </div>
-
-              <div className="sm:col-span-2 grid grid-cols-3 gap-3">
-                <div className="col-span-2">
-                  <label className="block font-semibold text-gray-700 mb-1">Rua / Avenida / Bairro</label>
-                  <input
-                    type="text"
-                    value={address.street}
-                    onChange={(e) => setAddress({ ...address, street: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                    required
-                  />
+              {addressMode === 'saved' ? (
+                isLoadingAddresses ? (
+                  <p className="text-xs text-gray-500 flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando seus endereços...</p>
+                ) : buyerAddresses.length === 0 ? (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                    Você ainda não tem nenhum endereço cadastrado. Escolha "Usar outro endereço" para informar um endereço para este pedido.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {buyerAddresses.map((a) => (
+                      <label key={a.id} className={`block border rounded-xl px-3 py-2 text-xs cursor-pointer ${selectedSavedAddressId === a.id ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                        <div className="flex items-start gap-2">
+                          <input type="radio" name="savedAddress" className="mt-0.5" checked={selectedSavedAddressId === a.id} onChange={() => setSelectedSavedAddressId(a.id)} />
+                          <div>
+                            <div className="font-bold text-gray-900">{a.recipientName}{a.isDefault ? ' • Padrão' : ''}</div>
+                            <div className="text-gray-600">
+                              {a.shippingRegionName ? `${a.shippingRegionName} • ` : ''}{a.shippingSectorName || 'Sem setor de entrega definido'}
+                            </div>
+                            <div className="text-gray-600">{a.city}{a.state ? ` - ${a.state}` : ''}</div>
+                            <div className="text-gray-600">{a.street}, {a.number}{a.complement ? ` - ${a.complement}` : ''}{a.neighborhood ? ` - ${a.neighborhood}` : ''}</div>
+                            {!a.shippingSectorId && (
+                              <div className="text-amber-700 font-semibold mt-1">Sem setor de entrega — edite este endereço em "Meus Endereços" para poder usá-lo.</div>
+                            )}
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                )
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Região</label>
+                    <select
+                      value={newAddress.regionId || ''}
+                      onChange={(e) => setNewAddress({ ...newAddress, regionId: e.target.value || null, sectorId: null })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                      required
+                    >
+                      <option value="">Selecione a região...</option>
+                      {newAddressRegions.map((r) => (
+                        <option key={r.id} value={r.id}>{r.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Setor</label>
+                    <select
+                      value={newAddress.sectorId || ''}
+                      onChange={(e) => setNewAddress({ ...newAddress, sectorId: e.target.value || null })}
+                      disabled={!newAddress.regionId || isLoadingSectors}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                      required
+                    >
+                      <option value="">{isLoadingSectors ? 'Carregando setores...' : 'Selecione o setor...'}</option>
+                      {newAddressSectors.map((s) => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Cidade / Localidade</label>
+                    <input type="text" value={newAddress.city} onChange={(e) => setNewAddress({ ...newAddress, city: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Bairro (opcional)</label>
+                    <input type="text" value={newAddress.neighborhood} onChange={(e) => setNewAddress({ ...newAddress, neighborhood: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
+                  </div>
+                  <div className="sm:col-span-2 grid grid-cols-3 gap-3">
+                    <div className="col-span-2">
+                      <label className="block font-semibold text-gray-700 mb-1">Rua / Avenida</label>
+                      <input type="text" value={newAddress.street} onChange={(e) => setNewAddress({ ...newAddress, street: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">Número / Lote</label>
+                      <input type="text" value={newAddress.number} onChange={(e) => setNewAddress({ ...newAddress, number: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                    </div>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block font-semibold text-gray-700 mb-1">Referência / Complemento (opcional)</label>
+                    <input type="text" value={newAddress.complement} onChange={(e) => setNewAddress({ ...newAddress, complement: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
+                  </div>
                 </div>
+              )}
+            </div>
+
+            {/* FASE D16-H1 — Quem vai receber? Escolha INDEPENDENTE do
+                endereço acima (qualquer combinação é válida). */}
+            <div className="pt-3 border-t border-gray-100 space-y-3">
+              <p className="text-xs font-bold text-gray-800">Quem vai receber?</p>
+              <div className="flex flex-col sm:flex-row gap-2 text-xs">
+                <label className={`flex-1 flex items-center gap-2 border rounded-xl px-3 py-2 cursor-pointer ${recipientMode === 'self' ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                  <input type="radio" name="recipientMode" checked={recipientMode === 'self'} onChange={() => setRecipientMode('self')} />
+                  <span className="font-semibold">Eu mesmo{user?.name ? ` (${user.name})` : ''}</span>
+                </label>
+                <label className={`flex-1 flex items-center gap-2 border rounded-xl px-3 py-2 cursor-pointer ${recipientMode === 'other' ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                  <input type="radio" name="recipientMode" checked={recipientMode === 'other'} onChange={() => setRecipientMode('other')} />
+                  <span className="font-semibold">Outra pessoa</span>
+                </label>
+              </div>
+
+              {recipientMode === 'other' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Nome completo do destinatário</label>
+                    <input type="text" value={recipientName} onChange={(e) => setRecipientName(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Telefone / WhatsApp do destinatário</label>
+                    <input type="text" value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                 <div>
-                  <label className="block font-semibold text-gray-700 mb-1">Número / Lote</label>
-                  <input
-                    type="text"
-                    value={address.number}
-                    onChange={(e) => setAddress({ ...address, number: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                    required
-                  />
+                  <label className="block font-semibold text-gray-700 mb-1">Documento de Identificação (NIF / BI / CPF)</label>
+                  <input type="text" value={documentValue} onChange={(e) => setDocumentValue(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                 </div>
               </div>
+
+              {resolvedAddress.ok === false && (
+                <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold">
+                  {resolvedAddress.message}
+                </p>
+              )}
             </div>
           </div>
 
@@ -1012,7 +1132,7 @@ export const CheckoutView: React.FC = () => {
 
             <button
               type="submit"
-              disabled={isProcessing || freightQuote.loading || !freightQuote.available}
+              disabled={isProcessing || freightQuote.loading || !freightQuote.available || !resolvedAddress.ok}
               className={`w-full text-white font-extrabold py-3.5 px-4 rounded-xl shadow-md transition flex items-center justify-center gap-2 text-sm disabled:opacity-50 cursor-pointer ${
                 paymentMethod === 'pix'
                   ? 'bg-emerald-600 hover:bg-emerald-700 ring-2 ring-emerald-400/30'
