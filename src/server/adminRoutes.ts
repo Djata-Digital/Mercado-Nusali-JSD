@@ -43,8 +43,6 @@ import {
   inventory,
   inventoryMovements,
   stockReservations,
-  shippingRates,
-  shippingZones,
   carriers,
   shippingRegions,
   shippingSectors,
@@ -3941,9 +3939,16 @@ adminRouter.patch('/carriers/:id', requireLogisticsStaff, async (req: AuthReques
 
 // DELETE /admin/carriers/:id
 //
-// Nunca deleta fisicamente uma transportadora já usada por shipment/tarifa
+// Nunca deleta fisicamente uma transportadora já usada por shipment
 // — marca INACTIVE nesse caso (histórico continua íntegro, FK preservada).
 // Só remove de fato a linha se ela nunca foi referenciada por nada.
+//
+// FASE D16-I6.1 — a checagem contra shippingRates (tabela legada, país↔país,
+// em vias de ser fisicamente removida) foi retirada desta proteção.
+// shipments.carrierId é a ÚNICA outra FK real para carriers.id em todo o
+// schema (confirmado por auditoria D16-I6/I6.1) — nenhuma tabela do sistema
+// atual (F3: shipping_regions/sectors/routes/services/route_rates) referencia
+// carrier algum, então não há nada além de shipments para proteger aqui.
 adminRouter.delete('/carriers/:id', requireLogisticsStaff, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -3953,17 +3958,14 @@ adminRouter.delete('/carriers/:id', requireLogisticsStaff, async (req: AuthReque
     const existing = await db.select().from(carriers).where(eq(carriers.id, id)).limit(1);
     if (existing.length === 0) throw new AdminRequestError(404, 'Transportadora não encontrada.');
 
-    const [shipmentUse, rateUse] = await Promise.all([
-      db.select({ id: shipments.id }).from(shipments).where(eq(shipments.carrierId, id)).limit(1),
-      db.select({ id: shippingRates.id }).from(shippingRates).where(eq(shippingRates.carrierId, id)).limit(1),
-    ]);
+    const shipmentUse = await db.select({ id: shipments.id }).from(shipments).where(eq(shipments.carrierId, id)).limit(1);
 
-    if (shipmentUse.length > 0 || rateUse.length > 0) {
+    if (shipmentUse.length > 0) {
       await db.update(carriers).set({ status: 'INACTIVE', updatedAt: new Date() }).where(eq(carriers.id, id));
       await writeRealAudit(req, 'admin.carrier.deactivated', 'carriers', id, { reason: 'already_in_use' });
       return res.json({
         success: true,
-        message: 'Esta transportadora já está em uso por envios ou tarifas — foi marcada como INACTIVE em vez de removida (histórico preservado).',
+        message: 'Esta transportadora já está em uso por envios — foi marcada como INACTIVE em vez de removida (histórico preservado).',
         data: { id, status: 'INACTIVE' },
       });
     }
