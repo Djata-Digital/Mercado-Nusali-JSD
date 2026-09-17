@@ -142,8 +142,17 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
         prev.map(item => item.id === u.id ? { ...item, status: nextStatus } : item)
       );
       showToast(res.message || `Usuário ${u.name} alterado para status ${nextStatus.toUpperCase()}.`);
-    } catch {
-      showToast(`Status de ${u.name} atualizado.`);
+    } catch (err: any) {
+      // FASE D16-G1.5 — mesmo bug de feedback falso identificado e corrigido
+      // no reset de senha (D16-G1.4): este catch mostrava incondicionalmente
+      // uma mensagem de SUCESSO mesmo quando a chamada falhava. Regras de
+      // bloqueio/desbloqueio em si não mudaram — só o feedback.
+      showToast(
+        err?.response?.data?.error?.message ||
+        err?.response?.data?.message ||
+        err?.message ||
+        `Não foi possível alterar o status de ${u.name}.`
+      );
     }
   };
 
@@ -154,8 +163,19 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
     try {
       const res = await AdminService.resetUserPassword(resetPasswordUser.id, newPasswordInput);
       showToast(res.message || `Senha do usuário ${resetPasswordUser.name} redefinida com sucesso!`);
-    } catch {
-      showToast(`Senha redefinida.`);
+    } catch (err: any) {
+      // FASE D16-G1.4 — bugfix: este catch mostrava incondicionalmente
+      // "Senha redefinida." mesmo quando a chamada falhava (ex.: backend
+      // bloqueia reset de senha de GLOBAL_ADMIN por esta tela e retorna
+      // 403) — o admin acreditava ter trocado a senha quando na verdade
+      // nada foi persistido. Agora mostra a mensagem real de erro do
+      // backend (mesmo padrão já usado em fetchSellers/AdminSellersManager).
+      showToast(
+        err?.response?.data?.error?.message ||
+        err?.response?.data?.message ||
+        err?.message ||
+        `Não foi possível redefinir a senha de ${resetPasswordUser.name}.`
+      );
     }
     setResetPasswordUser(null);
     setNewPasswordInput('');
@@ -277,9 +297,12 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
                         <Eye className="w-4 h-4" />
                       </button>
                       <button
-                        onClick={() => { setResetPasswordUser(u); setNewPasswordInput(''); }}
-                        className="p-1.5 hover:bg-gray-100 text-gray-600 rounded-lg cursor-pointer"
-                        title="Redefinir Senha"
+                        onClick={() => { if (u.id !== user?.id) { setResetPasswordUser(u); setNewPasswordInput(''); } }}
+                        disabled={u.id === user?.id}
+                        className={`p-1.5 rounded-lg ${
+                          u.id === user?.id ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-gray-100 text-gray-600 cursor-pointer'
+                        }`}
+                        title={u.id === user?.id ? 'Use as configurações de segurança da sua conta para alterar sua própria senha.' : 'Redefinir Senha'}
                       >
                         <Key className="w-4 h-4" />
                       </button>

@@ -57,7 +57,7 @@ import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull, or, gte, lte, ne, inArray } from 'drizzle-orm';
 import { AuthRequest, requireAuth } from './modules/auth/authMiddleware.js';
 import { CatalogService } from './modules/catalog/catalogService.js';
-import { isGlobalCatalogAdmin, canCreateRole } from './modules/auth/scopeService.js';
+import { isGlobalCatalogAdmin, canCreateRole, canAdministrativelyResetPassword } from './modules/auth/scopeService.js';
 import {
   resolveAdministrativeScope,
   assertCountryAccess,
@@ -1587,8 +1587,22 @@ adminRouter.post('/users/:id/reset-password', requireGlobalAdmin, async (req: Au
     const rows = await db.select().from(users).where(eq(users.id, req.params.id)).limit(1);
     const target = rows[0];
     if (!target) throw new AdminRequestError(404, 'Usuário não encontrado.');
-    if (String(target.role).toUpperCase() === 'GLOBAL_ADMIN') {
-      throw new AdminRequestError(403, 'Use a área de segurança da própria conta para alterar a senha do Administrador Geral.');
+
+    // FASE D16-G1.5 — autorreset nunca é permitido por esta ferramenta
+    // administrativa (mesmo para o próprio GLOBAL_ADMIN) — compara IDs
+    // reais (req.user.id, do JWT verificado por requireAuth), nunca
+    // email/nome, que poderiam colidir ou ser forjados na exibição.
+    if (target.id === req.user?.id) {
+      throw new AdminRequestError(403, 'Para alterar a senha da sua própria conta, use as configurações de segurança da conta.');
+    }
+
+    // Redefinir a senha de outro GLOBAL_ADMIN só é permitido para quem
+    // também é GLOBAL_ADMIN — antes disso o alvo GLOBAL_ADMIN era
+    // bloqueado incondicionalmente, deixando um segundo GLOBAL_ADMIN sem
+    // nenhum caminho de recuperação (auditoria D16-G1.4). Demais roles-alvo
+    // continuam com o comportamento já existente, inalterado.
+    if (!canAdministrativelyResetPassword(req.user?.role, target.role)) {
+      throw new AdminRequestError(403, 'Você não tem permissão para redefinir a senha deste usuário.');
     }
 
     const newPassword = String(req.body?.newPassword || '').trim() || generateTemporaryPassword();

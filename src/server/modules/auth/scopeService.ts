@@ -91,6 +91,35 @@ export function canCreateRole(callerRole: string | undefined, requestedRole: str
   return (callerRole || '').toUpperCase() === 'GLOBAL_ADMIN';
 }
 
+// ---------------------------------------------------------------------------
+// FASE D16-G1.5 — Recuperação Segura de Acesso de GLOBAL_ADMIN.
+//
+// POST /admin/users/:id/reset-password bloqueava incondicionalmente
+// qualquer reset cujo ALVO fosse GLOBAL_ADMIN — deixando um segundo
+// GLOBAL_ADMIN que perdeu a senha temporária de criação sem NENHUM caminho
+// de recuperação. Esta função decide especificamente sobre esse caso
+// (mesmo padrão de canCreateRole acima — pura, testável, chamada tanto
+// pelo handler real quanto pelos testes).
+//
+// A checagem de autorreset (actor.id === target.id) fica FORA desta
+// função, feita no handler com uma mensagem própria e amigável — nunca é
+// uma questão de role, é sempre proibida independente de quem for o ator.
+//
+// Regras:
+//   alvo != GLOBAL_ADMIN -> sempre permitido (comportamento já existente,
+//     inalterado — esta rota já exige requireGlobalAdmin no router, então
+//     quem chama já é garantidamente GLOBAL_ADMIN ou ADMIN... na prática
+//     só GLOBAL_ADMIN, ver requireGlobalAdmin).
+//   alvo == GLOBAL_ADMIN -> permitido SOMENTE se quem chama também é
+//     GLOBAL_ADMIN (defesa em profundidade explícita, nunca confia apenas
+//     na composição de middlewares de hoje — mesmo raciocínio de
+//     canCreateRole).
+export function canAdministrativelyResetPassword(actorRole: string | undefined, targetRole: string | undefined): boolean {
+  const target = (targetRole || '').toUpperCase();
+  if (target !== 'GLOBAL_ADMIN') return true;
+  return (actorRole || '').toUpperCase() === 'GLOBAL_ADMIN';
+}
+
 export class ScopeError extends Error {
   status: number;
   code: string;
