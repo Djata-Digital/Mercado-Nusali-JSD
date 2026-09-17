@@ -11,6 +11,11 @@ export const AdminService = {
     return AdminApi.getStats();
   },
 
+  // FASE D16-G1.1 — Admin Global Catalog Isolation. Ver AdminApi.getProducts.
+  async getProducts(params?: { originCountryFilter?: string }): Promise<ApiResponse<any[]>> {
+    return AdminApi.getProducts(params);
+  },
+
   // Users & Staff
   async getUsers(params?: { role?: string; status?: string; q?: string }): Promise<ApiResponse<any[]>> {
     return AdminApi.getUsers(params);

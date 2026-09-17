@@ -6,6 +6,15 @@ export class AdminApi {
     return apiClient.get('/admin/overview');
   }
 
+  // FASE D16-G1.1 — Admin Global Catalog Isolation. Catálogo administrativo
+  // COMPLETO (todos os produtos, independente de destino/publishingScope/
+  // targetCountriesJson) — NUNCA o catálogo público (/products). O único
+  // filtro aceito aqui é `originCountryFilter`, um conceito administrativo
+  // por país de ORIGEM, sem nenhuma relação com destino de comprador.
+  static async getProducts(params?: { originCountryFilter?: string }): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/products', { params });
+  }
+
   static async getStats(): Promise<ApiResponse<any>> {
     return apiClient.get('/admin/stats');
   }

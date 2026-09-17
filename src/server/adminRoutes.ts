@@ -56,6 +56,8 @@ import {
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull, or, gte, lte, ne, inArray } from 'drizzle-orm';
 import { AuthRequest, requireAuth } from './modules/auth/authMiddleware.js';
+import { CatalogService } from './modules/catalog/catalogService.js';
+import { isGlobalCatalogAdmin } from './modules/auth/scopeService.js';
 import {
   resolveAdministrativeScope,
   assertCountryAccess,
@@ -234,6 +236,85 @@ function requireGlobalAdmin(req: AuthRequest, res: Response, next: NextFunction)
 
 // Todas as rotas administrativas exigem sessão autenticada e um perfil interno.
 adminRouter.use(requireAuth, requireInternalStaff);
+
+// GET /admin/products — FASE D16-G1.1 (Admin Global Catalog Isolation).
+// Visão administrativa do catálogo completo, para as roles que a regra de
+// negócio define como globais (ADMIN/GLOBAL_ADMIN) — NUNCA restrita por
+// destinationCountry/X-Country-Code/catalogOriginFilter comercial/país do
+// perfil do admin/publishingScope/targetCountriesJson. O catálogo do
+// COMPRADOR (GET /products, getProductsHandler) continua absolutamente
+// intocado — esta é uma rota nova e separada, nunca um bypass acionável
+// pelo cliente (nada de `?admin=true`/`skipEligibility`/`adminView` no
+// endpoint público). Autorização é feita 100% server-side a partir de
+// req.user.role (JWT verificado por requireAuth, já aplicado pelo router
+// acima) — o cliente não pode se autodeclarar admin.
+//
+// Reaproveita CatalogService.getProducts() tal como já existe: a condição
+// de elegibilidade de destino (catalogService.ts) só é aplicada quando
+// `filters.country` é passado e diferente de 'ALL' — omitir `country` por
+// completo (nunca aceito do client nesta rota) já produz exatamente "todos
+// os produtos, de qualquer origem/publishingScope/destino", sem duplicar
+// nenhuma lógica de elegibilidade. `originCountryFilter` é o MESMO filtro
+// de origem introduzido em D16-G1 para o catálogo público — já é, por
+// design, independente de destino — reaproveitado aqui como o filtro
+// administrativo opcional por país (Todos/GW/BR/PT/...) pedido na seção 4.
+//
+// Deliberadamente restrita a ADMIN/GLOBAL_ADMIN (não a
+// resolveAdministrativeScope().kind === 'GLOBAL', que também classificaria
+// FINANCE/SUPPORT/LOGISTICS* como "global" para fins territoriais — isso
+// ampliaria silenciosamente o acesso a uma capacidade nova que o ticket
+// nunca pediu para essas roles). COUNTRY_REPRESENTATIVE/REGIONAL_SUPERVISOR
+// recebem 403 nesta fase: não existe hoje nenhum precedente definindo se o
+// escopo de produtos para essas roles seria por origem ou por destino — não
+// decidido aqui (ver relatório da fase), nem ampliado nem restringido em
+// relação ao comportamento atual (nunca tiveram acesso a esta rota, que é
+// inteiramente nova).
+adminRouter.get('/products', (req: AuthRequest, res: Response, next: NextFunction) => {
+  if (!isGlobalCatalogAdmin(req.user)) {
+    return res.status(403).json({
+      success: false,
+      error: {
+        code: 'GLOBAL_ADMIN_REQUIRED',
+        message: 'Apenas Administrador Geral pode visualizar o catálogo completo da plataforma.',
+      },
+    });
+  }
+  return next();
+}, async (req: AuthRequest, res: Response) => {
+  try {
+    const { q, category, originCountryFilter, storeId, brand, minPrice, maxPrice, freeShipping, full, sort, page, limit } = req.query;
+
+    const result = await CatalogService.getProducts({
+      q: q as string,
+      category: category as string,
+      // Deliberadamente SEM `country` (nunca lido de req.query aqui) — visão
+      // administrativa nunca aplica elegibilidade de destino, ao contrário
+      // de getProductsHandler (catálogo público), que sempre resolve um
+      // destino via query/header X-Country-Code.
+      originCountryFilter: originCountryFilter as string,
+      storeId: storeId as string,
+      brand: brand as string,
+      minPrice: minPrice ? Number(minPrice) : undefined,
+      maxPrice: maxPrice ? Number(maxPrice) : undefined,
+      freeShipping: freeShipping === 'true',
+      full: full === 'true',
+      sort: sort as any,
+      page: page ? Number(page) : 1,
+      limit: limit ? Number(limit) : 24,
+    });
+
+    return res.json({
+      success: true,
+      data: result.products,
+      pagination: result.pagination,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'ADMIN_CATALOG_ERROR', message: err.message },
+    });
+  }
+});
 
 type CanonicalRole =
   | 'BUYER'

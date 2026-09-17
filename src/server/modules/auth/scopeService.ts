@@ -50,6 +50,26 @@ export function resolveAdministrativeScope(user: { role?: string; countryCode?: 
   return { kind: 'GLOBAL' };
 }
 
+// ---------------------------------------------------------------------------
+// FASE D16-G1.1 — Admin Global Catalog Isolation.
+//
+// Deliberadamente MAIS ESTREITO que "scope.kind === 'GLOBAL'":
+// resolveAdministrativeScope() classifica como GLOBAL toda role que não é
+// territorialmente restrita (inclui FINANCE/SUPPORT/LOGISTICS* — ver
+// comentário no topo deste arquivo), mas isso é sobre restrição
+// TERRITORIAL, não sobre quem pode enxergar o catálogo administrativo
+// completo. Uma nova capacidade (ver TODOS os produtos, de qualquer
+// origem/publishingScope, sem elegibilidade de destino) não deve ser
+// concedida silenciosamente a essas outras roles internas só porque elas
+// também não têm país atribuído — por isso este helper checa
+// EXPLICITAMENTE ADMIN/GLOBAL_ADMIN, o mesmo par já tratado como
+// equivalente em requireRole() (authMiddleware.ts), AuthContext.tsx,
+// sellerRoutes.ts, Header.tsx, VerifyEmailPage.tsx.
+export function isGlobalCatalogAdmin(user: { role?: string } | undefined): boolean {
+  const role = (user?.role || '').toUpperCase();
+  return role === 'ADMIN' || role === 'GLOBAL_ADMIN';
+}
+
 export class ScopeError extends Error {
   status: number;
   code: string;
