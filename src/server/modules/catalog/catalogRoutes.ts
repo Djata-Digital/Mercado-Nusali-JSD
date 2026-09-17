@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { CatalogService } from './catalogService.js';
-import { requireAuth, requireRole, AuthRequest } from '../auth/authMiddleware.js';
+import { requireAuth, requireRole, AuthRequest, getOptionalAuthUser } from '../auth/authMiddleware.js';
+import { isGlobalCatalogAdmin } from '../auth/scopeService.js';
 import { getDb } from '../../../db/index.js';
 import { products, categories, productVariants, productImages, categoryAttributes, productAttributes } from '../../../db/schema.js';
 import { eq, or, inArray, asc } from 'drizzle-orm';
@@ -57,10 +58,29 @@ export async function getProductsHandler(req: Request, res: Response) {
       limit,
     } = req.query;
 
+    // FASE D16-G1.6 — visão administrativa por origem para GLOBAL_ADMIN
+    // navegando pelo catálogo público (Home/Search/Category/Header/
+    // Favorites/AIAssistant/StorePublicView — todas passam por este mesmo
+    // handler). Identidade vem EXCLUSIVAMENTE do JWT verificado
+    // (getOptionalAuthUser nunca lê query/body/header customizado — só o
+    // Authorization Bearer padrão que o apiClient já envia quando o usuário
+    // está logado) — nunca de um parâmetro como ?adminMode=true. Buyer,
+    // seller e guest continuam exatamente com o comportamento anterior:
+    // isGlobalCatalogAdmin(undefined) e isGlobalCatalogAdmin({role:'BUYER'|
+    // 'SELLER'}) são sempre false. Quando true, a elegibilidade de destino é
+    // pulada por completo (mesma técnica já usada em GET /admin/products —
+    // CatalogService.getProducts trata `country` ausente como "sem filtro
+    // de destino"), e originCountryFilter passa a ser a ÚNICA restrição —
+    // exatamente a "visão administrativa por origem" pedida. Isto NUNCA
+    // altera elegibilidade de COMPRA: GET /products/:id e o checkout
+    // (F6.2/orderService) continuam calculando availableForCountry/
+    // elegibilidade real do jeito que sempre calcularam, intocados.
+    const isAdminCatalogView = isGlobalCatalogAdmin(getOptionalAuthUser(req));
+
     const result = await CatalogService.getProducts({
       q: q as string,
       category: category as string,
-      country: resolveDestinationCountryFromRequest(req, country as string),
+      country: isAdminCatalogView ? undefined : resolveDestinationCountryFromRequest(req, country as string),
       // FASE D16-G1 — filtro de origem é INDEPENDENTE do destino: nunca lido
       // do header X-Country-Code (que representa exclusivamente o destino do
       // comprador — ver resolveDestinationCountryFromRequest acima), sempre
