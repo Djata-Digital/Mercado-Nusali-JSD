@@ -43,6 +43,7 @@ import {
   reviewImages,
   shippingRegions,
   shippingSectors,
+  stores,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
@@ -961,6 +962,19 @@ export async function getFormattedUserCart(db: any, userId: string, destinationC
       varObj = varRows[0] || null;
     }
 
+    // FASE D16-G3.1 — nome REAL da loja para "Vendido por X" no carrinho.
+    // Autoridade: products.storeId (o mesmo vínculo direto produto->loja já
+    // usado por F4/F6.2 para fulfillment), NUNCA um lookup por sellerId (que
+    // poderia pegar a loja errada se o vendedor tiver mais de uma). Produto
+    // histórico sem storeId -> storeName null, tratado no frontend com o
+    // mesmo fallback genérico que já existia (normalizeProduct), nunca um
+    // crash.
+    let storeObj: { name: string } | null = null;
+    if (prod.storeId) {
+      const storeRows = await db.select({ name: stores.name }).from(stores).where(eq(stores.id, prod.storeId)).limit(1);
+      storeObj = storeRows[0] || null;
+    }
+
     const realUnitPrice = varObj?.price ? Number(varObj.price) : Number(prod.price);
     const qty = Number(ci.quantity) || 1;
     const itemSubtotal = realUnitPrice * qty;
@@ -1011,6 +1025,11 @@ export async function getFormattedUserCart(db: any, userId: string, destinationC
         // ProductDetail nunca teve esse problema porque usa GET /products/:id,
         // que já retorna shippingJson completo — este é o endpoint do carrinho.
         storeId: prod.storeId,
+        // FASE D16-G3.1 — nome real da loja (stores.name via products.storeId,
+        // ver storeObj acima). null quando o produto não tem storeId
+        // (histórico) — normalizeProduct/CartView já tratam null com o
+        // mesmo fallback genérico de sempre, nunca quebram.
+        storeName: storeObj?.name || null,
         shippingJson: prod.shippingJson,
         // Melhoria pré-piloto (elegibilidade por país): o checkout precisa
         // saber o escopo/destinos permitidos de cada item para travar (ou
