@@ -43,8 +43,6 @@ import {
   storeMembers,
   storeShippingPolicies,
   countries,
-  shippingRates,
-  shippingZones,
   payments,
   paymentAttempts,
   refunds,

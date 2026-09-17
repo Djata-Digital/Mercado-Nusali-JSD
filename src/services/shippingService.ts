@@ -45,9 +45,7 @@ export const ShippingService = {
 
   /**
    * FASE D16-G2 — preview de entrega READ-ONLY via F4/F3 (smart
-   * fulfillment) — NUNCA o motor legado (calculateFreight abaixo, mantido
-   * para CartView/CheckoutView, que ainda não migraram — D16-G0/D16-G2
-   * seção 10). Nunca reserva estoque.
+   * fulfillment). Nunca reserva estoque.
    */
   async getPreview(params: {
     productId: string;
@@ -80,10 +78,8 @@ export const ShippingService = {
 
   /**
    * FASE D16-G3 — preview AGREGADO de frete para CartView/CheckoutView,
-   * via F4/F3 (mesma arquitetura do getPreview acima). Substitui, para
-   * esses dois consumidores, o motor legado (calculateFreight abaixo via
-   * multiSellerFreight.ts) — que permanece intocado para não quebrar outros
-   * chamadores ainda não migrados. Nunca reserva estoque, nunca chama F5.
+   * via F4/F3 (mesma arquitetura do getPreview acima). Nunca reserva
+   * estoque, nunca chama F5.
    */
   async getCartPreview(payload: {
     destinationShippingSectorId?: string | null;
@@ -112,64 +108,8 @@ export const ShippingService = {
     }
   },
 
-  async calculateFreight(params: {
-    originCountry: string;
-    destinationCountry: string;
-    weightKg: number;
-    currency?: string;
-    storeId?: string;
-    sellerId?: string;
-    productSubtotal?: number;
-    originRegion?: string;
-    destinationRegion?: string;
-    destinationCity?: string;
-    dimensionsCm?: { length: number; width: number; height: number };
-  }): Promise<ApiResponse<{
-    shippingCost: number;
-    shippingChargedToBuyer: number;
-    shippingSellerSubsidy: number;
-    shippingMarketplaceSubsidy: number;
-    shippingPayer: string;
-    estimatedMinDays: number;
-    estimatedMaxDays: number;
-    rateSource: string;
-    currency: string;
-    available: boolean;
-  }>> {
-    try {
-      const res = await ShippingApi.create(params);
-      if (!res.success || !res.data) {
-        return {
-          success: false,
-          error: {
-            code: res.error?.code || 'SHIPPING_RATE_NOT_AVAILABLE',
-            message: res.error?.message || res.message || 'Frete indisponível para este endereço.',
-          },
-        };
-      }
-
-      if (res.data.available !== true) {
-        return {
-          success: false,
-          error: {
-            code: 'SHIPPING_RATE_NOT_AVAILABLE',
-            message: res.data.errorMessage || 'Frete indisponível para este endereço.',
-          },
-        };
-      }
-
-      return {
-        success: true,
-        data: res.data,
-      };
-    } catch (err: any) {
-      return {
-        success: false,
-        error: {
-          code: 'SHIPPING_CALCULATION_FAILED',
-          message: err?.response?.data?.error?.message || err?.message || 'Erro ao calcular frete via API.',
-        },
-      };
-    }
-  }
+  // FASE D16-I4 — calculateFreight() (motor legado) removido: zero
+  // consumidor runtime real (auditoria D16-I1) — só era chamado por
+  // src/utils/multiSellerFreight.ts, um módulo sem nenhum importador,
+  // removido junto nesta mesma fase.
 };

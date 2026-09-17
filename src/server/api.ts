@@ -21,7 +21,6 @@ import { searchProductsIntelligent } from '../utils/searchEngine.js';
 import { ProductCreationService } from './modules/catalog/productCreationService.js';
 import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
-import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
 import { resolveShippingPreview, resolveCartShippingPreview } from './modules/shipping/shippingPreviewService.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 import { internalJobsRouter } from './modules/jobs/internalJobsRoutes.js';
@@ -54,99 +53,22 @@ apiRouter.use('/countries', countriesPublicRouter);
 // Public read-only stores catalog (source of truth: `stores` table, real eligibility filter)
 apiRouter.use('/stores', storesPublicRouter);
 
-// Public Freight Calculation Route (Requirement 2)
-apiRouter.post('/shipping/calculate', async (req: Request, res: Response) => {
-  try {
-    const {
-      storeId,
-      sellerId,
-      originCountry,
-      destinationCountry,
-      originRegion,
-      destinationRegion,
-      destinationCity,
-      weightKg,
-      dimensionsCm,
-      currency,
-      productSubtotal,
-    } = req.body;
-
-    const parsedWeight = Number(weightKg);
-    if (isNaN(parsedWeight) || parsedWeight <= 0 || parsedWeight > 1000) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'PRODUCT_WEIGHT_REQUIRED', message: 'O peso deve ser um número válido maior que zero.' },
-      });
-    }
-
-    if (!originCountry || !String(originCountry).trim()) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'SHIPPING_ORIGIN_REQUIRED', message: 'País de origem é obrigatório.' },
-      });
-    }
-
-    if (!destinationCountry || !String(destinationCountry).trim()) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'SHIPPING_DESTINATION_REQUIRED', message: 'País de destino é obrigatório.' },
-      });
-    }
-
-    if (!currency || !String(currency).trim()) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'SHIPPING_CURRENCY_REQUIRED', message: 'Moeda é obrigatória.' },
-      });
-    }
-
-    const result = await ShippingCalculatorService.calculateFreight({
-      storeId,
-      sellerId,
-      originCountry,
-      destinationCountry,
-      originRegion,
-      destinationRegion,
-      destinationCity,
-      weightKg: parsedWeight,
-      dimensionsCm,
-      currency,
-      productSubtotal: Number(productSubtotal) || 0,
-    });
-
-    if (!result.available) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 'SHIPPING_RATE_NOT_AVAILABLE',
-          message: result.errorMessage || 'Frete indisponível para este endereço.',
-        },
-        data: result,
-      });
-    }
-
-    return res.json({
-      success: true,
-      data: result,
-    });
-  } catch (err: any) {
-    return res.status(500).json({
-      success: false,
-      error: {
-        code: 'SHIPPING_CALCULATION_FAILED',
-        message: err?.message || 'Erro ao calcular o frete.',
-      },
-    });
-  }
-});
+// FASE D16-I4 — POST /shipping/calculate (motor legado país/zona,
+// ShippingCalculatorService.calculateFreight) REMOVIDO daqui: auditoria
+// D16-I1 confirmou zero consumidor runtime real (ShippingApi.create() só
+// era chamado por ShippingService.calculateFreight(), que só era chamado
+// por src/utils/multiSellerFreight.ts — sem NENHUM importador em nenhum
+// componente; toda a cadeia foi removida junto, D16-I4). calculateFreight()
+// em si permanece intocada em shippingCalculatorService.ts — ainda usada
+// por POST /admin/shipping-rates/simulate (ferramenta de administração,
+// fora do escopo desta fase) e referenciada por tipos em orderService.ts
+// (branch legado, código morto desde D16-I2, remoção física fica para
+// D16-I5). Nenhum fluxo real de comprador dependia desta rota.
 
 // FASE D16-G2 — preview de entrega READ-ONLY via F4/F3 (smart fulfillment),
 // para a página de produto (e futuramente checkout). NUNCA chama F5 —
 // nenhuma reserva, nenhum efeito colateral. sellerId é SEMPRE resolvido do
 // produto no banco (resolveShippingPreview), nunca confiado ao frontend.
-// Distinto e paralelo a /shipping/calculate (motor legado, mantido intocado
-// para outros chamadores existentes — CartView/CheckoutView/
-// multiSellerFreight.ts).
 apiRouter.get('/shipping/preview', async (req: Request, res: Response) => {
   try {
     const { productId, variantId, quantity, destinationShippingSectorId } = req.query;
@@ -200,9 +122,8 @@ apiRouter.get('/shipping/preview', async (req: Request, res: Response) => {
 // variantId/quantity — seller/preço/peso/tarifa são SEMPRE resolvidos no
 // banco (resolveCartShippingPreview -> resolveShippingPreviewLine), nunca
 // confiados ao cliente. Substitui, para CartView/CheckoutView, o preview
-// legado (calculateMultiSellerFreight/POST /shipping/calculate) — que
-// permanece intocado para não quebrar nenhum outro chamador ainda não
-// migrado (D16-G1.2, fase de zero-consumer audit fica para depois).
+// legado (calculateMultiSellerFreight/POST /shipping/calculate) — ambos
+// removidos por zero-consumer audit (D16-I1/D16-I4).
 apiRouter.post('/shipping/preview-cart', async (req: Request, res: Response) => {
   try {
     const { destinationShippingSectorId, items } = req.body ?? {};
