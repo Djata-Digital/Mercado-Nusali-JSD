@@ -312,6 +312,125 @@ export const ProductDetailView: React.FC = () => {
     return specsMap;
   }, [product, selectedColor, selectedSize, activeVariant]);
 
+  // FASE D16-G2.0.1 — bugfix de crash: hooks NUNCA podem ficar depois de um
+  // early return condicionado por product/isLoading (violação das Regras
+  // dos Hooks — "Rendered more hooks than during the previous render",
+  // capturado pelo Error Boundary como "Algo deu errado ao carregar a
+  // página"). Todos os hooks abaixo (antes existentes após os early
+  // returns de isValidId/isLoading/product ausente) foram movidos para
+  // ANTES deles, com segurança null-safe interna (mesmo padrão já usado
+  // pelos hooks acima, ex.: `product?.variants`) em vez de depender da
+  // posição do código para nunca rodar com product ainda ausente.
+  const buyerPriceDisplay = useMemo(
+    () => computeBuyerPriceDisplay(product?.variants, activeVariant),
+    [product, activeVariant]
+  );
+
+  const [isAnsweringQuestion, setIsAnsweringQuestion] = useState(false);
+
+  // FASE D16-G2 — a condição real de entrega (frete) precisa aparecer ANTES
+  // de Comprar/Adicionar ao carrinho, não só depois de clicar em Comprar.
+  // Usa o MESMO motor de decisão logística real do checkout (F4/F3 — smart
+  // fulfillment, read-only, nunca reserva estoque) em vez do motor legado
+  // país/zona (achado D16-G0: staging tem tarifas reais só no modelo F3 por
+  // setor, então o motor legado sempre respondia SHIPPING_RATE_NOT_AVAILABLE
+  // mesmo com tarifa cadastrada). destinationCountry (selectedCountry, do
+  // PreferencesContext) continua sendo SOMENTE o destino real do comprador
+  // — D16-G1: catalogOriginFilter nunca entra aqui, nunca é confundido com
+  // destino de entrega.
+  const { data: operationalCountriesForDelivery } = useCountries();
+
+  // Setor de entrega: EXCLUSIVAMENTE do endereço padrão real do comprador
+  // autenticado (fonte já usada por CheckoutView.tsx) — nunca inferido por
+  // cidade/texto. Convidado (ou autenticado sem nenhum endereço com setor)
+  // nunca chama o preview — mostra o estado explícito DELIVERY_SECTOR_REQUIRED
+  // (seção 3 do enunciado), nunca SHIPPING_RATE_NOT_AVAILABLE.
+  const { data: buyerAddresses } = useQuery({
+    queryKey: ['buyer-addresses-for-shipping-preview'],
+    queryFn: async () => {
+      const res = await BuyerService.getAddresses();
+      return res.success && Array.isArray(res.data) ? res.data : [];
+    },
+    enabled: isAuthenticated,
+    staleTime: 1000 * 60,
+  });
+  const defaultDeliveryAddress = useMemo(() => {
+    if (!buyerAddresses || buyerAddresses.length === 0) return null;
+    return buyerAddresses.find((a: any) => a.isDefault) || buyerAddresses[0];
+  }, [buyerAddresses]);
+  const destinationShippingSectorId: string | null = defaultDeliveryAddress?.shippingSectorId || null;
+
+  const [deliveryPreview, setDeliveryPreview] = useState<{
+    loading: boolean;
+    available: boolean;
+    shippingAmount: number;
+    currency: string;
+    serviceCode?: string;
+    serviceName?: string;
+    code?: string;
+    message?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    // Produto ainda não carregado (ou não encontrado) — este hook roda em
+    // TODO render (regra dos hooks), mas a lógica de negócio só decide algo
+    // depois que o produto real estiver disponível.
+    if (!product) {
+      setDeliveryPreview(null);
+      return;
+    }
+
+    // Seção 4 — não calcula uma cotação definitiva enquanto o produto
+    // exigir variante e nenhuma válida estiver selecionada ainda.
+    if (needsVariantSelection || isUnavailableForDestination || product.availableForCountry === false) {
+      setDeliveryPreview(null);
+      return;
+    }
+
+    // Seção 3 — setor ausente é um estado PRÓPRIO, nunca "sem tarifa".
+    // Backend também valida isto de forma independente (defesa em
+    // profundidade) — aqui só evita uma requisição desnecessária.
+    if (!destinationShippingSectorId) {
+      setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: product.currency || 'XOF', code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
+      return;
+    }
+
+    setDeliveryPreview((prev) => ({ ...(prev || { loading: true, available: false, shippingAmount: 0, currency: product.currency || 'XOF' }), loading: true }));
+
+    ShippingService.getPreview({
+      productId: product.id,
+      variantId: activeVariant?.id || null,
+      quantity,
+      destinationShippingSectorId,
+    }).then((res) => {
+      if (!isMounted) return;
+      if (res.success && res.data) {
+        const data: ShippingPreviewData = res.data;
+        if (data.available === true) {
+          setDeliveryPreview({
+            loading: false,
+            available: true,
+            shippingAmount: data.shippingAmount,
+            currency: data.currency,
+            serviceCode: data.serviceCode,
+            serviceName: data.serviceName,
+          });
+        } else {
+          const unavailableCode: string = data.code;
+          const unavailableMessage: string = data.message;
+          setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: product.currency || 'XOF', code: unavailableCode, message: unavailableMessage });
+        }
+      } else {
+        setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: product.currency || 'XOF', code: res.error?.code, message: res.error?.message || 'Frete indisponível para este destino no momento.' });
+      }
+    });
+
+    return () => { isMounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product?.id, activeVariant?.id, quantity, destinationShippingSectorId, needsVariantSelection, isUnavailableForDestination]);
+
   if (!isValidId) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-16 text-center space-y-4">
@@ -373,10 +492,8 @@ export const ProductDetailView: React.FC = () => {
   // Sem seleção -> "a partir de" (menor preço ativo). Com seleção -> preço
   // e riscado exclusivos da variante escolhida (riscado só se > preço dela
   // mesma). Produto simples: comportamento de sempre, intocado.
-  const buyerPriceDisplay = useMemo(
-    () => computeBuyerPriceDisplay(product.variants, activeVariant),
-    [product, activeVariant]
-  );
+  // (buyerPriceDisplay agora é calculado mais acima, junto com os demais
+  // hooks — D16-G2.0.1 — mas a lógica em si é idêntica.)
   const isPriceFromRange = hasRealVariants && buyerPriceDisplay.mode === 'from';
   const activeVariantPrice = hasRealVariants ? (buyerPriceDisplay.price ?? baseProductPrice) : baseProductPrice;
   const activeVariantOriginalPrice = hasRealVariants
@@ -409,103 +526,10 @@ export const ProductDetailView: React.FC = () => {
   const isInternational = !!(product.shipping?.isInternational || product.publishingScope === 'international');
   const originCountry = product.originCountry || product.shipping?.originCountry || product.seller?.country || '';
 
-  const [isAnsweringQuestion, setIsAnsweringQuestion] = useState(false);
-
-  // FASE D16-G2 — a condição real de entrega (frete) precisa aparecer ANTES
-  // de Comprar/Adicionar ao carrinho, não só depois de clicar em Comprar.
-  // Usa o MESMO motor de decisão logística real do checkout (F4/F3 — smart
-  // fulfillment, read-only, nunca reserva estoque) em vez do motor legado
-  // país/zona (achado D16-G0: staging tem tarifas reais só no modelo F3 por
-  // setor, então o motor legado sempre respondia SHIPPING_RATE_NOT_AVAILABLE
-  // mesmo com tarifa cadastrada). destinationCountry (selectedCountry, do
-  // PreferencesContext) continua sendo SOMENTE o destino real do comprador
-  // — D16-G1: catalogOriginFilter nunca entra aqui, nunca é confundido com
-  // destino de entrega.
-  const { data: operationalCountriesForDelivery } = useCountries();
-
-  // Setor de entrega: EXCLUSIVAMENTE do endereço padrão real do comprador
-  // autenticado (fonte já usada por CheckoutView.tsx) — nunca inferido por
-  // cidade/texto. Convidado (ou autenticado sem nenhum endereço com setor)
-  // nunca chama o preview — mostra o estado explícito DELIVERY_SECTOR_REQUIRED
-  // (seção 3 do enunciado), nunca SHIPPING_RATE_NOT_AVAILABLE.
-  const { data: buyerAddresses } = useQuery({
-    queryKey: ['buyer-addresses-for-shipping-preview'],
-    queryFn: async () => {
-      const res = await BuyerService.getAddresses();
-      return res.success && Array.isArray(res.data) ? res.data : [];
-    },
-    enabled: isAuthenticated,
-    staleTime: 1000 * 60,
-  });
-  const defaultDeliveryAddress = useMemo(() => {
-    if (!buyerAddresses || buyerAddresses.length === 0) return null;
-    return buyerAddresses.find((a: any) => a.isDefault) || buyerAddresses[0];
-  }, [buyerAddresses]);
-  const destinationShippingSectorId: string | null = defaultDeliveryAddress?.shippingSectorId || null;
-
-  const [deliveryPreview, setDeliveryPreview] = useState<{
-    loading: boolean;
-    available: boolean;
-    shippingAmount: number;
-    currency: string;
-    serviceCode?: string;
-    serviceName?: string;
-    code?: string;
-    message?: string;
-  } | null>(null);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    // Seção 4 — não calcula uma cotação definitiva enquanto o produto
-    // exigir variante e nenhuma válida estiver selecionada ainda.
-    if (needsVariantSelection || isUnavailableForDestination || product?.availableForCountry === false) {
-      setDeliveryPreview(null);
-      return;
-    }
-
-    // Seção 3 — setor ausente é um estado PRÓPRIO, nunca "sem tarifa".
-    // Backend também valida isto de forma independente (defesa em
-    // profundidade) — aqui só evita uma requisição desnecessária.
-    if (!destinationShippingSectorId) {
-      setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: productCurrency, code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
-      return;
-    }
-
-    setDeliveryPreview((prev) => ({ ...(prev || { loading: true, available: false, shippingAmount: 0, currency: productCurrency }), loading: true }));
-
-    ShippingService.getPreview({
-      productId: product!.id,
-      variantId: activeVariant?.id || null,
-      quantity,
-      destinationShippingSectorId,
-    }).then((res) => {
-      if (!isMounted) return;
-      if (res.success && res.data) {
-        const data: ShippingPreviewData = res.data;
-        if (data.available === true) {
-          setDeliveryPreview({
-            loading: false,
-            available: true,
-            shippingAmount: data.shippingAmount,
-            currency: data.currency,
-            serviceCode: data.serviceCode,
-            serviceName: data.serviceName,
-          });
-        } else {
-          const unavailableCode: string = data.code;
-          const unavailableMessage: string = data.message;
-          setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: productCurrency, code: unavailableCode, message: unavailableMessage });
-        }
-      } else {
-        setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: productCurrency, code: res.error?.code, message: res.error?.message || 'Frete indisponível para este destino no momento.' });
-      }
-    });
-
-    return () => { isMounted = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [product?.id, activeVariant?.id, quantity, destinationShippingSectorId, needsVariantSelection, isUnavailableForDestination]);
-
+  // (isAnsweringQuestion, operationalCountriesForDelivery, buyerAddresses,
+  // defaultDeliveryAddress, destinationShippingSectorId, deliveryPreview e o
+  // useEffect do preview de frete agora são calculados mais acima, junto
+  // com os demais hooks — D16-G2.0.1 — mas a lógica em si é idêntica.)
   const deliveryDestinationCountry = operationalCountriesForDelivery?.find((c) => c.code === selectedCountry);
 
   const handleAskQuestion = async (e: React.FormEvent) => {
