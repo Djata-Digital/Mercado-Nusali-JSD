@@ -70,6 +70,27 @@ export function isGlobalCatalogAdmin(user: { role?: string } | undefined): boole
   return role === 'ADMIN' || role === 'GLOBAL_ADMIN';
 }
 
+// ---------------------------------------------------------------------------
+// FASE D16-G1.3 — Global Admin Hierarchy.
+//
+// Auditoria D16-G1.2 (Problema 2) encontrou um bloqueio INCONDICIONAL em
+// POST /admin/users: nem o próprio GLOBAL_ADMIN conseguia criar outro.
+// Extraída como função pura (mesmo padrão de isGlobalCatalogAdmin acima)
+// para que o handler real (adminRoutes.ts) e os testes chamem exatamente a
+// mesma lógica — nunca uma cópia reimplementada em cada lugar.
+//
+// Regra: criar um usuário com role=GLOBAL_ADMIN só é permitido quando quem
+// está chamando já é GLOBAL_ADMIN. Qualquer outra role solicitada (ADMIN,
+// SELLER, BUYER, COUNTRY_REPRESENTATIVE, REGIONAL_SUPERVISOR, ...) segue as
+// regras já existentes e inalteradas (o próprio router já exige
+// requireGlobalAdmin para esta rota inteira) — esta função só decide sobre
+// o caso específico de auto-replicação do papel mais privilegiado.
+export function canCreateRole(callerRole: string | undefined, requestedRole: string | undefined): boolean {
+  const requested = (requestedRole || '').toUpperCase();
+  if (requested !== 'GLOBAL_ADMIN') return true;
+  return (callerRole || '').toUpperCase() === 'GLOBAL_ADMIN';
+}
+
 export class ScopeError extends Error {
   status: number;
   code: string;

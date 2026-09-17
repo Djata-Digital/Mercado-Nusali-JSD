@@ -57,7 +57,7 @@ import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, isNull, or, gte, lte, ne, inArray } from 'drizzle-orm';
 import { AuthRequest, requireAuth } from './modules/auth/authMiddleware.js';
 import { CatalogService } from './modules/catalog/catalogService.js';
-import { isGlobalCatalogAdmin } from './modules/auth/scopeService.js';
+import { isGlobalCatalogAdmin, canCreateRole } from './modules/auth/scopeService.js';
 import {
   resolveAdministrativeScope,
   assertCountryAccess,
@@ -221,7 +221,10 @@ function requireAdminDevSimulator(req: AuthRequest, res: Response, next: NextFun
   return next();
 }
 
-function requireGlobalAdmin(req: AuthRequest, res: Response, next: NextFunction) {
+// Exportada para testes (mesmo padrão de validateShippingRateInput/
+// findOverlappingShippingRate) — o teste chama exatamente este middleware
+// real, nunca uma reimplementação.
+export function requireGlobalAdmin(req: AuthRequest, res: Response, next: NextFunction) {
   if ((req.user?.role || '').toUpperCase() !== 'GLOBAL_ADMIN') {
     return res.status(403).json({
       success: false,
@@ -320,6 +323,7 @@ type CanonicalRole =
   | 'BUYER'
   | 'SELLER'
   | 'ADMIN'
+  | 'GLOBAL_ADMIN'
   | 'COUNTRY_REPRESENTATIVE'
   | 'REGIONAL_SUPERVISOR';
 
@@ -327,11 +331,17 @@ const UI_ROLE_TO_DB: Record<string, CanonicalRole> = {
   buyer: 'BUYER',
   seller: 'SELLER',
   admin: 'ADMIN',
+  // FASE D16-G1.3 — 'global_admin' só é aceito de fato pelo handler de
+  // criação (POST /admin/users) quando quem chama já é GLOBAL_ADMIN (ver
+  // checagem logo abaixo da rota); mapear aqui é só a tradução UI->DB, não
+  // uma autorização.
+  global_admin: 'GLOBAL_ADMIN',
   country_rep: 'COUNTRY_REPRESENTATIVE',
   supervisor: 'REGIONAL_SUPERVISOR',
   BUYER: 'BUYER',
   SELLER: 'SELLER',
   ADMIN: 'ADMIN',
+  GLOBAL_ADMIN: 'GLOBAL_ADMIN',
   COUNTRY_REPRESENTATIVE: 'COUNTRY_REPRESENTATIVE',
   REGIONAL_SUPERVISOR: 'REGIONAL_SUPERVISOR',
 };
@@ -376,6 +386,21 @@ const ROLE_PERMISSION_CODES: Record<CanonicalRole, Array<keyof typeof PERMISSION
     'manage_kyc',
     'manage_disputes',
   ],
+  // FASE D16-G1.3 — mesmo conjunto completo de permissões do ADMIN (que já
+  // é o superconjunto de tudo que PERMISSION_DEFINITIONS define hoje).
+  // GLOBAL_ADMIN nunca teve MENOS acesso que ADMIN; isto só passa a existir
+  // como registro real de roles/permissions quando alguém de fato cria um
+  // segundo GLOBAL_ADMIN por esta rota (o primeiro foi criado pelo script
+  // seguro, fora deste fluxo).
+  GLOBAL_ADMIN: [
+    'manage_products',
+    'manage_orders',
+    'manage_users',
+    'manage_sellers',
+    'view_financials',
+    'manage_kyc',
+    'manage_disputes',
+  ],
   COUNTRY_REPRESENTATIVE: [
     'manage_orders',
     'manage_sellers',
@@ -390,6 +415,7 @@ const ROLE_DESCRIPTIONS: Record<CanonicalRole, string> = {
   BUYER: 'Comprador da plataforma',
   SELLER: 'Vendedor da plataforma',
   ADMIN: 'Administrador operacional da plataforma',
+  GLOBAL_ADMIN: 'Administrador Geral da plataforma',
   COUNTRY_REPRESENTATIVE: 'Representante nacional do Mercado Nusali',
   REGIONAL_SUPERVISOR: 'Supervisor regional de operações',
 };
@@ -1450,10 +1476,20 @@ adminRouter.post('/users', requireGlobalAdmin, async (req: AuthRequest, res: Res
     const { name, email, phone, country = 'GW', role = 'buyer', password } = req.body ?? {};
     const requestedRole = String(role || '').trim();
 
-    // GLOBAL_ADMIN é deliberadamente excluído: o primeiro Administrador Geral
-    // já foi criado pelo script seguro e não pode ser replicado por esta tela.
-    if (requestedRole.toUpperCase() === 'GLOBAL_ADMIN' || requestedRole.toLowerCase() === 'global_admin') {
-      throw new AdminRequestError(403, 'Não é permitido criar outro Administrador Geral por esta rota.');
+    // FASE D16-G1.3 — auditoria D16-G1.2 (Problema 2) confirmou que este
+    // bloqueio era INCONDICIONAL: nem o próprio GLOBAL_ADMIN conseguia criar
+    // outro. Corrigido via canCreateRole (scopeService.ts) — depende
+    // exclusivamente de quem está autenticado (req.user, já verificado pelo
+    // JWT via requireAuth/requireGlobalAdmin acima), NUNCA de um parâmetro
+    // do cliente. Como esta rota inteira já exige requireGlobalAdmin (role
+    // EXATAMENTE GLOBAL_ADMIN, nunca ADMIN comum), req.user.role aqui já é
+    // garantidamente 'GLOBAL_ADMIN' — esta checagem fica como defesa em
+    // profundidade explícita (nunca confia apenas na composição de
+    // middlewares de hoje) e documenta a regra: somente GLOBAL_ADMIN pode
+    // criar outro GLOBAL_ADMIN; qualquer outro chamador tentando enviar
+    // role=GLOBAL_ADMIN é bloqueado aqui também.
+    if (!canCreateRole(req.user?.role, requestedRole)) {
+      throw new AdminRequestError(403, 'Somente o Administrador Geral pode criar outro Administrador Geral.');
     }
 
     const canonicalRole = UI_ROLE_TO_DB[requestedRole] || UI_ROLE_TO_DB[requestedRole.toLowerCase()];
