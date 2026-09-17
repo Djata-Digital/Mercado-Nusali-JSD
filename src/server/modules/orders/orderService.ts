@@ -37,10 +37,14 @@ import { resolveCarrierNames, pickCarrierName } from '../logistics/carrierResolv
 // (D15-C2/D16-E3/E4) — nunca uma segunda regra de setor/região divergente.
 import { validateAddressSectorAssignment, countryHasActiveShippingSectors } from '../shipping/shippingGeographyService.js';
 // FASE D16-F6.2 — smart fulfillment (F4 planeja a melhor origem por custo
-// real de frete, F5 reserva com lock+revalidação sob a MESMA transação) —
-// usados SOMENTE quando multiSellerCheckoutEnabled=true; o caminho legado
-// (split cego + frete país/zona) permanece 100% intocado quando a flag
-// estiver desligada.
+// real de frete, F5 reserva com lock+revalidação sob a MESMA transação).
+// FASE D16-I2 — usados SEMPRE agora, para TODO checkout (inclusive
+// single-seller), independente de multiSellerCheckoutEnabled — a flag
+// passou a controlar SOMENTE se um carrinho com MAIS DE 1 vendedor
+// distinto é permitido (ver MULTI_SELLER_CHECKOUT_DISABLED, mais abaixo).
+// O caminho legado (split cego + frete país/zona) permanece definido no
+// arquivo como código morto — nunca mais alcançado — removido fisicamente
+// só em D16-I5 (ver auditoria D16-I1).
 import { resolveFulfillmentCandidates } from '../shipping/fulfillmentCandidateResolverService.js';
 import { reserveFulfillmentInventory } from '../inventory/fulfillmentReservationService.js';
 
@@ -407,17 +411,24 @@ export class OrderService {
       // selecionado — targetAddress já É o endereço final escolhido).
       // Fail-closed: sem setor, o fluxo novo não pode chamar F4 (que exige
       // destinationShippingSectorId) — nunca inventa fallback geográfico.
-      let destinationShippingSectorId: string | null = null;
-      if (multiSellerCheckoutEnabled) {
-        destinationShippingSectorId = targetAddress?.shippingSectorId || null;
-        if (!destinationShippingSectorId) {
-          const countryRequiresGeography = await countryHasActiveShippingSectors(tx, destinationCountry);
-          throw new Error(
-            countryRequiresGeography
-              ? `DESTINATION_SHIPPING_SECTOR_REQUIRED: O endereço de entrega selecionado não tem um setor de frete definido, e "${destinationCountry}" exige geografia por setor para o checkout inteligente. Selecione/edite o endereço com um setor válido.`
-              : `DESTINATION_SHIPPING_SECTOR_REQUIRED: Não há geografia de frete por setor configurada para "${destinationCountry}" ainda — o checkout inteligente (F4/F5) não pode operar nesta região.`
-          );
-        }
+      //
+      // FASE D16-I2 — auditoria D16-I1 confirmou que multiSellerCheckoutEnabled
+      // controlava simultaneamente 4 coisas (motor de frete, resolução de
+      // estoque, mecanismo de reserva, estrutura order/purchase_group), não
+      // só a permissão de múltiplos vendedores. A partir desta fase, a
+      // resolução/validação do destino é SEMPRE feita aqui — para TODO
+      // checkout, inclusive single-seller com a flag desligada — nunca mais
+      // condicionada a multiSellerCheckoutEnabled. O fail-closed (erro
+      // explícito, nunca fallback para shipping_rates/shipping_zones) é
+      // preservado exatamente como estava.
+      let destinationShippingSectorId: string | null = targetAddress?.shippingSectorId || null;
+      if (!destinationShippingSectorId) {
+        const countryRequiresGeography = await countryHasActiveShippingSectors(tx, destinationCountry);
+        throw new Error(
+          countryRequiresGeography
+            ? `DESTINATION_SHIPPING_SECTOR_REQUIRED: O endereço de entrega selecionado não tem um setor de frete definido, e "${destinationCountry}" exige geografia por setor para o checkout inteligente. Selecione/edite o endereço com um setor válido.`
+            : `DESTINATION_SHIPPING_SECTOR_REQUIRED: Não há geografia de frete por setor configurada para "${destinationCountry}" ainda — o checkout inteligente (F4/F5) não pode operar nesta região.`
+        );
       }
 
       let realSubtotal = 0;
@@ -526,16 +537,24 @@ export class OrderService {
 
         const reqQty = Number(ci.quantity) || 1;
 
-        if (multiSellerCheckoutEnabled) {
+        {
           // ==========================================================
-          // FASE D16-F6.2 — CAMINHO NOVO: F4 escolhe UMA ÚNICA origem
-          // capaz de atender a quantidade INTEIRA da linha do carrinho
-          // (nunca split) por CUSTO REAL de frete (F3), nunca por
-          // preferência HUB/STORE. Nenhuma reserva acontece aqui — F4 é
-          // só planejamento; a reserva real (F5) só ocorre depois que
-          // TODAS as linhas do carrinho já tiverem um plano, em ordem
-          // global de lock (seção 5 do enunciado, mais abaixo).
-          // ==========================================================
+          // FASE D16-F6.2 — F4 escolhe UMA ÚNICA origem capaz de atender a
+          // quantidade INTEIRA da linha do carrinho (nunca split) por CUSTO
+          // REAL de frete (F3), nunca por preferência HUB/STORE. Nenhuma
+          // reserva acontece aqui — F4 é só planejamento; a reserva real
+          // (F5) só ocorre depois que TODAS as linhas do carrinho já
+          // tiverem um plano, em ordem global de lock (seção 5, mais
+          // abaixo).
+          //
+          // FASE D16-I2 — este branch (F4) agora é SEMPRE usado, para TODO
+          // checkout, inclusive single-seller com multiSellerCheckoutEnabled
+          // desligada (antes só rodava com a flag ligada). O "CAMINHO
+          // LEGADO" logo abaixo (split cego HUB>STORE) nunca mais é
+          // alcançado a partir daqui — fica como código morto nesta fase,
+          // preservado de propósito (D16-I1: remoção física fica para
+          // D16-I5, junto dos outros consumidores de shipping_rates/
+          // shipping_zones ainda existentes fora de orderService.ts).
           if (!prod.sellerId) {
             throw new Error(`ORDER_ITEM_SELLER_REQUIRED: O produto "${prod.title}" não possui vendedor associado — o checkout inteligente exige que todo item tenha um vendedor real.`);
           }
@@ -599,8 +618,14 @@ export class OrderService {
         }
 
         // ==========================================================
-        // CAMINHO LEGADO — intocado (split cego HUB>STORE por linha de
-        // carrinho, ativo somente quando multiSellerCheckoutEnabled=false).
+        // CAMINHO LEGADO — CÓDIGO MORTO a partir de D16-I2 (split cego
+        // HUB>STORE por linha de carrinho). O `continue;` acima garante que
+        // este trecho nunca mais executa (o branch F4 sempre roda e sempre
+        // termina o loop antes de chegar aqui). Mantido intocado/intacto de
+        // propósito — D16-I1 mapeou outros consumidores de
+        // ShippingCalculatorService/shipping_rates/shipping_zones que ainda
+        // existem fora de orderService.ts (admin, /shipping/calculate);
+        // remoção física deste bloco fica para D16-I5.
         // ==========================================================
         // Query real inventory table for this productId + strict variantId (No cross-variant fallback)
         let inventoryRows: any[];
@@ -1041,9 +1066,9 @@ export class OrderService {
       }
 
       /**
-       * Reserva de estoque LEGADA (caminho antigo, `multiSellerCheckoutEnabled=
-       * false` — nunca usada pelo caminho novo, que reserva via F5 em ordem
-       * global ANTES de order_items existir — ver orquestração mais abaixo).
+       * Reserva de estoque LEGADA — FASE D16-I2: CÓDIGO MORTO (nada mais
+       * chama esta função; o caminho novo reserva via F5 em ordem global
+       * ANTES de order_items existir — ver orquestração mais abaixo).
        * Comportamento idêntico ao que já existia: sem `.for('update')`
        * (achado pré-existente de D16-F1, fora de escopo desta fase para o
        * caminho legado).
@@ -1135,10 +1160,13 @@ export class OrderService {
        * Grava UM order filho completo (orders + order_items + orderStatusHistory
        * + reserva LEGADA) a partir de um grupo já calculado por
        * computeGroupFinancials — orquestra as 4 fases acima na MESMA ordem de
-       * sempre. Usada SOMENTE pelo caminho legado (multiSellerCheckoutEnabled=
-       * false) — o caminho novo (F6.2) orquestra as fases na ordem exigida
-       * pela seção 8 do enunciado (orders de TODOS os grupos primeiro, F5 em
-       * ordem global depois, order_items só após toda reserva confirmada).
+       * sempre. FASE D16-I2 — CÓDIGO MORTO a partir desta fase: nada mais
+       * chama esta função (o branch que a chamava foi removido da decisão
+       * abaixo). Mantida intacta de propósito — remoção física fica para
+       * D16-I5, junto do restante do caminho legado. O caminho novo (F6.2)
+       * orquestra as fases na ordem exigida pela seção 8 do enunciado
+       * (orders de TODOS os grupos primeiro, F5 em ordem global depois,
+       * order_items só após toda reserva confirmada).
        */
       async function insertOrderForGroup(
         items: typeof verifiedItems,
@@ -1158,17 +1186,18 @@ export class OrderService {
       let createdOrders: any[];
       let purchaseGroupResult: { id: string; buyerId: string; currency: string; totalAmount: number; status: string } | null = null;
 
-      if (!multiSellerCheckoutEnabled) {
-        // ===== CAMINHO LEGADO — comportamento inalterado: 1 grupo = o
-        // carrinho inteiro, sellerId = primarySellerId (mesma variável já
-        // rastreada durante a verificação de itens acima, nunca
-        // recomputada) — nenhum purchase_group é criado. =====
-        const { financials, freightRes, storeId } = await computeGroupFinancials(verifiedItems, primarySellerId);
-        const order = await insertOrderForGroup(verifiedItems, primarySellerId, storeId, financials, freightRes, null);
-        createdOrders = [order];
-      } else {
-        // ===== CAMINHO NOVO (Fase B) — 1 purchase_group + exatamente 1
-        // order por vendedor distinto, mesmo quando há só 1 vendedor. =====
+      // FASE D16-I2 — o pipeline smart (F4/F5 + purchase_group) agora é
+      // usado para TODO checkout, inclusive single-seller com
+      // multiSellerCheckoutEnabled desligada (auditoria D16-I1 confirmou
+      // que isso já era a arquitetura oficial e testada — "1 purchase_group
+      // + exatamente 1 order por vendedor distinto, mesmo quando há só 1
+      // vendedor" — nunca uma terceira estrutura nova). O único papel
+      // restante da flag é a checagem MULTI_SELLER_CHECKOUT_DISABLED já
+      // feita mais acima (linha ~830), antes de qualquer escrita — o branch
+      // legado (single order, sem purchase_group) nunca mais é alcançado
+      // daqui; permanece definido acima (insertOrderForGroup) como código
+      // morto, removido fisicamente só em D16-I5.
+      {
         const missingSeller = verifiedItems.find((i) => !i.sellerId);
         if (missingSeller) {
           throw new Error(`ORDER_ITEM_SELLER_REQUIRED: O produto "${missingSeller.productTitle}" não possui vendedor associado — checkout multi-vendedor exige que todo item tenha um vendedor real.`);
