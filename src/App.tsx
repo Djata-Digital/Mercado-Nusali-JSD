@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { PreferencesProvider } from './context/PreferencesContext';
 import { AuthProvider } from './context/AuthContext';
 import { MarketplaceProvider } from './context/MarketplaceContext';
+import { DeliveryDestinationProvider } from './context/DeliveryDestinationContext';
 
 // Layouts
 import { PublicLayout } from './layouts/PublicLayout';
@@ -64,6 +65,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <PreferencesProvider>
+          <DeliveryDestinationProvider>
           <MarketplaceProvider>
             <BrowserRouter>
               <Routes>
@@ -171,6 +173,7 @@ export default function App() {
               </Routes>
             </BrowserRouter>
           </MarketplaceProvider>
+          </DeliveryDestinationProvider>
         </PreferencesProvider>
       </AuthProvider>
     </QueryClientProvider>

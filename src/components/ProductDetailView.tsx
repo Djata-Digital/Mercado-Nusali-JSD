@@ -49,6 +49,8 @@ import { useCountries } from '../hooks/useCountries';
 import { ShippingService, ShippingPreviewData } from '../services/shippingService';
 import { useAuth } from '../context/AuthContext';
 import { BuyerService } from '../services/buyerService';
+import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
+import { DeliveryDestinationModal } from './DeliveryDestinationModal';
 import { ProductMediaViewerModal, MediaItem } from './ProductMediaViewerModal';
 import { ProductShareModal } from './ProductShareModal';
 import { ProductKit, ProductColor, ProductVariant } from '../types';
@@ -368,7 +370,23 @@ export const ProductDetailView: React.FC = () => {
     if (!buyerAddresses || buyerAddresses.length === 0) return null;
     return buyerAddresses.find((a: any) => a.isDefault) || buyerAddresses[0];
   }, [buyerAddresses]);
-  const destinationShippingSectorId: string | null = defaultDeliveryAddress?.shippingSectorId || null;
+
+  // FASE D16-H3 — destino de entrega ANTECIPADO: a intenção temporária da
+  // jornada de compra atual (DeliveryDestinationContext, compartilhada com
+  // Cart/Checkout) tem prioridade sobre o endereço padrão do comprador.
+  // Sem intenção nenhuma (caso comum, e sempre o caso para convidado que
+  // nunca abriu o modal), cai 100% no comportamento anterior (D16-G2) —
+  // nunca quebra guest/público. O context já se auto-invalida se o país
+  // mudar no Header (ver DeliveryDestinationContext.tsx), então nunca
+  // precisa ser revalidado aqui.
+  const { destination: deliveryDestinationIntent } = useDeliveryDestination();
+  const [isDestinationModalOpen, setIsDestinationModalOpen] = useState(false);
+  const destinationShippingSectorId: string | null =
+    deliveryDestinationIntent?.shippingSectorId || defaultDeliveryAddress?.shippingSectorId || null;
+  const destinationSectorDisplayName: string | null =
+    deliveryDestinationIntent?.shippingSectorName || defaultDeliveryAddress?.shippingSectorName || null;
+  const destinationRegionDisplayName: string | null =
+    deliveryDestinationIntent?.shippingRegionName || defaultDeliveryAddress?.shippingRegionName || null;
 
   const [deliveryPreview, setDeliveryPreview] = useState<{
     loading: boolean;
@@ -1332,6 +1350,32 @@ export const ProductDetailView: React.FC = () => {
                 </span>
               </div>
 
+              {/* FASE D16-H3 — "Entregar em" mostra o SETOR real (nome de
+                  exibição), permitindo ao comprador saber cedo o frete para
+                  onde realmente pretende receber, sem preencher o checkout
+                  inteiro. Só aparece quando há um setor resolvido (intenção
+                  temporária OU endereço padrão) — sem isso, o estado
+                  DELIVERY_SECTOR_REQUIRED abaixo já cobre a mensagem. */}
+              {!isUnavailableForDestination && (
+                <div className="text-xs text-gray-700 flex items-center justify-between gap-2">
+                  <span className="min-w-0">
+                    <span className="text-gray-500">Entregar em: </span>
+                    <span className="font-bold text-gray-900">
+                      {destinationSectorDisplayName
+                        ? `${destinationSectorDisplayName}${destinationRegionDisplayName ? ` · ${destinationRegionDisplayName}` : ''}`
+                        : 'Selecione um endereço'}
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsDestinationModalOpen(true)}
+                    className="shrink-0 text-emerald-700 font-bold underline decoration-dotted hover:text-emerald-900"
+                  >
+                    Alterar endereço
+                  </button>
+                </div>
+              )}
+
               {isUnavailableForDestination && (
                 <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold">
                   {product.unavailabilityReason || 'Este produto não está disponível para entrega no seu país.'}
@@ -1807,6 +1851,12 @@ export const ProductDetailView: React.FC = () => {
         isOpen={isShareModalOpen}
         onClose={() => setIsShareModalOpen(false)}
         product={product}
+      />
+
+      {/* FASE D16-H3 — "Alterar endereço" (intenção temporária de destino, compartilhada com Cart/Checkout) */}
+      <DeliveryDestinationModal
+        isOpen={isDestinationModalOpen}
+        onClose={() => setIsDestinationModalOpen(false)}
       />
     </div>
   );

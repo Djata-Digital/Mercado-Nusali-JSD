@@ -39,6 +39,7 @@ import { OrdersApi } from '../api/clients/OrdersApi';
 import { BuyerService } from '../services/buyerService';
 import { CreateOrderFromCartResult } from '../api/types';
 import { resolveCheckoutPaymentTarget, resolveCheckoutConfirmationUrl, initiateCheckoutPixPayment } from '../services/checkoutPaymentRouting';
+import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
 
 export const CheckoutView: React.FC = () => {
   const navigate = useNavigate();
@@ -108,6 +109,13 @@ export const CheckoutView: React.FC = () => {
   const [recipientPhone, setRecipientPhone] = useState('');
   const [documentValue, setDocumentValue] = useState('');
 
+  // FASE D16-H3 — intenção temporária de destino compartilhada com
+  // ProductDetail/Cart. Só usada para PRÉ-SELECIONAR o modo/endereço na
+  // primeira carga (nunca substitui a validação real: addressId é
+  // revalidado contra a lista de endereços DO PRÓPRIO comprador antes de
+  // ser aceito, e o backend/F6.2 continuam a autoridade final).
+  const { destination: deliveryDestinationIntent, setSavedAddressIntent, setSectorIntent } = useDeliveryDestination();
+
   // Carrega os endereços reais do comprador (lista completa, não só o
   // padrão) — mesma fonte já usada por CartView/ProductDetailView.
   React.useEffect(() => {
@@ -115,11 +123,73 @@ export const CheckoutView: React.FC = () => {
     BuyerService.getAddresses().then((res) => {
       if (res.success && Array.isArray(res.data)) {
         setBuyerAddresses(res.data);
+
+        // FASE D16-H3 — a intenção de destino (se existir e ainda for
+        // válida) tem prioridade sobre o endereço padrão nesta PRIMEIRA
+        // seleção — nunca sobrescreve uma escolha que o comprador já tenha
+        // feito manualmente aqui (este efeito só roda uma vez, no mount).
+        if (deliveryDestinationIntent?.mode === 'saved') {
+          const stillOwnedAndUsable = res.data.find(
+            (a: any) => a.id === deliveryDestinationIntent.addressId && !!a.shippingSectorId
+          );
+          if (stillOwnedAndUsable) {
+            setAddressMode('saved');
+            setSelectedSavedAddressId(stillOwnedAndUsable.id);
+            return;
+          }
+          // Endereço não existe mais/não pertence ao comprador/perdeu o
+          // setor — cai no fallback do endereço padrão, abaixo.
+        } else if (deliveryDestinationIntent?.mode === 'sector') {
+          setAddressMode('new');
+          setNewAddress((prev) => ({
+            ...prev,
+            regionId: deliveryDestinationIntent.shippingRegionId,
+            sectorId: deliveryDestinationIntent.shippingSectorId,
+          }));
+          return;
+        }
+
         const defaultAddr = res.data.find((a: any) => a.isDefault) || res.data[0];
         if (defaultAddr) setSelectedSavedAddressId(defaultAddr.id);
       }
     }).catch(() => {}).finally(() => setIsLoadingAddresses(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // FASE D16-H3, item 9 — sincroniza de VOLTA para o context quando o
+  // comprador muda o destino aqui mesmo no Checkout (endereço salvo
+  // selecionado, ou nova Região/Setor escolhidos) — assim a jornada
+  // continua coerente se ele voltar ao Carrinho/ProductDetail. Depende
+  // SOMENTE dos identificadores relevantes (nunca de rua/nome/telefone) —
+  // digitar esses campos nunca aciona isto.
+  React.useEffect(() => {
+    if (addressMode === 'saved') {
+      const addr = buyerAddresses.find((a) => a.id === selectedSavedAddressId);
+      if (addr && addr.shippingSectorId) {
+        setSavedAddressIntent({
+          addressId: addr.id,
+          shippingSectorId: addr.shippingSectorId,
+          shippingSectorName: addr.shippingSectorName || null,
+          shippingRegionId: addr.shippingRegionId || null,
+          shippingRegionName: addr.shippingRegionName || null,
+          countryCode: addr.countryCode || country,
+        });
+      }
+    } else if (newAddress.regionId && newAddress.sectorId) {
+      const region = newAddressRegions.find((r) => r.id === newAddress.regionId);
+      const sector = newAddressSectors.find((s) => s.id === newAddress.sectorId);
+      if (region && sector) {
+        setSectorIntent({
+          shippingSectorId: sector.id,
+          shippingSectorName: sector.name,
+          shippingRegionId: region.id,
+          shippingRegionName: region.name,
+          countryCode: country,
+        });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addressMode, selectedSavedAddressId, newAddress.regionId, newAddress.sectorId, country]);
 
   // Região→Setor do "outro endereço": região carrega quando o país muda;
   // setor carrega quando a região muda (cascata real, nunca lista fixa).
@@ -790,6 +860,21 @@ export const CheckoutView: React.FC = () => {
                   </div>
                 )
               ) : (
+                <div className="space-y-3">
+                  {/* FASE D16-H3 — aviso discreto quando a Região/Setor vieram
+                      de uma intenção de destino escolhida antes (ProductDetail
+                      /Carrinho): o endereço postal completo (rua/número/
+                      destinatário) continua sendo preenchido aqui mesmo,
+                      nunca inventado. */}
+                  {deliveryDestinationIntent?.mode === 'sector' &&
+                    newAddress.regionId === deliveryDestinationIntent.shippingRegionId &&
+                    newAddress.sectorId === deliveryDestinationIntent.shippingSectorId && (
+                      <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg p-2 font-semibold">
+                        Você selecionou entrega em {deliveryDestinationIntent.shippingSectorName}
+                        {deliveryDestinationIntent.shippingRegionName ? ` · ${deliveryDestinationIntent.shippingRegionName}` : ''}.
+                        Complete o endereço abaixo para continuar.
+                      </p>
+                    )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div>
                     <label className="block font-semibold text-gray-700 mb-1">Região</label>
@@ -842,6 +927,7 @@ export const CheckoutView: React.FC = () => {
                     <label className="block font-semibold text-gray-700 mb-1">Referência / Complemento (opcional)</label>
                     <input type="text" value={newAddress.complement} onChange={(e) => setNewAddress({ ...newAddress, complement: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                   </div>
+                </div>
                 </div>
               )}
             </div>

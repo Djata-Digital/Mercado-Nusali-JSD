@@ -9,7 +9,9 @@ import { formatCurrency } from '../utils/currencyUtils';
 import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
 import { BuyerService } from '../services/buyerService';
 import { sanitizeQuantityDigits, resolveQuantityInputValue, getCartItemAvailableStock } from '../utils/quantityInput';
-import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } from 'lucide-react';
+import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
+import { DeliveryDestinationModal } from './DeliveryDestinationModal';
+import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2, MapPin } from 'lucide-react';
 
 export const CartView: React.FC = () => {
   const navigate = useNavigate();
@@ -87,7 +89,18 @@ export const CartView: React.FC = () => {
     if (!buyerAddresses || buyerAddresses.length === 0) return null;
     return buyerAddresses.find((a: any) => a.isDefault) || buyerAddresses[0];
   }, [buyerAddresses]);
-  const destinationShippingSectorId: string | null = defaultDeliveryAddress?.shippingSectorId || null;
+
+  // FASE D16-H3 — mesma intenção temporária compartilhada com ProductDetail:
+  // tem prioridade sobre o endereço padrão, sem quebrar o fallback anterior
+  // quando não há nenhuma intenção selecionada ainda.
+  const { destination: deliveryDestinationIntent } = useDeliveryDestination();
+  const [isDestinationModalOpen, setIsDestinationModalOpen] = useState(false);
+  const destinationShippingSectorId: string | null =
+    deliveryDestinationIntent?.shippingSectorId || defaultDeliveryAddress?.shippingSectorId || null;
+  const destinationSectorDisplayName: string | null =
+    deliveryDestinationIntent?.shippingSectorName || defaultDeliveryAddress?.shippingSectorName || null;
+  const destinationRegionDisplayName: string | null =
+    deliveryDestinationIntent?.shippingRegionName || defaultDeliveryAddress?.shippingRegionName || null;
 
   const [shippingQuote, setShippingQuote] = useState<{
     loading: boolean;
@@ -202,10 +215,28 @@ export const CartView: React.FC = () => {
         <div className="lg:col-span-8 space-y-4">
           <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-200 shadow-xs">
             {/* Delivery banner */}
-            <div className="p-4 bg-green-50 rounded-t-lg flex items-center justify-between text-xs text-green-800 font-semibold border-b border-green-100">
+            <div className="p-4 bg-green-50 rounded-t-lg flex flex-wrap items-center justify-between gap-2 text-xs text-green-800 font-semibold border-b border-green-100">
               <span className="flex items-center gap-2">
                 <Truck className="w-4 h-4 text-green-600" />
                 Entrega para {cartDestinationCountry ? `${cartDestinationCountry.flag} ${cartDestinationCountry.name}` : selectedCountry}
+              </span>
+              {/* FASE D16-H3 — destino de entrega (setor) usado no preview
+                  deste carrinho, com a MESMA intenção temporária compartilhada
+                  com ProductDetail/Checkout. Nunca altera cart_items. */}
+              <span className="flex items-center gap-2">
+                <span className="flex items-center gap-1">
+                  <MapPin className="w-3.5 h-3.5 text-green-700" />
+                  {destinationSectorDisplayName
+                    ? `Entrega para: ${destinationSectorDisplayName}${destinationRegionDisplayName ? ` · ${destinationRegionDisplayName}` : ''}`
+                    : 'Selecione um endereço de entrega'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setIsDestinationModalOpen(true)}
+                  className="text-emerald-800 font-bold underline decoration-dotted hover:text-emerald-950"
+                >
+                  Alterar endereço
+                </button>
               </span>
             </div>
 
@@ -511,6 +542,12 @@ export const CartView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* FASE D16-H3 — "Alterar endereço" (mesmo modal do ProductDetail) */}
+      <DeliveryDestinationModal
+        isOpen={isDestinationModalOpen}
+        onClose={() => setIsDestinationModalOpen(false)}
+      />
     </div>
   );
 };
