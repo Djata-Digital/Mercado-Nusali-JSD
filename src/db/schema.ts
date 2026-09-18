@@ -720,47 +720,15 @@ export const carriers = pgTable('carriers', {
   carriers_country_idx: index('carriers_country_idx').on(table.countryCode),
 }));
 
-export const shippingZones = pgTable('shipping_zones', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  countryCode: varchar('country_code', { length: 10 }).notNull(),
-  name: varchar('name', { length: 255 }).notNull(),
-  regionCode: varchar('region_code', { length: 50 }),
-  city: varchar('city', { length: 255 }),
-  postalCodePattern: varchar('postal_code_pattern', { length: 100 }),
-  isActive: boolean('is_active').notNull().default(true),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-}, (table) => ({
-  shipping_zones_country_idx: index('shipping_zones_country_idx').on(table.countryCode),
-}));
-
-export const shippingRates = pgTable('shipping_rates', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  zoneId: varchar('zone_id', { length: 255 }).references(() => shippingZones.id, { onDelete: 'cascade' }),
-  originCountry: varchar('origin_country', { length: 10 }).notNull(),
-  originRegion: varchar('origin_region', { length: 50 }),
-  destinationCountry: varchar('destination_country', { length: 10 }).notNull(),
-  destinationRegion: varchar('destination_region', { length: 50 }),
-  minWeightKg: numeric('min_weight_kg', { precision: 8, scale: 3 }).notNull().default('0.000'),
-  maxWeightKg: numeric('max_weight_kg', { precision: 8, scale: 3 }).notNull().default('999.000'),
-  price: numeric('price', { precision: 12, scale: 2 }).notNull(),
-  currency: varchar('currency', { length: 10 }).notNull(),
-  estimatedMinDays: integer('estimated_min_days').notNull().default(1),
-  estimatedMaxDays: integer('estimated_max_days').notNull().default(5),
-  // Correção (Fase "Transportadoras Persistentes"): coluna já existia como
-  // texto livre sem FK e nunca era lida por ShippingCalculatorService (só
-  // gravada pelo admin) — auditado em produção: as 2 linhas reais têm
-  // carrier_id NULL, então virar FK real é seguro (nenhuma conversão de
-  // dado, nenhuma tarifa quebrada).
-  carrierId: varchar('carrier_id', { length: 255 }).references(() => carriers.id, { onDelete: 'set null' }),
-  serviceType: varchar('service_type', { length: 100 }).notNull().default('standard'),
-  isActive: boolean('is_active').notNull().default(true),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-}, (table) => ({
-  shipping_rates_route_idx: index('shipping_rates_route_idx').on(table.originCountry, table.destinationCountry),
-  shipping_rates_zone_idx: index('shipping_rates_zone_idx').on(table.zoneId),
-}));
+// FASE D16-I7-A — shippingZones/shippingRates (motor legado país/zona)
+// removidas destas definições: comprovadamente sem consumidor runtime
+// (auditorias D16-I1/I4/I5/I6/I6.1/I6.2), staging confirmado com só 2
+// linhas/0 pedidos+5 pedidos legados, todos com evidência financeira já
+// congelada em orders (orders.shippingRateId/shippingRateSource
+// PRESERVADOS como identificador histórico opaco — Estratégia A, D16-I6.2
+// — nenhum backfill, nenhuma coluna nova). A remoção física das tabelas em
+// si acontece pela migration gerada nesta mesma fase, nunca por edição
+// retroativa das migrations 0009/0010/0022 que as criaram/alteraram.
 
 // ============================================================================
 // 6. PEDIDOS (SNAPSHOT COMPLETO, HISTÓRICO DE STATUS)
