@@ -222,10 +222,14 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
           )}
 
           {/* Star Rating */}
+          {/* FASE D17-C3 — "|| 4.8" era uma nota falsa para produto sem
+              nenhuma review real (0 é falsy em JS, então um produto com
+              rating=0 real mostrava 4.8 inventado). ?? só cai no fallback
+              para null/undefined, nunca para um 0 real. */}
           <div className="mt-2 flex items-center gap-1 text-[11px] text-gray-500">
             <div className="flex items-center text-amber-400">
               <Star className="w-3 h-3 fill-amber-400" />
-              <span className="ml-1 font-bold text-gray-800">{product.rating || 4.8}</span>
+              <span className="ml-1 font-bold text-gray-800">{product.rating ?? 0}</span>
             </div>
             <span>({product.reviewsCount || 0})</span>
           </div>

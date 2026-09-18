@@ -127,6 +127,47 @@ export async function computeLiveVariantStock(variantIds: string[], executor?: a
   return result;
 }
 
+// FASE D17-C3 — reviews é a fonte de verdade; products.rating/reviewsCount
+// são agregados MATERIALIZADOS derivados dela (nunca uma segunda fonte
+// independente, nunca incrementados/decrementados manualmente — isso
+// divergiria sob concorrência). Sempre recalculado do zero a partir das
+// linhas reais de `reviews` com status='approved'.
+//
+// `executor` é OBRIGATÓRIO aqui (ao contrário de computeLiveStockAndSales/
+// computeLiveVariantStock, que toleram usar o pool singleton): esta função
+// SEMPRE precisa rodar dentro da MESMA transaction do INSERT da review que
+// a disparou (ver POST /buyer/reviews) — nunca solta, para que review+
+// agregado fiquem atomicamente consistentes.
+//
+// Lock FOR UPDATE na própria linha de `products` (mesmo mecanismo já usado
+// em walletService.ts para depósitos concorrentes) serializa duas chamadas
+// concorrentes para o MESMO productId: a segunda bloqueia até a primeira
+// transação commitar (INSERT da review + UPDATE do agregado juntos), então
+// sua própria leitura de `reviews` já enxerga a review da primeira chamada
+// — nunca uma leitura parcial, nunca um "count=1" sobrescrevendo um
+// "count=2" já commitado.
+export async function recomputeProductReviewAggregates(productId: string, executor: any): Promise<{ rating: string; reviewsCount: number }> {
+  await executor.select({ id: products.id }).from(products).where(eq(products.id, productId)).for('update');
+
+  const [agg] = await executor
+    .select({
+      count: sql<string>`COUNT(*)`,
+      avgRating: sql<string>`AVG(${reviews.rating})`,
+    })
+    .from(reviews)
+    .where(and(eq(reviews.productId, productId), eq(reviews.status, 'approved')));
+
+  const reviewsCount = Number(agg?.count || 0);
+  // numeric(3,2) — '0.00' é um sentinela inequívoco de "sem reviews": uma
+  // review real nunca produz média exatamente 0 (rating sempre 1..5), então
+  // nunca há ambiguidade entre "nota zero real" e "nenhuma avaliação".
+  const rating = reviewsCount > 0 ? Number(agg.avgRating).toFixed(2) : '0.00';
+
+  await executor.update(products).set({ rating, reviewsCount, updatedAt: new Date() }).where(eq(products.id, productId));
+
+  return { rating, reviewsCount };
+}
+
 export interface ProductQueryFilters {
   q?: string;
   category?: string;
@@ -303,7 +344,11 @@ export class CatalogService {
           ...p,
           price: Number(p.price),
           originalPrice: p.originalPrice ? Number(p.originalPrice) : undefined,
-          rating: Number(p.rating || 5.0),
+          // FASE D17-C3 — "|| 5.0" era um fallback de nota falsa (só não
+          // disparava para o sentinela real '0.00', mas dispararia para
+          // qualquer linha com rating NULL) — corrigido para o MESMO padrão
+          // já correto usado em getProductById (0, nunca uma nota inventada).
+          rating: p.rating !== null && p.rating !== undefined ? Number(p.rating) : 0,
           stock: live?.availableStock ?? Number(p.stock),
           salesCount: live?.salesCount ?? 0,
           hasVariants: hasVariantsSet.has(p.id),

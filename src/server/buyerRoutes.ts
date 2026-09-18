@@ -69,7 +69,7 @@ import {
 // FASE D16-H2 — computeLiveStockAndSales reaproveitada para o mesmo cálculo
 // (onHand-reserved) do lado de produto SIMPLES (sem variante), mesma fonte
 // única de verdade do catálogo — nunca uma segunda fórmula divergente.
-import { computeLiveVariantStock, computeLiveStockAndSales } from './modules/catalog/catalogService.js';
+import { computeLiveVariantStock, computeLiveStockAndSales, recomputeProductReviewAggregates } from './modules/catalog/catalogService.js';
 
 export const buyerRouter = Router();
 buyerRouter.use(requireAuth);
@@ -2601,8 +2601,19 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
       createdAt: new Date(),
     };
 
+    let aggregates: { rating: string; reviewsCount: number };
     try {
-      await db.insert(reviews).values(newReview);
+      // FASE D17-C3 — INSERT da review + recompute do agregado (rating/
+      // reviewsCount) na MESMA transaction: nunca ficam divergentes, e o
+      // lock FOR UPDATE dentro de recomputeProductReviewAggregates serializa
+      // corretamente duas reviews concorrentes para o mesmo produto (ver
+      // catalogService.ts). O tratamento de duplicidade (23505) do D17-C2
+      // continua idêntico — se o INSERT falhar por UNIQUE, a transaction
+      // inteira é revertida (nenhum agregado tocado).
+      aggregates = await db.transaction(async (tx) => {
+        await tx.insert(reviews).values(newReview);
+        return recomputeProductReviewAggregates(productId, tx);
+      });
     } catch (err: any) {
       // Mesma correção já aplicada em outros pontos do projeto (D16-H2):
       // DrizzleQueryError pode envolver o erro real do pg em err.cause.
@@ -2620,7 +2631,7 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
     return res.status(201).json({
       success: true,
       message: 'Avaliação publicada com sucesso! Obrigado pelo feedback.',
-      data: newReview,
+      data: { ...newReview, productRating: aggregates.rating, productReviewsCount: aggregates.reviewsCount },
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
