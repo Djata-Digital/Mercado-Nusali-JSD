@@ -2483,6 +2483,10 @@ buyerRouter.get('/reviews', async (req: AuthRequest, res: Response) => {
       .select({
         id: reviews.id,
         productId: reviews.productId,
+        // FASE D17-C6 — necessário para o frontend distinguir "já avaliado
+        // NESTE pedido" de "já avaliado em outro pedido do mesmo produto"
+        // (a UNIQUE real é userId+productId+orderId, nunca só userId+productId).
+        orderId: reviews.orderId,
         productTitle: products.title,
         productImage: products.image,
         rating: reviews.rating,
@@ -2500,6 +2504,7 @@ buyerRouter.get('/reviews', async (req: AuthRequest, res: Response) => {
     const data = rows.map((r) => ({
       id: r.id,
       productId: r.productId,
+      orderId: r.orderId,
       productTitle: r.productTitle || 'Produto Nusali',
       productImage: r.productImage || '',
       rating: r.rating,

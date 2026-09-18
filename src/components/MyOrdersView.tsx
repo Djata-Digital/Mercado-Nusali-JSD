@@ -1,11 +1,14 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useOrders } from '../hooks/useOrders';
+import { useBuyerReviews, useCreateReview } from '../hooks/useReviews';
 import { useCart } from '../hooks/useCart';
 import { usePreferences } from '../context/PreferencesContext';
 import { formatCurrency } from '../utils/currencyUtils';
-import { Package, Truck, CheckCircle2, ChevronRight, RefreshCw, ShieldCheck, Layers } from 'lucide-react';
+import { Package, Truck, CheckCircle2, ChevronRight, RefreshCw, ShieldCheck, Layers, Star } from 'lucide-react';
 import { buildPurchaseGroupIndex } from '../utils/purchaseGroupUx';
+import { ProductReviewModal } from './ProductReviewModal';
 
 /**
  * Fase M1-D3 — histórico do comprador. Uma compra multi-seller
@@ -37,6 +40,16 @@ interface OrderRow {
   [k: string]: any;
 }
 
+// FASE D17-C6 — alvo do modal de avaliação: productId/orderId vêm sempre do
+// item de pedido real selecionado, nunca digitados pelo usuário.
+interface ReviewTarget {
+  orderId: string;
+  productId: string;
+  productTitle: string;
+  productImage: string | null;
+  variantTitle: string | null;
+}
+
 function deliveryStatusText(order: OrderRow): string {
   const raw = (order.shipment?.status || order.logisticsStatus || order.status || '').toUpperCase();
   if (raw === 'DELIVERED') return 'Entregue no destino';
@@ -53,7 +66,9 @@ const OrderCard: React.FC<{
   compact?: boolean;
   buyAgainPendingKey: string | null;
   setBuyAgainPendingKey: (k: string | null) => void;
-}> = ({ order, fallbackCurrency, compact, buyAgainPendingKey, setBuyAgainPendingKey }) => {
+  reviewedKeySet: Set<string>;
+  onReviewProduct: (target: ReviewTarget) => void;
+}> = ({ order, fallbackCurrency, compact, buyAgainPendingKey, setBuyAgainPendingKey, reviewedKeySet, onReviewProduct }) => {
   const navigate = useNavigate();
   const { addItem } = useCart();
   const { showToast } = usePreferences();
@@ -121,43 +136,88 @@ const OrderCard: React.FC<{
                   </div>
                 </div>
 
-                {prod.id && (() => {
-                  // FASE D16-C2.1 — o item histórico tem variantId (o pedido
-                  // foi de um produto variável). Não temos dado ao vivo aqui
-                  // (isActive/estoque atual da variante) para validar com
-                  // segurança que ela ainda é reutilizável — nunca inventar:
-                  // manda para a página do produto para uma nova seleção
-                  // explícita, em vez de adicionar direto uma variante que
-                  // pode ter mudado ou não existir mais.
-                  const requiresVariantReselection = Boolean(item.variantId);
-                  const targetProductId = item.productId || prod.id;
+                <div className="flex flex-col items-end gap-1.5 shrink-0">
+                  {prod.id && (() => {
+                    // FASE D16-C2.1 — o item histórico tem variantId (o pedido
+                    // foi de um produto variável). Não temos dado ao vivo aqui
+                    // (isActive/estoque atual da variante) para validar com
+                    // segurança que ela ainda é reutilizável — nunca inventar:
+                    // manda para a página do produto para uma nova seleção
+                    // explícita, em vez de adicionar direto uma variante que
+                    // pode ter mudado ou não existir mais.
+                    const requiresVariantReselection = Boolean(item.variantId);
+                    const targetProductId = item.productId || prod.id;
 
-                  return (
-                    <button
-                      disabled={buyAgainPendingKey !== null}
-                      onClick={async () => {
-                        if (buyAgainPendingKey !== null) return;
-                        if (requiresVariantReselection) {
-                          navigate(`/products/${targetProductId}`);
-                          return;
+                    return (
+                      <button
+                        disabled={buyAgainPendingKey !== null}
+                        onClick={async () => {
+                          if (buyAgainPendingKey !== null) return;
+                          if (requiresVariantReselection) {
+                            navigate(`/products/${targetProductId}`);
+                            return;
+                          }
+                          setBuyAgainPendingKey(pendingKey);
+                          try {
+                            await addItem(prod, qty);
+                            navigate('/cart');
+                          } catch (err: any) {
+                            showToast(err?.message || 'Não foi possível adicionar ao carrinho. Tente novamente.');
+                          } finally {
+                            setBuyAgainPendingKey(null);
+                          }
+                        }}
+                        className="bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed text-emerald-800 font-bold px-3 py-1.5 rounded-xl text-xs transition flex items-center gap-1 shrink-0 border border-emerald-200 cursor-pointer"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${isPending ? 'animate-spin' : ''}`} />
+                        <span>{requiresVariantReselection ? 'Ver opções' : isPending ? 'Adicionando...' : 'Comprar novamente'}</span>
+                      </button>
+                    );
+                  })()}
+
+                  {(() => {
+                    // FASE D17-C6 — avaliação só é oferecida para pedidos
+                    // REALMENTE entregues (order.status==='delivered', a
+                    // mesma condição exigida pelo backend em POST
+                    // /buyer/reviews). orderId usa exclusivamente order.id
+                    // (a FK real) — nunca orderNumber/orderKey, que só serve
+                    // para exibição/roteamento. Se order.id estiver ausente
+                    // (não deveria acontecer com dado real), a ação
+                    // simplesmente não aparece, em vez de arriscar enviar um
+                    // orderId inválido.
+                    const targetProductId = item.productId || prod.id;
+                    if (!targetProductId || !order.id || order.status !== 'delivered') return null;
+
+                    const reviewKey = `${order.id}__${targetProductId}`;
+                    const alreadyReviewed = reviewedKeySet.has(reviewKey);
+
+                    if (alreadyReviewed) {
+                      return (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-1.5 rounded-xl">
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Avaliado
+                        </span>
+                      );
+                    }
+
+                    return (
+                      <button
+                        onClick={() =>
+                          onReviewProduct({
+                            orderId: order.id!,
+                            productId: targetProductId,
+                            productTitle: title,
+                            productImage: image,
+                            variantTitle: item.variantTitle || null,
+                          })
                         }
-                        setBuyAgainPendingKey(pendingKey);
-                        try {
-                          await addItem(prod, qty);
-                          navigate('/cart');
-                        } catch (err: any) {
-                          showToast(err?.message || 'Não foi possível adicionar ao carrinho. Tente novamente.');
-                        } finally {
-                          setBuyAgainPendingKey(null);
-                        }
-                      }}
-                      className="bg-emerald-50 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed text-emerald-800 font-bold px-3 py-1.5 rounded-xl text-xs transition flex items-center gap-1 shrink-0 border border-emerald-200 cursor-pointer"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${isPending ? 'animate-spin' : ''}`} />
-                      <span>{requiresVariantReselection ? 'Ver opções' : isPending ? 'Adicionando...' : 'Comprar novamente'}</span>
-                    </button>
-                  );
-                })()}
+                        className="bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold px-3 py-1.5 rounded-xl text-xs transition flex items-center gap-1 shrink-0 border border-amber-200 cursor-pointer"
+                      >
+                        <Star className="w-3.5 h-3.5" />
+                        <span>Avaliar produto</span>
+                      </button>
+                    );
+                  })()}
+                </div>
               </div>
             );
           })}
@@ -179,8 +239,42 @@ const OrderCard: React.FC<{
 export const MyOrdersView: React.FC = () => {
   const navigate = useNavigate();
   const { data: orders = [] } = useOrders();
-  const { selectedCurrency } = usePreferences();
+  const { selectedCurrency, showToast } = usePreferences();
   const [buyAgainPendingKey, setBuyAgainPendingKey] = useState<string | null>(null);
+
+  // FASE D17-C6 — avaliação real de produto a partir de pedido entregue.
+  const { data: buyerReviews = [] } = useBuyerReviews();
+  const createReview = useCreateReview();
+  const queryClient = useQueryClient();
+  const [reviewTarget, setReviewTarget] = useState<ReviewTarget | null>(null);
+
+  // Chave orderId+productId (nunca só productId — a UNIQUE real do backend é
+  // userId+productId+orderId, então o mesmo produto pode estar avaliado num
+  // pedido e pendente noutro).
+  const reviewedKeySet = useMemo(
+    () => new Set((buyerReviews as any[]).filter((r) => r.orderId).map((r) => `${r.orderId}__${r.productId}`)),
+    [buyerReviews]
+  );
+
+  const handleSubmitReview = async (input: { productId: string; orderId: string; rating: number; comment: string; title?: string }) => {
+    try {
+      await createReview.mutateAsync(input);
+      // Rating/reviewsCount reais (D17-C3) vivem no cache de useProduct — só
+      // invalida a chave já usada por ela, sem importar useProducts.ts aqui.
+      queryClient.invalidateQueries({ queryKey: ['product', input.productId] });
+      showToast('Avaliação publicada com sucesso!');
+    } catch (err: any) {
+      const code = err?.response?.data?.error?.code;
+      if (code === 'REVIEW_ALREADY_EXISTS') {
+        // Corrida/duplo clique: o backend é quem decide que já existe.
+        // Não é uma falha do ponto de vista do usuário — apenas resincroniza
+        // a lista real para o botão virar "Avaliado" em vez de mostrar erro.
+        await queryClient.invalidateQueries({ queryKey: ['buyer-reviews'] });
+        return;
+      }
+      throw err;
+    }
+  };
 
   const orderList = (orders as OrderRow[]) || [];
 
@@ -231,6 +325,8 @@ export const MyOrdersView: React.FC = () => {
                 fallbackCurrency={selectedCurrency}
                 buyAgainPendingKey={buyAgainPendingKey}
                 setBuyAgainPendingKey={setBuyAgainPendingKey}
+                reviewedKeySet={reviewedKeySet}
+                onReviewProduct={setReviewTarget}
               />
             );
           }
@@ -284,6 +380,8 @@ export const MyOrdersView: React.FC = () => {
                     compact
                     buyAgainPendingKey={buyAgainPendingKey}
                     setBuyAgainPendingKey={setBuyAgainPendingKey}
+                    reviewedKeySet={reviewedKeySet}
+                    onReviewProduct={setReviewTarget}
                   />
                 ))}
               </div>
@@ -291,6 +389,19 @@ export const MyOrdersView: React.FC = () => {
           );
         })}
       </div>
+
+      {reviewTarget && (
+        <ProductReviewModal
+          key={`${reviewTarget.orderId}__${reviewTarget.productId}`}
+          orderId={reviewTarget.orderId}
+          productId={reviewTarget.productId}
+          productTitle={reviewTarget.productTitle}
+          productImage={reviewTarget.productImage}
+          variantTitle={reviewTarget.variantTitle}
+          onClose={() => setReviewTarget(null)}
+          onSubmit={handleSubmitReview}
+        />
+      )}
     </div>
   );
 };

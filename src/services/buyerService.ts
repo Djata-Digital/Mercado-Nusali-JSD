@@ -105,6 +105,10 @@ export interface BuyerChatConversation {
 export interface BuyerReview {
   id: string;
   productId: string;
+  // FASE D17-C6 — a UNIQUE real de reviews é userId+productId+orderId;
+  // sem orderId aqui não dá para saber se ESTE pedido específico já foi
+  // avaliado (só se o produto já foi avaliado em algum pedido qualquer).
+  orderId?: string;
   productTitle: string;
   productImage?: string;
   rating: number;

@@ -15,7 +15,27 @@ export const ReviewService = {
     return res;
   },
 
-  async addReview(productId: string, rating: number, title: string, comment: string, productTitle?: string): Promise<ApiResponse<any>> {
-    return BuyerService.createReview({ productId, rating, title, comment, productTitle });
+  // FASE D17-C6 — antes, esta função nunca enviava orderId (o backend real
+  // de POST /buyer/reviews exige productId+orderId+rating+comment; sem
+  // orderId a chamada sempre falharia com 400 REVIEW_ORDER_REQUIRED). Só
+  // envia exatamente os campos aceitos pelo contrato real — nunca userId/
+  // authorName/authorCountry/isVerifiedPurchase/status, que são server-side.
+  async addReview(input: {
+    productId: string;
+    orderId: string;
+    rating: number;
+    comment: string;
+    title?: string;
+  }): Promise<ApiResponse<any>> {
+    const payload: Record<string, any> = {
+      productId: input.productId,
+      orderId: input.orderId,
+      rating: input.rating,
+      comment: input.comment,
+    };
+    if (input.title && input.title.trim()) {
+      payload.title = input.title.trim();
+    }
+    return BuyerService.createReview(payload);
   }
 };
