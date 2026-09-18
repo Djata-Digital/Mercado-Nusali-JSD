@@ -21,7 +21,7 @@ export const useBuyerReviews = () => {
 export const useCreateReview = () => {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { productId: string; orderId: string; rating: number; comment: string; title?: string }) =>
+    mutationFn: (input: { productId: string; orderId: string; rating: number; comment: string; title?: string; images?: string[] }) =>
       ReviewService.addReview(input),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['buyer-reviews'] });

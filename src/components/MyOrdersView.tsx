@@ -256,7 +256,9 @@ export const MyOrdersView: React.FC = () => {
     [buyerReviews]
   );
 
-  const handleSubmitReview = async (input: { productId: string; orderId: string; rating: number; comment: string; title?: string }) => {
+  // FASE D17-C7 — só o tipo foi ampliado (images?: string[], opcional); a
+  // lógica do D17-C6 abaixo (orderId/productId/409/invalidate) é intocada.
+  const handleSubmitReview = async (input: { productId: string; orderId: string; rating: number; comment: string; title?: string; images?: string[] }) => {
     try {
       await createReview.mutateAsync(input);
       // Rating/reviewsCount reais (D17-C3) vivem no cache de useProduct — só

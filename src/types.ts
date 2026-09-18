@@ -112,6 +112,8 @@ export interface ProductReview {
   comment: string;
   likes: number;
   verifiedPurchase: boolean;
+  // FASE D17-C7 — fotos reais anexadas à review; [] quando não há fotos.
+  images?: string[];
 }
 
 export interface ProductVideo {

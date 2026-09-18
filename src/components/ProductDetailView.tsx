@@ -1816,6 +1816,21 @@ export const ProductDetailView: React.FC = () => {
                     <span className="text-gray-400 text-[11px]">{rev.date}</span>
                   </div>
                   <p className="text-xs text-gray-700 leading-relaxed">{rev.comment}</p>
+                  {/* FASE D17-C7 — fotos reais anexadas à review (nunca
+                      inventadas: array vazio quando a review não tem foto). */}
+                  {rev.images && rev.images.length > 0 && (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {rev.images.map((imgUrl, i) => (
+                        <a key={i} href={imgUrl} target="_blank" rel="noopener noreferrer">
+                          <img
+                            src={imgUrl}
+                            alt=""
+                            className="w-16 h-16 object-cover rounded-lg border border-gray-200 hover:opacity-90 transition"
+                          />
+                        </a>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex items-center gap-3 text-[11px] text-gray-500 pt-1">
                     <span className="text-green-700 font-medium flex items-center gap-1">
                       <CheckCircle2 className="w-3 h-3 text-green-600" /> Compra verificada

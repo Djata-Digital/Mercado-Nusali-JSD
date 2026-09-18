@@ -26,6 +26,9 @@ export const ReviewService = {
     rating: number;
     comment: string;
     title?: string;
+    // FASE D17-C7 — URLs já enviadas ao storage (POST /upload/reviews)
+    // ANTES desta chamada; nunca um arquivo bruto/base64 aqui.
+    images?: string[];
   }): Promise<ApiResponse<any>> {
     const payload: Record<string, any> = {
       productId: input.productId,
@@ -35,6 +38,9 @@ export const ReviewService = {
     };
     if (input.title && input.title.trim()) {
       payload.title = input.title.trim();
+    }
+    if (Array.isArray(input.images) && input.images.length > 0) {
+      payload.images = input.images;
     }
     return BuyerService.createReview(payload);
   }

@@ -1,5 +1,5 @@
 import { getDb } from '../../../db/index.js';
-import { products, categories, brands, productVariants, productImages, productAttributes, reviews, sellers, stores, inventory, orderItems, orders, countries } from '../../../db/schema.js';
+import { products, categories, brands, productVariants, productImages, productAttributes, reviews, reviewImages, sellers, stores, inventory, orderItems, orders, countries } from '../../../db/schema.js';
 import { getCache, setCache, delCache } from '../../../db/redis.js';
 import { eq, ne, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -446,6 +446,22 @@ export class CatalogService {
       ...(p.attributesJson as Record<string, string>),
     };
 
+    // FASE D17-C7 — fotos reais da review, buscadas em uma única query
+    // separada (evita N+1: 1 query para todas as reviews desta página, nunca
+    // uma por review) — mesmo padrão já usado para as respostas de perguntas
+    // em catalogRoutes.ts. Reviews sem foto simplesmente não aparecem no Map,
+    // resultando em array vazio (nunca inventa/preenche com placeholder).
+    const reviewIds = reviewsRes.map((r) => r.id);
+    const reviewImagesRes = reviewIds.length > 0
+      ? await db.select().from(reviewImages).where(inArray(reviewImages.reviewId, reviewIds)).orderBy(asc(reviewImages.createdAt))
+      : [];
+    const imagesByReviewId = new Map<string, string[]>();
+    for (const img of reviewImagesRes as any[]) {
+      const list = imagesByReviewId.get(img.reviewId) || [];
+      list.push(img.imageUrl);
+      imagesByReviewId.set(img.reviewId, list);
+    }
+
     const imageUrlList = imagesRes.map((img) => img.imageUrl).filter(Boolean);
     const coverImageObj = imagesRes.find((img) => img.isCover);
     const mainImage = coverImageObj?.imageUrl || (imageUrlList.length > 0 ? imageUrlList[0] : p.image);
@@ -518,6 +534,8 @@ export class CatalogService {
         comment: r.comment,
         date: r.createdAt.toLocaleDateString('pt-BR'),
         likes: r.helpfulCount || 0,
+        // FASE D17-C7 — nunca undefined: review sem foto retorna [].
+        images: imagesByReviewId.get(r.id) || [],
       })),
     };
 

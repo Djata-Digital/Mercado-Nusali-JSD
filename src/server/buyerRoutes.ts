@@ -70,6 +70,7 @@ import {
 // (onHand-reserved) do lado de produto SIMPLES (sem variante), mesma fonte
 // única de verdade do catálogo — nunca uma segunda fórmula divergente.
 import { computeLiveVariantStock, computeLiveStockAndSales, recomputeProductReviewAggregates } from './modules/catalog/catalogService.js';
+import { isOwnedPublicObjectUrl } from './infra/storage.js';
 
 export const buyerRouter = Router();
 buyerRouter.use(requireAuth);
@@ -2468,6 +2469,11 @@ buyerRouter.post('/messages/:chatId', async (req: Request, res: Response) => {
 // 12. REVIEWS & RATINGS
 // ==========================================
 
+// FASE D17-C7 — mesmo padrão estrutural de PRODUCT_QUESTION_MAX_LENGTH
+// (catalogRoutes.ts)/CART_BATCH_MAX_ITEMS acima: limite nomeado, validado
+// server-side (nunca confia só no que o modal do frontend já impede).
+const REVIEW_MAX_IMAGES = 5;
+
 // FASE D17-C2 — aposenta buyerDataStore.reviews (mock em memória). Lista
 // reais do usuário autenticado (nunca de outro usuário — req.user.id vem
 // exclusivamente do JWT verificado por requireAuth, router-wide, linha 75).
@@ -2534,7 +2540,7 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
     const db = getDb();
     if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
 
-    const { productId, orderId, rating, title, comment } = req.body;
+    const { productId, orderId, rating, title, comment, images } = req.body;
 
     if (!productId || typeof productId !== 'string') {
       return res.status(400).json({ success: false, error: { code: 'REVIEW_PRODUCT_REQUIRED', message: 'Produto é obrigatório.' } });
@@ -2551,6 +2557,24 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ success: false, error: { code: 'REVIEW_COMMENT_REQUIRED', message: 'O comentário é obrigatório.' } });
     }
     const trimmedTitle = typeof title === 'string' && title.trim() ? title.trim().slice(0, 255) : null;
+
+    // FASE D17-C7 — fotos são opcionais, no máximo 5, e cada URL precisa
+    // provar que veio de um upload real e autenticado para a pasta pública
+    // 'reviews' (POST /upload/reviews, já existente — MIME/tamanho já
+    // validados lá). Nunca aceita uma URL arbitrária de outro domínio, nunca
+    // aceita mais do que o limite, mesmo que o modal do frontend já valide
+    // isso — o backend é a autoridade final.
+    const rawImages = Array.isArray(images) ? images : [];
+    if (rawImages.length > REVIEW_MAX_IMAGES) {
+      return res.status(400).json({ success: false, error: { code: 'REVIEW_TOO_MANY_IMAGES', message: `No máximo ${REVIEW_MAX_IMAGES} fotos por avaliação.` } });
+    }
+    const validatedImageUrls: string[] = [];
+    for (const raw of rawImages) {
+      if (!isOwnedPublicObjectUrl(raw, 'reviews')) {
+        return res.status(400).json({ success: false, error: { code: 'REVIEW_IMAGE_INVALID', message: 'Uma ou mais fotos enviadas são inválidas.' } });
+      }
+      validatedImageUrls.push(raw);
+    }
 
     // PASSO 6 — prova real de compra entregue: JWT user -> orders.buyerId ->
     // orders.status='delivered' -> order_items.productId. Qualquer falha
@@ -2617,6 +2641,21 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
       // inteira é revertida (nenhum agregado tocado).
       aggregates = await db.transaction(async (tx) => {
         await tx.insert(reviews).values(newReview);
+        // FASE D17-C7 — inserido na MESMA transaction do review: nunca fica
+        // uma review sem suas fotos (ou vice-versa) por uma falha a meio
+        // caminho. Os arquivos em si já foram enviados ao R2 ANTES desta
+        // requisição (POST /upload/reviews, autenticado) — só a REFERÊNCIA
+        // (URL) é persistida aqui, então não há chamada externa dentro da
+        // transaction do Postgres.
+        if (validatedImageUrls.length > 0) {
+          await tx.insert(reviewImages).values(
+            validatedImageUrls.map((imageUrl) => ({
+              id: `rvimg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+              reviewId: newReview.id,
+              imageUrl,
+            }))
+          );
+        }
         return recomputeProductReviewAggregates(productId, tx);
       });
     } catch (err: any) {
@@ -2636,7 +2675,7 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
     return res.status(201).json({
       success: true,
       message: 'Avaliação publicada com sucesso! Obrigado pelo feedback.',
-      data: { ...newReview, productRating: aggregates.rating, productReviewsCount: aggregates.reviewsCount },
+      data: { ...newReview, images: validatedImageUrls, productRating: aggregates.rating, productReviewsCount: aggregates.reviewsCount },
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
