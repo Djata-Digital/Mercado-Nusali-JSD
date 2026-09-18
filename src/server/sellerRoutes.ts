@@ -87,6 +87,7 @@ import {
   deriveShippingRegionFromSector,
 } from './modules/shipping/shippingGeographyService.js';
 import { listFulfillmentLocationsForSeller, ensureStoreFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
+import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -959,11 +960,29 @@ sellerRouter.post('/shipping-policy', async (req: AuthRequest, res: Response) =>
     let finalPct: number | null = null;
 
     if (finalMode === 'SELLER_SUBSIDIZED') {
+      // FASE D18-B1 — validação estrita (nunca Number(x) || 0, que convertia
+      // entrada inválida em 0 sem avisar). Percentual: finito, 0..100.
+      // Valor máximo: finito, >= 0. O resolver ainda revalida (defesa em
+      // profundidade) caso uma linha inválida já exista no banco.
       if (subsidyType === 'PERCENT') {
-        finalPct = Number(sellerSubsidyPercent) || 0;
+        const pct = validateSubsidyPercent(sellerSubsidyPercent);
+        if (!pct.ok) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_SELLER_SUBSIDY_PERCENT', message: 'O percentual de frete assumido deve ser um número entre 0 e 100.' },
+          });
+        }
+        finalPct = pct.value;
         finalMaxAmt = null;
       } else {
-        finalMaxAmt = Number(sellerSubsidyMaxAmount) || 0;
+        const amt = validateSubsidyAmount(sellerSubsidyMaxAmount);
+        if (!amt.ok) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_SELLER_SUBSIDY_AMOUNT', message: 'O valor máximo de frete assumido deve ser um número maior ou igual a zero.' },
+          });
+        }
+        finalMaxAmt = amt.value;
         finalPct = null;
       }
     }

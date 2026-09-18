@@ -23,11 +23,16 @@
  * o `bestCandidate` que F4 já escolhe por custo real de frete.
  */
 import { getDb } from '../../../db/index.js';
-import { products, productVariants, shippingSectors } from '../../../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { products, productVariants, shippingSectors, sellers, categories, platformSettings } from '../../../db/schema.js';
+import { eq, inArray } from 'drizzle-orm';
 import { resolveFulfillmentCandidates, type RejectedFulfillmentCandidate } from './fulfillmentCandidateResolverService.js';
 import { validateInventoryVariantConsistency } from '../logistics/fulfillmentLocationService.js';
-import { resolveShippingPayerPolicy } from './shippingCalculatorService.js';
+import {
+  resolveShippingPayerPolicy,
+  checkSellerNetForShippingShare,
+  sellerSubsidyExceedsNetError,
+  ShippingPolicyNotApplicableError,
+} from './shippingCalculatorService.js';
 
 export interface ShippingPreviewInput {
   productId: string;
@@ -247,7 +252,11 @@ export interface CartShippingPreviewAvailable {
 export interface CartShippingPreviewUnavailable {
   ok: true;
   available: false;
-  code: 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY' | 'DELIVERY_SECTOR_REQUIRED' | 'SHIPPING_ROUTE_NOT_AVAILABLE' | 'SHIPPING_RATE_NOT_AVAILABLE';
+  // FASE D18-B1 — códigos de "política de frete não aplicável" (mesmos que o
+  // checkout usa ao bloquear o pedido): o frontend já trata qualquer
+  // available:false como "checkout bloqueado" e exibe `message`.
+  code: 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY' | 'DELIVERY_SECTOR_REQUIRED' | 'SHIPPING_ROUTE_NOT_AVAILABLE' | 'SHIPPING_RATE_NOT_AVAILABLE'
+    | 'SELLER_SHIPPING_POLICY_INVALID' | 'SELLER_SUBSIDY_EXCEEDS_NET' | 'SHIPPING_FUNDING_INVARIANT_VIOLATION';
   message: string;
 }
 
@@ -259,6 +268,72 @@ export interface CartShippingPreviewInvalid {
 }
 
 export type CartShippingPreviewResult = CartShippingPreviewAvailable | CartShippingPreviewUnavailable | CartShippingPreviewInvalid;
+
+/**
+ * FASE D18-B1 — subtotal e comissão do grupo de UM vendedor, calculados
+ * EXATAMENTE como orderService.ts (createOrderFromCart) faz no checkout:
+ * preço = products.price, sobrescrito por productVariants.price quando a
+ * variante existe e tem preço; subtotal = preço * quantidade (sem
+ * arredondar); taxa por item = categoria -> seller -> padrão global
+ * (platformSettings.defaultSellerCommissionPercent); comissão do item =
+ * round2(subtotal * taxa / 100), somada e arredondada. Só é chamada quando
+ * o vendedor tem parcela de frete > 0 (é o único caso em que a regra do
+ * seller net se aplica). Devolve null se a comissão não puder ser resolvida
+ * (o checkout bloqueia esse caso por COMMISSION_NOT_CONFIGURED, com ou sem
+ * esta regra — nada novo a divergir).
+ */
+async function resolveSellerGroupNetInputs(
+  db: any,
+  sellerId: string,
+  entries: CartShippingPreviewLineInput[]
+): Promise<{ productSubtotal: number; marketplaceCommission: number } | null> {
+  const productIds = Array.from(new Set(entries.map((e) => e.productId)));
+  const variantIds = Array.from(new Set(entries.map((e) => e.variantId).filter((v): v is string => Boolean(v))));
+
+  const productRows = await db.select().from(products).where(inArray(products.id, productIds));
+  const productById = new Map<string, any>(productRows.map((r: any) => [r.id, r]));
+  const variantRows = variantIds.length > 0 ? await db.select().from(productVariants).where(inArray(productVariants.id, variantIds)) : [];
+  const variantById = new Map<string, any>(variantRows.map((r: any) => [r.id, r]));
+
+  let globalDefaultRate: number | null = null;
+  const defRows = await db.select().from(platformSettings).where(eq(platformSettings.key, 'defaultSellerCommissionPercent')).limit(1);
+  if (defRows.length > 0) {
+    const parsed = Number(defRows[0].valueJson);
+    if (!isNaN(parsed) && parsed >= 0) globalDefaultRate = parsed;
+  }
+  let sellerRate: number | null = null;
+  const sellerRows = await db.select().from(sellers).where(eq(sellers.id, sellerId)).limit(1);
+  if (sellerRows.length > 0 && sellerRows[0].commissionRate !== null && sellerRows[0].commissionRate !== undefined) {
+    sellerRate = Number(sellerRows[0].commissionRate);
+  }
+  const categoryIds = Array.from(new Set(Array.from(productById.values()).map((p) => p.categoryId).filter(Boolean))) as string[];
+  const categoryRate = new Map<string, number>();
+  if (categoryIds.length > 0) {
+    const catRows = await db.select().from(categories).where(inArray(categories.id, categoryIds));
+    for (const c of catRows) {
+      if (c.commissionRate !== null && c.commissionRate !== undefined) categoryRate.set(c.id, Number(c.commissionRate));
+    }
+  }
+  const fallbackRate = sellerRate ?? globalDefaultRate;
+
+  let subtotal = 0;
+  let commission = 0;
+  for (const e of entries) {
+    const prod = productById.get(e.productId);
+    if (!prod) return null;
+    let unitPrice = Number(prod.price);
+    if (e.variantId) {
+      const v = variantById.get(e.variantId);
+      if (v && v.price) unitPrice = Number(v.price);
+    }
+    const itemSubtotal = unitPrice * e.quantity;
+    const rate = prod.categoryId && categoryRate.has(prod.categoryId) ? categoryRate.get(prod.categoryId) : fallbackRate;
+    if (rate === null || rate === undefined) return null;
+    subtotal += itemSubtotal;
+    commission += Math.round((itemSubtotal * (rate / 100)) * 100) / 100;
+  }
+  return { productSubtotal: subtotal, marketplaceCommission: Math.round(commission * 100) / 100 };
+}
 
 /**
  * Preview agregado de frete para carrinho/checkout — reaproveita
@@ -324,11 +399,15 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
   // Agrupa por sellerId — MESMA chave que orderService.ts usa para separar
   // child orders (bySeller, F6.2) — nunca por um valor vindo do frontend.
   const bySeller = new Map<string, ShippingPreviewLineAvailable[]>();
-  for (const line of resolvedLines) {
+  const itemsBySeller = new Map<string, CartShippingPreviewLineInput[]>();
+  resolvedLines.forEach((line, idx) => {
     const existing = bySeller.get(line.sellerId);
     if (existing) existing.push(line);
     else bySeller.set(line.sellerId, [line]);
-  }
+    const existingItems = itemsBySeller.get(line.sellerId);
+    if (existingItems) existingItems.push(input.items[idx]);
+    else itemsBySeller.set(line.sellerId, [input.items[idx]]);
+  });
 
   const round2 = (n: number) => Math.round(n * 100) / 100;
   const currency = resolvedLines[0]?.currency || 'XOF';
@@ -343,7 +422,25 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
     // pacote nesta fase, mesmo que no futuro isso possa ser otimizado.
     const groupRawShippingCost = round2(lines.reduce((s, l) => s + l.shippingAmount, 0));
     const storeId = lines.find((l) => l.storeId)?.storeId || null;
-    const policy = await resolveShippingPayerPolicy(groupRawShippingCost, { storeId, sellerId }, db);
+    // FASE D18-B1 — política inválida / seller net <= 0 => available:false
+    // explícito (mesmos códigos do checkout), nunca uma cotação que o
+    // checkout depois recusaria.
+    let policy;
+    try {
+      policy = await resolveShippingPayerPolicy(groupRawShippingCost, { storeId, sellerId }, db);
+      if (policy.shippingSellerSubsidy > 0) {
+        const netInputs = await resolveSellerGroupNetInputs(db, sellerId, itemsBySeller.get(sellerId) || []);
+        if (netInputs) {
+          const netCheck = checkSellerNetForShippingShare({ ...netInputs, shippingSellerSubsidy: policy.shippingSellerSubsidy });
+          if (!netCheck.ok) throw sellerSubsidyExceedsNetError(netCheck.sellerNetAmount, policy.shippingSellerSubsidy);
+        }
+      }
+    } catch (err) {
+      if (err instanceof ShippingPolicyNotApplicableError) {
+        return { ok: true, available: false, code: err.code, message: err.message.replace(/^[A-Z_]+: /, '') };
+      }
+      throw err;
+    }
 
     shippingChargedToBuyer = round2(shippingChargedToBuyer + policy.shippingChargedToBuyer);
     shippingCost = round2(shippingCost + groupRawShippingCost);

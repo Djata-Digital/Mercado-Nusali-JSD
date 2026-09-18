@@ -85,6 +85,7 @@ import {
   deriveShippingRegionFromSector,
 } from './modules/shipping/shippingGeographyService.js';
 import { ensureWarehouseFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
+import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
 
 export const adminRouter = Router();
 
@@ -4818,13 +4819,14 @@ adminRouter.post('/stores/:id/shipping-policy', requireGlobalAdmin, async (req: 
     if (mode !== undefined && !ALLOWED_MODES.includes(mode)) {
       return res.status(400).json({ success: false, error: { code: 'INVALID_SHIPPING_POLICY_MODE', message: `Modo inválido. Use um de: ${ALLOWED_MODES.join(', ')}.` } });
     }
+    // FASE D18-B1 — mesma validação estrita (finito; Infinity/NaN/texto
+    // rejeitados) usada na rota do seller. Comportamento para valores
+    // válidos é idêntico ao anterior.
     if (marketplaceSubsidyMaxAmount !== undefined && marketplaceSubsidyMaxAmount !== null) {
-      const n = Number(marketplaceSubsidyMaxAmount);
-      if (isNaN(n) || n < 0) return res.status(400).json({ success: false, message: 'Teto de subsídio (valor) deve ser um número maior ou igual a zero.' });
+      if (!validateSubsidyAmount(marketplaceSubsidyMaxAmount).ok) return res.status(400).json({ success: false, message: 'Teto de subsídio (valor) deve ser um número maior ou igual a zero.' });
     }
     if (marketplaceSubsidyPercent !== undefined && marketplaceSubsidyPercent !== null) {
-      const n = Number(marketplaceSubsidyPercent);
-      if (isNaN(n) || n < 0 || n > 100) return res.status(400).json({ success: false, message: 'Teto de subsídio (percentual) deve estar entre 0 e 100.' });
+      if (!validateSubsidyPercent(marketplaceSubsidyPercent).ok) return res.status(400).json({ success: false, message: 'Teto de subsídio (percentual) deve estar entre 0 e 100.' });
     }
 
     const existing = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.storeId, storeId)).limit(1);
