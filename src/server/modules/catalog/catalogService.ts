@@ -382,7 +382,9 @@ export class CatalogService {
       db.select().from(products).where(eq(products.id, id)).limit(1),
       db.select().from(productVariants).where(eq(productVariants.productId, id)),
       db.select().from(productImages).where(eq(productImages.productId, id)),
-      db.select().from(reviews).where(eq(reviews.productId, id)).orderBy(desc(reviews.createdAt)).limit(10),
+      // FASE D17-C2 — só reviews com status='approved' (nenhuma moderação
+      // nova criada aqui, apenas respeitando o status já existente no schema).
+      db.select().from(reviews).where(and(eq(reviews.productId, id), eq(reviews.status, 'approved'))).orderBy(desc(reviews.createdAt)).limit(10),
       db.select().from(productAttributes).where(eq(productAttributes.productId, id)),
     ]);
 
@@ -458,7 +460,20 @@ export class CatalogService {
       images: imageUrlList.length > 0 ? imageUrlList : (p.image ? [p.image] : []),
       galleryImages: imageUrlList.length > 0 ? imageUrlList : (p.image ? [p.image] : []),
       productImages: imagesRes,
-      recentReviews: reviewsRes,
+      // FASE D17-C2 — corrige mismatch confirmado na auditoria D17-C1:
+      // ProductDetailView.tsx sempre leu `product.reviews` (rev.id/rating/
+      // title/comment/date/likes), mas este objeto só anexava
+      // `recentReviews` (sem nenhum consumidor) — a leitura real do banco
+      // nunca chegava à UI. Mapeado aqui para o formato que a UI já espera,
+      // sem alterar ProductDetailView.tsx.
+      reviews: reviewsRes.map((r) => ({
+        id: r.id,
+        rating: r.rating,
+        title: r.title || '',
+        comment: r.comment,
+        date: r.createdAt.toLocaleDateString('pt-BR'),
+        likes: r.helpfulCount || 0,
+      })),
     };
 
     if (!executor) {

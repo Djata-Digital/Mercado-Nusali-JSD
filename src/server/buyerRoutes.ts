@@ -200,18 +200,11 @@ export interface BuyerChatThread {
   messages: BuyerChatMessage[];
 }
 
-export interface BuyerReview {
-  id: string;
-  productId: string;
-  productTitle: string;
-  productImage: string;
-  rating: number;
-  title: string;
-  comment: string;
-  date: string;
-  verifiedPurchase: boolean;
-  likes: number;
-}
+// FASE D17-C2 — interface BuyerReview (mock) removida: reviews agora são
+// persistidas de verdade na tabela `reviews` (schema.ts); GET /buyer/reviews
+// monta o mesmo formato de saída inline, sem precisar de um tipo próprio
+// aqui (o tipo do frontend, em src/services/buyerService.ts, é independente
+// e não foi alterado).
 
 export interface BuyerSupportTicket {
   id: string;
@@ -251,8 +244,6 @@ export const buyerDataStore = {
   notifications: [] as any[],
 
   chats: [] as any[],
-
-  reviews: [] as any[],
 };
 
 // ==========================================
@@ -2477,40 +2468,163 @@ buyerRouter.post('/messages/:chatId', async (req: Request, res: Response) => {
 // 12. REVIEWS & RATINGS
 // ==========================================
 
-buyerRouter.get('/reviews', (req: Request, res: Response) => {
-  return res.json({
-    success: true,
-    data: buyerDataStore.reviews,
-  });
+// FASE D17-C2 — aposenta buyerDataStore.reviews (mock em memória). Lista
+// reais do usuário autenticado (nunca de outro usuário — req.user.id vem
+// exclusivamente do JWT verificado por requireAuth, router-wide, linha 75).
+// Formato de saída preservado (BuyerReview: productTitle/productImage via
+// join, date formatada, verifiedPurchase/likes mapeados de isVerifiedPurchase/
+// helpfulCount) para não exigir mudança em MyReviewsView.tsx nesta fase.
+buyerRouter.get('/reviews', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+
+    const rows = await db
+      .select({
+        id: reviews.id,
+        productId: reviews.productId,
+        productTitle: products.title,
+        productImage: products.image,
+        rating: reviews.rating,
+        title: reviews.title,
+        comment: reviews.comment,
+        createdAt: reviews.createdAt,
+        isVerifiedPurchase: reviews.isVerifiedPurchase,
+        helpfulCount: reviews.helpfulCount,
+      })
+      .from(reviews)
+      .leftJoin(products, eq(reviews.productId, products.id))
+      .where(eq(reviews.userId, req.user.id))
+      .orderBy(desc(reviews.createdAt));
+
+    const data = rows.map((r) => ({
+      id: r.id,
+      productId: r.productId,
+      productTitle: r.productTitle || 'Produto Nusali',
+      productImage: r.productImage || '',
+      rating: r.rating,
+      title: r.title || '',
+      comment: r.comment,
+      date: r.createdAt.toLocaleDateString('pt-BR'),
+      verifiedPurchase: r.isVerifiedPurchase === true,
+      likes: r.helpfulCount || 0,
+    }));
+
+    return res.json({ success: true, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
 });
 
-buyerRouter.post('/reviews', (req: Request, res: Response) => {
-  const { productId, productTitle, rating, title, comment } = req.body;
+// FASE D17-C2 — aposenta o mock de criação de review (buyerDataStore.reviews
+// + BuyerReview fabricada sem nenhuma prova de compra). Persiste de verdade
+// em `reviews`, só depois de provar server-side a cadeia completa:
+// JWT user -> orders.buyerId -> orders.status='delivered' ->
+// order_items.productId — nunca aceita userId/authorName/authorCountry/
+// isVerifiedPurchase/status/helpfulCount do cliente, todos determinados
+// aqui. D17-C3 tratará products.rating/reviewsCount separadamente — esta
+// fase deliberadamente NÃO os recalcula (ver auditoria D17-C1/ticket D17-C2).
+buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
 
-  if (!productId || !rating) {
-    return res.status(400).json({ success: false, message: 'Produto e nota (rating) são obrigatórios.' });
+    const { productId, orderId, rating, title, comment } = req.body;
+
+    if (!productId || typeof productId !== 'string') {
+      return res.status(400).json({ success: false, error: { code: 'REVIEW_PRODUCT_REQUIRED', message: 'Produto é obrigatório.' } });
+    }
+    if (!orderId || typeof orderId !== 'string') {
+      return res.status(400).json({ success: false, error: { code: 'REVIEW_ORDER_REQUIRED', message: 'Pedido é obrigatório.' } });
+    }
+    const ratingNum = Number(rating);
+    if (!Number.isInteger(ratingNum) || ratingNum < 1 || ratingNum > 5) {
+      return res.status(400).json({ success: false, error: { code: 'REVIEW_RATING_INVALID', message: 'A nota deve ser um número inteiro entre 1 e 5.' } });
+    }
+    const trimmedComment = typeof comment === 'string' ? comment.trim() : '';
+    if (!trimmedComment) {
+      return res.status(400).json({ success: false, error: { code: 'REVIEW_COMMENT_REQUIRED', message: 'O comentário é obrigatório.' } });
+    }
+    const trimmedTitle = typeof title === 'string' && title.trim() ? title.trim().slice(0, 255) : null;
+
+    // PASSO 6 — prova real de compra entregue: JWT user -> orders.buyerId ->
+    // orders.status='delivered' -> order_items.productId. Qualquer falha
+    // nesta cadeia rejeita a criação, sem exceção.
+    const [order] = await db.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+    if (!order) {
+      return res.status(404).json({ success: false, error: { code: 'REVIEW_ORDER_NOT_FOUND', message: 'Pedido não encontrado.' } });
+    }
+    if (order.buyerId !== req.user.id) {
+      return res.status(403).json({ success: false, error: { code: 'REVIEW_ORDER_NOT_OWNED', message: 'Este pedido não pertence a você.' } });
+    }
+    if (order.status !== 'delivered') {
+      return res.status(403).json({ success: false, error: { code: 'REVIEW_ORDER_NOT_DELIVERED', message: 'Só é possível avaliar produtos de pedidos já entregues.' } });
+    }
+    const [orderItemRow] = await db
+      .select({ id: orderItems.id })
+      .from(orderItems)
+      .where(and(eq(orderItems.orderId, orderId), eq(orderItems.productId, productId)))
+      .limit(1);
+    if (!orderItemRow) {
+      return res.status(403).json({ success: false, error: { code: 'REVIEW_PRODUCT_NOT_IN_ORDER', message: 'Este produto não faz parte do pedido informado.' } });
+    }
+
+    // PASSO 10 — precheck amigável (a UNIQUE(userId,productId,orderId) do
+    // Postgres continua sendo a garantia final contra concorrência real,
+    // capturada abaixo).
+    const [existingReview] = await db
+      .select({ id: reviews.id })
+      .from(reviews)
+      .where(and(eq(reviews.userId, req.user.id), eq(reviews.productId, productId), eq(reviews.orderId, orderId)))
+      .limit(1);
+    if (existingReview) {
+      return res.status(409).json({ success: false, error: { code: 'REVIEW_ALREADY_EXISTS', message: 'Você já avaliou este produto para este pedido.' } });
+    }
+
+    const newReview = {
+      id: `rev_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      productId,
+      orderId,
+      userId: req.user.id,
+      rating: ratingNum,
+      title: trimmedTitle,
+      comment: trimmedComment,
+      // Snapshot server-side, nunca aceito do cliente — mesmo formato já
+      // usado para req.user (claims verificadas do JWT, ver authMiddleware.ts).
+      authorName: req.user.fullName || 'Comprador Nusali',
+      authorCountry: req.user.countryCode || 'GW',
+      // PASSO 8 — só chega aqui se a cadeia acima já provou a compra
+      // entregue; nesta fase não existe review não-verificada.
+      isVerifiedPurchase: true,
+      helpfulCount: 0,
+      status: 'approved',
+      createdAt: new Date(),
+    };
+
+    try {
+      await db.insert(reviews).values(newReview);
+    } catch (err: any) {
+      // Mesma correção já aplicada em outros pontos do projeto (D16-H2):
+      // DrizzleQueryError pode envolver o erro real do pg em err.cause.
+      if (err?.code === '23505' || err?.cause?.code === '23505') {
+        return res.status(409).json({ success: false, error: { code: 'REVIEW_ALREADY_EXISTS', message: 'Você já avaliou este produto para este pedido.' } });
+      }
+      throw err;
+    }
+
+    // Mesmo padrão já usado em sellerRoutes.ts/catalogService.ts após
+    // mutações de produto: sem isso, a review real só apareceria no Product
+    // Detail depois do cache de 120s expirar (getProductById).
+    await delCache(`product:${productId}`);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Avaliação publicada com sucesso! Obrigado pelo feedback.',
+      data: newReview,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
   }
-
-  const newReview: BuyerReview = {
-    id: `rev-${Date.now()}`,
-    productId,
-    productTitle: productTitle || 'Produto Nusali',
-    productImage: 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?auto=format&fit=crop&q=80&w=800',
-    rating: Number(rating) || 5,
-    title: title || 'Excelente produto',
-    comment: comment || '',
-    date: 'Hoje',
-    verifiedPurchase: true,
-    likes: 0,
-  };
-
-  buyerDataStore.reviews.unshift(newReview);
-
-  return res.json({
-    success: true,
-    message: 'Avaliação publicada com sucesso! Obrigado pelo feedback.',
-    data: newReview,
-  });
 });
 
 // ==========================================
