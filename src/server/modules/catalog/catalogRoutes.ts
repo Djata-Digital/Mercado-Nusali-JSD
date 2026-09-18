@@ -134,6 +134,108 @@ export async function getProductByIdHandler(req: Request, res: Response) {
   }
 }
 
+// FASE D17-B1 — GET /api/v1/products/:id/recommendations
+//
+// Motor determinístico (sem IA/ML, sem randomização): reaproveita
+// EXCLUSIVAMENTE CatalogService.getProducts() — nunca uma segunda
+// implementação das regras de elegibilidade/publicação/origem. Mesmo padrão
+// de resolução de destino/origem/GLOBAL_ADMIN de getProductsHandler acima
+// (nunca confia em nada "administrativo" vindo do cliente — isGlobalCatalogAdmin
+// deriva só do JWT verificado).
+//
+// Estratégia (D17-A confirmou que categoria/loja são os únicos sinais reais
+// e imediatamente utilizáveis nesta fase — rating/reviewsCount/brandId/
+// sales_desc explicitamente adiados):
+//   relatedProducts   = mesma categoria do produto base (excluindo-o).
+//   sameStoreProducts = mesma loja do produto base (excluindo-o), []
+//                       se o produto não tiver storeId.
+//   youMayAlsoLike    = "sobra" determinística do MESMO pool de categoria
+//                       (buscado com uma folga de FETCH_LIMIT, nunca uma
+//                       terceira query/algoritmo novo), depois de remover o
+//                       que já foi usado em relatedProducts/sameStoreProducts.
+//                       SEM fallback para "outros produtos elegíveis do
+//                       catálogo" (PASSO 6 do ticket pediu explicitamente
+//                       para NÃO inventar esse preenchimento nesta fase) —
+//                       se a categoria não tiver sobra, a seção volta menor
+//                       ou vazia, nunca inventa candidato.
+// Deduplicação sempre nesta ordem de posse: relatedProducts ->
+// sameStoreProducts -> youMayAlsoLike (um produto nunca aparece 2x).
+export async function getProductRecommendationsHandler(req: Request, res: Response) {
+  try {
+    const { id } = req.params;
+
+    const baseProduct = await CatalogService.getProductBaseInfo(id);
+    if (!baseProduct) {
+      return res.status(404).json({
+        success: false,
+        error: { code: 'PRODUCT_NOT_FOUND', message: 'Produto não encontrado.' },
+      });
+    }
+
+    // Mesma técnica de resolução de destino/origem/admin de getProductsHandler
+    // acima — nunca uma segunda regra. isGlobalCatalogAdmin deriva SOMENTE do
+    // JWT já verificado (getOptionalAuthUser nunca lê query/body/header
+    // customizado), nunca de um parâmetro do cliente.
+    const isAdminCatalogView = isGlobalCatalogAdmin(getOptionalAuthUser(req));
+    const explicitDestination = typeof req.query.destinationCountry === 'string' ? req.query.destinationCountry : undefined;
+    const destinationCountry = isAdminCatalogView ? undefined : resolveDestinationCountryFromRequest(req, explicitDestination);
+    const originCountryFilter = typeof req.query.originCountryFilter === 'string' ? req.query.originCountryFilter : undefined;
+
+    const SECTION_LIMIT = 12;
+    // Pequena folga: cobre a deduplicação entre seções sem precisar de uma
+    // terceira consulta separada para youMayAlsoLike.
+    const FETCH_LIMIT = 18;
+
+    const [relatedResult, sameStoreResult] = await Promise.all([
+      baseProduct.categoryId
+        ? CatalogService.getProducts({
+            category: baseProduct.categoryId,
+            country: destinationCountry,
+            originCountryFilter,
+            excludeProductId: id,
+            limit: FETCH_LIMIT,
+          })
+        : Promise.resolve({ products: [] as any[], pagination: { total: 0, page: 1, limit: FETCH_LIMIT, totalPages: 0 } }),
+      baseProduct.storeId
+        ? CatalogService.getProducts({
+            storeId: baseProduct.storeId,
+            country: destinationCountry,
+            originCountryFilter,
+            excludeProductId: id,
+            limit: FETCH_LIMIT,
+          })
+        : Promise.resolve({ products: [] as any[], pagination: { total: 0, page: 1, limit: FETCH_LIMIT, totalPages: 0 } }),
+    ]);
+
+    const relatedProducts = relatedResult.products.slice(0, SECTION_LIMIT);
+    const relatedIds = new Set(relatedProducts.map((p: any) => p.id));
+
+    const sameStoreProducts = sameStoreResult.products
+      .filter((p: any) => !relatedIds.has(p.id))
+      .slice(0, SECTION_LIMIT);
+    const sameStoreIds = new Set(sameStoreProducts.map((p: any) => p.id));
+
+    const youMayAlsoLike = relatedResult.products
+      .filter((p: any) => !relatedIds.has(p.id) && !sameStoreIds.has(p.id))
+      .slice(0, SECTION_LIMIT);
+
+    return res.json({
+      success: true,
+      data: {
+        productId: id,
+        relatedProducts,
+        sameStoreProducts,
+        youMayAlsoLike,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'SERVER_ERROR', message: err.message },
+    });
+  }
+}
+
 // GET /api/v1/categories
 catalogRouter.get('/categories', async (req: Request, res: Response) => {
   try {

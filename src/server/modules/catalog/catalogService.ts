@@ -1,7 +1,7 @@
 import { getDb } from '../../../db/index.js';
 import { products, categories, brands, productVariants, productImages, productAttributes, reviews, sellers, stores, inventory, orderItems, orders, countries } from '../../../db/schema.js';
 import { getCache, setCache, delCache } from '../../../db/redis.js';
-import { eq, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
+import { eq, ne, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { isProductAvailableForCountry, eligibilityReason } from './productEligibilityService.js';
 
@@ -140,6 +140,12 @@ export interface ProductQueryFilters {
   originCountryFilter?: string;
   storeId?: string;
   brand?: string;
+  // FASE D17-B1 — usado exclusivamente por recomendações (GET /products/:id/
+  // recommendations) para nunca recomendar o próprio produto que o comprador
+  // já está vendo. Faz parte do objeto `filters` espalhado na cacheKey logo
+  // abaixo (nenhuma mudança necessária na própria chave) — uma resposta
+  // cacheada para excludeProductId=A nunca é reutilizada para B.
+  excludeProductId?: string;
   minPrice?: number;
   maxPrice?: number;
   freeShipping?: boolean;
@@ -221,6 +227,14 @@ export class CatalogService {
     // heurística de texto no nome do seller.
     if (filters.storeId) {
       conditions.push(eq(products.storeId, filters.storeId));
+    }
+
+    // FASE D17-B1 — exclui o próprio produto (recomendações nunca sugerem o
+    // produto que o comprador já está vendo). Nunca afeta nenhum outro
+    // chamador existente (Home/Search/Category/Store/Favorites/AIAssistant)
+    // porque nenhum deles passa excludeProductId.
+    if (filters.excludeProductId) {
+      conditions.push(ne(products.id, filters.excludeProductId));
     }
 
     if (filters.brand) {
@@ -309,6 +323,26 @@ export class CatalogService {
     }
 
     return result;
+  }
+
+  // FASE D17-B1 — lookup mínimo para recomendações (GET /products/:id/
+  // recommendations): precisa SOMENTE de id/categoryId/storeId para montar
+  // os filtros das seções, nunca variantes/imagens/reviews/estoque ao vivo
+  // (isso é getProductById, para a própria página de detalhe — nunca uma
+  // segunda implementação de Product Detail). Sem filtro de isActive/status:
+  // mesmo critério de "existe?" já usado por getProductById (404 só quando
+  // não há NENHUMA linha com esse id).
+  static async getProductBaseInfo(id: string, executor?: any): Promise<{ id: string; categoryId: string | null; storeId: string | null } | null> {
+    const db = executor ?? getDb();
+    if (!db) return null;
+
+    const rows = await db
+      .select({ id: products.id, categoryId: products.categoryId, storeId: products.storeId })
+      .from(products)
+      .where(eq(products.id, id))
+      .limit(1);
+
+    return rows[0] ?? null;
   }
 
   static async getProductById(id: string, destinationCountry?: string, executor?: any) {

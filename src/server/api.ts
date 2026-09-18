@@ -5,7 +5,7 @@ import { buyerRouter } from './buyerRoutes.js';
 import { pixRouter } from './pixRoutes.js';
 import { ratesRouter } from './ratesRoutes.js';
 import { authRouter } from './modules/auth/authRoutes.js';
-import { catalogRouter, getProductsHandler, getProductByIdHandler } from './modules/catalog/catalogRoutes.js';
+import { catalogRouter, getProductsHandler, getProductByIdHandler, getProductRecommendationsHandler } from './modules/catalog/catalogRoutes.js';
 import { shipmentRouter } from './modules/logistics/shipmentRoutes.js';
 import { orderRouter } from './modules/orders/orderRoutes.js';
 import { paymentRouter } from './modules/payments/paymentRoutes.js';
@@ -526,6 +526,10 @@ apiRouter.get('/products/search', async (req: Request, res: Response) => {
 // implementação de catalogRoutes.ts (CatalogService.getProductById), agora
 // finalmente reachable no caminho real que o frontend chama.
 apiRouter.get('/products/:id', getProductByIdHandler);
+
+// FASE D17-B1 — produtos relacionados/mesma loja/você também pode gostar
+// (motor determinístico, sem IA/ML, reaproveitando CatalogService.getProducts).
+apiRouter.get('/products/:id/recommendations', getProductRecommendationsHandler);
 
 apiRouter.patch('/products/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
