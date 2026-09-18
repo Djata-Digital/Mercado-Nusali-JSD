@@ -69,7 +69,7 @@ import {
 // FASE D16-H2 — computeLiveStockAndSales reaproveitada para o mesmo cálculo
 // (onHand-reserved) do lado de produto SIMPLES (sem variante), mesma fonte
 // única de verdade do catálogo — nunca uma segunda fórmula divergente.
-import { computeLiveVariantStock, computeLiveStockAndSales, recomputeProductReviewAggregates } from './modules/catalog/catalogService.js';
+import { computeLiveVariantStock, computeLiveStockAndSales, recomputeProductReviewAggregates, lockProductRowForReviewMutation } from './modules/catalog/catalogService.js';
 import { isOwnedPublicObjectUrl } from './infra/storage.js';
 
 export const buyerRouter = Router();
@@ -2634,12 +2634,17 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
     try {
       // FASE D17-C3 — INSERT da review + recompute do agregado (rating/
       // reviewsCount) na MESMA transaction: nunca ficam divergentes, e o
-      // lock FOR UPDATE dentro de recomputeProductReviewAggregates serializa
-      // corretamente duas reviews concorrentes para o mesmo produto (ver
-      // catalogService.ts). O tratamento de duplicidade (23505) do D17-C2
+      // lock FOR UPDATE do produto (tomado ANTES do INSERT, ver D17-C8.3)
+      // serializa corretamente duas reviews concorrentes para o mesmo
+      // produto (ver catalogService.ts). O tratamento de duplicidade (23505) do D17-C2
       // continua idêntico — se o INSERT falhar por UNIQUE, a transaction
       // inteira é revertida (nenhum agregado tocado).
       aggregates = await db.transaction(async (tx) => {
+        // FASE D17-C8.3 — lock do produto ANTES do INSERT (ver comentário em
+        // lockProductRowForReviewMutation): evita o deadlock 40P01 entre
+        // duas reviews concorrentes do mesmo produto. O lock serializa as
+        // transactions aqui; a segunda espera a primeira commitar.
+        await lockProductRowForReviewMutation(productId, tx);
         await tx.insert(reviews).values(newReview);
         // FASE D17-C7 — inserido na MESMA transaction do review: nunca fica
         // uma review sem suas fotos (ou vice-versa) por uma falha a meio
@@ -2656,7 +2661,7 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
             }))
           );
         }
-        return recomputeProductReviewAggregates(productId, tx);
+        return recomputeProductReviewAggregates(productId, tx, { productAlreadyLocked: true });
       });
     } catch (err: any) {
       // Mesma correção já aplicada em outros pontos do projeto (D16-H2):

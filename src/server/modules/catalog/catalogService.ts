@@ -146,8 +146,27 @@ export async function computeLiveVariantStock(variantIds: string[], executor?: a
 // sua própria leitura de `reviews` já enxerga a review da primeira chamada
 // — nunca uma leitura parcial, nunca um "count=1" sobrescrevendo um
 // "count=2" já commitado.
-export async function recomputeProductReviewAggregates(productId: string, executor: any): Promise<{ rating: string; reviewsCount: number }> {
+//
+// FASE D17-C8.3 — ORDEM DE LOCKS. O INSERT em `reviews` toma FOR KEY SHARE na
+// linha de `products` (FK reviews.product_id), que conflita com FOR UPDATE.
+// Se cada transaction fizesse INSERT e só depois FOR UPDATE, duas reviews
+// concorrentes do mesmo produto entravam em deadlock (40P01). Quem insere uma
+// review DEVE chamar lockProductRowForReviewMutation ANTES do INSERT e depois
+// passar { productAlreadyLocked: true } aqui. Chamadores que não fizeram isso
+// simplesmente usam o default (este helper toma o lock sozinho) e continuam
+// seguros.
+export async function lockProductRowForReviewMutation(productId: string, executor: any): Promise<void> {
   await executor.select({ id: products.id }).from(products).where(eq(products.id, productId)).for('update');
+}
+
+export async function recomputeProductReviewAggregates(
+  productId: string,
+  executor: any,
+  options: { productAlreadyLocked?: boolean } = {}
+): Promise<{ rating: string; reviewsCount: number }> {
+  if (!options.productAlreadyLocked) {
+    await lockProductRowForReviewMutation(productId, executor);
+  }
 
   const [agg] = await executor
     .select({
