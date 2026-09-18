@@ -3,8 +3,8 @@ import { CatalogService } from './catalogService.js';
 import { requireAuth, requireRole, AuthRequest, getOptionalAuthUser } from '../auth/authMiddleware.js';
 import { isGlobalCatalogAdmin } from '../auth/scopeService.js';
 import { getDb } from '../../../db/index.js';
-import { products, categories, productVariants, productImages, categoryAttributes, productAttributes } from '../../../db/schema.js';
-import { eq, or, inArray, asc } from 'drizzle-orm';
+import { products, categories, productVariants, productImages, categoryAttributes, productAttributes, productQuestions, productAnswers, users } from '../../../db/schema.js';
+import { eq, or, inArray, asc, desc, and } from 'drizzle-orm';
 import { z } from 'zod';
 
 import { buildCategoryTree } from '../../../utils/categoryUtils.js';
@@ -233,6 +233,148 @@ export async function getProductRecommendationsHandler(req: Request, res: Respon
       success: false,
       error: { code: 'SERVER_ERROR', message: err.message },
     });
+  }
+}
+
+// FASE D17-C4 — limite de tamanho de pergunta. Mesmo padrão já usado para
+// texto livre de comprador (DISPUTE_MESSAGE_MAX_LENGTH em
+// disputeMessageService.ts: constante nomeada + validação trim().length),
+// mas com um valor próprio: uma pergunta de produto é naturalmente curta
+// ("Tem tamanho GG?"), nunca uma narrativa de disputa — reaproveitar o MESMO
+// número (4000) seria desproporcional ao conteúdo real.
+export const PRODUCT_QUESTION_MAX_LENGTH = 1000;
+
+// GET /api/v1/products/:id/questions — público, sem autenticação.
+//
+// FASE D17-C4 — substitui o falso fluxo do frontend (fetch a
+// /api/gemini/seller-answer, que nunca existiu no backend). Retorna
+// perguntas publicáveis e as respostas reais de product_answers agrupadas
+// por pergunta (nunca N+1: 1 query de perguntas + 1 query de respostas por
+// lote, agrupamento em memória). Campos públicos mínimos: NUNCA
+// email/telefone/JWT/sellerId interno.
+//
+// Status publicáveis = 'published' (recém-criada, ainda sem resposta) E
+// 'answered' (POST /seller/questions/:id/answer, já corrigido em D17-C1.1,
+// atualiza para este valor) — as DUAS são etapas normais do mesmo ciclo de
+// vida de uma pergunta real, nunca um estado de moderação/rejeição. Filtrar
+// só por 'published' esconderia TODA pergunta já respondida, o que
+// quebraria exatamente o fluxo que este ticket pediu para fechar (PASSO 16:
+// buyer pergunta -> seller responde -> GET público mostra a resposta).
+// Nenhuma moderação nova criada aqui — só os dois valores que o schema já
+// escreve de verdade hoje.
+export async function getProductQuestionsHandler(req: Request, res: Response) {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Banco de dados indisponível.' } });
+
+    const { id } = req.params;
+    const [product] = await db.select({ id: products.id }).from(products).where(eq(products.id, id)).limit(1);
+    if (!product) {
+      return res.status(404).json({ success: false, error: { code: 'PRODUCT_NOT_FOUND', message: 'Produto não encontrado.' } });
+    }
+
+    const questionRows = await db
+      .select({
+        id: productQuestions.id,
+        question: productQuestions.question,
+        createdAt: productQuestions.createdAt,
+        authorName: users.fullName,
+      })
+      .from(productQuestions)
+      .leftJoin(users, eq(productQuestions.userId, users.id))
+      .where(and(eq(productQuestions.productId, id), inArray(productQuestions.status, ['published', 'answered'])))
+      .orderBy(desc(productQuestions.createdAt));
+
+    const questionIds = questionRows.map((q) => q.id);
+    const answerRows = questionIds.length > 0
+      ? await db
+          .select({
+            id: productAnswers.id,
+            questionId: productAnswers.questionId,
+            answer: productAnswers.answer,
+            isSeller: productAnswers.isSeller,
+            createdAt: productAnswers.createdAt,
+          })
+          .from(productAnswers)
+          .where(inArray(productAnswers.questionId, questionIds))
+          .orderBy(asc(productAnswers.createdAt))
+      : [];
+
+    const answersByQuestion = new Map<string, any[]>();
+    for (const a of answerRows) {
+      const list = answersByQuestion.get(a.questionId) || [];
+      list.push({ id: a.id, answer: a.answer, isSeller: a.isSeller, createdAt: a.createdAt });
+      answersByQuestion.set(a.questionId, list);
+    }
+
+    const data = questionRows.map((q) => ({
+      id: q.id,
+      question: q.question,
+      createdAt: q.createdAt,
+      authorName: q.authorName || 'Comprador Nusali',
+      answers: answersByQuestion.get(q.id) || [],
+    }));
+
+    return res.json({ success: true, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: err.message } });
+  }
+}
+
+// POST /api/v1/products/:id/questions — autenticado (requireAuth aplicado
+// no registro da rota, api.ts).
+//
+// FASE D17-C4 — productId vem EXCLUSIVAMENTE de req.params.id (nunca do
+// body); userId vem EXCLUSIVAMENTE de req.user.id (JWT verificado, nunca do
+// body). Qualquer comprador autenticado pode perguntar — NÃO exige compra
+// comprovada (pergunta não é review, ver D17-C2 para a exigência real de
+// compra entregue, que é exclusiva de reviews).
+export async function createProductQuestionHandler(req: AuthRequest, res: Response) {
+  try {
+    const db = getDb();
+    if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+
+    const { id } = req.params;
+    const [product] = await db.select({ id: products.id }).from(products).where(eq(products.id, id)).limit(1);
+    if (!product) {
+      return res.status(404).json({ success: false, error: { code: 'PRODUCT_NOT_FOUND', message: 'Produto não encontrado.' } });
+    }
+
+    const trimmedQuestion = typeof req.body?.question === 'string' ? req.body.question.trim() : '';
+    if (!trimmedQuestion) {
+      return res.status(400).json({ success: false, error: { code: 'QUESTION_REQUIRED', message: 'A pergunta é obrigatória.' } });
+    }
+    if (trimmedQuestion.length > PRODUCT_QUESTION_MAX_LENGTH) {
+      return res.status(400).json({ success: false, error: { code: 'QUESTION_TOO_LONG', message: `A pergunta excede o limite de ${PRODUCT_QUESTION_MAX_LENGTH} caracteres.` } });
+    }
+
+    const newQuestion = {
+      id: `q_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+      productId: id,
+      userId: req.user.id,
+      question: trimmedQuestion,
+      // FASE D17-C4 — sem moderação implementada (nenhuma criada aqui):
+      // usa o mesmo estado publicável já previsto pelo default do schema
+      // ('published'), nunca uma aprovação manual inventada.
+      status: 'published',
+      createdAt: new Date(),
+    };
+
+    await db.insert(productQuestions).values(newQuestion);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Pergunta enviada com sucesso!',
+      data: {
+        id: newQuestion.id,
+        question: newQuestion.question,
+        createdAt: newQuestion.createdAt,
+        authorName: req.user.fullName || 'Comprador Nusali',
+        answers: [] as any[],
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: { code: 'SERVER_ERROR', message: err.message } });
   }
 }
 

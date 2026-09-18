@@ -44,6 +44,32 @@ export const useProductRecommendations = (id: string, destinationCountry?: strin
   });
 };
 
+// FASE D17-C4 — Perguntas e Respostas reais (GET público, sem token
+// obrigatório — o backend não exige autenticação para listar).
+export const useProductQuestions = (productId: string) => {
+  return useQuery({
+    queryKey: ['product-questions', productId],
+    queryFn: async () => {
+      const res = await ProductService.getProductQuestions(productId);
+      return res.data;
+    },
+    enabled: !!productId,
+  });
+};
+
+// Mesmo padrão já usado por useCreateProduct acima: useMutation +
+// invalidateQueries da própria query de leitura, para a pergunta aparecer
+// na lista imediatamente após o sucesso, sem depender de refresh manual.
+export const useCreateProductQuestion = (productId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (question: string) => ProductService.createProductQuestion(productId, question),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['product-questions', productId] });
+    },
+  });
+};
+
 export const useCategories = () => {
   return useQuery({
     queryKey: ['categories'],

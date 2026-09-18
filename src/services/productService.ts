@@ -47,6 +47,16 @@ export const ProductService = {
     };
   },
 
+  // FASE D17-C4 — Perguntas e Respostas reais (substitui o falso fluxo
+  // /api/gemini/seller-answer, que nunca chegou a existir no backend).
+  async getProductQuestions(productId: string): Promise<ApiResponse<any[]>> {
+    return ProductsApi.getQuestions(productId);
+  },
+
+  async createProductQuestion(productId: string, question: string): Promise<ApiResponse<any>> {
+    return ProductsApi.createQuestion(productId, question);
+  },
+
   async getCategories(): Promise<ApiResponse<Category[]>> {
     return CategoriesApi.list();
   },

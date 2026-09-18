@@ -39,7 +39,7 @@ import {
   Loader2,
   Package,
 } from 'lucide-react';
-import { useProduct, useProducts } from '../hooks/useProducts';
+import { useProduct, useProducts, useProductQuestions, useCreateProductQuestion } from '../hooks/useProducts';
 import { useCart } from '../hooks/useCart';
 import { useFavorites } from '../hooks/useFavorites';
 import { usePreferences } from '../context/PreferencesContext';
@@ -82,6 +82,10 @@ export const ProductDetailView: React.FC = () => {
   // produto, só marca availableForCountry=false para travar a compra.
   const { data: fetchedProduct, isLoading, isError } = useProduct(isValidId ? id! : '', selectedCountry);
   const { data: allProducts = [] } = useProducts();
+  // FASE D17-C4 — Perguntas e Respostas reais (GET público, independente do
+  // produto já ter carregado — só precisa do id da URL).
+  const { data: productQuestions = [] } = useProductQuestions(isValidId ? id! : '');
+  const createQuestionMutation = useCreateProductQuestion(isValidId ? id! : '');
   const rawProduct = isValidId ? (fetchedProduct || allProducts.find((p) => p.id === id)) : null;
   const product = rawProduct ? normalizeProduct(rawProduct) : null;
   const isUnavailableForDestination = product?.availableForCountry === false;
@@ -104,7 +108,6 @@ export const ProductDetailView: React.FC = () => {
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [quantity, setQuantity] = useState(1);
   const [newQuestion, setNewQuestion] = useState('');
-  const [questionSubmitted, setQuestionSubmitted] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
 
   // Main video player preview state
@@ -339,8 +342,6 @@ export const ProductDetailView: React.FC = () => {
     [product, activeVariant]
   );
 
-  const [isAnsweringQuestion, setIsAnsweringQuestion] = useState(false);
-
   // FASE D16-G2 — a condição real de entrega (frete) precisa aparecer ANTES
   // de Comprar/Adicionar ao carrinho, não só depois de clicar em Comprar.
   // Usa o MESMO motor de decisão logística real do checkout (F4/F3 — smart
@@ -555,38 +556,36 @@ export const ProductDetailView: React.FC = () => {
   const isInternational = !!(product.shipping?.isInternational || product.publishingScope === 'international');
   const originCountry = product.originCountry || product.shipping?.originCountry || product.seller?.country || '';
 
-  // (isAnsweringQuestion, operationalCountriesForDelivery, buyerAddresses,
-  // defaultDeliveryAddress, destinationShippingSectorId, deliveryPreview e o
-  // useEffect do preview de frete agora são calculados mais acima, junto
-  // com os demais hooks — D16-G2.0.1 — mas a lógica em si é idêntica.)
+  // (operationalCountriesForDelivery, buyerAddresses, defaultDeliveryAddress,
+  // destinationShippingSectorId, deliveryPreview e o useEffect do preview de
+  // frete agora são calculados mais acima, junto com os demais hooks —
+  // D16-G2.0.1 — mas a lógica em si é idêntica.)
   const deliveryDestinationCountry = operationalCountriesForDelivery?.find((c) => c.code === selectedCountry);
 
+  // FASE D17-C4 — pergunta real, persistida em product_questions. Substitui
+  // o antigo fetch('/api/gemini/seller-answer'), um endpoint que nunca
+  // existiu no backend (a chamada sempre falhava silenciosamente, mas o
+  // `finally` ainda assim declarava sucesso). Sucesso só é mostrado depois
+  // de o POST realmente confirmar (dentro do try, nunca no finally); em
+  // caso de erro, o texto digitado é preservado (nunca limpo) e um toast de
+  // erro é mostrado — mesmo mecanismo de feedback já usado no resto desta
+  // página (showToast).
   const handleAskQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newQuestion.trim() || isAnsweringQuestion) return;
-
     const questionText = newQuestion.trim();
-    setNewQuestion('');
-    setIsAnsweringQuestion(true);
+    if (!questionText || createQuestionMutation.isPending) return;
+
+    if (!isAuthenticated) {
+      showToast('Faça login para perguntar ao vendedor.');
+      return;
+    }
 
     try {
-      const res = await fetch('/api/gemini/seller-answer', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          productTitle: product.title,
-          productSpecs: product.specs,
-          question: questionText,
-        }),
-      });
-      const data = await res.json();
-      console.log('Pergunta enviada com resposta:', data.answer);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsAnsweringQuestion(false);
-      setQuestionSubmitted(true);
-      setTimeout(() => setQuestionSubmitted(false), 3000);
+      await createQuestionMutation.mutateAsync(questionText);
+      setNewQuestion('');
+      showToast('Pergunta enviada com sucesso!');
+    } catch (err: any) {
+      showToast(err?.message || 'Não foi possível enviar sua pergunta. Tente novamente.');
     }
   };
 
@@ -1746,36 +1745,32 @@ export const ProductDetailView: React.FC = () => {
             />
             <button
               type="submit"
-              disabled={isAnsweringQuestion}
+              disabled={createQuestionMutation.isPending}
               className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-2.5 rounded-md text-sm transition disabled:opacity-60 shrink-0"
             >
-              {isAnsweringQuestion ? 'Vendedor respondendo...' : 'Perguntar'}
+              {createQuestionMutation.isPending ? 'Enviando...' : 'Perguntar'}
             </button>
           </div>
-          {questionSubmitted && (
-            <p className="text-xs text-green-700 font-semibold bg-green-50 p-2 rounded-md">
-              ✓ Pergunta enviada ao vendedor!
-            </p>
-          )}
         </form>
 
-        {/* Question List */}
+        {/* Question List — FASE D17-C4: dados reais (product_questions +
+            product_answers), nunca mais o mock nunca-preenchido product.questions. */}
         <div className="space-y-4 pt-2">
           <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">
             Últimas perguntas feitas:
           </h3>
-          {product.questions && product.questions.length > 0 ? (
-            product.questions.map((q) => (
+          {productQuestions.length > 0 ? (
+            productQuestions.map((q: any) => (
               <div key={q.id} className="space-y-1.5 text-xs border-b border-gray-100 pb-3">
                 <p className="font-medium text-gray-900 flex items-center gap-2">
                   <MessageSquare className="w-3.5 h-3.5 text-blue-600 shrink-0" />
                   {q.question}
                 </p>
-                {q.answer && (
-                  <p className="text-gray-600 pl-5 bg-gray-50 p-2 rounded-md border-l-2 border-blue-500">
-                    <strong className="text-gray-800">Resposta do vendedor:</strong> {q.answer}
+                {q.answers && q.answers.length > 0 && q.answers.map((a: any) => (
+                  <p key={a.id} className="text-gray-600 pl-5 bg-gray-50 p-2 rounded-md border-l-2 border-blue-500">
+                    <strong className="text-gray-800">Resposta do vendedor:</strong> {a.answer}
                   </p>
-                )}
+                ))}
               </div>
             ))
           ) : (

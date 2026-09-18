@@ -23,6 +23,17 @@ export class ProductsApi {
     return apiClient.get(`/products/${id}/recommendations`, Object.keys(query).length > 0 ? { params: query } : undefined);
   }
 
+  // FASE D17-C4 — Perguntas e Respostas reais. GET público (sem token
+  // obrigatório); POST exige sessão autenticada no backend (requireAuth) —
+  // productId sempre vem da URL, nunca do corpo.
+  static async getQuestions(productId: string): Promise<ApiResponse<any[]>> {
+    return apiClient.get(`/products/${productId}/questions`);
+  }
+
+  static async createQuestion(productId: string, question: string): Promise<ApiResponse<any>> {
+    return apiClient.post(`/products/${productId}/questions`, { question });
+  }
+
   static async create(data: any): Promise<ApiResponse<any>> {
     return apiClient.post('/products', data);
   }
