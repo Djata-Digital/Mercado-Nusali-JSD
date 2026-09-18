@@ -8,6 +8,16 @@ interface ProductRecommendationsSectionProps {
   productId: string;
 }
 
+// FASE D17-B3 — largura fixa por card (nunca `grid-cols-N`, que sempre
+// divide o container em N faixas iguais mesmo com 1 produto só, deixando o
+// card pequeno num canto de uma faixa enorme vazia). Com flex + largura
+// fixa por item, 1 produto ocupa só a própria largura e o resto da linha é
+// simplesmente o fundo natural da página — nunca uma caixa vazia. Mesma
+// proporção de itens por linha do grid anterior (2/3/4/5), só que calculada
+// como % do container menos a fatia do gap, então nunca depende da largura
+// específica do viewport de um ambiente em particular.
+const CARD_WIDTH_CLASSES = 'flex-none w-[calc(50%-0.5rem)] sm:w-[calc(33.3333%-0.6667rem)] md:w-[calc(25%-0.75rem)] lg:w-[calc(20%-0.8rem)]';
+
 // FASE D17-B2 — "Produtos relacionados" / "Mais desta loja" / "Você também
 // pode gostar", logo após a área principal do produto (galeria, variantes,
 // preço, frete, buy box, descrição, perguntas e avaliações continuam
@@ -30,11 +40,12 @@ export const ProductRecommendationsSection: React.FC<ProductRecommendationsSecti
 
   if (isLoading) {
     return (
-      <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xs space-y-4">
-        <div className="h-5 w-48 bg-gray-100 rounded animate-pulse" />
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+      <div>
+        <div className="h-5 w-48 bg-gray-100 rounded animate-pulse mb-3" />
+        <div className="border-b border-gray-200 mb-4" />
+        <div className="flex flex-wrap gap-4">
           {[1, 2, 3, 4, 5].map((n) => (
-            <div key={n} className="bg-gray-50 rounded-lg h-64 animate-pulse border border-gray-100" />
+            <div key={n} className={`${CARD_WIDTH_CLASSES} h-64 bg-gray-50 rounded-lg animate-pulse border border-gray-100`} />
           ))}
         </div>
       </div>
@@ -54,7 +65,7 @@ export const ProductRecommendationsSection: React.FC<ProductRecommendationsSecti
   }
 
   return (
-    <>
+    <div className="space-y-10">
       {relatedProducts.length > 0 && (
         <RecommendationBlock title="Produtos relacionados" products={relatedProducts} />
       )}
@@ -64,16 +75,19 @@ export const ProductRecommendationsSection: React.FC<ProductRecommendationsSecti
       {youMayAlsoLike.length > 0 && (
         <RecommendationBlock title="Você também pode gostar" products={youMayAlsoLike} />
       )}
-    </>
+    </div>
   );
 };
 
 const RecommendationBlock: React.FC<{ title: string; products: Product[] }> = ({ title, products }) => (
-  <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xs space-y-4">
-    <h2 className="text-lg font-bold text-gray-900 border-b border-gray-200 pb-3">{title}</h2>
-    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+  <div>
+    <h2 className="text-lg font-bold text-gray-900 mb-3">{title}</h2>
+    <div className="border-b border-gray-200 mb-4" />
+    <div className="flex flex-wrap gap-4">
       {products.map((product) => (
-        <ProductCard key={product.id} product={product} />
+        <div key={product.id} className={CARD_WIDTH_CLASSES}>
+          <ProductCard product={product} />
+        </div>
       ))}
     </div>
   </div>
