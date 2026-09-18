@@ -3253,24 +3253,45 @@ sellerRouter.get('/questions', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// FASE D17-C1.1 — corrige gap de autorização confirmado na auditoria D17-C1:
+// esta rota gravava uma resposta real em product_answers sem NENHUMA
+// verificação de que o vendedor autenticado é dono do produto da pergunta —
+// qualquer seller autenticado podia responder qualquer pergunta de qualquer
+// produto de qualquer loja. productId nunca vem do body (nunca confiável);
+// vem exclusivamente da própria pergunta já persistida no banco, e a posse é
+// verificada com a MESMA autoridade canônica já usada pelas rotas de produto
+// vizinhas (checkSellerProductOwnership) — nenhuma checagem paralela nova.
 sellerRouter.post('/questions/:id/answer', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
+    if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+
     const { id } = req.params;
     const { answerText } = req.body;
     if (!answerText) return res.status(400).json({ success: false, message: 'Texto da resposta é obrigatório.' });
 
-    if (db) {
-      await db.insert(productAnswers).values({
-        id: `ans_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        questionId: id,
-        userId: req.user?.id || 'system',
-        answer: answerText,
-        isSeller: true,
-        createdAt: new Date(),
-      });
-      await db.update(productQuestions).set({ status: 'answered' }).where(eq(productQuestions.id, id));
+    const [question] = await db.select().from(productQuestions).where(eq(productQuestions.id, id)).limit(1);
+    if (!question) {
+      return res.status(404).json({ success: false, error: { code: 'QUESTION_NOT_FOUND', message: 'Pergunta não encontrada.' } });
     }
+
+    const check = await checkSellerProductOwnership(db, req.user.id, question.productId);
+    if (!check.authorized) {
+      return res.status(check.status).json({ success: false, error: { code: check.code, message: check.error } });
+    }
+
+    // isSeller sempre true e nunca lido do body — resposta gravada por esta
+    // rota é sempre de um vendedor real, já comprovado dono do produto acima.
+    await db.insert(productAnswers).values({
+      id: `ans_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      questionId: id,
+      userId: req.user.id,
+      answer: answerText,
+      isSeller: true,
+      createdAt: new Date(),
+    });
+    await db.update(productQuestions).set({ status: 'answered' }).where(eq(productQuestions.id, id));
+
     return res.json({ success: true, message: 'Resposta enviada com sucesso ao cliente!' });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
