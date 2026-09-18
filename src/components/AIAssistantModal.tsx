@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Sparkles, X, Send, Bot, User } from 'lucide-react';
 import { useProducts } from '../hooks/useProducts';
+import { usePreferences } from '../context/PreferencesContext';
 import { NusaliLogo } from './NusaliLogo';
 
 interface Message {
@@ -12,7 +13,10 @@ interface Message {
 
 export const AIAssistantModal: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
-  const { data: products = [] } = useProducts();
+  // FASE D16-G1 — o assistente nunca deve sugerir produto inelegível para o
+  // destino atual (mesmo gap de D16-G0: useProducts() sem filtro nenhum).
+  const { selectedCountry, catalogOriginFilter } = usePreferences();
+  const { data: products = [] } = useProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);

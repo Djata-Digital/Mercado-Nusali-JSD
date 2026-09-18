@@ -50,6 +50,76 @@ export function resolveAdministrativeScope(user: { role?: string; countryCode?: 
   return { kind: 'GLOBAL' };
 }
 
+// ---------------------------------------------------------------------------
+// FASE D16-G1.1 — Admin Global Catalog Isolation.
+//
+// Deliberadamente MAIS ESTREITO que "scope.kind === 'GLOBAL'":
+// resolveAdministrativeScope() classifica como GLOBAL toda role que não é
+// territorialmente restrita (inclui FINANCE/SUPPORT/LOGISTICS* — ver
+// comentário no topo deste arquivo), mas isso é sobre restrição
+// TERRITORIAL, não sobre quem pode enxergar o catálogo administrativo
+// completo. Uma nova capacidade (ver TODOS os produtos, de qualquer
+// origem/publishingScope, sem elegibilidade de destino) não deve ser
+// concedida silenciosamente a essas outras roles internas só porque elas
+// também não têm país atribuído — por isso este helper checa
+// EXPLICITAMENTE ADMIN/GLOBAL_ADMIN, o mesmo par já tratado como
+// equivalente em requireRole() (authMiddleware.ts), AuthContext.tsx,
+// sellerRoutes.ts, Header.tsx, VerifyEmailPage.tsx.
+export function isGlobalCatalogAdmin(user: { role?: string } | undefined): boolean {
+  const role = (user?.role || '').toUpperCase();
+  return role === 'ADMIN' || role === 'GLOBAL_ADMIN';
+}
+
+// ---------------------------------------------------------------------------
+// FASE D16-G1.3 — Global Admin Hierarchy.
+//
+// Auditoria D16-G1.2 (Problema 2) encontrou um bloqueio INCONDICIONAL em
+// POST /admin/users: nem o próprio GLOBAL_ADMIN conseguia criar outro.
+// Extraída como função pura (mesmo padrão de isGlobalCatalogAdmin acima)
+// para que o handler real (adminRoutes.ts) e os testes chamem exatamente a
+// mesma lógica — nunca uma cópia reimplementada em cada lugar.
+//
+// Regra: criar um usuário com role=GLOBAL_ADMIN só é permitido quando quem
+// está chamando já é GLOBAL_ADMIN. Qualquer outra role solicitada (ADMIN,
+// SELLER, BUYER, COUNTRY_REPRESENTATIVE, REGIONAL_SUPERVISOR, ...) segue as
+// regras já existentes e inalteradas (o próprio router já exige
+// requireGlobalAdmin para esta rota inteira) — esta função só decide sobre
+// o caso específico de auto-replicação do papel mais privilegiado.
+export function canCreateRole(callerRole: string | undefined, requestedRole: string | undefined): boolean {
+  const requested = (requestedRole || '').toUpperCase();
+  if (requested !== 'GLOBAL_ADMIN') return true;
+  return (callerRole || '').toUpperCase() === 'GLOBAL_ADMIN';
+}
+
+// ---------------------------------------------------------------------------
+// FASE D16-G1.5 — Recuperação Segura de Acesso de GLOBAL_ADMIN.
+//
+// POST /admin/users/:id/reset-password bloqueava incondicionalmente
+// qualquer reset cujo ALVO fosse GLOBAL_ADMIN — deixando um segundo
+// GLOBAL_ADMIN que perdeu a senha temporária de criação sem NENHUM caminho
+// de recuperação. Esta função decide especificamente sobre esse caso
+// (mesmo padrão de canCreateRole acima — pura, testável, chamada tanto
+// pelo handler real quanto pelos testes).
+//
+// A checagem de autorreset (actor.id === target.id) fica FORA desta
+// função, feita no handler com uma mensagem própria e amigável — nunca é
+// uma questão de role, é sempre proibida independente de quem for o ator.
+//
+// Regras:
+//   alvo != GLOBAL_ADMIN -> sempre permitido (comportamento já existente,
+//     inalterado — esta rota já exige requireGlobalAdmin no router, então
+//     quem chama já é garantidamente GLOBAL_ADMIN ou ADMIN... na prática
+//     só GLOBAL_ADMIN, ver requireGlobalAdmin).
+//   alvo == GLOBAL_ADMIN -> permitido SOMENTE se quem chama também é
+//     GLOBAL_ADMIN (defesa em profundidade explícita, nunca confia apenas
+//     na composição de middlewares de hoje — mesmo raciocínio de
+//     canCreateRole).
+export function canAdministrativelyResetPassword(actorRole: string | undefined, targetRole: string | undefined): boolean {
+  const target = (targetRole || '').toUpperCase();
+  if (target !== 'GLOBAL_ADMIN') return true;
+  return (actorRole || '').toUpperCase() === 'GLOBAL_ADMIN';
+}
+
 export class ScopeError extends Error {
   status: number;
   code: string;
@@ -111,34 +181,10 @@ export function assertShipmentScopeAccess(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Painel Admin — Tarifas de Frete (shipping_rates). Diferente de shipments
-// (que exige origem E destino dentro do país autorizado — parcela física
-// real), uma TARIFA é uma configuração comercial: um admin de país deve
-// poder configurar tanto rotas de exportação (origem=seu país) quanto de
-// importação (destino=seu país). Por isso o critério aqui é OR, não AND.
-// ---------------------------------------------------------------------------
-
-export function isShippingRateWithinScope(
-  scope: AdministrativeScope,
-  originCountry: string | null | undefined,
-  destinationCountry: string | null | undefined
-): boolean {
-  if (scope.kind === 'GLOBAL') return true;
-  const origin = (originCountry || '').toUpperCase();
-  const destination = (destinationCountry || '').toUpperCase();
-  return !!scope.countryCode && (origin === scope.countryCode || destination === scope.countryCode);
-}
-
-export function assertShippingRateScopeAccess(
-  scope: AdministrativeScope,
-  originCountry: string | null | undefined,
-  destinationCountry: string | null | undefined
-) {
-  if (!isShippingRateWithinScope(scope, originCountry, destinationCountry)) {
-    throw new ScopeError('Esta tarifa de frete não envolve o seu país e está fora do seu escopo administrativo.', 'SHIPPING_RATE_SCOPE_FORBIDDEN');
-  }
-}
+// FASE D16-I5 — isShippingRateWithinScope/assertShippingRateScopeAccess
+// removidas: eram autorização EXCLUSIVA do painel admin legado de tarifas
+// (shipping_rates), removido fisicamente em adminRoutes.ts nesta mesma
+// fase — nenhum outro consumidor as chamava.
 
 // ---------------------------------------------------------------------------
 // Permissões financeiras mínimas. Reaproveita o conceito já existente em

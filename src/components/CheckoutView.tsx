@@ -19,17 +19,27 @@ import {
   Zap,
   Loader2,
 } from 'lucide-react';
-import { PaymentMethodType, DeliveryAddress, PaymentDetails, CountryCode, CurrencyCode } from '../types';
+import { PaymentMethodType, PaymentDetails, CountryCode, CurrencyCode } from '../types';
 import { countriesConfig, formatCurrency } from '../utils/currencyUtils';
 import { useCountries } from '../hooks/useCountries';
+import { useAuth } from '../context/AuthContext';
 import { PixPaymentModal } from './PixPaymentModal';
 import { PixService } from '../services/pixService';
 import { convertToBRL, PixTransaction } from '../utils/pixEngine';
-import { ShippingService } from '../services/shippingService';
+import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
+import {
+  resolveCheckoutAddress,
+  SavedAddressLike,
+  NewAddressFormState,
+  CheckoutAddressMode,
+  CheckoutRecipientMode,
+} from '../utils/checkoutAddressResolver';
 
 import { OrdersApi } from '../api/clients/OrdersApi';
-import { PaymentsApi } from '../api/clients/PaymentsApi';
 import { BuyerService } from '../services/buyerService';
+import { CreateOrderFromCartResult } from '../api/types';
+import { resolveCheckoutPaymentTarget, resolveCheckoutConfirmationUrl, initiateCheckoutPixPayment } from '../services/checkoutPaymentRouting';
+import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
 
 export const CheckoutView: React.FC = () => {
   const navigate = useNavigate();
@@ -68,45 +78,155 @@ export const CheckoutView: React.FC = () => {
   const isAllNationalCart = cart.length > 0 && cart.every((i: any) => (i.product?.publishingScope || 'national') !== 'international');
   const isCountryLocked = cartAllowedCountries !== null && cartAllowedCountries.length <= 1;
 
-  // Address State initialized with empty/default fields, filled from DB on mount
-  const [address, setAddress] = useState<DeliveryAddress>({
-    recipientName: '',
-    cpfOrTaxId: '',
-    zipCode: '',
-    street: '',
-    number: '',
-    complement: '',
-    neighborhood: '',
-    // Correção pré-piloto: "Bissau"/"Bissau" eram fallback fixo, mostrado
-    // mesmo para país=Brasil — nunca inventar cidade/estado. Sem endereço
-    // real do comprador, o campo começa vazio e ele preenche.
-    city: '',
-    state: '',
-    country: selectedCountry,
-    phone: '',
-  });
+  // FASE D16-H1 — Endereço de Entrega Selecionável + Destinatário do
+  // Pedido. Duas escolhas independentes (nunca acopladas): ONDE entregar
+  // (endereço cadastrado real, escolhido de uma lista — ou outro endereço,
+  // específico deste pedido, nunca salvo no perfil) e QUEM recebe (o
+  // próprio comprador ou outra pessoa). A resolução final (o objeto
+  // {shippingAddress} que realmente vai para OrdersApi.create — MESMO
+  // contrato que orderService.ts/F6.2 já aceita hoje, nenhuma mudança de
+  // backend) é feita por resolveCheckoutAddress (função pura, testável),
+  // nunca recalculada ad-hoc aqui.
+  const { user } = useAuth();
 
-  // Load real user address from PostgreSQL on mount
+  const [buyerAddresses, setBuyerAddresses] = useState<SavedAddressLike[]>([]);
+  const [isLoadingAddresses, setIsLoadingAddresses] = useState(true);
+  const [addressMode, setAddressMode] = useState<CheckoutAddressMode>('saved');
+  const [selectedSavedAddressId, setSelectedSavedAddressId] = useState<string | null>(null);
+
+  const [newAddress, setNewAddress] = useState<NewAddressFormState>({
+    regionId: null, sectorId: null, city: '', street: '', number: '', complement: '', neighborhood: '', zipCode: '',
+  });
+  // Região→Setor do "outro endereço" — SEMPRE carregados da autoridade real
+  // do backend (GET /buyer/shipping/regions|sectors, D16-F2 — já existente,
+  // nunca hardcoded aqui).
+  const [newAddressRegions, setNewAddressRegions] = useState<Array<{ id: string; name: string; code: string }>>([]);
+  const [newAddressSectors, setNewAddressSectors] = useState<Array<{ id: string; name: string; code: string; regionId: string }>>([]);
+  const [isLoadingSectors, setIsLoadingSectors] = useState(false);
+
+  const [recipientMode, setRecipientMode] = useState<CheckoutRecipientMode>('self');
+  const [recipientName, setRecipientName] = useState('');
+  const [recipientPhone, setRecipientPhone] = useState('');
+  const [documentValue, setDocumentValue] = useState('');
+
+  // FASE D16-H3 — intenção temporária de destino compartilhada com
+  // ProductDetail/Cart. Só usada para PRÉ-SELECIONAR o modo/endereço na
+  // primeira carga (nunca substitui a validação real: addressId é
+  // revalidado contra a lista de endereços DO PRÓPRIO comprador antes de
+  // ser aceito, e o backend/F6.2 continuam a autoridade final).
+  const { destination: deliveryDestinationIntent, setSavedAddressIntent, setSectorIntent } = useDeliveryDestination();
+
+  // Carrega os endereços reais do comprador (lista completa, não só o
+  // padrão) — mesma fonte já usada por CartView/ProductDetailView.
   React.useEffect(() => {
+    setIsLoadingAddresses(true);
     BuyerService.getAddresses().then((res) => {
-      if (res.success && Array.isArray(res.data) && res.data.length > 0) {
+      if (res.success && Array.isArray(res.data)) {
+        setBuyerAddresses(res.data);
+
+        // FASE D16-H3 — a intenção de destino (se existir e ainda for
+        // válida) tem prioridade sobre o endereço padrão nesta PRIMEIRA
+        // seleção — nunca sobrescreve uma escolha que o comprador já tenha
+        // feito manualmente aqui (este efeito só roda uma vez, no mount).
+        if (deliveryDestinationIntent?.mode === 'saved') {
+          const stillOwnedAndUsable = res.data.find(
+            (a: any) => a.id === deliveryDestinationIntent.addressId && !!a.shippingSectorId
+          );
+          if (stillOwnedAndUsable) {
+            setAddressMode('saved');
+            setSelectedSavedAddressId(stillOwnedAndUsable.id);
+            return;
+          }
+          // Endereço não existe mais/não pertence ao comprador/perdeu o
+          // setor — cai no fallback do endereço padrão, abaixo.
+        } else if (deliveryDestinationIntent?.mode === 'sector') {
+          setAddressMode('new');
+          setNewAddress((prev) => ({
+            ...prev,
+            regionId: deliveryDestinationIntent.shippingRegionId,
+            sectorId: deliveryDestinationIntent.shippingSectorId,
+          }));
+          return;
+        }
+
         const defaultAddr = res.data.find((a: any) => a.isDefault) || res.data[0];
-        setAddress({
-          recipientName: defaultAddr.recipientName || '',
-          cpfOrTaxId: '',
-          zipCode: defaultAddr.zipCode || '',
-          street: defaultAddr.street || '',
-          number: defaultAddr.number || '',
-          complement: defaultAddr.complement || '',
-          neighborhood: defaultAddr.neighborhood || '',
-          city: defaultAddr.city || '',
-          state: defaultAddr.state || '',
-          country: (defaultAddr.country || defaultAddr.countryCode || selectedCountry) as CountryCode,
-          phone: defaultAddr.phone || '',
+        if (defaultAddr) setSelectedSavedAddressId(defaultAddr.id);
+      }
+    }).catch(() => {}).finally(() => setIsLoadingAddresses(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // FASE D16-H3, item 9 — sincroniza de VOLTA para o context quando o
+  // comprador muda o destino aqui mesmo no Checkout (endereço salvo
+  // selecionado, ou nova Região/Setor escolhidos) — assim a jornada
+  // continua coerente se ele voltar ao Carrinho/ProductDetail. Depende
+  // SOMENTE dos identificadores relevantes (nunca de rua/nome/telefone) —
+  // digitar esses campos nunca aciona isto.
+  React.useEffect(() => {
+    if (addressMode === 'saved') {
+      const addr = buyerAddresses.find((a) => a.id === selectedSavedAddressId);
+      if (addr && addr.shippingSectorId) {
+        setSavedAddressIntent({
+          addressId: addr.id,
+          shippingSectorId: addr.shippingSectorId,
+          shippingSectorName: addr.shippingSectorName || null,
+          shippingRegionId: addr.shippingRegionId || null,
+          shippingRegionName: addr.shippingRegionName || null,
+          countryCode: addr.countryCode || country,
         });
       }
+    } else if (newAddress.regionId && newAddress.sectorId) {
+      const region = newAddressRegions.find((r) => r.id === newAddress.regionId);
+      const sector = newAddressSectors.find((s) => s.id === newAddress.sectorId);
+      if (region && sector) {
+        setSectorIntent({
+          shippingSectorId: sector.id,
+          shippingSectorName: sector.name,
+          shippingRegionId: region.id,
+          shippingRegionName: region.name,
+          countryCode: country,
+        });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addressMode, selectedSavedAddressId, newAddress.regionId, newAddress.sectorId, country]);
+
+  // Região→Setor do "outro endereço": região carrega quando o país muda;
+  // setor carrega quando a região muda (cascata real, nunca lista fixa).
+  React.useEffect(() => {
+    if (addressMode !== 'new') return;
+    BuyerService.getShippingRegions(country).then((res) => {
+      if (res.success && Array.isArray(res.data)) setNewAddressRegions(res.data);
     }).catch(() => {});
-  }, [selectedCountry]);
+  }, [addressMode, country]);
+
+  React.useEffect(() => {
+    if (addressMode !== 'new' || !newAddress.regionId) {
+      setNewAddressSectors([]);
+      return;
+    }
+    setIsLoadingSectors(true);
+    BuyerService.getShippingSectors(country, newAddress.regionId).then((res) => {
+      if (res.success && Array.isArray(res.data)) setNewAddressSectors(res.data);
+    }).catch(() => {}).finally(() => setIsLoadingSectors(false));
+  }, [addressMode, country, newAddress.regionId]);
+
+  const selectedSavedAddress = buyerAddresses.find((a) => a.id === selectedSavedAddressId) || null;
+
+  const resolvedAddress = React.useMemo(() => resolveCheckoutAddress({
+    addressMode,
+    selectedSavedAddress,
+    newAddress,
+    country,
+    recipientMode,
+    recipientName,
+    recipientPhone,
+    documentValue,
+    buyerName: user?.name || '',
+    buyerPhone: user?.phone || '',
+  }), [addressMode, selectedSavedAddress, newAddress, country, recipientMode, recipientName, recipientPhone, documentValue, user?.name, user?.phone]);
+
+  const resolvedShippingSectorId = resolvedAddress.ok ? resolvedAddress.displaySectorId : null;
 
   // Se o destino atual não está mais entre os permitidos (ex.: carrinho
   // mudou, ou o país padrão de navegação não é o único destino elegível),
@@ -116,7 +236,7 @@ export const CheckoutView: React.FC = () => {
     if (!cartAllowedCountries.includes(country)) {
       const next = cartAllowedCountries[0] as CountryCode;
       setCountry(next);
-      setAddress((prev) => ({ ...prev, country: next }));
+      setNewAddress((prev) => ({ ...prev, regionId: null, sectorId: null }));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cartAllowedCountries]);
@@ -147,7 +267,6 @@ export const CheckoutView: React.FC = () => {
 
   // Real Pix Modal state
   const [isPixModalOpen, setIsPixModalOpen] = useState(false);
-  const [activeOrderId, setActiveOrderId] = useState<string>('');
   const [pixInitiateData, setPixInitiateData] = useState<any>(null);
   // Correção crítica (checkout "carrinho vazio" depois de gerar PIX):
   // createOrderFromCart APAGA cartItems na mesma transação que cria o
@@ -156,14 +275,27 @@ export const CheckoutView: React.FC = () => {
   // MODE para ORDER MODE: nunca mais decide "carrinho vazio" olhando para
   // `cart` (que pode legitimamente já estar vazio), e um clique
   // repetido/retry reaproveita o MESMO pedido em vez de criar outro.
-  const [confirmedOrder, setConfirmedOrder] = useState<any>(null);
+  //
+  // Fase M1-D2 — tipado explicitamente com CreateOrderFromCartResult (nunca
+  // mais `any`). O discriminante `mode` é a ÚNICA autoridade usada abaixo
+  // para decidir identidade de pagamento/navegação — nunca inferido por
+  // `orders?.length`/`purchaseGroup?.id`/presença acidental de campos.
+  const [confirmedOrder, setConfirmedOrder] = useState<CreateOrderFromCartResult | null>(null);
+
+  // Fase M1-D2 — alvo de polling do PixPaymentModal, SEMPRE derivado de
+  // `confirmedOrder.mode` (nunca um id guardado separadamente que poderia
+  // ficar dessincronizado). Quando confirmedOrder ainda não existe (modal
+  // fechado, ver PixPaymentModal isOpen=false abaixo), o valor 'legacy'
+  // vazio é inofensivo — o modal nunca chega a usá-lo enquanto isOpen=false.
+  const pixPollTarget: { mode: 'legacy'; orderId: string } | { mode: 'purchase_group'; purchaseGroupId: string } =
+    confirmedOrder?.mode === 'purchase_group'
+      ? { mode: 'purchase_group', purchaseGroupId: confirmedOrder.purchaseGroup.id }
+      : { mode: 'legacy', orderId: confirmedOrder?.id || '' };
 
   const [freightQuote, setFreightQuote] = useState<{
     shippingCost: number;
     shippingChargedToBuyer: number;
     shippingSellerSubsidy: number;
-    estimatedMinDays: number;
-    estimatedMaxDays: number;
     available: boolean;
     loading: boolean;
     error?: string;
@@ -171,67 +303,90 @@ export const CheckoutView: React.FC = () => {
     shippingCost: 0,
     shippingChargedToBuyer: 0,
     shippingSellerSubsidy: 0,
-    estimatedMinDays: 1,
-    estimatedMaxDays: 3,
     available: true,
     loading: false,
   });
 
   const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || 'BR').toUpperCase();
-  const destCountry = (address.countryCode || address.country || country || 'BR').toUpperCase();
+  // FASE D16-H1 — `destCountry` é SOMENTE o `country` do topo do checkout
+  // (destino comercial do pedido, já resolvido por D16-F2/D16-G1) — nunca
+  // mais lido de um objeto `address` solto, que agora é derivado
+  // (resolvedAddress) a partir do endereço/destinatário escolhidos.
+  const destCountry = (country || 'BR').toUpperCase();
   const isCrossBorder = originCountry !== destCountry;
   const CARD_PAYMENTS_ENABLED = false;
 
+  // FASE D16-G3 — preview de frete via F4/F3 (mesma arquitetura do Cart/
+  // Product Detail) em vez do motor legado (calculateMultiSellerFreight/
+  // shipping_rates). FASE D16-H1 — setor de entrega: EXCLUSIVAMENTE
+  // resolvedShippingSectorId, derivado do endereço/modo realmente
+  // selecionado (cadastrado OU outro endereço) — nunca inferido de
+  // country/texto, e recalcula sempre que o setor efetivo muda (trocar de
+  // endereço, trocar de setor no formulário de outro endereço, etc.).
   React.useEffect(() => {
     let isMounted = true;
     const fetchFreight = async () => {
+      if (cart.length === 0) return;
       setFreightQuote((prev) => ({ ...prev, loading: true, error: undefined }));
-      // Sem fallback fictício de 0.5kg: se algum item não tem peso real
-      // cadastrado, o frete não pode ser calculado — o backend já rejeita
-      // isso (PRODUCT_WEIGHT_REQUIRED), então detectamos aqui para dar um
-      // erro claro em vez de subestimar o peso silenciosamente.
-      const itemsMissingWeight = cart.filter((item) => !item.product.weightKg || item.product.weightKg <= 0);
-      if (itemsMissingWeight.length > 0) {
+
+      if (!resolvedShippingSectorId) {
         if (isMounted) {
-          setFreightQuote((prev) => ({
-            ...prev,
-            loading: false,
+          setFreightQuote({
+            shippingCost: 0,
+            shippingChargedToBuyer: 0,
+            shippingSellerSubsidy: 0,
             available: false,
-            error: 'Não é possível calcular o frete: um ou mais produtos do carrinho não têm peso cadastrado.',
-          }));
+            loading: false,
+            error: 'Selecione/atualize seu endereço de entrega para calcular o frete.',
+          });
         }
         return;
       }
-      const totalWeight = cart.reduce((sum, item) => sum + item.product.weightKg! * item.quantity, 0);
-      const res = await ShippingService.calculateFreight({
-        originCountry,
-        destinationCountry: destCountry,
-        weightKg: totalWeight,
-        currency: orderCurrency,
-        storeId: cart[0]?.product?.storeId || cart[0]?.product?.seller?.storeId,
-        sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
-        productSubtotal: cartTotal,
+
+      // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
+      // vendedor; cada vendedor é uma entrega/child order independente no
+      // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
+      // getCartPreview agrupa por sellerId (F4/F3) e soma 1 cotação por
+      // grupo — NUNCA 1 cotação para o carrinho inteiro. Fail-closed: se
+      // qualquer grupo falhar, o resultado inteiro vem available:false
+      // (nunca um total parcial/subestimado).
+      const res = await ShippingService.getCartPreview({
+        destinationShippingSectorId: resolvedShippingSectorId,
+        items: cart.map((item) => ({
+          productId: item.product.id,
+          variantId: item.selectedVariantSku || null,
+          quantity: item.quantity,
+        })),
       });
 
       if (!isMounted) return;
 
       if (res.success && res.data) {
-        setFreightQuote({
-          shippingCost: res.data.shippingCost,
-          shippingChargedToBuyer: res.data.shippingChargedToBuyer,
-          shippingSellerSubsidy: res.data.shippingSellerSubsidy,
-          estimatedMinDays: res.data.estimatedMinDays,
-          estimatedMaxDays: res.data.estimatedMaxDays,
-          available: true,
-          loading: false,
-        });
+        const data: CartShippingPreviewData = res.data;
+        if (data.available === true) {
+          setFreightQuote({
+            shippingCost: data.shippingCost,
+            shippingChargedToBuyer: data.shippingChargedToBuyer,
+            shippingSellerSubsidy: data.shippingSellerSubsidy,
+            available: true,
+            loading: false,
+          });
+        } else {
+          const unavailableMessage: string = data.message;
+          setFreightQuote({
+            shippingCost: 0,
+            shippingChargedToBuyer: 0,
+            shippingSellerSubsidy: 0,
+            available: false,
+            loading: false,
+            error: unavailableMessage,
+          });
+        }
       } else {
         setFreightQuote({
           shippingCost: 0,
           shippingChargedToBuyer: 0,
           shippingSellerSubsidy: 0,
-          estimatedMinDays: 0,
-          estimatedMaxDays: 0,
           available: false,
           loading: false,
           error: res.error?.message || 'Frete não disponível para o endereço informado.',
@@ -243,7 +398,8 @@ export const CheckoutView: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [originCountry, destCountry, cartTotal, orderCurrency]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedShippingSectorId, cart.length, cartTotal]);
 
   const customsDuty = 0; // Removed 8% fake tax - national is 0, international is pending
   const shippingFee = freightQuote.shippingChargedToBuyer;
@@ -265,6 +421,16 @@ export const CheckoutView: React.FC = () => {
       return;
     }
 
+    // FASE D16-H1 — mesma checagem de UX que já existia para país: o
+    // backend (OrderService.createOrderFromCart) sempre revalida endereço/
+    // setor de qualquer forma; isto só evita uma ida ao servidor quando já
+    // sabemos que o formulário está incompleto (endereço sem setor,
+    // destinatário sem nome/telefone, etc.).
+    if (resolvedAddress.ok === false) {
+      setErrorMessage(resolvedAddress.message);
+      return;
+    }
+
     setIsProcessing(true);
     setErrorMessage(null);
 
@@ -280,15 +446,25 @@ export const CheckoutView: React.FC = () => {
 
       if (!createdOrder) {
         // 1. Create Order in PostgreSQL
-        // Correção crítica de checkout: DeliveryAddress (types.ts) só tem o
-        // campo `country`, não `countryCode` — o backend (OrderService) lê
-        // primeiro `countryCode`, depois `country`, então já funcionava por
-        // fallback, mas enviar `countryCode` explicitamente aqui também
-        // (mesma convenção usada quando o endereço vem de addressId/endereço
-        // padrão, que sempre preenche as duas chaves) deixa o payload
-        // inequívoco, sem depender só do fallback.
+        // FASE D16-H1.1 — payload vem de resolvedAddress.payload
+        // (resolveCheckoutAddress, função pura), que separa EXPLICITAMENTE
+        // a autoridade geográfica do destinatário:
+        //   modo "endereço cadastrado" -> envia SOMENTE addressId (nunca
+        //     reconstrói rua/cidade/setor no frontend — o backend busca do
+        //     banco e valida addresses.userId === buyer autenticado);
+        //   modo "outro endereço" -> envia shippingAddress inline (é um
+        //     endereço específico deste pedido, nunca salvo no perfil);
+        //   recipientOverride -> SEMPRE separado, nunca embutido nos
+        //     campos geográficos (mesmo "eu mesmo" reafirma nome/telefone
+        //     do buyer explicitamente).
+        // orderService.ts (F6.2) já aceitava addressId+shippingAddress;
+        // recipientOverride foi adicionado nesta fase (D16-H1.1) como o
+        // MENOR campo aditivo necessário para não enfraquecer a validação
+        // de propriedade do addressId.
         const res = await OrdersApi.create({
-          shippingAddress: { ...address, countryCode: country },
+          addressId: resolvedAddress.payload.addressId || undefined,
+          shippingAddress: resolvedAddress.payload.shippingAddress ? { ...resolvedAddress.payload.shippingAddress, countryCode: country } : undefined,
+          recipientOverride: { name: resolvedAddress.payload.recipient.name, phone: resolvedAddress.payload.recipient.phone, document: resolvedAddress.payload.recipient.document || undefined },
           paymentMethod: paymentMethod,
           currency: orderCurrency,
           countryCode: country,
@@ -303,6 +479,10 @@ export const CheckoutView: React.FC = () => {
             DESTINATION_COUNTRY_NOT_FOUND: 'O país informado no endereço de entrega não é reconhecido pelo Mercado Nusali.',
             DESTINATION_COUNTRY_INACTIVE: 'O Mercado Nusali ainda não está disponível para entregas neste país.',
             CART_CURRENCY_MISMATCH: 'Os produtos deste carrinho usam moedas diferentes e não podem ser pagos juntos.',
+            // FASE D16-F2 — só deveria acontecer se o país foi trocado sem
+            // recarregar a página (o onChange já limpa shippingSectorId);
+            // mensagem amigável como rede de segurança, nunca "undefined".
+            SHIPPING_SECTOR_INVALID: 'O setor de entrega salvo não é válido para o país selecionado. Atualize seu endereço em "Meus Endereços" e tente novamente.',
           };
           const rawMsg = res.error?.message || res.message || 'Erro ao processar checkout.';
           const msg = friendlyMessages[code] || (rawMsg.includes('undefined') ? 'Não foi possível confirmar o país de entrega. Verifique o endereço e tente novamente.' : rawMsg);
@@ -318,23 +498,37 @@ export const CheckoutView: React.FC = () => {
         setConfirmedOrder(createdOrder);
       }
 
+      // Fase M1-D2 — resolveCheckoutPaymentTarget é a ÚNICA função que lê
+      // `createdOrder.mode` para decidir identidade de pagamento/navegação
+      // (nunca orders?.length/purchaseGroup?.id/presença acidental de
+      // campos). Em modo purchase_group, o alvo é SEMPRE purchaseGroup.id —
+      // nenhum child order id é usado como payment id, navigation id ou
+      // retry id, nem aqui nem em src/services/checkoutPaymentRouting.ts.
+      const paymentTarget = resolveCheckoutPaymentTarget(createdOrder);
+
       // 2. Non-PIX payment: navigate directly to confirmation
       if (paymentMethod !== 'pix') {
         clearCart();
         setIsProcessing(false);
-        navigate(`/orders/${createdOrder.id}/confirmation`, { state: { order: createdOrder } });
+        navigate(resolveCheckoutConfirmationUrl(paymentTarget), {
+          // Discrimina em `createdOrder.mode` (não em `paymentTarget.mode`)
+          // para o TypeScript estreitar a união CreateOrderFromCartResult e
+          // liberar o acesso a `createdOrder.purchaseGroup` — os dois campos
+          // `mode` são sempre idênticos por construção (paymentTarget deriva
+          // de createdOrder.mode em resolveCheckoutPaymentTarget).
+          state: createdOrder.mode === 'purchase_group' ? { purchaseGroup: createdOrder.purchaseGroup } : { order: createdOrder },
+        });
         return;
       }
 
-      // 3. PIX payment: Initiate Asaas Payment via POST /api/v1/payments/initiate
-      // (idempotente no backend: uma segunda chamada para o mesmo
-      // orderId+provider reaproveita o payment pendente existente, nunca
-      // cria um segundo — ver paymentService.ts)
-      const payRes = await PaymentsApi.initiate({
-        orderId: createdOrder.id,
-        method: 'pix',
-        provider: 'asaas',
-      });
+      // 3. PIX payment: initiateCheckoutPixPayment roteia SEMPRE pelo mode
+      // (legacy -> POST /payments/initiate; purchase_group -> SEMPRE POST
+      // /payments/purchase-groups/:purchaseGroupId/initiate) — inclusive em
+      // retry, já que paymentTarget é recalculado a partir do MESMO
+      // createdOrder.mode a cada tentativa. Ambos os caminhos já são
+      // idempotentes NO BACKEND (paymentService.ts) — nenhuma idempotência
+      // financeira nova foi implementada aqui.
+      const payRes = await initiateCheckoutPixPayment(paymentTarget, { method: 'pix', provider: 'asaas' });
 
       if (!payRes.success || !payRes.data) {
         const errCode = payRes.error?.code || '';
@@ -373,8 +567,9 @@ export const CheckoutView: React.FC = () => {
         return;
       }
 
-      // 4. Open Real Asaas Pix Modal
-      setActiveOrderId(createdOrder.id);
+      // 4. Open Real Asaas Pix Modal — o modal deriva o alvo de polling
+      // (pollTarget) direto de confirmedOrder no render abaixo, nunca de um
+      // id guardado separadamente aqui.
       setPixInitiateData(payRes.data);
       setIsPixModalOpen(true);
       setIsProcessing(false);
@@ -386,10 +581,20 @@ export const CheckoutView: React.FC = () => {
     }
   };
 
-  const handlePixPaymentSuccess = (updatedOrder: any) => {
+  // Fase M1-D2 — a navegação NUNCA decide o modo pelo shape de `freshData`
+  // (o objeto recém-lido pelo polling do modal): a autoridade é sempre
+  // `confirmedOrder.mode`, guardado desde a criação do pedido/group e nunca
+  // alterado entre tentativas. Em purchase_group, a URL usa SEMPRE
+  // purchaseGroup.id — nenhum child order id é aceito aqui, nem como
+  // fallback.
+  const handlePixPaymentSuccess = (freshData: any) => {
     setIsPixModalOpen(false);
     clearCart();
-    navigate(`/orders/${updatedOrder.id || activeOrderId}/confirmation`, { state: { order: updatedOrder } });
+    if (confirmedOrder?.mode === 'purchase_group') {
+      navigate(`/purchase-groups/${confirmedOrder.purchaseGroup.id}/confirmation`, { state: { purchaseGroup: freshData } });
+    } else if (confirmedOrder) {
+      navigate(`/orders/${confirmedOrder.id}/confirmation`, { state: { order: freshData } });
+    }
   };
 
   // Correção pré-piloto (race condition): nunca tratar "carrinho ainda
@@ -437,7 +642,7 @@ export const CheckoutView: React.FC = () => {
         <PixPaymentModal
           isOpen={isPixModalOpen}
           onClose={() => setIsPixModalOpen(false)}
-          orderId={activeOrderId}
+          pollTarget={pixPollTarget}
           paymentData={pixInitiateData}
           onPaymentSuccess={handlePixPaymentSuccess}
         />
@@ -445,12 +650,26 @@ export const CheckoutView: React.FC = () => {
         {!isPixModalOpen && (
           <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-6 text-center space-y-4">
             <ShieldCheck className="w-10 h-10 text-emerald-600 mx-auto" />
+            {/* Fase M1-D2 — em modo purchase_group, os campos de raiz
+                (id/orderNumber/totalAmount/currency) são compatibilidade
+                retroativa do PRIMEIRO child (ver orderService.ts) — nunca
+                representam a compra inteira. A exibição usa
+                purchaseGroup.id/totalAmount/currency, as únicas fontes
+                corretas do valor total e da identidade real da compra. */}
             <div>
-              <h2 className="text-lg font-black text-gray-900">Pedido criado com sucesso</h2>
-              <p className="text-xs text-gray-500 mt-1">Pedido Nº {confirmedOrder.orderNumber || confirmedOrder.id}</p>
+              <h2 className="text-lg font-black text-gray-900">
+                {confirmedOrder.mode === 'purchase_group' ? 'Compra criada com sucesso' : 'Pedido criado com sucesso'}
+              </h2>
+              <p className="text-xs text-gray-500 mt-1">
+                {confirmedOrder.mode === 'purchase_group'
+                  ? `Compra Nº ${confirmedOrder.purchaseGroup.id}`
+                  : `Pedido Nº ${confirmedOrder.orderNumber || confirmedOrder.id}`}
+              </p>
             </div>
             <div className="text-2xl font-black text-gray-900">
-              {formatPrice(Number(confirmedOrder.totalAmount), confirmedOrder.currency).formatted}
+              {confirmedOrder.mode === 'purchase_group'
+                ? formatPrice(Number(confirmedOrder.purchaseGroup.totalAmount), confirmedOrder.purchaseGroup.currency as CurrencyCode).formatted
+                : formatPrice(Number(confirmedOrder.totalAmount), confirmedOrder.currency as CurrencyCode).formatted}
             </div>
 
             {errorMessage ? (
@@ -481,7 +700,7 @@ export const CheckoutView: React.FC = () => {
       <PixPaymentModal
         isOpen={isPixModalOpen}
         onClose={() => setIsPixModalOpen(false)}
-        orderId={activeOrderId}
+        pollTarget={pixPollTarget}
         paymentData={pixInitiateData}
         onPaymentSuccess={handlePixPaymentSuccess}
       />
@@ -510,7 +729,7 @@ export const CheckoutView: React.FC = () => {
               <MapPin className="w-5 h-5 text-emerald-600" /> 1. Endereço de Destino e Destinatário
             </h2>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            <div className="grid grid-cols-1 gap-4 text-xs">
               <div>
                 <label className="block font-semibold text-gray-700 mb-1">País do Destinatário</label>
                 {isCountryLocked ? (
@@ -529,7 +748,12 @@ export const CheckoutView: React.FC = () => {
                     onChange={(e) => {
                       const newCountry = e.target.value as CountryCode;
                       setCountry(newCountry);
-                      setAddress({ ...address, country: newCountry });
+                      // FASE D16-H1 — trocar o país invalida a Região/Setor já
+                      // escolhidos do "outro endereço" (pertenciam ao país
+                      // anterior); nunca deixa um sectorId órfão seguir para o
+                      // pedido. O endereço CADASTRADO não precisa disso — cada
+                      // endereço salvo já carrega seu próprio país/setor reais.
+                      setNewAddress((prev) => ({ ...prev, regionId: null, sectorId: null }));
                       // countriesConfig cobre só os 8 países legados — para um
                       // país real fora dele (ex.: GM, SN) simplesmente não
                       // reatribui o método de pagamento, em vez de quebrar.
@@ -573,17 +797,6 @@ export const CheckoutView: React.FC = () => {
                   </p>
                 )}
               </div>
-
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">Cidade</label>
-                <input
-                  type="text"
-                  value={address.city}
-                  onChange={(e) => setAddress({ ...address, city: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  required
-                />
-              </div>
             </div>
 
             {/* Route Scope Badge (Requirement 4) */}
@@ -603,62 +816,162 @@ export const CheckoutView: React.FC = () => {
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">Nome Completo</label>
-                <input
-                  type="text"
-                  value={address.recipientName}
-                  onChange={(e) => setAddress({ ...address, recipientName: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  required
-                />
+            {/* FASE D16-H1 — Onde deseja receber este pedido? */}
+            <div className="pt-3 border-t border-gray-100 space-y-3">
+              <p className="text-xs font-bold text-gray-800">Onde deseja receber este pedido?</p>
+              <div className="flex flex-col sm:flex-row gap-2 text-xs">
+                <label className={`flex-1 flex items-center gap-2 border rounded-xl px-3 py-2 cursor-pointer ${addressMode === 'saved' ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                  <input type="radio" name="addressMode" checked={addressMode === 'saved'} onChange={() => setAddressMode('saved')} />
+                  <span className="font-semibold">Usar meu endereço cadastrado</span>
+                </label>
+                <label className={`flex-1 flex items-center gap-2 border rounded-xl px-3 py-2 cursor-pointer ${addressMode === 'new' ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                  <input type="radio" name="addressMode" checked={addressMode === 'new'} onChange={() => setAddressMode('new')} />
+                  <span className="font-semibold">Usar outro endereço</span>
+                </label>
               </div>
 
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">Documento de Identificação (NIF / BI / CPF)</label>
-                <input
-                  type="text"
-                  value={address.cpfOrTaxId}
-                  onChange={(e) => setAddress({ ...address, cpfOrTaxId: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-gray-700 mb-1">Telefone de Contacto (Com WhatsApp)</label>
-                <input
-                  type="text"
-                  value={address.phone}
-                  onChange={(e) => setAddress({ ...address, phone: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                  required
-                />
-              </div>
-
-              <div className="sm:col-span-2 grid grid-cols-3 gap-3">
-                <div className="col-span-2">
-                  <label className="block font-semibold text-gray-700 mb-1">Rua / Avenida / Bairro</label>
-                  <input
-                    type="text"
-                    value={address.street}
-                    onChange={(e) => setAddress({ ...address, street: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                    required
-                  />
+              {addressMode === 'saved' ? (
+                isLoadingAddresses ? (
+                  <p className="text-xs text-gray-500 flex items-center gap-1.5"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando seus endereços...</p>
+                ) : buyerAddresses.length === 0 ? (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                    Você ainda não tem nenhum endereço cadastrado. Escolha "Usar outro endereço" para informar um endereço para este pedido.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {buyerAddresses.map((a) => (
+                      <label key={a.id} className={`block border rounded-xl px-3 py-2 text-xs cursor-pointer ${selectedSavedAddressId === a.id ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                        <div className="flex items-start gap-2">
+                          <input type="radio" name="savedAddress" className="mt-0.5" checked={selectedSavedAddressId === a.id} onChange={() => setSelectedSavedAddressId(a.id)} />
+                          <div>
+                            <div className="font-bold text-gray-900">{a.recipientName}{a.isDefault ? ' • Padrão' : ''}</div>
+                            <div className="text-gray-600">
+                              {a.shippingRegionName ? `${a.shippingRegionName} • ` : ''}{a.shippingSectorName || 'Sem setor de entrega definido'}
+                            </div>
+                            <div className="text-gray-600">{a.city}{a.state ? ` - ${a.state}` : ''}</div>
+                            <div className="text-gray-600">{a.street}, {a.number}{a.complement ? ` - ${a.complement}` : ''}{a.neighborhood ? ` - ${a.neighborhood}` : ''}</div>
+                            {!a.shippingSectorId && (
+                              <div className="text-amber-700 font-semibold mt-1">Sem setor de entrega — edite este endereço em "Meus Endereços" para poder usá-lo.</div>
+                            )}
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                )
+              ) : (
+                <div className="space-y-3">
+                  {/* FASE D16-H3 — aviso discreto quando a Região/Setor vieram
+                      de uma intenção de destino escolhida antes (ProductDetail
+                      /Carrinho): o endereço postal completo (rua/número/
+                      destinatário) continua sendo preenchido aqui mesmo,
+                      nunca inventado. */}
+                  {deliveryDestinationIntent?.mode === 'sector' &&
+                    newAddress.regionId === deliveryDestinationIntent.shippingRegionId &&
+                    newAddress.sectorId === deliveryDestinationIntent.shippingSectorId && (
+                      <p className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg p-2 font-semibold">
+                        Você selecionou entrega em {deliveryDestinationIntent.shippingSectorName}
+                        {deliveryDestinationIntent.shippingRegionName ? ` · ${deliveryDestinationIntent.shippingRegionName}` : ''}.
+                        Complete o endereço abaixo para continuar.
+                      </p>
+                    )}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Região</label>
+                    <select
+                      value={newAddress.regionId || ''}
+                      onChange={(e) => setNewAddress({ ...newAddress, regionId: e.target.value || null, sectorId: null })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
+                      required
+                    >
+                      <option value="">Selecione a região...</option>
+                      {newAddressRegions.map((r) => (
+                        <option key={r.id} value={r.id}>{r.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Setor</label>
+                    <select
+                      value={newAddress.sectorId || ''}
+                      onChange={(e) => setNewAddress({ ...newAddress, sectorId: e.target.value || null })}
+                      disabled={!newAddress.regionId || isLoadingSectors}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 disabled:opacity-60"
+                      required
+                    >
+                      <option value="">{isLoadingSectors ? 'Carregando setores...' : 'Selecione o setor...'}</option>
+                      {newAddressSectors.map((s) => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Cidade / Localidade</label>
+                    <input type="text" value={newAddress.city} onChange={(e) => setNewAddress({ ...newAddress, city: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Bairro (opcional)</label>
+                    <input type="text" value={newAddress.neighborhood} onChange={(e) => setNewAddress({ ...newAddress, neighborhood: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
+                  </div>
+                  <div className="sm:col-span-2 grid grid-cols-3 gap-3">
+                    <div className="col-span-2">
+                      <label className="block font-semibold text-gray-700 mb-1">Rua / Avenida</label>
+                      <input type="text" value={newAddress.street} onChange={(e) => setNewAddress({ ...newAddress, street: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-gray-700 mb-1">Número / Lote (opcional)</label>
+                      <input type="text" value={newAddress.number} onChange={(e) => setNewAddress({ ...newAddress, number: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
+                    </div>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block font-semibold text-gray-700 mb-1">Referência / Complemento (opcional)</label>
+                    <input type="text" value={newAddress.complement} onChange={(e) => setNewAddress({ ...newAddress, complement: e.target.value })} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
+                  </div>
                 </div>
+                </div>
+              )}
+            </div>
+
+            {/* FASE D16-H1 — Quem vai receber? Escolha INDEPENDENTE do
+                endereço acima (qualquer combinação é válida). */}
+            <div className="pt-3 border-t border-gray-100 space-y-3">
+              <p className="text-xs font-bold text-gray-800">Quem vai receber?</p>
+              <div className="flex flex-col sm:flex-row gap-2 text-xs">
+                <label className={`flex-1 flex items-center gap-2 border rounded-xl px-3 py-2 cursor-pointer ${recipientMode === 'self' ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                  <input type="radio" name="recipientMode" checked={recipientMode === 'self'} onChange={() => setRecipientMode('self')} />
+                  <span className="font-semibold">Eu mesmo{user?.name ? ` (${user.name})` : ''}</span>
+                </label>
+                <label className={`flex-1 flex items-center gap-2 border rounded-xl px-3 py-2 cursor-pointer ${recipientMode === 'other' ? 'border-emerald-600 bg-emerald-50/70 ring-2 ring-emerald-500/20' : 'border-gray-200'}`}>
+                  <input type="radio" name="recipientMode" checked={recipientMode === 'other'} onChange={() => setRecipientMode('other')} />
+                  <span className="font-semibold">Outra pessoa</span>
+                </label>
+              </div>
+
+              {recipientMode === 'other' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Nome completo do destinatário</label>
+                    <input type="text" value={recipientName} onChange={(e) => setRecipientName(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-gray-700 mb-1">Telefone / WhatsApp do destinatário</label>
+                    <input type="text" value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" required />
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                 <div>
-                  <label className="block font-semibold text-gray-700 mb-1">Número / Lote</label>
-                  <input
-                    type="text"
-                    value={address.number}
-                    onChange={(e) => setAddress({ ...address, number: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500"
-                    required
-                  />
+                  <label className="block font-semibold text-gray-700 mb-1">Documento de Identificação (NIF / BI / CPF)</label>
+                  <input type="text" value={documentValue} onChange={(e) => setDocumentValue(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500" />
                 </div>
               </div>
+
+              {resolvedAddress.ok === false && (
+                <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold">
+                  {resolvedAddress.message}
+                </p>
+              )}
             </div>
           </div>
 
@@ -905,7 +1218,7 @@ export const CheckoutView: React.FC = () => {
 
             <button
               type="submit"
-              disabled={isProcessing || freightQuote.loading || !freightQuote.available}
+              disabled={isProcessing || freightQuote.loading || !freightQuote.available || !resolvedAddress.ok}
               className={`w-full text-white font-extrabold py-3.5 px-4 rounded-xl shadow-md transition flex items-center justify-center gap-2 text-sm disabled:opacity-50 cursor-pointer ${
                 paymentMethod === 'pix'
                   ? 'bg-emerald-600 hover:bg-emerald-700 ring-2 ring-emerald-400/30'

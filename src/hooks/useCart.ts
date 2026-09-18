@@ -49,11 +49,30 @@ export const useCart = () => {
       storage?: string;
       kit?: any;
       unitPriceOverride?: number;
+      // FASE D16-C2 — ID real da variante (product_variants.id, "pvar_...").
+      // É este campo que vira a FK cart_items.variant_id no backend — NUNCA
+      // o SKU (ver selectedVariantSku abaixo, que é só apresentação).
+      variantId?: string;
+      // Apresentação apenas (ex.: exibir o SKU no carrinho) — nunca usado
+      // como FK. Continuar existindo separadamente evita reintroduzir o bug
+      // de SKU-como-variantId corrigido nesta fase.
       selectedVariantSku?: string;
       selectedVariantImage?: string;
     }
   ) => {
     const updated = await CartService.addItem(product, quantity, options);
+    setItems([...updated]);
+    return updated;
+  };
+
+  // FASE D16-D2 — compra multi-variante: UM request batch para várias
+  // linhas do mesmo produto. Erros propagam igual a addItem (quem chama
+  // decide o que mostrar/não navegar).
+  const addItemsBatch = async (
+    product: Product,
+    lines: Array<{ variantId: string; quantity: number; color?: string; size?: string }>
+  ) => {
+    const updated = await CartService.addItemsBatch(product, lines);
     setItems([...updated]);
     return updated;
   };
@@ -90,6 +109,7 @@ export const useCart = () => {
     error,
     loadCart,
     addItem,
+    addItemsBatch,
     updateQuantity,
     removeItem,
     clearCart,

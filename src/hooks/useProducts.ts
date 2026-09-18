@@ -24,6 +24,52 @@ export const useProduct = (id: string, destinationCountry?: string) => {
   });
 };
 
+// FASE D17-B2 — produtos relacionados/mesma loja/você também pode gostar.
+// queryKey inclui id/destinationCountry/originCountryFilter: ao trocar de
+// produto (ou de destino/origem), o React Query automaticamente descarta
+// qualquer resposta em voo da chave antiga (nunca sobrescreve com dado do
+// produto anterior) — mesmo mecanismo já usado por useProduct acima, sem
+// necessidade de AbortController manual nem cache/infra nova.
+export const useProductRecommendations = (id: string, destinationCountry?: string, originCountryFilter?: string) => {
+  return useQuery({
+    queryKey: ['product-recommendations', id, destinationCountry, originCountryFilter],
+    queryFn: async () => {
+      const res = await ProductService.getProductRecommendations(id, destinationCountry, originCountryFilter);
+      return res.data;
+    },
+    enabled: !!id,
+    // Falha aqui é sempre degradação silenciosa (PASSO 9) — nunca vale a
+    // pena insistir automaticamente numa seção secundária da página.
+    retry: false,
+  });
+};
+
+// FASE D17-C4 — Perguntas e Respostas reais (GET público, sem token
+// obrigatório — o backend não exige autenticação para listar).
+export const useProductQuestions = (productId: string) => {
+  return useQuery({
+    queryKey: ['product-questions', productId],
+    queryFn: async () => {
+      const res = await ProductService.getProductQuestions(productId);
+      return res.data;
+    },
+    enabled: !!productId,
+  });
+};
+
+// Mesmo padrão já usado por useCreateProduct acima: useMutation +
+// invalidateQueries da própria query de leitura, para a pergunta aparecer
+// na lista imediatamente após o sucesso, sem depender de refresh manual.
+export const useCreateProductQuestion = (productId: string) => {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (question: string) => ProductService.createProductQuestion(productId, question),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['product-questions', productId] });
+    },
+  });
+};
+
 export const useCategories = () => {
   return useQuery({
     queryKey: ['categories'],

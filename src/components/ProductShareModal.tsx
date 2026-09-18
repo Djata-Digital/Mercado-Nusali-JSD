@@ -176,7 +176,11 @@ export const ProductShareModal: React.FC<ProductShareModalProps> = ({
             </h4>
             <div className="flex items-center gap-2 mt-1">
               <span className="text-emerald-700 font-bold text-sm">{priceText}</span>
-              {product.freeShipping && (
+              {/* Fase M1-D2.6 — `product.freeShipping` (flat) não existe num
+                  Product normalizado (normalizeProduct move para
+                  `shipping.freeShipping`); o campo lido era sempre undefined
+                  e o badge nunca aparecia. Corrigido para o caminho real. */}
+              {product.shipping?.freeShipping && (
                 <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-1.5 py-0.2 rounded">
                   Frete Grátis
                 </span>

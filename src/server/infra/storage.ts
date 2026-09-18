@@ -98,6 +98,32 @@ function getAccessForFolder(folder: string): StorageAccess {
   throw new Error(`Unsupported storage folder: ${folder}`);
 }
 
+/**
+ * FASE D17-C7 — confirma que uma URL enviada pelo cliente (ex.: fotos de
+ * review) realmente aponta para um objeto público desta MESMA pasta/bucket,
+ * nunca para um domínio arbitrário controlado pelo usuário. Só é possível
+ * obter uma URL que passa nesta checagem tendo feito upload de verdade via
+ * POST /upload/:folder (autenticado, com MIME/tamanho já validados
+ * server-side) — esta função nunca faz uma nova requisição de rede, é uma
+ * checagem de prefixo pura.
+ */
+export function isOwnedPublicObjectUrl(url: unknown, folder: string): boolean {
+  if (typeof url !== 'string' || !url) return false;
+
+  let access: StorageAccess;
+  try {
+    access = getAccessForFolder(folder);
+  } catch {
+    return false;
+  }
+  if (access !== 'public') return false;
+
+  const publicUrl = normalizePublicUrl(process.env.STORAGE_PUBLIC_URL?.trim() || '');
+  if (!publicUrl) return false;
+
+  return url.startsWith(`${publicUrl}/${folder}/`);
+}
+
 function getAccessForObjectKey(objectKey: string): StorageAccess {
   const folder = objectKey.split('/')[0];
   return getAccessForFolder(folder);

@@ -54,7 +54,10 @@ export const SellerFinancialManager: React.FC<SellerFinancialManagerProps> = ({
 
   const availableBalance = walletData?.available || 0;
   const escrowBalance = walletData?.retained || 0;
-  const pendingRelease = 0;
+  // Correção (auditoria "painel do vendedor" — Aguardando Liberação sempre
+  // R$0,00): antes era um literal 0 fixo, ignorando o campo real que
+  // GET /seller/wallet já retorna. Nunca inventa/soma nada aqui — só lê.
+  const pendingRelease = walletData?.pendingRelease || 0;
 
   const ledgerTransactions: any[] = walletData?.transactions || [];
 

@@ -6,6 +6,15 @@ export class AdminApi {
     return apiClient.get('/admin/overview');
   }
 
+  // FASE D16-G1.1 — Admin Global Catalog Isolation. Catálogo administrativo
+  // COMPLETO (todos os produtos, independente de destino/publishingScope/
+  // targetCountriesJson) — NUNCA o catálogo público (/products). O único
+  // filtro aceito aqui é `originCountryFilter`, um conceito administrativo
+  // por país de ORIGEM, sem nenhuma relação com destino de comprador.
+  static async getProducts(params?: { originCountryFilter?: string }): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/products', { params });
+  }
+
   static async getStats(): Promise<ApiResponse<any>> {
     return apiClient.get('/admin/stats');
   }
@@ -109,6 +118,11 @@ export class AdminApi {
 
   static async createWarehouse(data: any): Promise<ApiResponse<any>> {
     return apiClient.post('/admin/warehouses', data);
+  }
+
+  // FASE D16-E3 — único campo editável nesta fase é a geografia de setor.
+  static async updateWarehouseShippingSector(id: string, shippingSectorId: string | null): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/warehouses/${id}`, { shippingSectorId });
   }
 
   // Inventory Transfers & Fulfillment
@@ -262,32 +276,54 @@ export class AdminApi {
     return apiClient.delete(`/admin/category-attributes/${attributeId}`);
   }
 
-  // Shipping Rates (Requirement 8)
-  static async getShippingRates(): Promise<ApiResponse<any[]>> {
-    return apiClient.get('/admin/shipping-rates');
+  // FASE D16-I5 — métodos de Shipping Rates (país↔país, Requirement 8)
+  // removidos: eram o único cliente do painel admin legado
+  // (AdminShippingRatesManager.tsx, removido nesta fase) e das rotas
+  // /admin/shipping-rates* (removidas em adminRoutes.ts nesta mesma fase).
+  // Substituído integralmente pelo painel/rotas por setor abaixo.
+
+  // FASE D15-B: rotas de frete por setor (país > região > setor > rota >
+  // serviço > tarifa) — sistema PARALELO ao de shipping-rates acima
+  // (país↔país). Reutiliza integralmente os endpoints já criados no D15-A;
+  // GET /shipping/services é o único endpoint novo desta fase (D15-A nunca
+  // expôs uma forma de listar serviços — sem ele não há como popular o
+  // seletor de serviço nem as colunas Standard/Economy/Express do painel).
+  static async getShippingGeographyRegions(params?: { country?: string; active?: boolean }): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/shipping/regions', { params });
   }
 
-  static async createShippingRate(data: any): Promise<ApiResponse<any>> {
-    return apiClient.post('/admin/shipping-rates', data);
+  static async getShippingGeographySectors(params?: { country?: string; region?: string; active?: boolean }): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/shipping/sectors', { params });
   }
 
-  static async deleteShippingRate(id: string): Promise<ApiResponse<any>> {
-    return apiClient.delete(`/admin/shipping-rates/${id}`);
+  static async getShippingGeographyServices(params?: { country?: string; active?: boolean }): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/shipping/services', { params });
   }
 
-  static async updateShippingRate(id: string, data: any): Promise<ApiResponse<any>> {
-    return apiClient.patch(`/admin/shipping-rates/${id}`, data);
+  static async getShippingRoutes(params?: {
+    country?: string; region?: string; originRegion?: string; destinationRegion?: string;
+    originSector?: string; destinationSector?: string; q?: string;
+    service?: string; active?: boolean; hasRate?: boolean; page?: number; limit?: number;
+  }): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/shipping/routes', { params });
   }
 
-  static async toggleShippingRate(id: string, isActive?: boolean): Promise<ApiResponse<any>> {
-    return apiClient.patch(`/admin/shipping-rates/${id}/toggle`, isActive !== undefined ? { isActive } : {});
+  static async getShippingRouteById(id: string): Promise<ApiResponse<any>> {
+    return apiClient.get(`/admin/shipping/routes/${id}`);
   }
 
-  static async getShippingRateCoverage(params: { originCountry: string; destinationCountry: string; currency: string }): Promise<ApiResponse<any>> {
-    return apiClient.get('/admin/shipping-rates/coverage', { params });
+  static async updateShippingRouteStatus(id: string, data: { isActive?: boolean; deletedAt?: string | null }): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/shipping/routes/${id}`, data);
   }
 
-  static async simulateShippingRate(data: any): Promise<ApiResponse<any>> {
-    return apiClient.post('/admin/shipping-rates/simulate', data);
+  static async createShippingRouteRate(data: {
+    routeId: string; serviceId: string; minWeightKg: number; maxWeightKg: number; amount: number; currency: string;
+    isActive?: boolean; validFrom?: string | null; validUntil?: string | null;
+  }): Promise<ApiResponse<any>> {
+    return apiClient.post('/admin/shipping/rates', data);
+  }
+
+  static async updateShippingRouteRate(id: string, data: any): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/shipping/rates/${id}`, data);
   }
 }

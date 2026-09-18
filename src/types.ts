@@ -112,6 +112,8 @@ export interface ProductReview {
   comment: string;
   likes: number;
   verifiedPurchase: boolean;
+  // FASE D17-C7 — fotos reais anexadas à review; [] quando não há fotos.
+  images?: string[];
 }
 
 export interface ProductVideo {
@@ -139,17 +141,32 @@ export interface ProductColor {
 
 export interface ProductVariant {
   id: string;
+  productId?: string;
   sku?: string;
   color?: string;
   size?: string;
+  capacity?: string;
+  // Legado/não-autoritativo (D16-A2) — nunca usar para decidir
+  // disponibilidade. A fonte real é `availableStock`, abaixo.
   stock: number;
   price?: number;
   originalPrice?: number;
+  // FASE D16-C2 — estoque AO VIVO da variante (inventory, calculado na
+  // leitura pelo backend). undefined só em respostas antigas/sem essa
+  // enriquecimento; nesse caso trate como indisponível, nunca como "sem
+  // limite".
+  availableStock?: number;
+  // Campo real vindo do backend (product_variants.imageUrl) — usar este,
+  // nunca `image` (que só existe nos dados de mock/demo do frontend).
+  imageUrl?: string;
+  /** @deprecated Só existe em dados de demonstração (src/data/mockData.ts). Variantes reais do backend usam `imageUrl`. */
   image?: string;
   galleryImages?: string[];
   videos?: ProductVideo[] | string[];
   description?: string;
   specs?: Record<string, string>;
+  attributesJson?: Record<string, any>;
+  isActive?: boolean;
 }
 
 export interface ProductKit {
@@ -189,6 +206,15 @@ export interface Product {
   reviewsCount: number;
   seller: Seller;
   storeId?: string;
+  // Campos que só aparecem na resposta CRUA da API (catalogService faz
+  // `{...produtoDoBanco}`) ou no mapper do carrinho (getFormattedUserCart) —
+  // NUNCA re-emitidos por normalizeProduct(). São opcionais de propósito:
+  // um Product normalizado não os tem (usa `seller.id`, `category`,
+  // `shipping.*` em vez disso).
+  sellerId?: string | null;
+  countryCode?: string;
+  categoryId?: string | null;
+  attributesJson?: Record<string, string>;
   storeName?: string;
   isDigitalProduct?: boolean;
   weightKg?: number;
@@ -204,6 +230,17 @@ export interface Product {
   availableColors?: (ProductColor | string)[];
   availableSizes?: string[];
   variants?: ProductVariant[];
+  // FASE D16-C2.1 — sinal leve (sem trazer as variantes inteiras) para telas
+  // que só precisam saber "este produto exige seleção de variante?" antes de
+  // decidir entre adicionar direto ou levar ao detalhe (ex.: ProductCard).
+  hasVariants?: boolean;
+  // FASE D16-H2 — disponibilidade AO VIVO (inventory) da linha específica no
+  // contexto do carrinho: quando o item tem variantId, é a disponibilidade
+  // DAQUELA variante (nunca o estoque agregado do produto); quando não tem,
+  // é a disponibilidade do produto simples. Ausente = desconhecido (o
+  // frontend não deve travar a digitação por isso — o backend continua
+  // autoridade final na confirmação).
+  availableStock?: number;
   shipping: {
     freeShipping: boolean;
     arrivesTomorrow: boolean;
@@ -257,6 +294,12 @@ export interface DeliveryAddress {
   state: string;
   country: CountryCode;
   phone: string;
+  // FASE D16-F2 — fundação geográfica do endereço de ENTREGA. Referência
+  // logística autoritativa (shipping_sectors), nunca substitui os campos
+  // textuais acima. Opcional/opt-in: países sem geografia por setor (ex.:
+  // BR) continuam com isto sempre undefined/null. Ainda NÃO usado para
+  // calcular frete — só validado e mantido disponível no pedido.
+  shippingSectorId?: string | null;
 }
 
 export type PaymentMethodType =
@@ -313,6 +356,18 @@ export interface TrackingStep {
   completed: boolean;
 }
 
+// Resumo de shipment que OrderService.buildEnrichedOrder anexa ao pedido
+// (GET /orders/:id, GET /buyer/orders) — `shipment` = primeiro shipment,
+// com `carrier` já resolvido (carrierId -> carriers.name). Só os campos
+// realmente lidos pelo frontend tipado; o objeto real do backend tem mais.
+export interface OrderShipmentSummary {
+  id: string;
+  trackingNumber: string | null;
+  carrier: string | null;
+  carrierId: string | null;
+  status: string;
+}
+
 export interface Order {
   id: string;
   date: string;
@@ -334,6 +389,16 @@ export interface Order {
   originCountry: CountryCode;
   destinationCountry: CountryCode;
   disputeId?: string;
+  // Anexados por OrderService.buildEnrichedOrder — presentes na resposta
+  // real de GET /orders/:id (opcionais: pedidos sem shipment ainda).
+  shipment?: OrderShipmentSummary | null;
+  carrier?: string | null;
+  // Fase M1-D3 — coluna orders.purchase_group_id, presente em todos os
+  // pedidos via `{...ord}` em buildEnrichedOrder. `null` = pedido legado
+  // single-seller; preenchido = child order de uma compra multi-seller.
+  purchaseGroupId?: string | null;
+  logisticsStatus?: string;
+  orderNumber?: string;
 }
 
 export type DisputeReason =
@@ -397,12 +462,19 @@ export interface Category {
   image: string;
   itemCount: number;
   description?: string;
+  // Contagem de produtos calculada, emitida por GET /admin/categories
+  // (adminRoutes.ts) — ausente na resposta pública de /categories.
+  prods?: number;
 }
 
 export interface FilterState {
   query: string;
   category: string;
   country?: CountryCode | 'all';
+  // FASE D16-G1 — filtro OPCIONAL de país de ORIGEM (products.countryCode),
+  // independente de `country` (destino/elegibilidade) — nunca o substitui.
+  // 'ALL'/ausente = sem filtro de origem.
+  originCountryFilter?: string;
   storeId?: string;
   priceMin?: number;
   priceMax?: number;
@@ -465,6 +537,10 @@ export interface User {
   role: UserRole;
   avatar?: string;
   country?: string;
+  // AuthService emite `country` E `countryCode` (mesmo valor) na resposta de
+  // login/registro/refresh — ambos reais.
+  countryCode?: string;
+  kycStatus?: KycStatus;
   phone?: string;
   createdAt: string;
   isEmailVerified: boolean;
@@ -597,6 +673,10 @@ export interface AuthSession {
   location: string;
   lastActive: string;
   isCurrent: boolean;
+  // GET /buyer/security/sessions emite `ip` E `ipAddress`, `lastActive` E
+  // `lastActiveAt` (mesmos valores) — belt-and-suspenders no backend.
+  ipAddress?: string | null;
+  lastActiveAt?: string;
 }
 
 export type Permission =

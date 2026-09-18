@@ -53,7 +53,12 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
   const [formName, setFormName] = useState('');
-  const [formCommission, setFormCommission] = useState('4.5%');
+  // Correção crítica (comissão da categoria nunca persistia): formCommission
+  // representa SOMENTE o número (ex.: "4.5"), nunca mais um placeholder fixo
+  // com "%" embutido — o "%" agora é só decoração visual no input (ver JSX).
+  // Vazio = sem taxa própria (cai para sellers.commissionRate, depois o
+  // global) — nunca inventamos um default aqui.
+  const [formCommission, setFormCommission] = useState('');
   const [formStatus, setFormStatus] = useState('Ativa');
   const [formParentId, setFormParentId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -112,7 +117,7 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
   const handleOpenCreateMain = () => {
     setEditingCategory(null);
     setFormName('');
-    setFormCommission('4.5%');
+    setFormCommission('');
     setFormStatus('Ativa');
     setFormParentId('');
     setIsModalOpen(true);
@@ -121,7 +126,7 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
   const handleOpenAddSubcategory = (parentCategory: Category) => {
     setEditingCategory(null);
     setFormName('');
-    setFormCommission('4.5%');
+    setFormCommission('');
     setFormStatus('Ativa');
     setFormParentId(parentCategory.id);
     setIsModalOpen(true);
@@ -130,7 +135,13 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
   const handleOpenEdit = (c: Category) => {
     setEditingCategory(c);
     setFormName(c.name);
-    setFormCommission(c.commission || '4.5%');
+    // Correção crítica: nunca mais ler o placeholder "commission" (campo que
+    // o backend nunca preencheu) — inicializa a partir do valor real
+    // c.commissionRate (numeric do Postgres via Drizzle: string ou null).
+    // null/undefined => campo vazio, nunca um "4.5%" inventado.
+    setFormCommission(
+      c.commissionRate !== null && c.commissionRate !== undefined ? String(c.commissionRate) : ''
+    );
     setFormStatus(c.isActive !== false ? 'Ativa' : 'Inativa');
     setFormParentId(c.parentId || '');
     setIsModalOpen(true);
@@ -151,10 +162,30 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
     }
   };
 
+  // Correção crítica (comissão da categoria nunca persistia): normaliza
+  // vírgula decimal ("4,5" -> "4.5") antes de Number() e valida 0-100 aqui
+  // também (o backend já valida, mas rejeitar cedo evita um round-trip e dá
+  // feedback claro). Retorna null explícito para "sem taxa própria" (campo
+  // vazio) e 'invalid' quando o valor não pode ser salvo.
+  const parseCommissionInput = (raw: string): number | null | 'invalid' => {
+    const trimmed = raw.trim();
+    if (trimmed === '') return null;
+    const normalized = trimmed.replace(',', '.');
+    const num = Number(normalized);
+    if (isNaN(num) || num < 0 || num > 100) return 'invalid';
+    return num;
+  };
+
   const handleSaveCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) {
       showToast('Por favor, digite o nome da categoria.');
+      return;
+    }
+
+    const parsedCommission = parseCommissionInput(formCommission);
+    if (parsedCommission === 'invalid') {
+      showToast('A comissão da categoria deve ser um percentual entre 0 e 100 (ex.: 4.5). Deixe em branco para não definir uma taxa própria.');
       return;
     }
 
@@ -178,6 +209,7 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
           name: formName.trim(),
           parentId: parentIdValue,
           isActive,
+          commissionRate: parsedCommission,
         });
         if (res.success) {
           showToast(`Categoria "${formName}" atualizada com sucesso no Supabase!`);
@@ -191,6 +223,7 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
           name: formName.trim(),
           parentId: parentIdValue,
           isActive,
+          commissionRate: parsedCommission,
         });
         if (res.success) {
           showToast(`Nova categoria "${formName}" criada com sucesso no Supabase!`);
@@ -399,7 +432,11 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
               </div>
             </td>
             <td className="p-3 font-bold text-gray-700">{node.prods ?? 0} produtos</td>
-            <td className="p-3 font-black text-purple-700">{node.commission || '4.5%'}</td>
+            <td className="p-3 font-black text-purple-700">
+              {node.commissionRate !== null && node.commissionRate !== undefined
+                ? `${Number(node.commissionRate)}%`
+                : <span className="font-medium text-gray-400">Padrão do vendedor</span>}
+            </td>
             <td className="p-3">
               <button
                 onClick={() => handleToggleActive(node)}
@@ -578,14 +615,22 @@ export const AdminCategoriesManager: React.FC<AdminCategoriesManagerProps> = ({ 
 
               <div>
                 <label className="block font-bold text-gray-700 mb-1">Comissão Base (%):</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Ex: 4.5%"
-                  value={formCommission}
-                  onChange={(e) => setFormCommission(e.target.value)}
-                  className="w-full p-2.5 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 font-bold"
-                />
+                <div className="relative">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    placeholder="Ex: 4.5 (em branco = sem taxa própria)"
+                    value={formCommission}
+                    onChange={(e) => setFormCommission(e.target.value)}
+                    className="w-full p-2.5 pr-8 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 font-bold"
+                  />
+                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 font-bold">%</span>
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Deixe em branco para esta categoria usar a comissão do vendedor (ou o padrão global).
+                </p>
               </div>
 
               <div>

@@ -1,0 +1,4 @@
+ALTER TABLE "addresses" ADD COLUMN "shipping_sector_id" varchar(255);--> statement-breakpoint
+ALTER TABLE "stores" ADD COLUMN "operational_address_id" varchar(255);--> statement-breakpoint
+ALTER TABLE "addresses" ADD CONSTRAINT "addresses_shipping_sector_id_shipping_sectors_id_fk" FOREIGN KEY ("shipping_sector_id") REFERENCES "public"."shipping_sectors"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "stores" ADD CONSTRAINT "stores_operational_address_id_addresses_id_fk" FOREIGN KEY ("operational_address_id") REFERENCES "public"."addresses"("id") ON DELETE set null ON UPDATE no action;

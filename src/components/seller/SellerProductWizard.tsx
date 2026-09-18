@@ -44,6 +44,7 @@ import { CategoriesApi } from '../../api/clients/CategoriesApi';
 import { uploadService } from '../../services/uploadService';
 import {
   Product,
+  ProductCondition,
   CurrencyCode,
   CountryCode,
   PublishingScope,
@@ -53,11 +54,49 @@ import {
 } from '../../types';
 import { countriesConfig, getCountryFlag, getCountryName } from '../../utils/currencyUtils';
 import { useCountries } from '../../hooks/useCountries';
+import {
+  type ProductMode,
+  deriveProductMode,
+  deriveColorsFromVariants,
+  deriveSizesFromVariants,
+  groupVariantsByColor,
+  propagateColorImage,
+  computeVariantsSummary,
+  deriveProductLevelPricing,
+  validateVariantEntry,
+  buildVariantsPayloadForSubmit,
+} from '../../utils/productVariantWizard';
+
+// Fase M1-D2.6 — payload de escrita (create/update). NÃO é um Product
+// normalizado: é o formato de WIRE que o backend aceita em
+// products.* — `condition` em inglês ('new'|'used'|'refurbished') ou null
+// (o normalizeProduct converte para 'novo'/'usado'/'recondicionado' só na
+// LEITURA), `categoryId` flat, etc. O parent
+// (SellerHubView.handleAddNewProduct/handleUpdateProduct, ambos `(p: any)`)
+// repassa direto para SellerService.createProduct/updateProduct.
+type SellerProductWritePayload = Omit<Partial<Product>, 'condition'> & {
+  // O backend aceita AMBOS os formatos em products.condition:
+  // productCreationService.ts e sellerRoutes.ts (PATCH) têm o mesmo
+  // conditionMap { new/novo -> new, used/usado -> used,
+  // refurbished/recondicionado -> refurbished }. `null` limpa o campo.
+  condition?: 'new' | 'used' | 'refurbished' | ProductCondition | null;
+};
+
+// Product.videos é `ProductVideo[] | string[]` — o primeiro elemento pode
+// ser uma string (URL solta) OU um objeto. Extrai os campos com segurança
+// sem assumir que é sempre objeto (normalizeProduct passa `p.videos`
+// adiante como veio).
+function firstVideoParts(videos: Product['videos']): { url?: string; title?: string; duration?: string } {
+  const v = Array.isArray(videos) ? videos[0] : undefined;
+  if (!v) return {};
+  if (typeof v === 'string') return { url: v };
+  return { url: v.url, title: v.title, duration: v.duration };
+}
 
 interface SellerProductWizardProps {
   initialProduct?: Product | null;
-  onAddProduct: (p: Omit<Product, 'id'>) => Promise<any> | any;
-  onUpdateProduct?: (p: Product) => Promise<any> | any;
+  onAddProduct: (p: SellerProductWritePayload) => Promise<any> | any;
+  onUpdateProduct?: (p: SellerProductWritePayload) => Promise<any> | any;
   onCancelEdit?: () => void;
   onOpenProductDetail: (id: string) => void;
   showToast: (msg: string) => void;
@@ -223,25 +262,30 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     }
   }, [selectedStore, isEditing]);
 
+  // FASE D16-B1 — "produto com variações" nunca foi um campo salvo; é
+  // sempre inferido de existir pelo menos uma variante REAL (nunca de
+  // availableColors/availableSizes, que o backend nunca persiste — achado
+  // central da auditoria D16-A2.5). Guardamos também se o produto JÁ tinha
+  // variantes reais ao abrir o editor, para decidir no submit se alternar
+  // para "simples" deve desativar (variants: []) ou simplesmente nunca ter
+  // tido nada a desativar (variants: undefined) — ver buildVariantsPayloadForSubmit.
+  const [productMode, setProductMode] = useState<ProductMode>(() => deriveProductMode(initialProduct?.variants));
+  const hadRealVariantsOnLoadRef = useRef<boolean>(deriveProductMode(initialProduct?.variants) === 'variable');
+
   // Step 3: Variations (Colors, Sizes & Stock Matrix) and Product Kits (Bundles)
-  const [colors, setColors] = useState<ProductColor[]>(() => {
-    if (initialProduct?.availableColors && initialProduct.availableColors.length > 0) {
-      return initialProduct.availableColors.map((c) =>
-        typeof c === 'string' ? { name: c, hex: '#374151' } : c
-      );
-    }
-    return [];
-  });
+  // Reconstruídas das VARIANTES REAIS devolvidas pelo backend — nunca de
+  // availableColors/availableSizes (campos fantasma, nunca persistidos).
+  const [colors, setColors] = useState<ProductColor[]>(() => deriveColorsFromVariants(initialProduct?.variants));
   const [newColorName, setNewColorName] = useState('');
   const [newColorHex, setNewColorHex] = useState('#111827');
   const [newColorImage, setNewColorImage] = useState('');
   const [newColorDesc, setNewColorDesc] = useState('');
+  // Upload de imagem por CARD de cor (reaproveita uploadService.uploadProduct,
+  // mesma infra do upload de galeria — nunca um novo endpoint).
+  const colorImageInputRef = useRef<HTMLInputElement | null>(null);
+  const [editingColorImageIndex, setEditingColorImageIndex] = useState<number | null>(null);
 
-  const [sizes, setSizes] = useState<string[]>(
-    initialProduct?.availableSizes && initialProduct.availableSizes.length > 0
-      ? initialProduct.availableSizes
-      : []
-  );
+  const [sizes, setSizes] = useState<string[]>(() => deriveSizesFromVariants(initialProduct?.variants));
   const [newSizeName, setNewSizeName] = useState('');
 
   // Stock per variant matrix
@@ -317,17 +361,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   const [shortVideoUrl, setShortVideoUrl] = useState(
     initialProduct?.shortVideo?.url ||
       initialProduct?.videoUrl ||
-      (initialProduct?.videos && initialProduct.videos[0]?.url) ||
+      firstVideoParts(initialProduct?.videos).url ||
       ''
   );
   const [shortVideoTitle, setShortVideoTitle] = useState(
     initialProduct?.shortVideo?.title ||
-      (initialProduct?.videos && initialProduct.videos[0]?.title) ||
+      firstVideoParts(initialProduct?.videos).title ||
       'Vídeo Demonstrativo do Produto'
   );
   const [shortVideoDuration, setShortVideoDuration] = useState(
     initialProduct?.shortVideo?.duration ||
-      (initialProduct?.videos && initialProduct.videos[0]?.duration) ||
+      firstVideoParts(initialProduct?.videos).duration ||
       '0:25'
   );
 
@@ -396,17 +440,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       const existingVideo =
         initialProduct.shortVideo?.url ||
         initialProduct.videoUrl ||
-        (initialProduct.videos && initialProduct.videos[0]?.url) ||
+        firstVideoParts(initialProduct.videos).url ||
         '';
       setShortVideoUrl(existingVideo);
       setShortVideoTitle(
         initialProduct.shortVideo?.title ||
-          (initialProduct.videos && initialProduct.videos[0]?.title) ||
+          firstVideoParts(initialProduct.videos).title ||
           'Vídeo Demonstrativo do Produto'
       );
       setShortVideoDuration(
         initialProduct.shortVideo?.duration ||
-          (initialProduct.videos && initialProduct.videos[0]?.duration) ||
+          firstVideoParts(initialProduct.videos).duration ||
           '0:25'
       );
 
@@ -614,6 +658,42 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     handleRegenerateMatrix(updated, sizes);
   };
 
+  // FASE D16-B1 — imagem por CARD de cor. Reaproveita uploadService.uploadProduct
+  // (mesma infra do upload de galeria, nenhum endpoint novo). A imagem é
+  // sempre da COR, nunca de um tamanho — propagada para TODAS as variantes
+  // daquela cor de uma vez (nunca pedimos imagem diferente por M/L/XL).
+  const handleOpenColorImagePicker = (colorIndex: number) => {
+    setEditingColorImageIndex(colorIndex);
+    colorImageInputRef.current?.click();
+  };
+
+  const handleColorImageFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const colorIndex = editingColorImageIndex;
+    if (colorImageInputRef.current) colorImageInputRef.current.value = '';
+    setEditingColorImageIndex(null);
+    if (!file || colorIndex === null || !colors[colorIndex]) return;
+
+    const colorName = colors[colorIndex].name;
+    try {
+      const res = await uploadService.uploadProduct(file);
+      if (res?.url) {
+        setColors((prev) => prev.map((c, idx) => (idx === colorIndex ? { ...c, image: res.url } : c)));
+        setVariantsMatrix((prev) => propagateColorImage(prev, colorName, res.url));
+        showToast(`Imagem da cor "${colorName}" atualizada!`);
+      }
+    } catch (err: any) {
+      showToast(`Falha no upload da imagem da cor "${colorName}": ${err?.message || 'Erro de envio'}`);
+    }
+  };
+
+  const handleRemoveColorImage = (colorIndex: number) => {
+    const colorName = colors[colorIndex]?.name;
+    if (!colorName) return;
+    setColors((prev) => prev.map((c, idx) => (idx === colorIndex ? { ...c, image: undefined } : c)));
+    setVariantsMatrix((prev) => propagateColorImage(prev, colorName, undefined));
+  };
+
   // Add/Remove Sizes
   const handleAddSize = (sizeToAdd?: string) => {
     const val = (sizeToAdd || newSizeName).trim();
@@ -796,8 +876,14 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
 
   const handlePublish = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title || !price) {
-      showToast('Por favor, preencha o título e o preço.');
+    if (!title) {
+      showToast('Por favor, preencha o título do produto.');
+      return;
+    }
+    // FASE D16-B1 — produto variável nunca exige o preço "global" da Etapa 4
+    // (ele deixou de ser autoridade nesse modo); só produto simples exige.
+    if (productMode === 'simple' && !price) {
+      showToast('Por favor, preencha o preço do produto.');
       return;
     }
 
@@ -806,17 +892,49 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
-    const priceNum = parseFloat(price) || 0;
-    // Correção pré-piloto (preço promocional): "preço anterior" NUNCA pode
-    // ser inventado (era priceNum * 1.2 — um desconto de 20% fictício
-    // aplicado a todo produto que o vendedor não configurasse). Sem valor
-    // real informado, não existe preço anterior — undefined, não um cálculo.
-    const parsedOrigPrice = originalPrice ? parseFloat(originalPrice) : undefined;
-    if (parsedOrigPrice !== undefined && parsedOrigPrice <= priceNum) {
-      showToast('Preço anterior precisa ser maior que o preço atual para configurar uma promoção — ele não será exibido.');
+    // FASE D16-B1 — price/originalPrice/stock nunca são pedidos de novo ao
+    // vendedor quando o produto é variável: são SEMPRE derivados das
+    // variantes reais (menor preço válido, estoque somado, riscado só da
+    // variante mais barata) — nunca um valor inventado. Se nenhuma variante
+    // tiver preço válido, bloqueia aqui mesmo, antes de qualquer chamada à
+    // API, com uma mensagem amigável.
+    let priceNum: number;
+    let origPriceNum: number | undefined;
+    let discPercentage: number;
+    let parsedStock: number;
+
+    if (productMode === 'variable') {
+      const derivedPricing = deriveProductLevelPricing(variantsMatrix);
+      if ('error' in derivedPricing) {
+        showToast(derivedPricing.error);
+        return;
+      }
+      priceNum = derivedPricing.price;
+      origPriceNum = derivedPricing.originalPrice;
+      parsedStock = derivedPricing.stock;
+      discPercentage = origPriceNum ? Math.round(((origPriceNum - priceNum) / origPriceNum) * 100) : 0;
+    } else {
+      priceNum = parseFloat(price) || 0;
+      // Correção pré-piloto (preço promocional): "preço anterior" NUNCA pode
+      // ser inventado (era priceNum * 1.2 — um desconto de 20% fictício
+      // aplicado a todo produto que o vendedor não configurasse). Sem valor
+      // real informado, não existe preço anterior — undefined, não um cálculo.
+      const parsedOrigPrice = originalPrice ? parseFloat(originalPrice) : undefined;
+      if (parsedOrigPrice !== undefined && parsedOrigPrice <= priceNum) {
+        showToast('Preço anterior precisa ser maior que o preço atual para configurar uma promoção — ele não será exibido.');
+      }
+      origPriceNum = parsedOrigPrice !== undefined && parsedOrigPrice > priceNum ? parsedOrigPrice : undefined;
+      discPercentage = origPriceNum ? Math.round(((origPriceNum - priceNum) / origPriceNum) * 100) : 0;
+
+      // Validate stock (Requirement 5: no fallback || 10, stock = 0 is valid)
+      const parsedStockValue = parseInt(stock, 10);
+      if (stock === '' || stock === undefined || stock === null || isNaN(parsedStockValue) || parsedStockValue < 0) {
+        showToast('Por favor, informe uma quantidade válida de estoque (número inteiro maior ou igual a 0).');
+        return;
+      }
+      parsedStock = parsedStockValue;
     }
-    const origPriceNum = parsedOrigPrice !== undefined && parsedOrigPrice > priceNum ? parsedOrigPrice : undefined;
-    const discPercentage = origPriceNum ? Math.round(((origPriceNum - priceNum) / origPriceNum) * 100) : 0;
+
     const selectedCategoryObj = activeCategories.find(
       (c: any) => c.id === category || c.slug === category || c.name === category
     ) || activeCategories[0];
@@ -852,13 +970,6 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
     const mainCoverImage = gallery[0].trim();
-
-    // Validate stock (Requirement 5: no fallback || 10, stock = 0 is valid)
-    const parsedStock = parseInt(stock, 10);
-    if (stock === '' || stock === undefined || stock === null || isNaN(parsedStock) || parsedStock < 0) {
-      showToast('Por favor, informe uma quantidade válida de estoque (número inteiro maior ou igual a 0).');
-      return;
-    }
 
     // BLOCKER_LAUNCH: peso é obrigatório — o backend rejeita a criação sem
     // ele (orderService precisa desse valor para calcular frete no
@@ -916,7 +1027,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       if (warehouseHub && warehouseHub.trim()) cleanEditSpecs['Armazém'] = warehouseHub.trim();
       else delete cleanEditSpecs['Armazém'];
 
-      const updatedProduct: Product = {
+      const updatedProduct: SellerProductWritePayload = {
         ...initialProduct,
         title,
         price: priceNum,
@@ -933,7 +1044,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         productKits,
         availableColors: colors,
         availableSizes: sizes,
-        variants: variantsMatrix,
+        variants: buildVariantsPayloadForSubmit(productMode, variantsMatrix, hadRealVariantsOnLoadRef.current),
         videos: cleanVideoUrl
           ? [
               {
@@ -959,7 +1070,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         // null explícito (não undefined) para que a limpeza de condição
         // realmente chegue ao PATCH — undefined seria descartado pelo
         // JSON.stringify e o backend nunca saberia que deve limpar o campo.
-        condition: (condition || null) as any,
+        condition: condition || null,
         brand: brand && brand.trim() ? brand.trim() : undefined,
         model: model && model.trim() ? model.trim() : undefined,
         stock: parsedStock,
@@ -1577,6 +1688,45 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         {/* STEP 3: Colors, Sizes & Linked Stock Variations + Product Kits */}
         {wizardStep === 3 && (
           <div className="space-y-8 text-xs font-medium">
+            {/* FASE D16-B1 — Tipo do produto. Nunca é um campo salvo (ver
+                deriveProductMode) — só decide qual UI mostrar aqui e na
+                Etapa 4. Trocar de "com variações" para "simples" nunca
+                apaga o que já foi montado: só some da tela; volta a
+                aparecer se o vendedor mudar de ideia antes de publicar. */}
+            <div>
+              <h3 className="font-bold text-gray-900 text-sm mb-2">Este produto possui variações?</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setProductMode('simple')}
+                  className={`text-left p-4 rounded-2xl border-2 transition ${
+                    productMode === 'simple'
+                      ? 'border-emerald-600 bg-emerald-50/60 ring-2 ring-emerald-200'
+                      : 'border-gray-200 bg-white hover:border-gray-300'
+                  }`}
+                >
+                  <p className="font-black text-gray-900 text-sm flex items-center gap-2">
+                    <Package className="w-4 h-4 text-emerald-700" /> Produto simples
+                  </p>
+                  <p className="text-[11px] text-gray-600 mt-1">Um único preço e estoque.</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProductMode('variable')}
+                  className={`text-left p-4 rounded-2xl border-2 transition ${
+                    productMode === 'variable'
+                      ? 'border-emerald-600 bg-emerald-50/60 ring-2 ring-emerald-200'
+                      : 'border-gray-200 bg-white hover:border-gray-300'
+                  }`}
+                >
+                  <p className="font-black text-gray-900 text-sm flex items-center gap-2">
+                    <Palette className="w-4 h-4 text-purple-600" /> Produto com variações
+                  </p>
+                  <p className="text-[11px] text-gray-600 mt-1">Cores, tamanhos/capacidades, preços e estoques diferentes.</p>
+                </button>
+              </div>
+            </div>
+
             {/* 1. SEÇÃO DE KITS DE PRODUTOS (BUNDLES / LOTES) */}
             <div className="p-5 bg-amber-50/50 border border-amber-200 rounded-2xl space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-amber-200/60">
@@ -1682,8 +1832,18 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
               </div>
             </div>
 
-            {/* 2. SEÇÃO DE CORES E TAMANHOS */}
+            {/* 2. SEÇÃO DE CORES E TAMANHOS — só em modo "com variações". */}
+            {productMode === 'variable' && (
             <div className="space-y-6 pt-4 border-t border-gray-200">
+              {/* Input oculto compartilhado do upload de imagem por card de
+                  cor — reaproveita uploadService.uploadProduct. */}
+              <input
+                ref={colorImageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleColorImageFileSelected}
+              />
               {/* Cores Builder */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
@@ -1862,198 +2022,219 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                 </div>
               </div>
 
-              {/* 3. MATRIZ DE PREÇO, SKU E ESTOQUE POR VARIAÇÃO */}
-              <div className="p-5 bg-slate-50 border border-slate-200 rounded-2xl space-y-4 pt-4">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-200">
+              {/* 3. VARIAÇÕES DO PRODUTO — cards por cor (FASE D16-B1).
+                  Substitui a antiga tabela horizontal; variantsMatrix
+                  continua sendo o MESMO array plano de sempre (nunca
+                  reordenado/mutado aqui) — groupVariantsByColor só projeta
+                  para renderização, e os handlers de edição (handleUpdateVariant*)
+                  continuam recebendo o índice ORIGINAL em variantsMatrix. */}
+              <div className="space-y-4 pt-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
                     <h3 className="font-black text-gray-900 text-sm flex items-center gap-2">
                       <Boxes className="w-4 h-4 text-emerald-700" />
-                      3. Tabela de Preços, SKUs e Estoque por Variação ({variantsMatrix.length} Opções)
+                      3. Variações do Produto
                     </h3>
                     <p className="text-[11px] text-gray-600">
-                      Configure o <strong>preço específico</strong> para cada tamanho ou capacidade, código SKU de separação no armazém e unidades disponíveis.
+                      Configure preço, preço riscado, estoque e SKU de cada variação — organizadas por cor.
                     </p>
                   </div>
-
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <div className="bg-emerald-100 text-emerald-950 font-black px-3 py-1.5 rounded-xl text-xs border border-emerald-300">
-                      Estoque Total: {stock} un.
-                    </div>
-                  </div>
-                </div>
-
-                {/* Variant Fast Action Tools */}
-                <div className="flex flex-wrap items-center gap-2 p-2.5 bg-white border border-gray-200 rounded-xl">
-                  <span className="text-[11px] font-bold text-gray-500 flex items-center gap-1">
-                    ⚡ Ações Rápidas:
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleCopyBasePriceToAllVariants}
-                    className="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
-                    title="Copia o preço base geral para todas as variações da tabela"
-                  >
-                    💰 Copiar Preço Base ({parseFloat(price) > 0 ? parseFloat(price).toLocaleString('pt-BR') : '0'}) para Todos
-                  </button>
-                  {sizes.length > 1 && (
+                  {variantsMatrix.length > 0 && (
                     <button
                       type="button"
-                      onClick={() => handleApplyPriceScaleBySizes(15)}
-                      className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-800 border border-blue-200 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
-                      title="Calcula preços progressivos para tamanhos maiores (+15% a cada nível)"
+                      onClick={handleGenerateAutoSkus}
+                      className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer shrink-0"
+                      title="Gera códigos SKU organizados para envio e separação logística"
                     >
-                      📈 Escala por Tamanho (+15%)
+                      🏷️ Gerar SKUs de Separação
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={handleGenerateAutoSkus}
-                    className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
-                    title="Gera códigos SKU organizados para envio e separação logística"
-                  >
-                    🏷️ Gerar SKUs de Separação
-                  </button>
                 </div>
 
-                {/* Matrix Table */}
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs bg-white rounded-xl border border-gray-200 overflow-hidden">
-                    <thead className="bg-gray-100 text-gray-700 font-bold border-b border-gray-200">
-                      <tr>
-                        <th className="p-3">Cor</th>
-                        <th className="p-3">Tamanho / Capacidade</th>
-                        <th className="p-3">Preço da Variação (Moeda) *</th>
-                        <th className="p-3">Preço Original (Riscado)</th>
-                        <th className="p-3">SKU de Separação</th>
-                        <th className="p-3 text-center">Estoque (Un.)</th>
-                        <th className="p-3">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {variantsMatrix.map((item, idx) => {
-                        const basePriceNum = parseFloat(price) || 0;
-                        const currentVariantPrice = item.price ?? basePriceNum;
-                        const hasCustomPrice = item.price !== undefined && item.price !== basePriceNum && basePriceNum > 0;
-                        const diffPct = basePriceNum > 0 && item.price !== undefined
-                          ? Math.round(((item.price - basePriceNum) / basePriceNum) * 100)
-                          : 0;
+                {variantsMatrix.length === 0 ? (
+                  <div className="p-4 bg-gray-50 border border-dashed border-gray-300 rounded-xl text-center text-gray-500 text-xs">
+                    Adicione ao menos uma cor ou tamanho acima para começar a configurar as variações.
+                  </div>
+                ) : (
+                  <>
+                    {/* Resumo — somente leitura, nunca uma segunda fonte de verdade. */}
+                    {(() => {
+                      const summary = computeVariantsSummary(variantsMatrix);
+                      return (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-950 font-bold text-xs">
+                          {summary.colorsCount > 0 && <span>{summary.colorsCount} cor(es)</span>}
+                          {summary.colorsCount > 0 && <span className="text-emerald-400">•</span>}
+                          <span>{summary.count} variação(ões)</span>
+                          <span className="text-emerald-400">•</span>
+                          <span>{summary.totalStock} un. em estoque</span>
+                          {summary.minPrice !== null && (
+                            <>
+                              <span className="text-emerald-400">•</span>
+                              <span>
+                                Preço:{' '}
+                                {summary.minPrice === summary.maxPrice
+                                  ? `${currency} ${summary.minPrice.toLocaleString('pt-BR')}`
+                                  : `${currency} ${summary.minPrice.toLocaleString('pt-BR')} – ${summary.maxPrice!.toLocaleString('pt-BR')}`}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })()}
 
+                    {/* Cards por cor (2 colunas em telas largas, sempre 1 no mobile). */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      {groupVariantsByColor(variantsMatrix).map((group) => {
+                        const colorIndex = group.color ? colors.findIndex((c) => c.name === group.color) : -1;
+                        const groupHasSizes = group.entries.some((e) => !!e.variant.size);
                         return (
-                          <tr key={item.id || idx} className="hover:bg-gray-50/80 transition-colors">
-                            <td className="p-3 font-bold text-gray-900 flex items-center gap-2">
-                              {item.image ? (
+                          <div
+                            key={group.color ?? '__sem_cor__'}
+                            className="p-4 bg-white border border-gray-200 rounded-2xl space-y-3 shadow-2xs"
+                          >
+                            {/* Header do card: imagem da cor + nome + ações de imagem */}
+                            <div className="flex items-center gap-3 pb-3 border-b border-gray-100">
+                              {group.image ? (
                                 <img
-                                  src={item.image}
-                                  alt={item.color || 'Variação'}
-                                  className="w-7 h-7 rounded-lg object-cover border border-gray-200"
+                                  src={group.image}
+                                  alt={group.color || 'Variação'}
+                                  className="w-14 h-14 rounded-xl object-cover border border-gray-200 shrink-0"
                                 />
                               ) : (
-                                <span className="w-3 h-3 rounded-full bg-gray-700 shrink-0" />
+                                <div className="w-14 h-14 rounded-xl bg-gray-100 border border-gray-200 flex items-center justify-center text-gray-400 shrink-0">
+                                  <ImageIcon className="w-5 h-5" />
+                                </div>
                               )}
-                              <span>{item.color || 'Padrão'}</span>
-                            </td>
-                            <td className="p-3">
-                              <span className="bg-blue-50 text-blue-900 border border-blue-200 font-black px-2 py-1 rounded-md text-xs">
-                                {item.size || 'Único / Padrão'}
-                              </span>
-                            </td>
-                            <td className="p-3">
-                              <div className="flex items-center gap-1.5">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="any"
-                                  placeholder={basePriceNum > 0 ? String(basePriceNum) : 'Preço'}
-                                  value={item.price !== undefined ? item.price : ''}
-                                  onChange={(e) =>
-                                    handleUpdateVariantPrice(
-                                      idx,
-                                      e.target.value === '' ? (basePriceNum || 0) : parseFloat(e.target.value) || 0
-                                    )
-                                  }
-                                  className={`w-28 p-1.5 border rounded-lg font-bold text-sm bg-white focus:ring-2 focus:ring-emerald-500 ${
-                                    hasCustomPrice
-                                      ? 'border-emerald-500 bg-emerald-50/30 text-emerald-950 font-black'
-                                      : 'border-gray-300 text-gray-800'
-                                  }`}
-                                />
-                                {hasCustomPrice && (
-                                  <span
-                                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                                      diffPct > 0
-                                        ? 'bg-purple-100 text-purple-800'
-                                        : 'bg-emerald-100 text-emerald-800'
-                                    }`}
-                                  >
-                                    {diffPct > 0 ? `+${diffPct}%` : `${diffPct}%`}
-                                  </span>
+                              <div className="flex-1 min-w-0">
+                                <p className="font-black text-gray-900 text-sm truncate">{group.color || 'Padrão'}</p>
+                                <p className="text-[11px] text-gray-500">{group.entries.length} variação(ões)</p>
+                                {colorIndex >= 0 && (
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenColorImagePicker(colorIndex)}
+                                      className="text-[11px] font-bold text-emerald-700 hover:text-emerald-900 cursor-pointer"
+                                    >
+                                      {group.image ? 'Alterar imagem' : 'Adicionar imagem'}
+                                    </button>
+                                    {group.image && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemoveColorImage(colorIndex)}
+                                        className="text-[11px] font-bold text-gray-400 hover:text-red-600 cursor-pointer"
+                                      >
+                                        Remover imagem
+                                      </button>
+                                    )}
+                                  </div>
                                 )}
                               </div>
-                            </td>
-                            <td className="p-3">
-                              <input
-                                type="number"
-                                min="0"
-                                step="any"
-                                placeholder="Opcional"
-                                value={item.originalPrice !== undefined ? item.originalPrice : ''}
-                                onChange={(e) =>
-                                  handleUpdateVariantOriginalPrice(
-                                    idx,
-                                    e.target.value === '' ? undefined : parseFloat(e.target.value) || undefined
-                                  )
-                                }
-                                className="w-24 p-1.5 border border-gray-300 rounded-lg text-xs text-gray-600 bg-white"
-                              />
-                            </td>
-                            <td className="p-3">
-                              <input
-                                type="text"
-                                placeholder="SKU-VAR-001"
-                                value={item.sku || ''}
-                                onChange={(e) => handleUpdateVariantSku(idx, e.target.value)}
-                                className="w-36 p-1.5 border border-gray-300 rounded-lg font-mono text-[11px] text-gray-700 bg-white"
-                              />
-                            </td>
-                            <td className="p-3 text-center">
-                              <input
-                                type="number"
-                                min="0"
-                                value={item.stock}
-                                onChange={(e) => handleUpdateVariantStock(idx, parseInt(e.target.value) || 0)}
-                                className="w-20 p-1.5 border border-gray-300 rounded-lg font-bold text-center bg-white focus:border-emerald-600"
-                              />
-                            </td>
-                            <td className="p-3">
-                              {item.stock > 5 ? (
-                                <span className="text-emerald-700 font-bold text-[11px] bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 whitespace-nowrap">
-                                  ✓ Em Estoque ({item.stock})
-                                </span>
-                              ) : item.stock > 0 ? (
-                                <span className="text-amber-700 font-bold text-[11px] bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200 whitespace-nowrap">
-                                  ⚠️ Poucas ({item.stock})
-                                </span>
-                              ) : (
-                                <span className="text-red-700 font-bold text-[11px] bg-red-50 px-2 py-0.5 rounded-md border border-red-200 whitespace-nowrap">
-                                  ✕ Esgotado
-                                </span>
-                              )}
-                            </td>
-                          </tr>
+                            </div>
+
+                            {/* Pills informativas dos tamanhos existentes nesta cor */}
+                            {groupHasSizes && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {group.entries
+                                  .filter((e) => e.variant.size)
+                                  .map((e) => (
+                                    <span
+                                      key={e.index}
+                                      className="px-2 py-0.5 bg-blue-50 border border-blue-200 text-blue-900 rounded-lg text-[11px] font-bold"
+                                    >
+                                      {e.variant.size}
+                                    </span>
+                                  ))}
+                              </div>
+                            )}
+
+                            {/* Uma sub-seção por combinação concreta (= 1 product_variant real) */}
+                            <div className="space-y-2">
+                              {group.entries.map(({ variant: item, index: idx }) => {
+                                const errors = validateVariantEntry(item);
+                                return (
+                                  <div key={item.id || idx} className="p-3 bg-gray-50 rounded-xl space-y-2">
+                                    {item.size && <p className="font-bold text-gray-800 text-xs">{item.size}</p>}
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                      <div>
+                                        <label className="block text-[10px] font-bold text-gray-500 mb-0.5">Preço *</label>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          step="any"
+                                          value={item.price !== undefined ? item.price : ''}
+                                          onChange={(e) =>
+                                            handleUpdateVariantPrice(idx, e.target.value === '' ? 0 : parseFloat(e.target.value) || 0)
+                                          }
+                                          className={`w-full p-1.5 border rounded-lg font-bold text-xs bg-white focus:ring-2 focus:ring-emerald-500 ${
+                                            errors.price ? 'border-red-400' : 'border-gray-300'
+                                          }`}
+                                        />
+                                        {errors.price && <p className="text-[10px] text-red-600 mt-0.5">{errors.price}</p>}
+                                      </div>
+                                      <div>
+                                        <label className="block text-[10px] font-bold text-gray-500 mb-0.5">Riscado</label>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          step="any"
+                                          placeholder="Opcional"
+                                          value={item.originalPrice !== undefined ? item.originalPrice : ''}
+                                          onChange={(e) =>
+                                            handleUpdateVariantOriginalPrice(
+                                              idx,
+                                              e.target.value === '' ? undefined : parseFloat(e.target.value) || undefined
+                                            )
+                                          }
+                                          className={`w-full p-1.5 border rounded-lg text-xs bg-white ${
+                                            errors.originalPrice ? 'border-red-400' : 'border-gray-300'
+                                          }`}
+                                        />
+                                        {errors.originalPrice && <p className="text-[10px] text-red-600 mt-0.5">{errors.originalPrice}</p>}
+                                      </div>
+                                      <div>
+                                        <label className="block text-[10px] font-bold text-gray-500 mb-0.5">Estoque</label>
+                                        <input
+                                          type="number"
+                                          min="0"
+                                          value={item.stock}
+                                          onChange={(e) => handleUpdateVariantStock(idx, parseInt(e.target.value) || 0)}
+                                          className={`w-full p-1.5 border rounded-lg font-bold text-xs text-center bg-white ${
+                                            errors.stock ? 'border-red-400' : 'border-gray-300'
+                                          }`}
+                                        />
+                                        {errors.stock && <p className="text-[10px] text-red-600 mt-0.5">{errors.stock}</p>}
+                                      </div>
+                                      <div>
+                                        <label className="block text-[10px] font-bold text-gray-500 mb-0.5">SKU</label>
+                                        <input
+                                          type="text"
+                                          placeholder="Opcional"
+                                          value={item.sku || ''}
+                                          onChange={(e) => handleUpdateVariantSku(idx, e.target.value)}
+                                          className="w-full p-1.5 border border-gray-300 rounded-lg font-mono text-[11px] bg-white"
+                                        />
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
                         );
                       })}
-                    </tbody>
-                  </table>
-                </div>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
+            )}
           </div>
         )}
 
         {/* STEP 4: Price, Weight & Dimensions (Logistics) */}
         {wizardStep === 4 && (
           <div className="space-y-6 text-xs font-medium">
-            {/* Price & Stock Overview */}
+            {/* Moeda — sempre visível, simples ou variável. */}
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
               <div>
                 <label className="block text-gray-800 font-bold mb-1">Moeda do Produto *</label>
@@ -2070,42 +2251,87 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                 </select>
               </div>
 
-              <div>
-                <label className="block text-gray-800 font-bold mb-1">Preço de Venda ({currency}) *</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={price}
-                  onChange={(e) => setPrice(e.target.value)}
-                  placeholder={currency === 'XOF' ? '5000' : '100'}
-                  required
-                  className="w-full p-2.5 border border-gray-300 rounded-xl font-bold text-sm focus:border-emerald-600 focus:outline-hidden"
-                />
-              </div>
+              {/* FASE D16-B1 — Preço/Riscado/Estoque só fazem sentido como
+                  inputs manuais em modo simples. Em modo variável eles já
+                  vêm das variantes (ver deriveProductLevelPricing) — pedir
+                  de novo aqui seria a redundância que a auditoria D16-A2.5
+                  apontou (duas fontes de verdade aparentes). */}
+              {productMode === 'simple' && (
+                <>
+                  <div>
+                    <label className="block text-gray-800 font-bold mb-1">Preço de Venda ({currency}) *</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={price}
+                      onChange={(e) => setPrice(e.target.value)}
+                      placeholder={currency === 'XOF' ? '5000' : '100'}
+                      required
+                      className="w-full p-2.5 border border-gray-300 rounded-xl font-bold text-sm focus:border-emerald-600 focus:outline-hidden"
+                    />
+                  </div>
 
-              <div>
-                <label className="block text-gray-800 font-bold mb-1">Preço Riscado ({currency})</label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={originalPrice}
-                  onChange={(e) => setOriginalPrice(e.target.value)}
-                  placeholder={currency === 'XOF' ? '6000' : '120'}
-                  className="w-full p-2.5 border border-gray-300 rounded-xl text-gray-400 focus:border-emerald-600 focus:outline-hidden"
-                />
-              </div>
+                  <div>
+                    <label className="block text-gray-800 font-bold mb-1">Preço Riscado ({currency})</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={originalPrice}
+                      onChange={(e) => setOriginalPrice(e.target.value)}
+                      placeholder={currency === 'XOF' ? '6000' : '120'}
+                      className="w-full p-2.5 border border-gray-300 rounded-xl text-gray-400 focus:border-emerald-600 focus:outline-hidden"
+                    />
+                  </div>
 
-              <div>
-                <label className="block text-gray-800 font-bold mb-1">Estoque Total *</label>
-                <input
-                  type="number"
-                  value={stock}
-                  onChange={(e) => setStock(e.target.value)}
-                  required
-                  className="w-full p-2.5 border border-gray-300 rounded-xl font-bold focus:border-emerald-600 focus:outline-hidden bg-gray-50"
-                />
-              </div>
+                  <div>
+                    <label className="block text-gray-800 font-bold mb-1">Estoque Total *</label>
+                    <input
+                      type="number"
+                      value={stock}
+                      onChange={(e) => setStock(e.target.value)}
+                      required
+                      className="w-full p-2.5 border border-gray-300 rounded-xl font-bold focus:border-emerald-600 focus:outline-hidden bg-gray-50"
+                    />
+                  </div>
+                </>
+              )}
             </div>
+
+            {/* Resumo somente-leitura para produto variável — nunca editável
+                aqui; a fonte real são as variações configuradas na Etapa 3. */}
+            {productMode === 'variable' && (() => {
+              const summary = computeVariantsSummary(variantsMatrix);
+              return (
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl">
+                  <p className="font-black text-gray-900 text-sm mb-2">Resumo das variações</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                    <div>
+                      <p className="text-gray-500 font-bold">Preço</p>
+                      <p className="font-black text-gray-900 text-sm">
+                        {summary.minPrice === null
+                          ? '—'
+                          : summary.minPrice === summary.maxPrice
+                            ? `${currency} ${summary.minPrice.toLocaleString('pt-BR')}`
+                            : `Faixa: ${currency} ${summary.minPrice.toLocaleString('pt-BR')} – ${summary.maxPrice!.toLocaleString('pt-BR')}`}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-gray-500 font-bold">Estoque total</p>
+                      <p className="font-black text-gray-900 text-sm">{summary.totalStock} unidades</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-500 font-bold">Variações</p>
+                      <p className="font-black text-gray-900 text-sm">{summary.count}</p>
+                    </div>
+                  </div>
+                  {summary.minPrice === null && (
+                    <p className="text-[11px] text-amber-700 font-bold mt-2">
+                      ⚠️ Nenhuma variação tem preço válido ainda — volte à Etapa 3 antes de publicar.
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-1 sm:grid-cols-1 gap-4">
               <div>

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { SellerService } from '../../services/sellerService';
 import { countriesConfig } from '../../utils/currencyUtils';
+import { formatVariantIdentity } from '../../utils/variantIdentity';
 
 interface SellerStockManagerProps {
   warehouses?: any[];
@@ -30,13 +31,17 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
   const [transfersList, setTransfersList] = useState<any[]>([]);
   const [warehousesList, setWarehousesList] = useState<any[]>([]);
   const [productsList, setProductsList] = useState<any[]>([]);
-  const [sellerProfile, setSellerProfile] = useState<any>(null);
-  const [sellerStore, setSellerStore] = useState<any>(null);
+  // FASE D16-E5 — read-model dedicado, uma opção por inventory row
+  // SELLER_LOCATION real e transferível (produto/variante/loja JÁ
+  // resolvidos pelo backend) — substitui inteiramente o antigo par
+  // selectedProductId/selectedVariantId (que dependia de
+  // products.attributesJson, uma fonte que nunca continha as variantes
+  // reais, e do sellerStore=storesRes.data[0], que ignorava multi-store).
+  const [transferableInventory, setTransferableInventory] = useState<any[]>([]);
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedProductId, setSelectedProductId] = useState<string>('');
-  const [selectedVariantId, setSelectedVariantId] = useState<string>('');
+  const [selectedInventoryId, setSelectedInventoryId] = useState<string>('');
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>('');
   const [deliveryMode, setDeliveryMode] = useState<'NUSALI_PICKUP' | 'SELLER_DROPOFF'>('NUSALI_PICKUP');
   const [quantityInput, setQuantityInput] = useState<string>('1');
@@ -50,13 +55,12 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
     else setRefreshing(true);
 
     try {
-      const [invRes, trfRes, whRes, prodRes, profileRes, storesRes] = await Promise.all([
+      const [invRes, trfRes, whRes, prodRes, transferableRes] = await Promise.all([
         SellerService.getInventory(),
         SellerService.getTransfers(),
         SellerService.getWarehouses(),
         SellerService.getProducts(),
-        SellerService.getProfile(),
-        SellerService.getStores(),
+        SellerService.getTransferableInventory(),
       ]);
 
       if (invRes.success && Array.isArray(invRes.data)) {
@@ -71,11 +75,8 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
       if (prodRes.success && Array.isArray(prodRes.data)) {
         setProductsList(prodRes.data);
       }
-      if (profileRes.success) {
-        setSellerProfile(profileRes.data);
-      }
-      if (storesRes.success && Array.isArray(storesRes.data) && storesRes.data.length > 0) {
-        setSellerStore(storesRes.data[0]);
+      if (transferableRes.success && Array.isArray(transferableRes.data)) {
+        setTransferableInventory(transferableRes.data);
       }
     } catch (err: any) {
       console.error('Erro ao carregar dados de estoque:', err);
@@ -88,16 +89,6 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
   useEffect(() => {
     fetchData();
   }, [fetchData]);
-
-  // Seller pickup address resolved
-  const sellerPickupAddressStr = useMemo(() => {
-    if (sellerStore?.address) return sellerStore.address;
-    if (sellerProfile?.address) return sellerProfile.address;
-    if (sellerProfile?.street) {
-      return `${sellerProfile.street}, ${sellerProfile.number || ''} ${sellerProfile.neighborhood || ''} ${sellerProfile.city || ''}`.trim();
-    }
-    return '';
-  }, [sellerStore, sellerProfile]);
 
   // 1. Filter SELLER_LOCATION inventory items
   const sellerLocationsList = useMemo(() => {
@@ -114,6 +105,18 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
   }, [inventoryList]);
 
   // 3. Compute Product Summary Across All Locations
+  //
+  // FASE D16-E6.2 — antes, esta agregação só somava onHand/reserved por
+  // localização e nunca sabia da existência de transferências PENDING
+  // (comprometidas mas ainda fisicamente na loja) ou IN_TRANSIT (já saiu
+  // fisicamente da loja, ainda não chegou no HUB — D16-E6.1 decrementa a
+  // loja exatamente nesse momento). Resultado: durante IN_TRANSIT, as
+  // unidades "desapareciam" do resumo (nem loja nem HUB as contavam mais).
+  // pendingTransferQuantity/inTransitQuantity vêm PRONTOS do backend por
+  // inventory row exata (GET /seller/inventory, FASE D16-E6.1/E6.2) — nunca
+  // recalculados aqui, só somados por produto (agregação pura, isolada por
+  // fromInventoryId exato desde a origem backend, nunca vazando entre
+  // variantes/lojas/sellers/produtos diferentes).
   const productSummaries = useMemo(() => {
     const map = new Map<string, any>();
 
@@ -127,6 +130,8 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
         image: prod.image || (prod.images && prod.images[0]) || null,
         sellerOnHand: 0,
         sellerReserved: 0,
+        sellerPending: 0,
+        sellerInTransit: 0,
         hubOnHand: 0,
         hubReserved: 0,
       });
@@ -145,6 +150,8 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
           image: null,
           sellerOnHand: 0,
           sellerReserved: 0,
+          sellerPending: 0,
+          sellerInTransit: 0,
           hubOnHand: 0,
           hubReserved: 0,
         };
@@ -160,98 +167,47 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
       } else {
         entry.sellerOnHand += onHand;
         entry.sellerReserved += reserved;
+        entry.sellerPending += Number(inv.pendingTransferQuantity) || 0;
+        entry.sellerInTransit += Number(inv.inTransitQuantity) || 0;
       }
     });
 
     return Array.from(map.values()).map((e) => {
-      const totalOnHand = e.sellerOnHand + e.hubOnHand;
+      const sellerAvailable = Math.max(0, e.sellerOnHand - e.sellerReserved - e.sellerPending);
+      const hubAvailable = Math.max(0, e.hubOnHand - e.hubReserved);
       const totalReserved = e.sellerReserved + e.hubReserved;
-      const totalAvailable = Math.max(0, totalOnHand - totalReserved);
+      // TOTAL DA REDE — inclui EM TRÂNSITO de propósito (nunca renomear
+      // "Total Físico" para incluir isso: físico é só loja+HUB armazenados
+      // agora; rede é tudo sob responsabilidade logística Nusali).
+      const totalNetworkStock = e.sellerOnHand + e.hubOnHand + e.sellerInTransit;
+      const totalAvailable = sellerAvailable + hubAvailable;
       return {
         ...e,
-        totalOnHand,
+        sellerAvailable,
+        hubAvailable,
         totalReserved,
+        totalNetworkStock,
         totalAvailable,
-        sellerAvailable: Math.max(0, e.sellerOnHand - e.sellerReserved),
-        hubAvailable: Math.max(0, e.hubOnHand - e.hubReserved),
       };
     });
   }, [productsList, inventoryList]);
-
-  // Selected Product details for Modal
-  const selectedProduct = useMemo(() => {
-    return productsList.find((p) => String(p.id) === String(selectedProductId)) || null;
-  }, [productsList, selectedProductId]);
 
   // Selected Warehouse details
   const selectedWarehouse = useMemo(() => {
     return warehousesList.find((w) => String(w.id) === String(selectedWarehouseId)) || null;
   }, [warehousesList, selectedWarehouseId]);
 
-  // Parsed Variants for Selected Product
-  const productVariants = useMemo(() => {
-    if (!selectedProduct?.attributesJson) return [];
-    try {
-      const parsed =
-        typeof selectedProduct.attributesJson === 'string'
-          ? JSON.parse(selectedProduct.attributesJson)
-          : selectedProduct.attributesJson;
+  // FASE D16-E5 — a origem é sempre UMA opção explícita do read-model
+  // transferable (produto+variante+loja já resolvidos e validados pelo
+  // backend) — nunca mais um productId/variantId reconstruído no cliente,
+  // nunca um .find() ambíguo sobre inventoryList genérico.
+  const selectedInventoryOption = useMemo(() => {
+    return transferableInventory.find((opt) => String(opt.inventoryId) === String(selectedInventoryId)) || null;
+  }, [transferableInventory, selectedInventoryId]);
 
-      if (Array.isArray(parsed?.variants)) return parsed.variants;
-      if (Array.isArray(parsed)) return parsed;
-      return [];
-    } catch {
-      return [];
-    }
-  }, [selectedProduct]);
-
-  // Available Stock for Transfer Calculation (SELLER_LOCATION inventory row)
-  const transferStockInfo = useMemo(() => {
-    if (!selectedProduct) return { onHand: 0, reserved: 0, pendingTransfers: 0, availableForTransfer: 0 };
-
-    const sellerInv = inventoryList.find((inv) => {
-      const isSellerLoc = inv.locationType === 'SELLER_LOCATION' || !inv.warehouseId;
-      const isSameProd = String(inv.productId) === String(selectedProduct.id);
-      const isSameVar = selectedVariantId ? String(inv.variantId) === String(selectedVariantId) : true;
-      return isSellerLoc && isSameProd && isSameVar;
-    });
-
-    const onHand = Number(sellerInv?.quantityOnHand) || 0;
-    const reserved = Number(sellerInv?.quantityReserved) || 0;
-
-    const pendingTransfers = transfersList.reduce((sum, trf) => {
-      const isSameProd = String(trf.productId) === String(selectedProduct.id);
-      const isSameVar = selectedVariantId ? String(trf.variantId) === String(selectedVariantId) : true;
-      const isActivePending = trf.status === 'PENDING' || trf.status === 'IN_TRANSIT';
-
-      if (isSameProd && isSameVar && isActivePending) {
-        return sum + (Number(trf.quantity) || 0);
-      }
-      return sum;
-    }, 0);
-
-    const availableForTransfer = Math.max(0, onHand - reserved - pendingTransfers);
-
-    return {
-      onHand,
-      reserved,
-      pendingTransfers,
-      availableForTransfer,
-    };
-  }, [selectedProduct, selectedVariantId, inventoryList, transfersList]);
-
-  // Reset variant & auto-select defaults on product change
-  useEffect(() => {
-    if (selectedProduct) {
-      if (productVariants.length > 0) {
-        setSelectedVariantId(String(productVariants[0].id || productVariants[0].sku || ''));
-      } else {
-        setSelectedVariantId('');
-      }
-    }
-  }, [selectedProduct, productVariants]);
-
-  // Default warehouse selection when modal opens
+  // Default warehouse selection when modal opens. A origem (selectedInventoryId)
+  // NUNCA é pré-selecionada automaticamente — o vendedor precisa escolher
+  // conscientemente qual estoque real está transferindo (D16-E5, seção 5).
   useEffect(() => {
     if (isModalOpen && warehousesList.length > 0 && !selectedWarehouseId) {
       setSelectedWarehouseId(String(warehousesList[0].id));
@@ -263,9 +219,10 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
     setModalError(null);
     setQuantityInput('1');
     setDeliveryMode('NUSALI_PICKUP');
-    if (productsList.length > 0) {
-      setSelectedProductId(String(productsList[0].id));
-    }
+    // FASE D16-E5 — NUNCA pré-seleciona uma origem (nem "a primeira opção
+    // da lista", nem "a primeira loja do seller"): o vendedor precisa
+    // escolher conscientemente qual inventory real está transferindo.
+    setSelectedInventoryId('');
     if (warehousesList.length > 0) {
       setSelectedWarehouseId(String(warehousesList[0].id));
     }
@@ -283,8 +240,8 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
       return;
     }
 
-    if (!selectedProductId) {
-      setModalError('Selecione um produto.');
+    if (!selectedInventoryId || !selectedInventoryOption) {
+      setModalError('Selecione exatamente qual estoque (produto/variante/loja) deseja transferir.');
       return;
     }
 
@@ -293,41 +250,32 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
       return;
     }
 
-    if (deliveryMode === 'NUSALI_PICKUP') {
-      const city = sellerStore?.city || sellerProfile?.city;
-      const country = sellerStore?.countryCode || sellerProfile?.countryCode;
-      const phone = sellerProfile?.phone || sellerStore?.phone;
-
-      if (!sellerPickupAddressStr || !city || !country || !phone) {
-        setModalError('PICKUP_LOCATION_INCOMPLETE: Por favor, cadastre o endereço completo (rua, cidade, país) e o telefone de contato da sua loja antes de solicitar a coleta pela Nusali.');
-        return;
-      }
+    // FASE D16-E5 — checagem de UX (o backend é quem de fato valida/exige
+    // isso com autoridade, a partir do endereço operacional REAL da loja
+    // desta inventory — nunca de sellerStore/sellerProfile).
+    if (deliveryMode === 'NUSALI_PICKUP' && !selectedInventoryOption.storeAddressText) {
+      setModalError('PICKUP_LOCATION_INCOMPLETE: Configure o endereço operacional completo desta loja (rua, cidade, país e telefone) antes de solicitar a coleta pela Nusali.');
+      return;
     }
 
-    if (qty > transferStockInfo.availableForTransfer) {
+    if (qty > selectedInventoryOption.availableForTransfer) {
       setModalError(
-        `Você possui apenas ${transferStockInfo.availableForTransfer} unidades disponíveis no seu estabelecimento.`
+        `Você possui apenas ${selectedInventoryOption.availableForTransfer} unidades disponíveis nesta origem.`
       );
       return;
     }
 
     setSubmitting(true);
     try {
+      // FASE D16-E5 — payload mínimo e seguro: a origem é SEMPRE o
+      // inventoryId exato escolhido. productId/variantId/pickupSnapshotJson
+      // não são mais enviados — o backend deriva tudo (produto, variante,
+      // loja, endereço operacional) a partir do próprio sourceInventoryId.
       const res = await SellerService.requestTransfer({
-        productId: selectedProductId,
-        variantId: selectedVariantId || undefined,
+        sourceInventoryId: selectedInventoryId,
         toWarehouseId: selectedWarehouseId,
         quantity: qty,
         deliveryMode,
-        pickupSnapshotJson: deliveryMode === 'NUSALI_PICKUP' ? {
-          storeName: sellerStore?.name || sellerProfile?.companyName || sellerProfile?.tradingName || null,
-          contactName: sellerProfile?.fullName || null,
-          phone: sellerProfile?.phone || sellerStore?.phone || null,
-          address: sellerPickupAddressStr || null,
-          city: sellerStore?.city || sellerProfile?.city || null,
-          region: sellerStore?.region || sellerProfile?.state || null,
-          countryCode: sellerStore?.countryCode || sellerProfile?.countryCode || null,
-        } : null,
       });
 
       if (res.success) {
@@ -408,7 +356,7 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
               <Boxes className="w-5 h-5 text-emerald-600" /> Resumo Geral de Estoque por Produto
             </h2>
             <p className="text-xs text-gray-500 font-medium">
-              Visão consolidação multilocais (Estabelecimento Físico + HUBs Nusali).
+              Visão consolidada multilocal (Estabelecimento + HUBs Nusali + Em Trânsito).
             </p>
           </div>
           <span className="text-xs font-mono font-bold bg-emerald-100 text-emerald-900 px-3 py-1 rounded-full">
@@ -423,7 +371,8 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                 <th className="p-3">Produto</th>
                 <th className="p-3 text-center">Estabelecimento (Físico)</th>
                 <th className="p-3 text-center">Nusali HUBs</th>
-                <th className="p-3 text-center">Total Físico</th>
+                <th className="p-3 text-center">Em Trânsito</th>
+                <th className="p-3 text-center">Total da Rede</th>
                 <th className="p-3 text-center">Reservado Vendas</th>
                 <th className="p-3 text-center">Total Disponível</th>
               </tr>
@@ -431,13 +380,13 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
             <tbody className="divide-y divide-gray-100 font-medium">
               {loading ? (
                 <tr>
-                  <td colSpan={6} className="p-8 text-center text-gray-400 font-bold">
+                  <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
                     Carregando resumo de estoque...
                   </td>
                 </tr>
               ) : productSummaries.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="p-8 text-center text-gray-400 font-bold">
+                  <td colSpan={7} className="p-8 text-center text-gray-400 font-bold">
                     Nenhum produto cadastrado no catálogo.
                   </td>
                 </tr>
@@ -475,7 +424,14 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                         Livre: {summary.hubAvailable} un.
                       </span>
                     </td>
-                    <td className="p-3 text-center font-black text-gray-900">{summary.totalOnHand} un.</td>
+                    <td className="p-3 text-center">
+                      {summary.sellerInTransit > 0 ? (
+                        <span className="font-bold text-blue-900 block">{summary.sellerInTransit} un.</span>
+                      ) : (
+                        <span className="text-gray-400 font-semibold">0 un.</span>
+                      )}
+                    </td>
+                    <td className="p-3 text-center font-black text-gray-900">{summary.totalNetworkStock} un.</td>
                     <td className="p-3 text-center font-bold text-amber-700">{summary.totalReserved} un.</td>
                     <td className="p-3 text-center">
                       <span className="inline-block px-3 py-1 bg-emerald-100 text-emerald-900 rounded-full font-black text-xs">
@@ -535,7 +491,22 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                   const prod = productsList.find((p) => String(p.id) === String(inv.productId));
                   const onHand = Number(inv.quantityOnHand) || 0;
                   const reserved = Number(inv.quantityReserved) || 0;
-                  const available = Math.max(0, onHand - reserved);
+                  // FASE D16-E6.1 — pendingTransferQuantity aqui é só PENDING
+                  // (loja física ainda intacta, mas comprometida). Nunca
+                  // soma IN_TRANSIT: aquele já saiu de onHand (decrementado
+                  // em markTransferInTransit) — somar de novo seria dupla
+                  // subtração do mesmo estoque.
+                  const pending = Number(inv.pendingTransferQuantity) || 0;
+                  const available = Math.max(0, onHand - reserved - pending);
+                  const variantLabel = inv.variantId
+                    ? formatVariantIdentity({
+                        color: inv.color,
+                        size: inv.size,
+                        capacity: inv.capacity,
+                        attributesJson: inv.variantAttributesJson,
+                      })
+                    : '';
+                  const skuLabel = inv.variantSku || prod?.sku || inv.productSku || inv.productId;
 
                   return (
                     <tr key={inv.id} className="hover:bg-gray-50/50">
@@ -553,10 +524,13 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                             </div>
                           )}
                           <div>
-                            <span className="font-bold text-gray-900 block">{prod?.title || inv.productId}</span>
-                            <span className="text-[10px] font-mono text-gray-400">
-                              SKU: {prod?.sku || inv.productId} {inv.variantId ? `• Var: ${inv.variantId}` : ''}
+                            <span className="font-bold text-gray-900 block">
+                              {prod?.title || inv.productName || inv.productId}
                             </span>
+                            {variantLabel && (
+                              <span className="text-[11px] font-semibold text-gray-600 block">{variantLabel}</span>
+                            )}
+                            <span className="text-[10px] font-mono text-gray-400">SKU: {skuLabel}</span>
                           </div>
                         </div>
                       </td>
@@ -632,6 +606,15 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                   const onHand = Number(inv.quantityOnHand) || 0;
                   const reserved = Number(inv.quantityReserved) || 0;
                   const available = Math.max(0, onHand - reserved);
+                  const variantLabel = inv.variantId
+                    ? formatVariantIdentity({
+                        color: inv.color,
+                        size: inv.size,
+                        capacity: inv.capacity,
+                        attributesJson: inv.variantAttributesJson,
+                      })
+                    : '';
+                  const skuLabel = inv.variantSku || prod?.sku || inv.productSku || inv.productId;
 
                   return (
                     <tr key={inv.id} className="hover:bg-gray-50/50">
@@ -649,10 +632,13 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                             </div>
                           )}
                           <div>
-                            <span className="font-bold text-gray-900 block">{prod?.title || inv.productId}</span>
-                            <span className="text-[10px] font-mono text-gray-400">
-                              SKU: {prod?.sku || inv.productId} {inv.variantId ? `• Var: ${inv.variantId}` : ''}
+                            <span className="font-bold text-gray-900 block">
+                              {prod?.title || inv.productName || inv.productId}
                             </span>
+                            {variantLabel && (
+                              <span className="text-[11px] font-semibold text-gray-600 block">{variantLabel}</span>
+                            )}
+                            <span className="text-[10px] font-mono text-gray-400">SKU: {skuLabel}</span>
                           </div>
                         </div>
                       </td>
@@ -843,58 +829,74 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
             )}
 
             <form onSubmit={handleSubmitTransfer} className="space-y-4">
-              {/* 1. SELEÇÃO DE PRODUTO DO VENDEDOR */}
+              {/* 1. SELEÇÃO DE ORIGEM (INVENTORY EXATA) — FASE D16-E5. Cada
+                  opção representa UMA linha real de inventory (produto +
+                  variante + loja já resolvidos pelo backend) — nunca um
+                  produto genérico que exigiria adivinhar a variante/loja
+                  depois. Produto simples aparece como 1 opção; produto
+                  variável aparece como N opções, uma por variante/loja com
+                  estoque transferível real. */}
               <div>
-                <label className="block text-xs font-bold text-gray-700 mb-1.5">Produto do seu catálogo</label>
+                <label className="block text-xs font-bold text-gray-700 mb-1.5">Estoque de origem (produto / variante / loja)</label>
                 <select
-                  value={selectedProductId}
-                  onChange={(e) => setSelectedProductId(e.target.value)}
+                  value={selectedInventoryId}
+                  onChange={(e) => setSelectedInventoryId(e.target.value)}
                   className="w-full text-xs font-medium bg-gray-50 border border-gray-200 rounded-xl p-3 focus:bg-white focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 outline-none transition"
                 >
-                  {productsList.length === 0 ? (
-                    <option value="">Nenhum produto cadastrado no seu catálogo</option>
+                  <option value="">Selecione o estoque a transferir...</option>
+                  {transferableInventory.length === 0 ? (
+                    <option value="" disabled>Nenhum estoque transferível encontrado no seu catálogo</option>
                   ) : (
-                    productsList.map((prod) => (
-                      <option key={prod.id} value={prod.id}>
-                        {prod.title} (SKU: {prod.sku || prod.id})
-                      </option>
-                    ))
+                    transferableInventory.map((opt) => {
+                      const variantLabel = [opt.color, opt.size, opt.capacity].filter(Boolean).join(' / ');
+                      const skuLabel = opt.variantSku || opt.productSku;
+                      return (
+                        <option key={opt.inventoryId} value={opt.inventoryId} disabled={opt.availableForTransfer <= 0}>
+                          {opt.productName}
+                          {variantLabel ? ` — ${variantLabel}` : ''}
+                          {skuLabel ? ` — SKU: ${skuLabel}` : ''}
+                          {' — '}{opt.storeName}
+                          {' — '}{opt.availableForTransfer} un.
+                        </option>
+                      );
+                    })
                   )}
                 </select>
               </div>
 
-              {/* 2. SELEÇÃO DE VARIANTE (QUANDO EXISTIR) */}
-              {productVariants.length > 0 && (
-                <div>
-                  <label className="block text-xs font-bold text-gray-700 mb-1.5">Variante do Produto</label>
-                  <select
-                    value={selectedVariantId}
-                    onChange={(e) => setSelectedVariantId(e.target.value)}
-                    className="w-full text-xs font-medium bg-gray-50 border border-gray-200 rounded-xl p-3 focus:bg-white focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 outline-none transition"
-                  >
-                    {productVariants.map((v: any, idx: number) => {
-                      const vId = String(v.id || v.sku || idx);
-                      const title = v.title || v.name || `Variante ${idx + 1}`;
-                      return (
-                        <option key={vId} value={vId}>
-                          {title}
-                        </option>
-                      );
-                    })}
-                  </select>
+              {/* 2. DETALHE DA ORIGEM ESCOLHIDA — deixa explícito de qual
+                  LOJA (multi-store safe) e qual VARIANTE exata sairá o
+                  estoque, nunca implícito. */}
+              {selectedInventoryOption && (
+                <div className="p-3.5 bg-gray-50 border border-gray-200 rounded-2xl space-y-1.5 text-xs">
+                  <div className="flex items-center gap-1.5 text-gray-500 font-bold uppercase text-[10px] tracking-wide">
+                    <Store className="w-3.5 h-3.5" /> Origem
+                  </div>
+                  <p className="font-black text-gray-900">{selectedInventoryOption.storeName}</p>
+                  <p className="text-gray-500 text-[11px]">{selectedInventoryOption.storeAddressText || 'Endereço operacional não configurado'}{selectedInventoryOption.storeCity ? ` — ${selectedInventoryOption.storeCity}` : ''}</p>
+                  <div className="border-t border-gray-200 pt-1.5 mt-1.5">
+                    <p className="font-bold text-gray-800">
+                      {selectedInventoryOption.productName}
+                      {[selectedInventoryOption.color, selectedInventoryOption.size, selectedInventoryOption.capacity].filter(Boolean).length > 0
+                        ? ` — ${[selectedInventoryOption.color, selectedInventoryOption.size, selectedInventoryOption.capacity].filter(Boolean).join(' / ')}`
+                        : ''}
+                    </p>
+                    <p className="text-gray-500 text-[11px]">SKU: {selectedInventoryOption.variantSku || selectedInventoryOption.productSku || selectedInventoryOption.productId}</p>
+                  </div>
                 </div>
               )}
 
-              {/* 3. ESTOQUE DISPONÍVEL NO ESTABELECIMENTO */}
+              {/* 3. ESTOQUE DISPONÍVEL NESTA ORIGEM EXATA (nunca agregado do
+                  produto — só da inventory row escolhida) */}
               <div className="p-3.5 bg-emerald-50/70 border border-emerald-100 rounded-2xl space-y-1.5 text-xs">
                 <div className="flex justify-between items-center text-emerald-900 font-bold">
-                  <span>Disponível no seu estabelecimento:</span>
-                  <span className="text-sm font-black">{transferStockInfo.availableForTransfer} un.</span>
+                  <span>Disponível nesta origem:</span>
+                  <span className="text-sm font-black">{selectedInventoryOption?.availableForTransfer ?? 0} un.</span>
                 </div>
                 <div className="text-[10px] text-emerald-700 flex flex-wrap gap-x-3 gap-y-1 font-medium border-t border-emerald-100 pt-1.5">
-                  <span>Em estoque físico: {transferStockInfo.onHand} un.</span>
-                  <span>Reservado pedidos: {transferStockInfo.reserved} un.</span>
-                  <span>Transfers pendentes: {transferStockInfo.pendingTransfers} un.</span>
+                  <span>Em estoque físico: {selectedInventoryOption?.quantityOnHand ?? 0} un.</span>
+                  <span>Reservado pedidos: {selectedInventoryOption?.quantityReserved ?? 0} un.</span>
+                  <span>Transfers pendentes: {selectedInventoryOption?.pendingTransferQuantity ?? 0} un.</span>
                 </div>
               </div>
 
@@ -938,31 +940,36 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                 </div>
               </div>
 
-              {/* NUSALI PICKUP PREVIEW & ADDRESS CHECK */}
+              {/* NUSALI PICKUP PREVIEW & ADDRESS CHECK — FASE D16-E5. Vem
+                  sempre da LOJA REAL da origem escolhida (selectedInventoryOption),
+                  nunca de sellerStore/sellerProfile (que ignoravam multi-store
+                  e nunca correspondiam necessariamente à loja certa). */}
               {deliveryMode === 'NUSALI_PICKUP' && (
                 <div className="p-3.5 bg-purple-50 border border-purple-200 rounded-2xl space-y-2 text-xs">
                   <h4 className="font-bold text-purple-900 text-[11px] uppercase tracking-wider flex items-center gap-1.5">
                     <MapPin className="w-3.5 h-3.5 text-purple-600" /> Confirmar Dados de Coleta
                   </h4>
-                  {sellerPickupAddressStr ? (
+                  {!selectedInventoryOption ? (
+                    <p className="text-purple-700 text-[11px] font-medium">Selecione o estoque de origem para ver os dados de coleta.</p>
+                  ) : selectedInventoryOption.storeAddressText ? (
                     <div className="space-y-1 text-[11px]">
                       <div className="flex justify-between">
                         <span className="text-gray-500">Loja:</span>
-                        <strong className="text-gray-900">{sellerStore?.name || sellerProfile?.companyName || 'Sua Loja'}</strong>
+                        <strong className="text-gray-900">{selectedInventoryOption.storeName}</strong>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-500">Endereço de Coleta:</span>
-                        <strong className="text-gray-900 text-right">{sellerPickupAddressStr}</strong>
+                        <strong className="text-gray-900 text-right">{selectedInventoryOption.storeAddressText}{selectedInventoryOption.storeCity ? `, ${selectedInventoryOption.storeCity}` : ''}</strong>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-gray-500">Contato:</span>
-                        <strong className="text-emerald-700">{sellerProfile?.phone || sellerStore?.phone || 'Não informado'}</strong>
+                        <strong className="text-emerald-700">{selectedInventoryOption.storePhone || 'Não informado'}</strong>
                       </div>
                     </div>
                   ) : (
                     <div className="p-2.5 bg-amber-100 border border-amber-200 rounded-xl text-amber-900 text-[11px] font-bold flex items-center gap-2">
                       <AlertCircle className="w-4 h-4 shrink-0 text-amber-700" />
-                      <span>Cadastre o endereço de coleta da sua loja antes de solicitar coleta.</span>
+                      <span>Configure a origem operacional de "{selectedInventoryOption.storeName}" antes de solicitar coleta.</span>
                     </div>
                   )}
                 </div>
@@ -1016,15 +1023,15 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                 <input
                   type="number"
                   min="1"
-                  max={transferStockInfo.availableForTransfer || 1}
+                  max={selectedInventoryOption?.availableForTransfer || 1}
                   value={quantityInput}
                   onChange={(e) => setQuantityInput(e.target.value)}
                   className="w-full text-xs font-bold bg-gray-50 border border-gray-200 rounded-xl p-3 focus:bg-white focus:border-emerald-600 focus:ring-1 focus:ring-emerald-600 outline-none transition"
                   placeholder="Ex: 5"
                 />
-                {Number(quantityInput) > transferStockInfo.availableForTransfer && (
+                {selectedInventoryOption && Number(quantityInput) > selectedInventoryOption.availableForTransfer && (
                   <p className="text-[11px] text-red-600 font-bold mt-1">
-                    Você possui apenas {transferStockInfo.availableForTransfer} unidades disponíveis para transferência.
+                    Você possui apenas {selectedInventoryOption.availableForTransfer} unidades disponíveis nesta origem.
                   </p>
                 )}
               </div>
@@ -1043,9 +1050,10 @@ export const SellerStockManager: React.FC<SellerStockManagerProps> = ({ showToas
                   disabled={
                     submitting ||
                     warehousesList.length === 0 ||
-                    transferStockInfo.availableForTransfer <= 0 ||
-                    Number(quantityInput) > transferStockInfo.availableForTransfer ||
-                    (deliveryMode === 'NUSALI_PICKUP' && !sellerPickupAddressStr)
+                    !selectedInventoryOption ||
+                    selectedInventoryOption.availableForTransfer <= 0 ||
+                    Number(quantityInput) > selectedInventoryOption.availableForTransfer ||
+                    (deliveryMode === 'NUSALI_PICKUP' && !selectedInventoryOption.storeAddressText)
                   }
                   className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition shadow-xs flex items-center gap-2 cursor-pointer"
                 >

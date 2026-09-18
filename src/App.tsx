@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { PreferencesProvider } from './context/PreferencesContext';
 import { AuthProvider } from './context/AuthContext';
 import { MarketplaceProvider } from './context/MarketplaceContext';
+import { DeliveryDestinationProvider } from './context/DeliveryDestinationContext';
 
 // Layouts
 import { PublicLayout } from './layouts/PublicLayout';
@@ -33,6 +34,7 @@ import { CheckoutPage } from './pages/CheckoutPage';
 import { OrderConfirmationPage } from './pages/OrderConfirmationPage';
 import { MyOrdersPage } from './pages/MyOrdersPage';
 import { OrderDetailPage } from './pages/OrderDetailPage';
+import { PurchaseGroupConfirmationPage } from './pages/PurchaseGroupConfirmationPage';
 import { TrackingPage } from './pages/TrackingPage';
 import { FavoritesPage } from './pages/FavoritesPage';
 import { ProfilePage } from './pages/ProfilePage';
@@ -63,6 +65,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <PreferencesProvider>
+          <DeliveryDestinationProvider>
           <MarketplaceProvider>
             <BrowserRouter>
               <Routes>
@@ -123,6 +126,11 @@ export default function App() {
                     <Route path="/orders/confirmation" element={<OrderConfirmationPage />} />
                     <Route path="/orders/:id/confirmation" element={<OrderConfirmationPage />} />
                     <Route path="/orders/:id" element={<OrderDetailPage />} />
+                    {/* Fase M1-D2 — checkout multi-seller (mode: 'purchase_group')
+                        nunca mais navega usando um child orderId para representar
+                        a compra inteira; a identidade real é purchaseGroup.id.
+                        Tela mínima (M1-D3 traz a UX completa). */}
+                    <Route path="/purchase-groups/:purchaseGroupId/confirmation" element={<PurchaseGroupConfirmationPage />} />
                     <Route path="/favorites" element={<FavoritesPage />} />
                     <Route path="/profile" element={<ProfilePage />} />
                     <Route path="/addresses" element={<AddressesPage />} />
@@ -165,6 +173,7 @@ export default function App() {
               </Routes>
             </BrowserRouter>
           </MarketplaceProvider>
+          </DeliveryDestinationProvider>
         </PreferencesProvider>
       </AuthProvider>
     </QueryClientProvider>

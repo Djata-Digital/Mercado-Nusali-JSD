@@ -13,6 +13,12 @@ export class CartApi {
     return apiClient.post('/cart/items', item);
   }
 
+  // FASE D16-D2 — compra multi-variante estilo Alibaba: UM request para
+  // várias linhas (productId+variantId+quantity) de uma vez, tudo ou nada.
+  static async createBatch(items: any[]): Promise<ApiResponse<any>> {
+    return apiClient.post('/cart/items/batch', { items });
+  }
+
   static async update(itemId: string, data: any): Promise<ApiResponse<any>> {
     return apiClient.patch(`/cart/items/${itemId}`, data);
   }

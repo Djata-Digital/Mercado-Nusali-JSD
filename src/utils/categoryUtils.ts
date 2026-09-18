@@ -7,7 +7,10 @@ export interface Category {
   displayOrder?: number;
   isActive?: boolean;
   prods?: number;
+  /** @deprecated Nunca foi realmente preenchido pelo backend — sempre undefined. Use commissionRate. */
   commission?: string;
+  /** categories.commission_rate real (numeric do Postgres via Drizzle chega como string, ou null quando não definida). */
+  commissionRate?: number | string | null;
   status?: string;
   createdAt?: Date | string;
 }

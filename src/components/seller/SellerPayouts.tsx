@@ -22,7 +22,13 @@ export const SellerPayouts: React.FC<SellerPayoutsProps> = ({ showToast }) => {
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [selectedCurrency, setSelectedCurrency] = useState<CurrencyCode>('XOF');
   const [amount, setAmount] = useState<number>(0);
-  const [selectedMethod, setSelectedMethod] = useState<'orange_money' | 'mtn_money' | 'pix' | 'bank' | 'wallet'>('orange_money');
+  // Fase M1-D2.6 — union alinhada aos métodos REAIS do backend
+  // (payoutService.ts CANONICAL_METHODS = orange_money | mtn | pix |
+  // bank_transfer | wallet). Antes tinha 'mtn_money'/'bank', literais que o
+  // backend nunca aceitou — e o próprio `paymentMethods[].id` deste arquivo
+  // já usava 'mtn'/'bank_transfer', então em runtime selectedMethod nunca
+  // foi 'mtn_money'/'bank'. Zero mudança de comportamento.
+  const [selectedMethod, setSelectedMethod] = useState<'orange_money' | 'mtn' | 'pix' | 'bank_transfer' | 'wallet'>('orange_money');
   const [bankAccounts, setBankAccounts] = useState<any[]>([]);
   const [selectedBankAccountId, setSelectedBankAccountId] = useState<string>('');
   const [completedTx, setCompletedTx] = useState<any | null>(null);
