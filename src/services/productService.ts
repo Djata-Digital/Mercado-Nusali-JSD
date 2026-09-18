@@ -24,6 +24,29 @@ export const ProductService = {
     return ProductsApi.getById(id, destinationCountry);
   },
 
+  // FASE D17-B2 — mesma normalização já aplicada a getProducts (condition
+  // cru 'new'/'used' -> 'novo'/'usado' etc.) reaproveitada aqui: os itens
+  // vêm do MESMO CatalogService.getProducts() por trás do endpoint de
+  // recomendações, então têm exatamente o mesmo formato cru.
+  async getProductRecommendations(
+    id: string,
+    destinationCountry?: string,
+    originCountryFilter?: string
+  ): Promise<ApiResponse<{ productId: string; relatedProducts: Product[]; sameStoreProducts: Product[]; youMayAlsoLike: Product[] }>> {
+    const res = await ProductsApi.getRecommendations(id, { destinationCountry, originCountryFilter });
+    const data = res.data || { productId: id, relatedProducts: [], sameStoreProducts: [], youMayAlsoLike: [] };
+    return {
+      success: res.success,
+      data: {
+        productId: data.productId,
+        relatedProducts: (data.relatedProducts || []).map(normalizeProduct),
+        sameStoreProducts: (data.sameStoreProducts || []).map(normalizeProduct),
+        youMayAlsoLike: (data.youMayAlsoLike || []).map(normalizeProduct),
+      },
+      message: res.message,
+    };
+  },
+
   async getCategories(): Promise<ApiResponse<Category[]>> {
     return CategoriesApi.list();
   },

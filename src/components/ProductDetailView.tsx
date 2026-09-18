@@ -53,6 +53,7 @@ import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
 import { DeliveryDestinationModal } from './DeliveryDestinationModal';
 import { ProductMediaViewerModal, MediaItem } from './ProductMediaViewerModal';
 import { ProductShareModal } from './ProductShareModal';
+import { ProductRecommendationsSection } from './ProductRecommendationsSection';
 import { ProductKit, ProductColor, ProductVariant } from '../types';
 import {
   getActiveVariants,
@@ -1836,6 +1837,11 @@ export const ProductDetailView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* FASE D17-B2 — Produtos relacionados / Mais desta loja / Você também
+          pode gostar. Conteúdo secundário, carregado independentemente —
+          nunca bloqueia/altera galeria, variantes, preço, frete ou compra. */}
+      <ProductRecommendationsSection productId={product.id} />
 
       {/* Fullscreen Interactive Zoom & Media Lightbox Modal */}
       <ProductMediaViewerModal

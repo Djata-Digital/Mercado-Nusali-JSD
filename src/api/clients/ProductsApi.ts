@@ -10,6 +10,19 @@ export class ProductsApi {
     return apiClient.get(`/products/${id}`, destinationCountry ? { params: { destinationCountry } } : undefined);
   }
 
+  // FASE D17-B2 — produtos relacionados/mesma loja/você também pode gostar.
+  // Mesma convenção de destinationCountry/originCountryFilter já usada pelo
+  // resto do catálogo (Home/Search/Store/Favorites) — nunca inventa um
+  // código de país quando catalogOriginFilter representar "Todos" ('ALL'):
+  // o próprio backend já trata 'ALL' como "sem filtro de origem" (mesma
+  // semântica de CatalogService.getProducts), então é passado tal como está.
+  static async getRecommendations(id: string, params?: { destinationCountry?: string; originCountryFilter?: string }): Promise<ApiResponse<any>> {
+    const query: Record<string, string> = {};
+    if (params?.destinationCountry) query.destinationCountry = params.destinationCountry;
+    if (params?.originCountryFilter) query.originCountryFilter = params.originCountryFilter;
+    return apiClient.get(`/products/${id}/recommendations`, Object.keys(query).length > 0 ? { params: query } : undefined);
+  }
+
   static async create(data: any): Promise<ApiResponse<any>> {
     return apiClient.post('/products', data);
   }
