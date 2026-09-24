@@ -113,6 +113,45 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
   }
 }
 
+// FASE D16-G1.6 — identifica o usuário autenticado, se houver, SEM nunca
+// bloquear a requisição (diferente de requireAuth). Usado por endpoints
+// PÚBLICOS (ex.: GET /products) que precisam saber "quem está pedindo",
+// server-side e a partir do JWT verificado (nunca de um parâmetro do
+// cliente), para decidir uma visão administrativa — sem exigir login para
+// os demais casos (guest/buyer/seller continuam podendo chamar a rota
+// livremente). Token ausente, malformado ou expirado -> undefined,
+// silenciosamente (nunca lança, nunca responde 401 aqui).
+export function getOptionalAuthUser(req: Request): AuthRequest['user'] | undefined {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return undefined;
+
+  const token = authHeader.split(' ')[1];
+  const secret = getJwtAccessSecret();
+
+  try {
+    const decoded = jwt.verify(token, secret) as {
+      userId: string;
+      email: string;
+      role: string;
+      fullName: string;
+      countryCode: string;
+      kycStatus: string;
+      isEmailVerified?: boolean;
+    };
+    return {
+      id: decoded.userId,
+      email: decoded.email,
+      role: decoded.role,
+      fullName: decoded.fullName,
+      countryCode: decoded.countryCode,
+      kycStatus: decoded.kycStatus,
+      isEmailVerified: decoded.isEmailVerified !== false,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function requireRole(...allowedRoles: string[]) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) {

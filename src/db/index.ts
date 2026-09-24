@@ -167,40 +167,14 @@ export async function runRuntimeSchemaAlign() {
           "updated_at" timestamp DEFAULT now() NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS "shipping_zones" (
-          "id" varchar(255) PRIMARY KEY NOT NULL,
-          "country_code" varchar(10) NOT NULL,
-          "name" varchar(255) NOT NULL,
-          "region_code" varchar(50),
-          "city" varchar(255),
-          "postal_code_pattern" varchar(100),
-          "is_active" boolean DEFAULT true NOT NULL,
-          "created_at" timestamp DEFAULT now() NOT NULL,
-          "updated_at" timestamp DEFAULT now() NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS "shipping_rates" (
-          "id" varchar(255) PRIMARY KEY NOT NULL,
-          "zone_id" varchar(255) REFERENCES "shipping_zones"("id") ON DELETE cascade,
-          "origin_country" varchar(10) NOT NULL,
-          "origin_region" varchar(50),
-          "destination_country" varchar(10) NOT NULL,
-          "destination_region" varchar(50),
-          "min_weight_kg" numeric(8, 3) DEFAULT '0.000' NOT NULL,
-          "max_weight_kg" numeric(8, 3) DEFAULT '999.000' NOT NULL,
-          "price" numeric(12, 2) NOT NULL,
-          "currency" varchar(10) NOT NULL,
-          "estimated_min_days" integer DEFAULT 1 NOT NULL,
-          "estimated_max_days" integer DEFAULT 5 NOT NULL,
-          "carrier_id" varchar(255),
-          "service_type" varchar(100) DEFAULT 'standard' NOT NULL,
-          "is_active" boolean DEFAULT true NOT NULL,
-          "created_at" timestamp DEFAULT now() NOT NULL,
-          "updated_at" timestamp DEFAULT now() NOT NULL
-        );
-
-        ALTER TABLE "shipping_rates" ALTER COLUMN "currency" DROP DEFAULT;
-
+        -- FASE D16-I6.1 — CREATE TABLE de "shipping_zones"/"shipping_rates"
+        -- (motor legado país/zona, sem consumidor runtime desde D16-I5) e o
+        -- ALTER de "shipping_rates".currency removidos deste bootstrap:
+        -- eram um espelho manual das migrations 0009/0010 que, se mantido,
+        -- recriaria fisicamente as duas tabelas legadas a cada boot mesmo
+        -- depois de uma futura migration de DROP (auditoria D16-I6). As
+        -- colunas de snapshot histórico abaixo (orders.shipping_rate_source/
+        -- shipping_rate_id) NÃO são afetadas — continuam preservadas.
         ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS "shipping_cost" numeric(12, 2);
         ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS "shipping_charged_to_buyer" numeric(12, 2);
         ALTER TABLE "orders" ADD COLUMN IF NOT EXISTS "shipping_seller_subsidy" numeric(12, 2);

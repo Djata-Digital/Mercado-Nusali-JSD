@@ -5,7 +5,8 @@ import { buyerRouter } from './buyerRoutes.js';
 import { pixRouter } from './pixRoutes.js';
 import { ratesRouter } from './ratesRoutes.js';
 import { authRouter } from './modules/auth/authRoutes.js';
-import { catalogRouter, getProductsHandler, getProductByIdHandler } from './modules/catalog/catalogRoutes.js';
+import { catalogRouter, getProductsHandler, getProductByIdHandler, getProductRecommendationsHandler, getProductQuestionsHandler, createProductQuestionHandler } from './modules/catalog/catalogRoutes.js';
+import { requireAuth } from './modules/auth/authMiddleware.js';
 import { shipmentRouter } from './modules/logistics/shipmentRoutes.js';
 import { orderRouter } from './modules/orders/orderRoutes.js';
 import { paymentRouter } from './modules/payments/paymentRoutes.js';
@@ -21,7 +22,7 @@ import { searchProductsIntelligent } from '../utils/searchEngine.js';
 import { ProductCreationService } from './modules/catalog/productCreationService.js';
 import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
-import { ShippingCalculatorService } from './modules/shipping/shippingCalculatorService.js';
+import { resolveShippingPreview, resolveCartShippingPreview } from './modules/shipping/shippingPreviewService.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 import { internalJobsRouter } from './modules/jobs/internalJobsRoutes.js';
 import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
@@ -53,88 +54,128 @@ apiRouter.use('/countries', countriesPublicRouter);
 // Public read-only stores catalog (source of truth: `stores` table, real eligibility filter)
 apiRouter.use('/stores', storesPublicRouter);
 
-// Public Freight Calculation Route (Requirement 2)
-apiRouter.post('/shipping/calculate', async (req: Request, res: Response) => {
+// FASE D16-I4 — POST /shipping/calculate (motor legado país/zona,
+// ShippingCalculatorService.calculateFreight) REMOVIDO daqui: auditoria
+// D16-I1 confirmou zero consumidor runtime real (ShippingApi.create() só
+// era chamado por ShippingService.calculateFreight(), que só era chamado
+// por src/utils/multiSellerFreight.ts — sem NENHUM importador em nenhum
+// componente; toda a cadeia foi removida junto, D16-I4). calculateFreight()
+// em si permanece intocada em shippingCalculatorService.ts — ainda usada
+// por POST /admin/shipping-rates/simulate (ferramenta de administração,
+// fora do escopo desta fase) e referenciada por tipos em orderService.ts
+// (branch legado, código morto desde D16-I2, remoção física fica para
+// D16-I5). Nenhum fluxo real de comprador dependia desta rota.
+
+// FASE D16-G2 — preview de entrega READ-ONLY via F4/F3 (smart fulfillment),
+// para a página de produto (e futuramente checkout). NUNCA chama F5 —
+// nenhuma reserva, nenhum efeito colateral. sellerId é SEMPRE resolvido do
+// produto no banco (resolveShippingPreview), nunca confiado ao frontend.
+apiRouter.get('/shipping/preview', async (req: Request, res: Response) => {
   try {
-    const {
-      storeId,
-      sellerId,
-      originCountry,
-      destinationCountry,
-      originRegion,
-      destinationRegion,
-      destinationCity,
-      weightKg,
-      dimensionsCm,
-      currency,
-      productSubtotal,
-    } = req.body;
+    const { productId, variantId, quantity, destinationShippingSectorId } = req.query;
 
-    const parsedWeight = Number(weightKg);
-    if (isNaN(parsedWeight) || parsedWeight <= 0 || parsedWeight > 1000) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'PRODUCT_WEIGHT_REQUIRED', message: 'O peso deve ser um número válido maior que zero.' },
-      });
-    }
-
-    if (!originCountry || !String(originCountry).trim()) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'SHIPPING_ORIGIN_REQUIRED', message: 'País de origem é obrigatório.' },
-      });
-    }
-
-    if (!destinationCountry || !String(destinationCountry).trim()) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'SHIPPING_DESTINATION_REQUIRED', message: 'País de destino é obrigatório.' },
-      });
-    }
-
-    if (!currency || !String(currency).trim()) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'SHIPPING_CURRENCY_REQUIRED', message: 'Moeda é obrigatória.' },
-      });
-    }
-
-    const result = await ShippingCalculatorService.calculateFreight({
-      storeId,
-      sellerId,
-      originCountry,
-      destinationCountry,
-      originRegion,
-      destinationRegion,
-      destinationCity,
-      weightKg: parsedWeight,
-      dimensionsCm,
-      currency,
-      productSubtotal: Number(productSubtotal) || 0,
+    const result = await resolveShippingPreview({
+      productId: productId as string,
+      variantId: (variantId as string) || null,
+      quantity: Number(quantity),
+      destinationShippingSectorId: (destinationShippingSectorId as string) || null,
     });
 
-    if (!result.available) {
-      return res.status(400).json({
+    if (result.ok === false) {
+      return res.status(result.httpStatus).json({
         success: false,
-        error: {
-          code: 'SHIPPING_RATE_NOT_AVAILABLE',
-          message: result.errorMessage || 'Frete indisponível para este endereço.',
-        },
-        data: result,
+        error: { code: result.code, message: result.message },
+      });
+    }
+
+    if (result.available === false) {
+      const unavailableCode = result.code;
+      const unavailableMessage = result.message;
+      return res.json({
+        success: true,
+        data: { available: false, code: unavailableCode, message: unavailableMessage },
       });
     }
 
     return res.json({
       success: true,
-      data: result,
+      data: {
+        available: true,
+        shippingAmount: result.shippingAmount,
+        currency: result.currency,
+        serviceCode: result.serviceCode,
+        serviceName: result.serviceName,
+        fulfillmentType: result.fulfillmentType,
+      },
     });
   } catch (err: any) {
     return res.status(500).json({
       success: false,
-      error: {
-        code: 'SHIPPING_CALCULATION_FAILED',
-        message: err?.message || 'Erro ao calcular o frete.',
+      error: { code: 'SHIPPING_PREVIEW_FAILED', message: err?.message || 'Erro ao calcular o preview de entrega.' },
+    });
+  }
+});
+
+// FASE D16-G3 — preview AGREGADO de frete para carrinho/checkout, via F4/F3
+// (mesma arquitetura de /shipping/preview acima, D16-G2 — nunca uma segunda
+// implementação). NUNCA chama F5, nunca reserva estoque, nunca cria
+// order/payment/escrow. Cada item do payload leva SOMENTE productId/
+// variantId/quantity — seller/preço/peso/tarifa são SEMPRE resolvidos no
+// banco (resolveCartShippingPreview -> resolveShippingPreviewLine), nunca
+// confiados ao cliente. Substitui, para CartView/CheckoutView, o preview
+// legado (calculateMultiSellerFreight/POST /shipping/calculate) — ambos
+// removidos por zero-consumer audit (D16-I1/D16-I4).
+apiRouter.post('/shipping/preview-cart', async (req: Request, res: Response) => {
+  try {
+    const { destinationShippingSectorId, items } = req.body ?? {};
+
+    if (!Array.isArray(items)) {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'CART_ITEMS_REQUIRED', message: 'items deve ser uma lista de {productId, variantId?, quantity}.' },
+      });
+    }
+
+    const result = await resolveCartShippingPreview({
+      destinationShippingSectorId: destinationShippingSectorId || null,
+      items: items.map((item: any) => ({
+        productId: item?.productId,
+        variantId: item?.variantId || null,
+        quantity: Number(item?.quantity),
+      })),
+    });
+
+    if (result.ok === false) {
+      return res.status(result.httpStatus).json({
+        success: false,
+        error: { code: result.code, message: result.message },
+      });
+    }
+
+    if (result.available === false) {
+      const unavailableCode = result.code;
+      const unavailableMessage = result.message;
+      return res.json({
+        success: true,
+        data: { available: false, code: unavailableCode, message: unavailableMessage },
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        available: true,
+        shippingChargedToBuyer: result.shippingChargedToBuyer,
+        shippingCost: result.shippingCost,
+        shippingSellerSubsidy: result.shippingSellerSubsidy,
+        currency: result.currency,
+        sellers: result.sellers,
       },
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: { code: 'SHIPPING_PREVIEW_FAILED', message: err?.message || 'Erro ao calcular o preview de entrega do carrinho.' },
     });
   }
 });
@@ -486,6 +527,16 @@ apiRouter.get('/products/search', async (req: Request, res: Response) => {
 // implementação de catalogRoutes.ts (CatalogService.getProductById), agora
 // finalmente reachable no caminho real que o frontend chama.
 apiRouter.get('/products/:id', getProductByIdHandler);
+
+// FASE D17-B1 — produtos relacionados/mesma loja/você também pode gostar
+// (motor determinístico, sem IA/ML, reaproveitando CatalogService.getProducts).
+apiRouter.get('/products/:id/recommendations', getProductRecommendationsHandler);
+
+// FASE D17-C4 — Perguntas e Respostas reais. GET público (sem
+// autenticação); POST exige requireAuth — qualquer comprador autenticado
+// pode perguntar, nunca compra comprovada (isso é exclusivo de reviews).
+apiRouter.get('/products/:id/questions', getProductQuestionsHandler);
+apiRouter.post('/products/:id/questions', requireAuth, createProductQuestionHandler);
 
 apiRouter.patch('/products/:id', async (req: Request, res: Response) => {
   const { id } = req.params;

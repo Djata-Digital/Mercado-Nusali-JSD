@@ -1,11 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useCart } from '../hooks/useCart';
 import { usePreferences } from '../context/PreferencesContext';
 import { useCountries } from '../hooks/useCountries';
+import { useAuth } from '../context/AuthContext';
 import { formatCurrency } from '../utils/currencyUtils';
-import { ShippingService } from '../services/shippingService';
-import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2 } from 'lucide-react';
+import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
+import { BuyerService } from '../services/buyerService';
+import { sanitizeQuantityDigits, resolveQuantityInputValue, getCartItemAvailableStock } from '../utils/quantityInput';
+import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
+import { DeliveryDestinationModal } from './DeliveryDestinationModal';
+import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2, MapPin } from 'lucide-react';
 
 export const CartView: React.FC = () => {
   const navigate = useNavigate();
@@ -23,6 +29,32 @@ export const CartView: React.FC = () => {
   const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
   const [couponError, setCouponError] = useState('');
 
+  // FASE D16-H2 — quantidade digitável no carrinho (além dos botões −/+).
+  // `qtyDrafts` guarda o texto EM EDIÇÃO por item (permite vazio temporário
+  // durante a digitação); undefined = mostra item.quantity normalmente.
+  // Confirmado (clampado a [1, disponibilidade real da linha]) só no
+  // blur/Enter — nunca a cada tecla, nunca vira um request por keystroke.
+  // `qtyPending` evita disparar um segundo update para o MESMO item
+  // enquanto o anterior ainda está em voo (evita race condition simples de
+  // cliques/edições rápidas sucessivas na mesma linha).
+  const [qtyDrafts, setQtyDrafts] = useState<Record<string, string>>({});
+  const [qtyFeedback, setQtyFeedback] = useState<Record<string, string>>({});
+  const [qtyPending, setQtyPending] = useState<Record<string, boolean>>({});
+
+  const applyCartQuantity = async (itemKey: string, nextQty: number) => {
+    if (qtyPending[itemKey]) return;
+    setQtyPending((prev) => ({ ...prev, [itemKey]: true }));
+    try {
+      await updateCartQuantity(itemKey, nextQty);
+    } finally {
+      setQtyPending((prev) => {
+        const next = { ...prev };
+        delete next[itemKey];
+        return next;
+      });
+    }
+  };
+
   const handleApplyCoupon = (e: React.FormEvent) => {
     e.preventDefault();
     if (couponCode.toUpperCase() === 'NUSALI10') {
@@ -38,18 +70,61 @@ export const CartView: React.FC = () => {
 
   const couponDiscount = appliedCoupon?.includes('NUSALI10') ? cartTotal * 0.10 : 0;
 
-  // Fase "Comissão percentual + logística real": SEM cálculo financeiro
-  // paralelo no frontend. Mesmo endpoint real (POST /api/v1/shipping/calculate)
-  // que o checkout usa — nunca um valor fixo como os antigos "R$29,90".
+  // FASE D16-G3 — preview de frete via F4/F3 (mesma arquitetura já validada
+  // no Product Detail, D16-G2) em vez do motor legado
+  // (calculateMultiSellerFreight/shipping_rates). Setor de entrega:
+  // EXCLUSIVAMENTE o endereço padrão real do comprador autenticado (mesmo
+  // padrão de ProductDetailView.tsx) — nunca inferido por país/texto.
+  const { isAuthenticated } = useAuth();
+  const { data: buyerAddresses } = useQuery({
+    queryKey: ['buyer-addresses-for-shipping-preview'],
+    queryFn: async () => {
+      const res = await BuyerService.getAddresses();
+      return res.success && Array.isArray(res.data) ? res.data : [];
+    },
+    enabled: isAuthenticated,
+    staleTime: 1000 * 60,
+  });
+  const defaultDeliveryAddress = useMemo(() => {
+    if (!buyerAddresses || buyerAddresses.length === 0) return null;
+    return buyerAddresses.find((a: any) => a.isDefault) || buyerAddresses[0];
+  }, [buyerAddresses]);
+
+  // FASE D16-H3 — mesma intenção temporária compartilhada com ProductDetail:
+  // tem prioridade sobre o endereço padrão, sem quebrar o fallback anterior
+  // quando não há nenhuma intenção selecionada ainda.
+  const { destination: deliveryDestinationIntent } = useDeliveryDestination();
+  const [isDestinationModalOpen, setIsDestinationModalOpen] = useState(false);
+  const destinationShippingSectorId: string | null =
+    deliveryDestinationIntent?.shippingSectorId || defaultDeliveryAddress?.shippingSectorId || null;
+  const destinationSectorDisplayName: string | null =
+    deliveryDestinationIntent?.shippingSectorName || defaultDeliveryAddress?.shippingSectorName || null;
+  const destinationRegionDisplayName: string | null =
+    deliveryDestinationIntent?.shippingRegionName || defaultDeliveryAddress?.shippingRegionName || null;
+
   const [shippingQuote, setShippingQuote] = useState<{
     loading: boolean;
     available: boolean;
     shippingChargedToBuyer: number;
     currency: string;
-    estimatedMinDays?: number;
-    estimatedMaxDays?: number;
+    code?: string;
     errorMessage?: string;
   } | null>(null);
+
+  // FASE D16-H2.1 — chave estável derivada dos itens CONFIRMADOS do
+  // carrinho (id, productId, variantId, quantity), para o efeito de preview
+  // de frete reagir diretamente a mudança de quantidade — nunca via
+  // cartTotal (preço) como proxy, que não muda se um item tiver preço 0 ou
+  // se dois deltas de preço se cancelarem entre itens diferentes. `cart` em
+  // si é uma referência instável (nova a cada fetch), por isso NUNCA vai
+  // direto no dependency array do efeito — só esta string derivada, que só
+  // muda quando o CONTEÚDO relevante muda de verdade (evita loop de
+  // requests). O array de itens só muda de valor quando updateQuantity
+  // (blur/Enter/±) resolve — nunca a cada tecla do draft em edição.
+  const shippingItemsKey = useMemo(
+    () => cart.map((item) => `${item.id || item.product.id}:${item.product.id}:${item.selectedVariantSku || ''}:${item.quantity}`).join('|'),
+    [cart]
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -57,40 +132,42 @@ export const CartView: React.FC = () => {
       setShippingQuote(null);
       return;
     }
-    const itemsMissingWeight = cart.filter((i) => !i.product.weightKg || i.product.weightKg <= 0);
-    if (itemsMissingWeight.length > 0) {
-      setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: 'Um ou mais produtos do carrinho não têm peso cadastrado — não é possível calcular o frete.' });
+    const currency = cart[0]?.product?.currency || 'XOF';
+    if (!destinationShippingSectorId) {
+      setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency, code: 'DELIVERY_SECTOR_REQUIRED', errorMessage: 'Selecione/atualize seu endereço de entrega para calcular o frete.' });
       return;
     }
-    const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || '').toUpperCase();
-    if (!originCountry || !selectedCountry) {
-      setShippingQuote(null);
-      return;
-    }
-    setShippingQuote((prev) => ({ ...(prev || { loading: true, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF' }), loading: true }));
-    const totalWeight = cart.reduce((sum, item) => sum + item.product.weightKg! * item.quantity, 0);
-    ShippingService.calculateFreight({
-      originCountry,
-      destinationCountry: selectedCountry.toUpperCase(),
-      weightKg: totalWeight,
-      currency: cart[0]?.product?.currency || 'XOF',
-      storeId: cart[0]?.product?.storeId || cart[0]?.product?.seller?.storeId,
-      sellerId: cart[0]?.product?.sellerId || cart[0]?.product?.seller?.id,
-      productSubtotal: cartTotal,
+    setShippingQuote((prev) => ({ ...(prev || { loading: true, available: false, shippingChargedToBuyer: 0, currency }), loading: true }));
+    // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
+    // vendedor; cada vendedor é uma entrega/child order independente no
+    // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
+    // getCartPreview agrupa por sellerId (F4/F3) e soma 1 cotação por
+    // grupo — NUNCA 1 cotação para o carrinho inteiro.
+    ShippingService.getCartPreview({
+      destinationShippingSectorId,
+      items: cart.map((item) => ({
+        productId: item.product.id,
+        variantId: item.selectedVariantSku || null,
+        quantity: item.quantity,
+      })),
     }).then((res) => {
       if (!isMounted) return;
       if (res.success && res.data) {
-        setShippingQuote({
-          loading: false, available: true, shippingChargedToBuyer: res.data.shippingChargedToBuyer, currency: res.data.currency,
-          estimatedMinDays: res.data.estimatedMinDays, estimatedMaxDays: res.data.estimatedMaxDays,
-        });
+        const data: CartShippingPreviewData = res.data;
+        if (data.available === true) {
+          setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: data.shippingChargedToBuyer, currency: data.currency });
+        } else {
+          const unavailableCode: string = data.code;
+          const unavailableMessage: string = data.message;
+          setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency, code: unavailableCode, errorMessage: unavailableMessage });
+        }
       } else {
-        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency: cart[0]?.product?.currency || 'XOF', errorMessage: res.error?.message || 'Frete indisponível para este destino.' });
+        setShippingQuote({ loading: false, available: false, shippingChargedToBuyer: 0, currency, errorMessage: res.error?.message || 'Frete indisponível para este destino no momento.' });
       }
     });
     return () => { isMounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cart.length, selectedCountry, cartTotal]);
+  }, [shippingItemsKey, destinationShippingSectorId]);
 
   const shippingFee = shippingQuote?.available ? shippingQuote.shippingChargedToBuyer : 0;
   const finalTotal = cartTotal + shippingFee - couponDiscount;
@@ -138,25 +215,67 @@ export const CartView: React.FC = () => {
         <div className="lg:col-span-8 space-y-4">
           <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-200 shadow-xs">
             {/* Delivery banner */}
-            <div className="p-4 bg-green-50 rounded-t-lg flex items-center justify-between text-xs text-green-800 font-semibold border-b border-green-100">
+            <div className="p-4 bg-green-50 rounded-t-lg flex flex-wrap items-center justify-between gap-2 text-xs text-green-800 font-semibold border-b border-green-100">
               <span className="flex items-center gap-2">
                 <Truck className="w-4 h-4 text-green-600" />
                 Entrega para {cartDestinationCountry ? `${cartDestinationCountry.flag} ${cartDestinationCountry.name}` : selectedCountry}
               </span>
-              {shippingQuote?.available && typeof shippingQuote.estimatedMinDays === 'number' && (
-                <span className="text-green-700 font-bold">
-                  {shippingQuote.estimatedMinDays}–{shippingQuote.estimatedMaxDays} dias úteis
+              {/* FASE D16-H3 — destino de entrega (setor) usado no preview
+                  deste carrinho, com a MESMA intenção temporária compartilhada
+                  com ProductDetail/Checkout. Nunca altera cart_items. */}
+              <span className="flex items-center gap-2">
+                <span className="flex items-center gap-1">
+                  <MapPin className="w-3.5 h-3.5 text-green-700" />
+                  {destinationSectorDisplayName
+                    ? `Entrega para: ${destinationSectorDisplayName}${destinationRegionDisplayName ? ` · ${destinationRegionDisplayName}` : ''}`
+                    : 'Selecione um endereço de entrega'}
                 </span>
-              )}
+                <button
+                  type="button"
+                  onClick={() => setIsDestinationModalOpen(true)}
+                  className="text-emerald-800 font-bold underline decoration-dotted hover:text-emerald-950"
+                >
+                  Alterar endereço
+                </button>
+              </span>
             </div>
 
             {/* Product row items */}
             {cart.map((item) => {
               const unitPrice = item.unitPriceOverride || item.product.price;
               const itemSubtotal = unitPrice * item.quantity;
+              // FASE D16-H2 — chave estável desta linha (mesma usada pelas
+              // chamadas updateQuantity/removeItem existentes) e disponibilidade
+              // REAL desta variante/produto específico (nunca o estoque
+              // agregado do produto — ver getCartItemAvailableStock).
+              const itemKey = item.id || item.product.id;
+              const itemMaxQty = getCartItemAvailableStock(item);
+              const itemDraft = qtyDrafts[itemKey];
+              const itemFeedback = qtyFeedback[itemKey];
+              const itemDisplayValue = itemDraft !== undefined ? itemDraft : String(item.quantity);
+              const itemPending = !!qtyPending[itemKey];
+              const commitItemDraft = () => {
+                const draft = qtyDrafts[itemKey];
+                if (draft === undefined) return; // já confirmado (evita duplo commit de blur após Enter)
+                setQtyDrafts((prev) => {
+                  const next = { ...prev };
+                  delete next[itemKey];
+                  return next;
+                });
+                const { value, message } = resolveQuantityInputValue(draft, 1, itemMaxQty);
+                setQtyFeedback((prev) => {
+                  const next = { ...prev };
+                  if (message) next[itemKey] = message;
+                  else delete next[itemKey];
+                  return next;
+                });
+                if (value !== item.quantity) {
+                  applyCartQuantity(itemKey, value);
+                }
+              };
 
               return (
-                <div key={`${item.product.id}-${item.selectedColor || ''}-${item.selectedSize || ''}-${item.selectedKit?.id || ''}`} className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div key={item.id || `${item.product.id}-${item.selectedColor || ''}-${item.selectedSize || ''}-${item.selectedKit?.id || ''}`} className="p-4 sm:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                   <div className="flex items-start gap-4 flex-1">
                     <img
                       src={item.product.image}
@@ -215,20 +334,63 @@ export const CartView: React.FC = () => {
 
                   {/* Quantity & Price */}
                   <div className="flex items-center justify-between w-full sm:w-auto sm:justify-end gap-6 pt-2 sm:pt-0 border-t sm:border-none border-gray-100">
-                    <div className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-gray-50">
-                      <button
-                        onClick={() => updateCartQuantity(item.product.id, item.quantity - 1)}
-                        className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold"
-                      >
-                        -
-                      </button>
-                      <span className="px-3 py-1 text-xs font-bold text-gray-900">{item.quantity}</span>
-                      <button
-                        onClick={() => updateCartQuantity(item.product.id, item.quantity + 1)}
-                        className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold"
-                      >
-                        +
-                      </button>
+                    <div className="flex flex-col items-start sm:items-end gap-1">
+                      <div className="flex items-center border border-gray-300 rounded-md overflow-hidden bg-gray-50">
+                        <button
+                          type="button"
+                          disabled={itemPending || item.quantity <= 1}
+                          onClick={() => {
+                            setQtyFeedback((prev) => {
+                              if (!(itemKey in prev)) return prev;
+                              const next = { ...prev };
+                              delete next[itemKey];
+                              return next;
+                            });
+                            applyCartQuantity(itemKey, item.quantity - 1);
+                          }}
+                          aria-label={`Diminuir quantidade de ${item.product.title}${item.selectedColor ? ` - ${item.selectedColor}` : ''}${item.selectedSize ? ` / ${item.selectedSize}` : ''}`}
+                          className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          -
+                        </button>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          disabled={itemPending}
+                          aria-label={`Quantidade de ${item.product.title}${item.selectedColor ? ` - ${item.selectedColor}` : ''}${item.selectedSize ? ` / ${item.selectedSize}` : ''}`}
+                          value={itemDisplayValue}
+                          onChange={(e) => {
+                            const digits = sanitizeQuantityDigits(e.target.value);
+                            setQtyDrafts((prev) => ({ ...prev, [itemKey]: digits }));
+                          }}
+                          onFocus={(e) => e.target.select()}
+                          onBlur={commitItemDraft}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') e.currentTarget.blur();
+                          }}
+                          className="w-10 px-1 py-1 text-xs font-bold text-gray-900 text-center bg-transparent focus:outline-hidden focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                        />
+                        <button
+                          type="button"
+                          disabled={itemPending || item.quantity >= itemMaxQty}
+                          onClick={() => {
+                            setQtyFeedback((prev) => {
+                              if (!(itemKey in prev)) return prev;
+                              const next = { ...prev };
+                              delete next[itemKey];
+                              return next;
+                            });
+                            applyCartQuantity(itemKey, item.quantity + 1);
+                          }}
+                          aria-label={`Aumentar quantidade de ${item.product.title}${item.selectedColor ? ` - ${item.selectedColor}` : ''}${item.selectedSize ? ` / ${item.selectedSize}` : ''}`}
+                          className="px-2.5 py-1 text-gray-700 hover:bg-gray-200 font-bold disabled:opacity-30 disabled:cursor-not-allowed"
+                        >
+                          +
+                        </button>
+                      </div>
+                      {itemFeedback && (
+                        <p className="text-[10px] text-amber-700 font-semibold max-w-[9rem] sm:text-right">{itemFeedback}</p>
+                      )}
                     </div>
 
                     <div className="text-right">
@@ -250,7 +412,7 @@ export const CartView: React.FC = () => {
                     </div>
 
                     <button
-                      onClick={() => removeFromCart(item.product.id)}
+                      onClick={() => removeFromCart(item.id || item.product.id)}
                       className="text-gray-400 hover:text-red-600 p-1 transition"
                       title="Excluir item"
                     >
@@ -318,6 +480,8 @@ export const CartView: React.FC = () => {
                       <span>Frete:</span>
                       {shippingQuote?.loading ? (
                         <span className="text-gray-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Calculando...</span>
+                      ) : shippingQuote && !shippingQuote.available && shippingQuote.code === 'DELIVERY_SECTOR_REQUIRED' ? (
+                        <span className="text-gray-500 font-semibold text-[11px]">{shippingQuote.errorMessage}</span>
                       ) : shippingQuote && !shippingQuote.available ? (
                         <span className="text-red-600 font-semibold text-[11px]">{shippingQuote.errorMessage || 'Indisponível'}</span>
                       ) : shippingFee === 0 ? (
@@ -378,6 +542,12 @@ export const CartView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* FASE D16-H3 — "Alterar endereço" (mesmo modal do ProductDetail) */}
+      <DeliveryDestinationModal
+        isOpen={isDestinationModalOpen}
+        onClose={() => setIsDestinationModalOpen(false)}
+      />
     </div>
   );
 };

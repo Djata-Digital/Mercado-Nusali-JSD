@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Users, Search, Filter, Shield, Ban, Lock, Unlock, Key, RefreshCw, Eye, AlertOctagon, Plus, X, Check, CheckCircle2, Loader2 } from 'lucide-react';
+import { Users, Search, Filter, Shield, Ban, Lock, Unlock, Key, RefreshCw, Eye, AlertOctagon, Plus, X, Check, CheckCircle2, Loader2, AlertCircle } from 'lucide-react';
 import { AdminService } from '../../services/adminService';
 import { AdminUserRecord } from '../../data/mockAdminUsers';
+import { useAuth } from '../../context/AuthContext';
+import { useCountries } from '../../hooks/useCountries';
 
 interface AdminUsersManagerProps {
   showToast: (msg: string) => void;
@@ -13,6 +15,15 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
   const [activeTab, setActiveTab] = useState<'all' | 'buyers' | 'sellers' | 'internal' | 'blocked' | 'suspended' | 'pending_kyc'>('all');
   const [searchTerm, setSearchTerm] = useState('');
 
+  // FASE D16-G1.3 — a opção "Administrador Global" só aparece no dropdown
+  // para quem já está autenticado como GLOBAL_ADMIN (mecanismo de
+  // AuthContext já existente — nunca um novo sistema de autorização). Isto
+  // é só UX: a autorização real e definitiva é 100% server-side em
+  // POST /admin/users (adminRoutes.ts) — esconder/mostrar aqui nunca
+  // substitui aquela checagem.
+  const { user } = useAuth();
+  const isGlobalAdmin = user?.role === 'GLOBAL_ADMIN';
+
   // Modals state
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [viewUser, setViewUser] = useState<AdminUserRecord | null>(null);
@@ -20,12 +31,27 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
   const [newPasswordInput, setNewPasswordInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // FASE D16-G1.3 — países SEMPRE da fonte oficial (GET /countries, só
+  // isActive=true) — nunca mais GW/BR/PT/AO hardcoded. Mesmo hook já usado
+  // pelo catálogo público e pelo filtro administrativo de origem em
+  // AdminProductsModeration.tsx (D16-G1.1) — nenhuma segunda fonte.
+  const { data: operationalCountries, isLoading: isCountriesLoading, isError: isCountriesError } = useCountries();
+
   // Form for New User
   const [formName, setFormName] = useState('');
   const [formEmail, setFormEmail] = useState('');
   const [formPhone, setFormPhone] = useState('');
-  const [formCountry, setFormCountry] = useState('GW');
-  const [formRole, setFormRole] = useState<'buyer' | 'seller' | 'admin' | 'country_rep' | 'supervisor'>('buyer');
+  // Nunca um código hardcoded como valor inicial — fica vazio até a lista
+  // real de países operacionais carregar, aí sim seleciona deterministicamente
+  // o primeiro país ativo retornado pela API (ver useEffect abaixo).
+  const [formCountry, setFormCountry] = useState('');
+  const [formRole, setFormRole] = useState<'buyer' | 'seller' | 'admin' | 'global_admin' | 'country_rep' | 'supervisor'>('buyer');
+
+  useEffect(() => {
+    if (!formCountry && operationalCountries && operationalCountries.length > 0) {
+      setFormCountry(operationalCountries[0].code);
+    }
+  }, [operationalCountries, formCountry]);
 
   const fetchUsers = async () => {
     setIsLoading(true);
@@ -67,6 +93,12 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
       showToast('Por favor, informe o nome e o email do usuário.');
       return;
     }
+    // Nunca submeter com país ainda carregando/indisponível/vazio — nunca um
+    // fallback silencioso para um código hardcoded.
+    if (!formCountry) {
+      showToast('Aguarde o carregamento dos países ou verifique se existe algum país operacional cadastrado.');
+      return;
+    }
 
     setIsSubmitting(true);
     try {
@@ -87,11 +119,13 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
       }
       setIsCreateModalOpen(false);
 
-      // Reset form
+      // Reset form. formCountry volta para '' — o useEffect acima reatribui
+      // deterministicamente o primeiro país operacional real assim que a
+      // lista (já em cache do react-query) estiver disponível novamente.
       setFormName('');
       setFormEmail('');
       setFormPhone('');
-      setFormCountry('GW');
+      setFormCountry('');
       setFormRole('buyer');
     } catch (err: any) {
       showToast('Erro ao cadastrar usuário.');
@@ -108,8 +142,17 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
         prev.map(item => item.id === u.id ? { ...item, status: nextStatus } : item)
       );
       showToast(res.message || `Usuário ${u.name} alterado para status ${nextStatus.toUpperCase()}.`);
-    } catch {
-      showToast(`Status de ${u.name} atualizado.`);
+    } catch (err: any) {
+      // FASE D16-G1.5 — mesmo bug de feedback falso identificado e corrigido
+      // no reset de senha (D16-G1.4): este catch mostrava incondicionalmente
+      // uma mensagem de SUCESSO mesmo quando a chamada falhava. Regras de
+      // bloqueio/desbloqueio em si não mudaram — só o feedback.
+      showToast(
+        err?.response?.data?.error?.message ||
+        err?.response?.data?.message ||
+        err?.message ||
+        `Não foi possível alterar o status de ${u.name}.`
+      );
     }
   };
 
@@ -120,8 +163,19 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
     try {
       const res = await AdminService.resetUserPassword(resetPasswordUser.id, newPasswordInput);
       showToast(res.message || `Senha do usuário ${resetPasswordUser.name} redefinida com sucesso!`);
-    } catch {
-      showToast(`Senha redefinida.`);
+    } catch (err: any) {
+      // FASE D16-G1.4 — bugfix: este catch mostrava incondicionalmente
+      // "Senha redefinida." mesmo quando a chamada falhava (ex.: backend
+      // bloqueia reset de senha de GLOBAL_ADMIN por esta tela e retorna
+      // 403) — o admin acreditava ter trocado a senha quando na verdade
+      // nada foi persistido. Agora mostra a mensagem real de erro do
+      // backend (mesmo padrão já usado em fetchSellers/AdminSellersManager).
+      showToast(
+        err?.response?.data?.error?.message ||
+        err?.response?.data?.message ||
+        err?.message ||
+        `Não foi possível redefinir a senha de ${resetPasswordUser.name}.`
+      );
     }
     setResetPasswordUser(null);
     setNewPasswordInput('');
@@ -243,9 +297,12 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
                         <Eye className="w-4 h-4" />
                       </button>
                       <button
-                        onClick={() => { setResetPasswordUser(u); setNewPasswordInput(''); }}
-                        className="p-1.5 hover:bg-gray-100 text-gray-600 rounded-lg cursor-pointer"
-                        title="Redefinir Senha"
+                        onClick={() => { if (u.id !== user?.id) { setResetPasswordUser(u); setNewPasswordInput(''); } }}
+                        disabled={u.id === user?.id}
+                        className={`p-1.5 rounded-lg ${
+                          u.id === user?.id ? 'text-gray-300 cursor-not-allowed' : 'hover:bg-gray-100 text-gray-600 cursor-pointer'
+                        }`}
+                        title={u.id === user?.id ? 'Use as configurações de segurança da sua conta para alterar sua própria senha.' : 'Redefinir Senha'}
                       >
                         <Key className="w-4 h-4" />
                       </button>
@@ -318,16 +375,31 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
                 </div>
                 <div>
                   <label className="block font-bold text-gray-700 mb-1">País:</label>
-                  <select
-                    value={formCountry}
-                    onChange={e => setFormCountry(e.target.value)}
-                    className="w-full p-2.5 border border-gray-300 rounded-xl font-bold"
-                  >
-                    <option value="GW">🇬🇼 Guiné-Bissau</option>
-                    <option value="BR">🇧🇷 Brasil</option>
-                    <option value="PT">🇵🇹 Portugal</option>
-                    <option value="AO">🇦🇴 Angola</option>
-                  </select>
+                  {isCountriesLoading ? (
+                    <div className="w-full p-2.5 border border-gray-200 rounded-xl font-bold text-gray-400 flex items-center gap-1.5 bg-gray-50">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando países...
+                    </div>
+                  ) : isCountriesError ? (
+                    <div className="w-full p-2.5 border border-red-200 rounded-xl font-bold text-red-600 bg-red-50 text-[11px] flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" /> Não foi possível carregar os países. Tente novamente mais tarde.
+                    </div>
+                  ) : !operationalCountries || operationalCountries.length === 0 ? (
+                    <div className="w-full p-2.5 border border-amber-200 rounded-xl font-bold text-amber-700 bg-amber-50 text-[11px]">
+                      Nenhum país operacional cadastrado. Cadastre um país em Países & Regiões antes de criar usuários.
+                    </div>
+                  ) : (
+                    <select
+                      value={formCountry}
+                      onChange={e => setFormCountry(e.target.value)}
+                      className="w-full p-2.5 border border-gray-300 rounded-xl font-bold"
+                    >
+                      {operationalCountries.map((c) => (
+                        <option key={c.code} value={c.code}>
+                          {c.flag} {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               </div>
 
@@ -341,6 +413,7 @@ export const AdminUsersManager: React.FC<AdminUsersManagerProps> = ({ showToast 
                   <option value="buyer">Comprador</option>
                   <option value="seller">Vendedor</option>
                   <option value="admin">Administrador</option>
+                  {isGlobalAdmin && <option value="global_admin">Administrador Global</option>}
                   <option value="country_rep">Representante Nacional</option>
                   <option value="supervisor">Supervisor de Operações</option>
                 </select>

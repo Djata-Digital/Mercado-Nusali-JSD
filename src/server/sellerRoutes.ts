@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ProductCreationService } from './modules/catalog/productCreationService.js';
 import { InventoryService } from './modules/inventory/inventoryService.js';
+import { syncVariantsForProduct } from './modules/catalog/variantService.js';
 import { getDb, checkDbConnection } from '../db/index.js';
 import {
   products,
@@ -42,8 +43,6 @@ import {
   storeMembers,
   storeShippingPolicies,
   countries,
-  shippingRates,
-  shippingZones,
   payments,
   paymentAttempts,
   refunds,
@@ -59,14 +58,19 @@ import {
   messages,
   supportTickets,
   supportTicketMessages,
+  shippingRegions,
+  shippingSectors,
+  fulfillmentLocations,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
-import { eq, desc, and, or, isNull, inArray } from 'drizzle-orm';
+import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
 import { requireAuth, AuthRequest } from './modules/auth/authMiddleware.js';
 import { syncOrderFulfillmentStatus } from './modules/orders/orderService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
+import { resolveCarrierNames, pickCarrierName } from './modules/logistics/carrierResolver.js';
 import { storageService } from './infra/storage.js';
 import { requestSellerPayout, PayoutValidationError } from './modules/wallet/payoutService.js';
+import { postSellerDisputeMessage, DisputeMessageValidationError } from './modules/disputes/disputeMessageService.js';
 import { computeLiveStockAndSales } from './modules/catalog/catalogService.js';
 import {
   getSellerOrderRows,
@@ -77,6 +81,13 @@ import {
   computeSellerWalletSnapshot,
   computeSellerCustomers,
 } from './modules/seller/sellerFinancialsService.js';
+import {
+  validateOperationalAddressGeography,
+  validateAddressSectorAssignment,
+  deriveShippingRegionFromSector,
+} from './modules/shipping/shippingGeographyService.js';
+import { listFulfillmentLocationsForSeller, ensureStoreFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
+import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -465,6 +476,134 @@ sellerRouter.get('/customers', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Correção (auditoria "painel do vendedor" — disputas nunca apareciam): não
+// existia NENHUM endpoint real de disputas para o vendedor —
+// SellerDisputesManager.tsx era 100% mock (useState([]) nunca preenchido).
+// Mesmo padrão de segurança já usado por GET /admin/disputes: sellerId
+// SEMPRE vem de resolveSeller(req) (autenticação), NUNCA de query/body — um
+// vendedor nunca consegue ver disputa de outro.
+sellerRouter.get('/disputes', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const seller = await resolveSeller(req);
+    if (!db || !seller) return res.json({ success: true, data: [] });
+
+    const disputeRows = await db
+      .select({
+        dispute: disputes,
+        orderNumber: orders.orderNumber,
+        buyerFullName: users.fullName,
+      })
+      .from(disputes)
+      .innerJoin(orders, eq(disputes.orderId, orders.id))
+      .innerJoin(users, eq(disputes.buyerId, users.id))
+      .where(eq(disputes.sellerId, seller.id))
+      .orderBy(desc(disputes.createdAt));
+
+    if (disputeRows.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+
+    const disputeIds = disputeRows.map((r: any) => r.dispute.id);
+    const orderIds = [...new Set(disputeRows.map((r: any) => r.dispute.orderId))];
+
+    // Item representativo do pedido (só deste vendedor — um pedido pode ter
+    // itens de outros vendedores, nunca misturamos) para mostrar
+    // produto/imagem na listagem, sem inventar um vínculo direto
+    // disputa->item que não existe no schema.
+    const [itemRows, messageRows] = await Promise.all([
+      db
+        .select({ orderId: orderItems.orderId, productTitle: orderItems.productTitle, productImage: orderItems.productImage })
+        .from(orderItems)
+        .where(and(inArray(orderItems.orderId, orderIds), eq(orderItems.sellerId, seller.id))),
+      db
+        .select()
+        .from(disputeMessages)
+        .where(inArray(disputeMessages.disputeId, disputeIds))
+        // Fase M1-C — desempate por id além de createdAt: duas mensagens
+        // inseridas no mesmo milissegundo (createdAt igual) precisam de uma
+        // ordem determinística, nunca dependente da ordem física de disco.
+        .orderBy(asc(disputeMessages.createdAt), asc(disputeMessages.id)),
+    ]);
+
+    const firstItemByOrder = new Map<string, any>();
+    for (const item of itemRows as any[]) {
+      if (!firstItemByOrder.has(item.orderId)) firstItemByOrder.set(item.orderId, item);
+    }
+    const messagesByDispute = new Map<string, any[]>();
+    for (const msg of messageRows as any[]) {
+      const list = messagesByDispute.get(msg.disputeId) || [];
+      list.push(msg);
+      messagesByDispute.set(msg.disputeId, list);
+    }
+
+    const data = disputeRows.map((r: any) => {
+      const item = firstItemByOrder.get(r.dispute.orderId);
+      return {
+        id: r.dispute.id,
+        orderId: r.dispute.orderId,
+        orderNumber: r.orderNumber,
+        buyerName: r.buyerFullName,
+        productTitle: item?.productTitle || null,
+        productImage: item?.productImage || null,
+        reason: r.dispute.reason,
+        description: r.dispute.description,
+        status: r.dispute.status, // valores reais: open, in_mediation, resolved_buyer, resolved_seller, cancelled
+        claimAmount: Number(r.dispute.claimAmount),
+        currency: r.dispute.currency,
+        resolution: r.dispute.resolution,
+        createdAt: r.dispute.createdAt,
+        updatedAt: r.dispute.updatedAt,
+        // Somente leitura nesta etapa — nenhuma ação de resposta/acordo foi
+        // conectada (ver relatório da correção).
+        messages: (messagesByDispute.get(r.dispute.id) || []).map((m: any) => ({
+          id: m.id,
+          senderRole: m.senderRole,
+          message: m.message,
+          createdAt: m.createdAt,
+        })),
+      };
+    });
+
+    return res.json({ success: true, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar disputas.' });
+  }
+});
+
+// Fase M1-C — primeiro endpoint REAL de resposta do vendedor numa disputa
+// (antes só existia leitura; SellerDisputesManager.tsx informava "ainda não
+// disponível"). Mesmo padrão de auth/scoping do GET acima: seller SEMPRE
+// vem de resolveSeller(req) (sessão), nunca de query/body. Identidade da
+// mensagem (senderId/senderRole) sempre derivada da sessão —
+// disputeMessageService nem aceita esses campos vindos de fora. Nenhuma
+// lógica financeira: só INSERT em dispute_messages.
+sellerRouter.post('/disputes/:id/messages', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const seller = await resolveSeller(req);
+    if (!db || !seller) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+
+    const inserted = await postSellerDisputeMessage(db, {
+      disputeId: req.params.id,
+      sellerId: seller.id,
+      sellerUserId: seller.userId,
+      rawMessage: req.body?.message,
+    });
+
+    return res.json({
+      success: true,
+      message: 'Mensagem enviada.',
+      data: { id: inserted.id, senderRole: inserted.senderRole, message: inserted.message, createdAt: inserted.createdAt },
+    });
+  } catch (err: any) {
+    if (err instanceof DisputeMessageValidationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao enviar mensagem.' });
+  }
+});
+
 function canSellerOperate(seller: any): boolean {
   if (!seller) return false;
   if (seller.isEmailVerified === false) return false;
@@ -821,39 +960,62 @@ sellerRouter.post('/shipping-policy', async (req: AuthRequest, res: Response) =>
     let finalPct: number | null = null;
 
     if (finalMode === 'SELLER_SUBSIDIZED') {
+      // FASE D18-B1 — validação estrita (nunca Number(x) || 0, que convertia
+      // entrada inválida em 0 sem avisar). Percentual: finito, 0..100.
+      // Valor máximo: finito, >= 0. O resolver ainda revalida (defesa em
+      // profundidade) caso uma linha inválida já exista no banco.
       if (subsidyType === 'PERCENT') {
-        finalPct = Number(sellerSubsidyPercent) || 0;
+        const pct = validateSubsidyPercent(sellerSubsidyPercent);
+        if (!pct.ok) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_SELLER_SUBSIDY_PERCENT', message: 'O percentual de frete assumido deve ser um número entre 0 e 100.' },
+          });
+        }
+        finalPct = pct.value;
         finalMaxAmt = null;
       } else {
-        finalMaxAmt = Number(sellerSubsidyMaxAmount) || 0;
+        const amt = validateSubsidyAmount(sellerSubsidyMaxAmount);
+        if (!amt.ok) {
+          return res.status(400).json({
+            success: false,
+            error: { code: 'INVALID_SELLER_SUBSIDY_AMOUNT', message: 'O valor máximo de frete assumido deve ser um número maior ou igual a zero.' },
+          });
+        }
+        finalMaxAmt = amt.value;
         finalPct = null;
       }
     }
 
     const storeId = targetStoreId;
 
-    const existingPolicy = await db.select().from(storeShippingPolicies).where(and(eq(storeShippingPolicies.storeId, storeId), eq(storeShippingPolicies.sellerId, seller.id))).limit(1);
-
-    if (existingPolicy.length > 0) {
-      await db.update(storeShippingPolicies)
-        .set({
-          mode: finalMode,
-          sellerSubsidyMaxAmount: finalMaxAmt !== null ? String(finalMaxAmt) : null,
-          sellerSubsidyPercent: finalPct !== null ? String(finalPct) : null,
-          updatedAt: new Date(),
-        })
-        .where(eq(storeShippingPolicies.id, existingPolicy[0].id));
-    } else {
-      await db.insert(storeShippingPolicies).values({
-        id: `pol_${Date.now()}`,
+    // FASE D18-B2 — upsert atômico por LOJA (UNIQUE store_id): duas requisições
+    // simultâneas para a mesma loja nunca criam duas políticas nem geram 500
+    // por violação de unicidade — a segunda vira UPDATE. O storeId já foi
+    // provado como pertencente ao seller autenticado acima (validStore), então
+    // a política dessa loja é dele por definição. isActive só é definido na
+    // criação (o update nunca o altera, como antes).
+    const sellerSubsidyMaxAmountValue = finalMaxAmt !== null ? String(finalMaxAmt) : null;
+    const sellerSubsidyPercentValue = finalPct !== null ? String(finalPct) : null;
+    await db.insert(storeShippingPolicies)
+      .values({
+        id: `pol_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         storeId,
         sellerId: seller.id,
         mode: finalMode,
-        sellerSubsidyMaxAmount: finalMaxAmt !== null ? String(finalMaxAmt) : null,
-        sellerSubsidyPercent: finalPct !== null ? String(finalPct) : null,
+        sellerSubsidyMaxAmount: sellerSubsidyMaxAmountValue,
+        sellerSubsidyPercent: sellerSubsidyPercentValue,
         isActive: true,
+      })
+      .onConflictDoUpdate({
+        target: storeShippingPolicies.storeId,
+        set: {
+          mode: finalMode,
+          sellerSubsidyMaxAmount: sellerSubsidyMaxAmountValue,
+          sellerSubsidyPercent: sellerSubsidyPercentValue,
+          updatedAt: new Date(),
+        },
       });
-    }
 
     return res.json({
       success: true,
@@ -907,6 +1069,95 @@ sellerRouter.get('/stores', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// FASE D16-E4 — erro de validação de endereço/setor com status/code, mesmo
+// padrão já usado em CartOperationError (buyerRoutes.ts): lançar dentro de
+// uma db.transaction() faz o ROLLBACK acontecer sozinho; a borda HTTP só
+// traduz para { error } na hora de responder.
+class AddressValidationError extends Error {
+  status: number;
+  code: string;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/**
+ * FASE D16-E4 — núcleo reutilizável de "criar um endereço business real para
+ * o usuário autenticado", extraído de POST /seller/addresses para também
+ * poder ser chamado (dentro da MESMA transação) pela criação atômica de
+ * loja com origem operacional. MESMA validação/mapeamento de campos em
+ * ambos os chamadores — nunca uma segunda regra divergente. `executor` é
+ * `db` (chamada avulsa) OU `tx` (dentro da transação de criação de loja).
+ *
+ * Mapeamento de campos (nenhum dado fictício inventado):
+ *   recipientName/street/city -> obrigatórios, exigidos do chamador
+ *   number -> 'S/N' quando ausente (mesmo fallback já usado por este
+ *     endpoint desde antes desta fase — convenção real "Sem Número", nunca
+ *     um valor inventado)
+ *   state -> a própria cidade quando ausente (mesmo fallback pré-existente)
+ *   phone -> string vazia quando ausente (mesmo comportamento pré-existente)
+ *   countryCode -> sempre o país JÁ RESOLVIDO pelo chamador (nunca aceito
+ *     cru do body sem validação, para nunca divergir do país da loja/seller)
+ *   shippingSectorId -> null quando ausente; quando presente, validado via
+ *     validateAddressSectorAssignment (nunca uma segunda regra de país)
+ *   userId, addressType='business' -> sempre controlados pelo chamador
+ *     (sessão autenticada), nunca aceitos do corpo da requisição.
+ */
+async function createBusinessAddressForUser(
+  executor: any,
+  userId: string,
+  input: {
+    recipientName?: string; street?: string; number?: string; complement?: string;
+    neighborhood?: string; city?: string; state?: string; countryCode?: string;
+    zipCode?: string; phone?: string; shippingSectorId?: string | null; isDefault?: boolean;
+  },
+  fallbackCountryCode: string
+): Promise<any> {
+  const {
+    recipientName, street, number, complement, neighborhood, city, state,
+    countryCode: rawCountryCode, zipCode, phone, shippingSectorId, isDefault,
+  } = input;
+
+  if (!recipientName || !String(recipientName).trim() || !street || !String(street).trim() || !city || !String(city).trim()) {
+    throw new AddressValidationError(400, 'MISSING_FIELDS', 'Nome do responsável, rua e cidade são obrigatórios.');
+  }
+
+  const countryCode = String(rawCountryCode || fallbackCountryCode || 'GW').trim().toUpperCase();
+
+  if (shippingSectorId) {
+    const sectorValidation = await validateAddressSectorAssignment(executor, { countryCode, shippingSectorId: String(shippingSectorId) });
+    if (!('ok' in sectorValidation)) {
+      throw new AddressValidationError(400, 'SHIPPING_SECTOR_INVALID', sectorValidation.error);
+    }
+  }
+
+  const newId = `addr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  await executor.insert(addresses).values({
+    id: newId,
+    userId, // NUNCA aceito do corpo — sempre resolvido pelo chamador a partir da sessão autenticada.
+    recipientName: String(recipientName).trim(),
+    street: String(street).trim(),
+    number: String(number || 'S/N').trim(),
+    complement: complement ? String(complement).trim() : null,
+    neighborhood: neighborhood ? String(neighborhood).trim() : null,
+    city: String(city).trim(),
+    state: state ? String(state).trim() : String(city).trim(),
+    countryCode,
+    zipCode: zipCode ? String(zipCode).trim() : null,
+    phone: String(phone || '').trim(),
+    isDefault: Boolean(isDefault),
+    addressType: 'business', // SEMPRE controlado pelo backend — nunca aceito do corpo.
+    shippingSectorId: shippingSectorId ? String(shippingSectorId) : null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  } as any);
+
+  const [inserted] = await executor.select().from(addresses).where(eq(addresses.id, newId)).limit(1);
+  return inserted;
+}
+
 sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -941,6 +1192,12 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       email: rawEmail,
       businessHoursJson: rawBusinessHoursJson,
       businessHours: rawBusinessHours,
+      // FASE D16-E4 — origem operacional estruturada, opcional e backward-
+      // compatible: quando enviado, a store nasce já com operationalAddressId
+      // real (endereço business + setor validado), criados ATOMICAMENTE com
+      // a própria store. Ausente = comportamento idêntico a antes (nenhum
+      // address criado, operationalAddressId permanece NULL).
+      operationalAddress: rawOperationalAddress,
     } = req.body;
 
     const logoUrl = rawLogoUrl || rawLogo || null;
@@ -986,7 +1243,7 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
     const storeId = `store_${Date.now()}`;
     const storeSlug = slug || name.trim().toLowerCase().replace(/[^a-z0-9]/g, '-');
 
-    const newStore = {
+    const newStore: any = {
       id: storeId,
       sellerId: seller.id,
       name: name.trim(),
@@ -999,11 +1256,48 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       addressJson,
       businessHoursJson,
       status: 'active',
+      operationalAddressId: null,
     };
 
-    await db.insert(storesTable).values(newStore);
+    // FASE D16-E4 — criação ATÔMICA de address + store quando o seller já
+    // informa a origem operacional no próprio cadastro (nunca 2 requests
+    // separados como fluxo principal). Endereço criado ANTES da store (FK
+    // stores.operational_address_id -> addresses.id exige que o endereço já
+    // exista); qualquer falha (setor inválido, país divergente, etc.) faz a
+    // TRANSAÇÃO inteira reverter — nunca fica uma store órfã sem endereço
+    // nem um endereço órfão sem store.
+    let operationalAddressRow: any = null;
+    const wantsOperationalAddress = rawOperationalAddress && typeof rawOperationalAddress === 'object';
+
+    if (wantsOperationalAddress) {
+      await db.transaction(async (tx: any) => {
+        // País SEMPRE o da loja já resolvido acima — nunca um país
+        // divergente vindo do corpo do endereço (evita a mesma classe de
+        // bug que validateOperationalAddressGeography já protege no PATCH).
+        operationalAddressRow = await createBusinessAddressForUser(
+          tx,
+          req.user!.id,
+          { ...rawOperationalAddress, countryCode },
+          countryCode
+        );
+        newStore.operationalAddressId = operationalAddressRow.id;
+
+        await tx.insert(storesTable).values(newStore);
+
+        // FASE D16-E4 (seção 9) — como a origem já é válida desde a
+        // criação, a fulfillment_location da store pode existir desde já,
+        // na MESMA transação (ensureStoreFulfillmentLocation já aceita
+        // executor/tx desde D15-C3 — nenhuma mudança nela). Loja criada SEM
+        // origem continua exatamente como antes: location só nasce sob
+        // demanda (GET /seller/fulfillment-locations), nunca aqui.
+        await ensureStoreFulfillmentLocation(storeId, tx);
+      });
+    } else {
+      await db.insert(storesTable).values(newStore);
+    }
 
     const addr = addressJson && typeof addressJson === 'object' ? (addressJson as any) : {};
+    const sectorInfo = operationalAddressRow ? await deriveShippingRegionFromSector(db, operationalAddressRow.shippingSectorId) : null;
     const formattedStoreData = {
       ...newStore,
       logo: logoUrl || '',
@@ -1019,6 +1313,14 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       addressJson,
       businessHours: businessHoursJson,
       businessHoursJson,
+      // FASE D16-E4 — mesmo formato já usado por formatOperationalAddress,
+      // para a UI mostrar "Origem Definida" IMEDIATAMENTE, sem precisar de
+      // um segundo fetch. Região sempre DERIVADA do setor, nunca persistida.
+      operationalAddressId: newStore.operationalAddressId,
+      shippingSectorId: operationalAddressRow?.shippingSectorId || null,
+      shippingSectorName: sectorInfo?.sector?.name || null,
+      shippingRegionId: sectorInfo?.region?.id || null,
+      shippingRegionName: sectorInfo?.region?.name || null,
     };
 
     return res.json({
@@ -1027,6 +1329,9 @@ sellerRouter.post('/stores', async (req: AuthRequest, res: Response) => {
       data: formattedStoreData,
     });
   } catch (error: any) {
+    if (error instanceof AddressValidationError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao criar loja.' });
   }
 });
@@ -1073,7 +1378,30 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
       email: rawEmail,
       businessHoursJson: rawBusinessHoursJson,
       businessHours: rawBusinessHours,
+      operationalAddressId: rawOperationalAddressId,
     } = req.body;
+
+    // FASE D15-C — origem operacional explícita (stores.operationalAddressId).
+    // Nunca inferida (isDefault/primeiro endereço) — só aceita se as 6
+    // validações passarem (dono real, mesmo país, setor coerente quando
+    // houver). `null` explícito remove a associação (loja volta a "sem
+    // origem configurada") sem apagar o endereço em si.
+    let operationalAddressId = storeRows[0].operationalAddressId;
+    if (rawOperationalAddressId !== undefined) {
+      if (rawOperationalAddressId === null) {
+        operationalAddressId = null;
+      } else {
+        const validation = await validateOperationalAddressGeography(db, {
+          addressId: String(rawOperationalAddressId),
+          storeId: req.params.id,
+          sellerUserId: req.user!.id,
+        });
+        if (!('ok' in validation)) {
+          return res.status(400).json({ success: false, error: { code: 'OPERATIONAL_ADDRESS_INVALID', message: validation.error } });
+        }
+        operationalAddressId = String(rawOperationalAddressId);
+      }
+    }
 
     const logoUrl = rawLogoUrl !== undefined ? rawLogoUrl : (rawLogo !== undefined ? rawLogo : storeRows[0].logoUrl);
     const bannerUrl = rawBannerUrl !== undefined ? rawBannerUrl : (rawBanner !== undefined ? rawBanner : storeRows[0].bannerUrl);
@@ -1119,6 +1447,7 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
         categoryId: categoryId ? String(categoryId).trim() : storeRows[0].categoryId,
         addressJson,
         businessHoursJson,
+        operationalAddressId,
         updatedAt: new Date(),
       })
       .where(and(eq(storesTable.id, req.params.id), eq(storesTable.sellerId, seller.id)));
@@ -1129,6 +1458,222 @@ sellerRouter.patch('/stores/:id', async (req: AuthRequest, res: Response) => {
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao atualizar loja.' });
+  }
+});
+
+// ==========================================
+// FASE D15-C2 — LEITURA DE GEOGRAFIA DE FRETE PARA O SELLER
+// ==========================================
+// Os endpoints /admin/shipping/regions e /admin/shipping/sectors (D15-A)
+// exigem requireLogisticsStaff (INTERNAL_STAFF_ROLES) — SELLER não está
+// nesse conjunto, de propósito (autorização admin não é relaxada aqui).
+// Sem uma rota própria do seller, o formulário de endereço operacional não
+// teria como popular Região/Setor sem hardcodar a lista no frontend. Estes
+// 2 endpoints são SOMENTE LEITURA, filtram isActive=true, e devolvem apenas
+// id/name/code/regionId — nunca tarifas, rotas ou qualquer dado
+// administrativo de frete.
+sellerRouter.get('/shipping/regions', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const country = String(req.query.country || '').trim().toUpperCase();
+    if (!country) return res.status(400).json({ success: false, error: { code: 'COUNTRY_REQUIRED', message: 'country é obrigatório.' } });
+
+    const rows = await db.select({
+      id: shippingRegions.id, name: shippingRegions.name, code: shippingRegions.code,
+    }).from(shippingRegions).where(and(eq(shippingRegions.countryCode, country), eq(shippingRegions.isActive, true)))
+      .orderBy(asc(shippingRegions.name));
+
+    return res.json({ success: true, data: rows });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar regiões.' });
+  }
+});
+
+sellerRouter.get('/shipping/sectors', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const country = String(req.query.country || '').trim().toUpperCase();
+    if (!country) return res.status(400).json({ success: false, error: { code: 'COUNTRY_REQUIRED', message: 'country é obrigatório.' } });
+
+    const conditions = [eq(shippingSectors.countryCode, country), eq(shippingSectors.isActive, true)];
+    if (req.query.region) conditions.push(eq(shippingSectors.regionId, String(req.query.region)));
+
+    const rows = await db.select({
+      id: shippingSectors.id, name: shippingSectors.name, code: shippingSectors.code, regionId: shippingSectors.regionId,
+    }).from(shippingSectors).where(and(...conditions)).orderBy(asc(shippingSectors.name));
+
+    return res.json({ success: true, data: rows });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar setores.' });
+  }
+});
+
+// GET /seller/fulfillment-locations — FASE D15-C3. Fundação de múltiplas
+// origens físicas de estoque. Lista SOMENTE o que é relevante ao seller
+// autenticado: (1) as fulfillment_locations das próprias lojas (garantidas/
+// atualizadas na hora — nunca duplicadas) e (2) HUBs Nusali onde ele JÁ TEM
+// estoque (política atual: HUB continua admin-managed, seller só visualiza
+// onde possui estoque, nunca edita um HUB arbitrariamente). Nada aqui
+// conecta a checkout/frete/reserva real.
+sellerRouter.get('/fulfillment-locations', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.json({ success: true, data: [] });
+
+    const locations = await listFulfillmentLocationsForSeller(seller.id, db);
+    return res.json({ success: true, data: locations });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar locais de fulfillment.' });
+  }
+});
+
+// ==========================================
+// FASE D15-C — ENDEREÇO OPERACIONAL ESTRUTURADO DO SELLER
+// ==========================================
+// Hoje /buyer/addresses hardcoda addressType='shipping' e nunca aceita o
+// campo do corpo da requisição — não há como um seller criar um endereço
+// operacional real por essa rota. Estes 3 endpoints são o mínimo necessário
+// (nenhum redundante: nada em sellerRoutes.ts ou buyerRoutes.ts atende
+// isso hoje). addressType é SEMPRE 'business' aqui, controlado pelo
+// backend — nunca aceito do corpo. userId é SEMPRE req.user.id — nunca
+// aceito do corpo (impede um seller criar/editar endereço de outro
+// usuário). shippingSectorId é opcional (opt-in) e sempre revalidado
+// contra o país do próprio endereço via validateAddressSectorAssignment.
+// NÃO conectado a checkout/shipmentService nesta fase.
+
+function formatOperationalAddress(row: any, sectorInfo: { sector: any; region: any } | null) {
+  return {
+    id: row.id,
+    recipientName: row.recipientName,
+    street: row.street,
+    number: row.number,
+    complement: row.complement || '',
+    neighborhood: row.neighborhood || '',
+    city: row.city,
+    state: row.state,
+    countryCode: row.countryCode,
+    zipCode: row.zipCode || '',
+    phone: row.phone,
+    addressType: row.addressType,
+    isDefault: row.isDefault,
+    shippingSectorId: row.shippingSectorId || null,
+    shippingSectorName: sectorInfo?.sector?.name || null,
+    // DERIVADO em tempo de leitura a partir do setor — nunca uma coluna
+    // própria em addresses (evita a divergência region=X + sector=setor-de-Y).
+    shippingRegionId: sectorInfo?.region?.id || null,
+    shippingRegionName: sectorInfo?.region?.name || null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+sellerRouter.get('/addresses', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não cadastrado.' });
+
+    const rows = await db.select().from(addresses)
+      .where(and(eq(addresses.userId, req.user!.id), eq(addresses.addressType, 'business')))
+      .orderBy(desc(addresses.createdAt));
+
+    const formatted = await Promise.all(rows.map(async (r) => {
+      const sectorInfo = await deriveShippingRegionFromSector(db, r.shippingSectorId);
+      return formatOperationalAddress(r, sectorInfo);
+    }));
+
+    return res.json({ success: true, data: formatted });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar endereços operacionais.' });
+  }
+});
+
+sellerRouter.post('/addresses', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não cadastrado.' });
+
+    // FASE D16-E4 — núcleo extraído para createBusinessAddressForUser,
+    // reutilizado também pela criação atômica de loja com origem
+    // operacional (POST /stores) — mesma validação, mesmo mapeamento de
+    // campos, nunca uma segunda regra divergente.
+    const inserted = await createBusinessAddressForUser(db, req.user!.id, req.body ?? {}, seller.countryCode);
+    const sectorInfo = await deriveShippingRegionFromSector(db, inserted.shippingSectorId);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Endereço operacional cadastrado com sucesso!',
+      data: formatOperationalAddress(inserted, sectorInfo),
+    });
+  } catch (error: any) {
+    if (error instanceof AddressValidationError) {
+      return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+    }
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao cadastrar endereço operacional.' });
+  }
+});
+
+sellerRouter.patch('/addresses/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const seller = await resolveSeller(req);
+    if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não cadastrado.' });
+
+    const [existing] = await db.select().from(addresses).where(eq(addresses.id, req.params.id)).limit(1);
+    if (!existing || existing.userId !== req.user!.id) {
+      return res.status(404).json({ success: false, error: { code: 'ADDRESS_NOT_FOUND', message: 'Endereço não encontrado.' } });
+    }
+
+    const {
+      recipientName, street, number, complement, neighborhood, city, state,
+      countryCode: rawCountryCode, zipCode, phone, shippingSectorId, isDefault,
+    } = req.body ?? {};
+
+    const countryCode = rawCountryCode !== undefined ? String(rawCountryCode).trim().toUpperCase() : existing.countryCode;
+    const nextShippingSectorId = shippingSectorId !== undefined ? (shippingSectorId ? String(shippingSectorId) : null) : existing.shippingSectorId;
+
+    if (nextShippingSectorId) {
+      const sectorValidation = await validateAddressSectorAssignment(db, { countryCode, shippingSectorId: nextShippingSectorId });
+      if (!('ok' in sectorValidation)) {
+        return res.status(400).json({ success: false, error: { code: 'SHIPPING_SECTOR_INVALID', message: sectorValidation.error } });
+      }
+    }
+
+    await db.update(addresses).set({
+      recipientName: recipientName !== undefined ? String(recipientName).trim() : existing.recipientName,
+      street: street !== undefined ? String(street).trim() : existing.street,
+      number: number !== undefined ? String(number).trim() : existing.number,
+      complement: complement !== undefined ? (complement ? String(complement).trim() : null) : existing.complement,
+      neighborhood: neighborhood !== undefined ? (neighborhood ? String(neighborhood).trim() : null) : existing.neighborhood,
+      city: city !== undefined ? String(city).trim() : existing.city,
+      state: state !== undefined ? String(state).trim() : existing.state,
+      countryCode,
+      zipCode: zipCode !== undefined ? (zipCode ? String(zipCode).trim() : null) : existing.zipCode,
+      phone: phone !== undefined ? String(phone).trim() : existing.phone,
+      isDefault: isDefault !== undefined ? Boolean(isDefault) : existing.isDefault,
+      shippingSectorId: nextShippingSectorId,
+      // addressType NUNCA editável por aqui — permanece 'business' sempre.
+      updatedAt: new Date(),
+    }).where(eq(addresses.id, req.params.id));
+
+    const [updated] = await db.select().from(addresses).where(eq(addresses.id, req.params.id)).limit(1);
+    const sectorInfo = await deriveShippingRegionFromSector(db, updated.shippingSectorId);
+
+    return res.json({
+      success: true,
+      message: 'Endereço operacional atualizado com sucesso!',
+      data: formatOperationalAddress(updated, sectorInfo),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, message: error?.message || 'Erro ao atualizar endereço operacional.' });
   }
 });
 
@@ -1621,6 +2166,23 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
       await InventoryService.updateSellerStock(id, Number(updates.stock), check.seller.id, null, req.user.id);
     }
 
+    // FASE D16-A2 — variantes NUNCA entram no UPDATE de products acima
+    // (fieldsToUpdate nunca inclui updates.variants). Sync separado, na
+    // própria transação: `variants` ausente do payload = não mexe em
+    // nenhuma variante existente (diferente de `variants: []`, que
+    // desativa todas — nunca deleta nenhuma).
+    if (updates.variants !== undefined) {
+      const variantsArray = Array.isArray(updates.variants) ? updates.variants : [];
+      await db.transaction((tx: any) =>
+        syncVariantsForProduct(tx, {
+          sellerId: check.seller.id,
+          productId: id,
+          variants: variantsArray,
+          performedBy: req.user.id,
+        })
+      );
+    }
+
     await delCache('products_list_all');
     // Sem isso, GET /products/:id (CatalogService.getProductById) continuava
     // servindo o cache antigo por até 120s depois do vendedor mudar o
@@ -1686,6 +2248,116 @@ sellerRouter.patch('/products/:id/status', async (req: AuthRequest, res: Respons
   }
 });
 
+// GET /api/v1/seller/inventory/transferable — FASE D16-E5. Read-model
+// dedicado para o modal "Enviar para o HUB": UMA opção explícita por
+// inventory row SELLER_LOCATION real e transferível deste seller — nunca
+// agregado por produto, nunca usando product_variants a partir de
+// products.attributesJson (achado da auditoria: fonte errada, sempre
+// vazia). Só inclui linhas com origem física válida (fulfillment_location
+// ativa, do tipo STORE, cuja store pertence a este seller e está ativa) —
+// exatamente as que InventoryService.requestTransferToHub aceitaria,
+// nunca uma opção que a UI mostra mas o backend depois rejeita.
+sellerRouter.get('/inventory/transferable', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+
+    const [seller] = await db.select().from(sellers).where(eq(sellers.userId, req.user.id)).limit(1);
+    if (!seller) return res.status(403).json({ success: false, message: 'Vendedor não encontrado.' });
+
+    const rows = await db.select().from(inventory).where(and(eq(inventory.sellerId, seller.id), eq(inventory.locationType, 'SELLER_LOCATION')));
+    if (rows.length === 0) return res.json({ success: true, data: [] });
+
+    const productIds = Array.from(new Set(rows.map((r: any) => r.productId)));
+    const variantIds = Array.from(new Set(rows.map((r: any) => r.variantId).filter(Boolean))) as string[];
+    const flocIds = Array.from(new Set(rows.map((r: any) => r.fulfillmentLocationId).filter(Boolean))) as string[];
+    const inventoryIds = rows.map((r: any) => r.id);
+
+    const [productRows, variantRows, flocRows, pendingRows] = await Promise.all([
+      db.select().from(products).where(inArray(products.id, productIds)),
+      variantIds.length > 0 ? db.select().from(productVariants).where(inArray(productVariants.id, variantIds)) : Promise.resolve([]),
+      flocIds.length > 0 ? db.select().from(fulfillmentLocations).where(inArray(fulfillmentLocations.id, flocIds)) : Promise.resolve([]),
+      // FASE D16-E6.1 — só soma PENDING aqui. IN_TRANSIT já decrementou
+      // fromInventory.quantityOnHand fisicamente (markTransferInTransit) —
+      // somar de novo seria dupla subtração (onHand já reflete a saída).
+      db.select({ fromInventoryId: inventoryTransfers.fromInventoryId, qty: inventoryTransfers.quantity })
+        .from(inventoryTransfers)
+        .where(and(
+          inArray(inventoryTransfers.fromInventoryId, inventoryIds),
+          eq(inventoryTransfers.status, 'PENDING')
+        )),
+    ]);
+
+    const activeFlocRows = (flocRows as any[]).filter((f) => f.isActive && f.locationType === 'STORE' && f.storeId);
+    const storeIds = Array.from(new Set(activeFlocRows.map((f: any) => f.storeId))) as string[];
+    const storeRows = storeIds.length > 0 ? await db.select().from(storesTable).where(inArray(storesTable.id, storeIds)) : [];
+    const activeStoreIds = new Set((storeRows as any[]).filter((s) => s.status === 'active').map((s: any) => s.id));
+
+    const operationalAddressIds = Array.from(new Set((storeRows as any[]).map((s) => s.operationalAddressId).filter(Boolean))) as string[];
+    const addressRows = operationalAddressIds.length > 0 ? await db.select().from(addresses).where(inArray(addresses.id, operationalAddressIds)) : [];
+
+    const productMap = new Map((productRows as any[]).map((p) => [p.id, p]));
+    const variantMap = new Map((variantRows as any[]).map((v) => [v.id, v]));
+    const flocMap = new Map(activeFlocRows.map((f) => [f.id, f]));
+    const storeMap = new Map((storeRows as any[]).map((s) => [s.id, s]));
+    const addressMap = new Map((addressRows as any[]).map((a) => [a.id, a]));
+    const pendingMap = new Map<string, number>();
+    for (const p of pendingRows as any[]) {
+      pendingMap.set(p.fromInventoryId, (pendingMap.get(p.fromInventoryId) || 0) + (Number(p.qty) || 0));
+    }
+
+    const formatted = rows
+      .map((r: any) => {
+        const floc = r.fulfillmentLocationId ? flocMap.get(r.fulfillmentLocationId) : null;
+        // Só entra na lista se a origem física é exatamente a que o backend
+        // aceitaria (nunca oferece uma opção que depois seria rejeitada).
+        if (!floc) return null;
+        const store = storeMap.get(floc.storeId);
+        if (!store || !activeStoreIds.has(store.id)) return null;
+
+        const product = productMap.get(r.productId);
+        const variant = r.variantId ? variantMap.get(r.variantId) : null;
+        const address = store.operationalAddressId ? addressMap.get(store.operationalAddressId) : null;
+        const pending = pendingMap.get(r.id) || 0;
+        const onHand = Number(r.quantityOnHand) || 0;
+        const reserved = Number(r.quantityReserved) || 0;
+        const availableForTransfer = Math.max(0, onHand - reserved - pending);
+        const storeAddressText = address
+          ? `${address.street}, ${address.number || 'S/N'}${address.neighborhood ? ', ' + address.neighborhood : ''}`.trim()
+          : null;
+
+        return {
+          inventoryId: r.id,
+          productId: r.productId,
+          productName: product?.title || `Produto ${r.productId}`,
+          productSku: product?.sku || null,
+          variantId: r.variantId || null,
+          variantTitle: variant?.title || null,
+          variantSku: variant?.sku || null,
+          color: variant?.color || null,
+          size: variant?.size || null,
+          capacity: variant?.capacity || null,
+          quantityOnHand: onHand,
+          quantityReserved: reserved,
+          pendingTransferQuantity: pending,
+          availableForTransfer,
+          fulfillmentLocationId: floc.id,
+          storeId: store.id,
+          storeName: store.name,
+          storeCity: address?.city || null,
+          storeCountryCode: address?.countryCode || store.countryCode || null,
+          storePhone: address?.phone || null,
+          storeAddressText,
+        };
+      })
+      .filter(Boolean);
+
+    return res.json({ success: true, data: formatted });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
 // GET /api/v1/seller/inventory
 sellerRouter.get('/inventory', async (req: AuthRequest, res: Response) => {
   try {
@@ -1696,7 +2368,70 @@ sellerRouter.get('/inventory', async (req: AuthRequest, res: Response) => {
     if (!seller) return res.status(403).json({ success: false, message: 'Vendedor não encontrado.' });
 
     const rows = await db.select().from(inventory).where(eq(inventory.sellerId, seller.id));
-    return res.json({ success: true, data: rows });
+    if (rows.length === 0) return res.json({ success: true, data: [] });
+
+    // FASE D16-E5.1 — enriquece cada linha com a identidade REAL do produto
+    // e da variante (product_variants), para as tabelas "Meu Estoque" e
+    // "Estoque nos Nusali HUBs" pararem de mostrar só o productId/variantId
+    // técnico. Nunca lê products.attributesJson (fonte errada, corrigida no
+    // D16-E5) — só product_variants.{color,size,capacity,attributesJson}.
+    const productIds = Array.from(new Set(rows.map((r: any) => r.productId)));
+    const variantIds = Array.from(new Set(rows.map((r: any) => r.variantId).filter(Boolean))) as string[];
+
+    // FASE D16-E6.1 — "Meu Estoque" precisa refletir transferências PENDING
+    // ainda comprometidas mas fisicamente na loja: onHand só é decrementado
+    // quando a transferência vira IN_TRANSIT (retirada física real — ver
+    // markTransferInTransit). Por isso pendingTransferQuantity soma só
+    // PENDING — nunca IN_TRANSIT, que já saiu de onHand (dupla subtração),
+    // mesmo cuidado já aplicado em GET /inventory/transferable.
+    //
+    // FASE D16-E6.2 — "Resumo Geral de Estoque por Produto" precisa também
+    // saber quanto está EM TRÂNSITO (saiu da loja, ainda não chegou no
+    // HUB — nem onHand da loja nem do HUB o contam). Uma única query busca
+    // PENDING + IN_TRANSIT dessas mesmas inventoryIds (isolado por
+    // fromInventoryId exato, que já pertence a este seller — nunca outro
+    // seller/produto/variante entra aqui); separa em dois mapas por status.
+    const inventoryIds = rows.map((r: any) => r.id);
+    const [productRows, variantRows, transferRows] = await Promise.all([
+      productIds.length > 0 ? db.select().from(products).where(inArray(products.id, productIds)) : Promise.resolve([]),
+      variantIds.length > 0 ? db.select().from(productVariants).where(inArray(productVariants.id, variantIds)) : Promise.resolve([]),
+      inventoryIds.length > 0
+        ? db.select({ fromInventoryId: inventoryTransfers.fromInventoryId, qty: inventoryTransfers.quantity, status: inventoryTransfers.status })
+            .from(inventoryTransfers)
+            .where(and(
+              inArray(inventoryTransfers.fromInventoryId, inventoryIds),
+              or(eq(inventoryTransfers.status, 'PENDING'), eq(inventoryTransfers.status, 'IN_TRANSIT'))
+            ))
+        : Promise.resolve([]),
+    ]);
+    const productMap = new Map((productRows as any[]).map((p: any) => [p.id, p]));
+    const variantMap = new Map((variantRows as any[]).map((v: any) => [v.id, v]));
+    const pendingMap = new Map<string, number>();
+    const inTransitMap = new Map<string, number>();
+    for (const t of transferRows as any[]) {
+      const target = t.status === 'PENDING' ? pendingMap : inTransitMap;
+      target.set(t.fromInventoryId, (target.get(t.fromInventoryId) || 0) + (Number(t.qty) || 0));
+    }
+
+    const enriched = rows.map((r: any) => {
+      const product = productMap.get(r.productId);
+      const variant = r.variantId ? variantMap.get(r.variantId) : null;
+      return {
+        ...r,
+        productName: product?.title || null,
+        productSku: product?.sku || null,
+        variantTitle: variant?.title || null,
+        variantSku: variant?.sku || null,
+        color: variant?.color || null,
+        size: variant?.size || null,
+        capacity: variant?.capacity || null,
+        variantAttributesJson: (variant?.attributesJson && typeof variant.attributesJson === 'object') ? variant.attributesJson : null,
+        pendingTransferQuantity: pendingMap.get(r.id) || 0,
+        inTransitQuantity: inTransitMap.get(r.id) || 0,
+      };
+    });
+
+    return res.json({ success: true, data: enriched });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
   }
@@ -1724,6 +2459,13 @@ sellerRouter.get('/inventory/transfers', async (req: AuthRequest, res: Response)
 });
 
 // POST /api/v1/seller/inventory/transfers
+// FASE D16-E5 — contrato reescrito: a ORIGEM é sempre uma inventory row
+// EXATA (sourceInventoryId), nunca mais productId+variantId opcional. Todo
+// ownership/origem (seller, produto, variante, fulfillment location, store)
+// é revalidado dentro de InventoryService.requestTransferToHub a partir do
+// PRÓPRIO sourceInventoryId — nunca confiando em productId/variantId/
+// pickupSnapshotJson enviados pelo corpo (fail-closed, sem fallback para o
+// contrato antigo: único caller real é SellerStockManager.tsx, já adaptado).
 sellerRouter.post('/inventory/transfers', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -1732,42 +2474,19 @@ sellerRouter.post('/inventory/transfers', async (req: AuthRequest, res: Response
     const [seller] = await db.select().from(sellers).where(eq(sellers.userId, req.user.id)).limit(1);
     if (!seller) return res.status(403).json({ success: false, message: 'Vendedor não encontrado.' });
 
-    const { productId, variantId, toWarehouseId, quantity, deliveryMode } = req.body;
-    if (!productId || !toWarehouseId || !quantity) {
-      return res.status(400).json({ success: false, message: 'productId, toWarehouseId e quantity são obrigatórios.' });
-    }
-
-    const [sellerUser] = await db.select().from(users).where(eq(users.id, req.user.id)).limit(1);
-    const [store] = await db.select().from(storesTable).where(eq(storesTable.sellerId, seller.id)).limit(1);
-    const [sellerAddress] = await db.select().from(addresses).where(eq(addresses.userId, req.user.id)).limit(1);
-
-    let pickupSnapshotJson: any = req.body.pickupSnapshotJson || null;
-    if (!pickupSnapshotJson) {
-      const addrFormatted = sellerAddress
-        ? `${sellerAddress.street}, ${sellerAddress.number}${sellerAddress.complement ? ' - ' + sellerAddress.complement : ''}${sellerAddress.neighborhood ? ', ' + sellerAddress.neighborhood : ''}`.trim()
-        : null;
-
-      pickupSnapshotJson = {
-        storeName: store?.name || seller.tradingName || seller.companyName || null,
-        contactName: sellerUser?.fullName || seller.companyName || seller.tradingName || null,
-        phone: sellerAddress?.phone || seller.phone || null,
-        address: addrFormatted || null,
-        city: sellerAddress?.city || null,
-        region: sellerAddress?.state || null,
-        countryCode: sellerAddress?.countryCode || store?.countryCode || seller.countryCode || null,
-      };
+    const { sourceInventoryId, toWarehouseId, quantity, deliveryMode } = req.body;
+    if (!sourceInventoryId || !toWarehouseId || !quantity) {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'sourceInventoryId, toWarehouseId e quantity são obrigatórios.' } });
     }
 
     const mode = deliveryMode === 'SELLER_DROPOFF' ? 'SELLER_DROPOFF' : 'NUSALI_PICKUP';
 
     const transferResult = await InventoryService.requestTransferToHub(
       seller.id,
-      productId,
+      String(sourceInventoryId),
       toWarehouseId,
       Number(quantity),
-      variantId,
-      mode,
-      pickupSnapshotJson
+      mode
     );
 
     return res.status(201).json({
@@ -1842,9 +2561,14 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
     // cancelados/reembolsados, exatamente como já acontecia antes.
     const rows = (await getSellerOrderRows(seller.id, db)).filter((r) => r.paymentStatus === 'paid');
 
+    // Fix (diagnóstico "Transportadora" vazia): resolução em LOTE (1 query,
+    // nunca N+1) via o mesmo resolver central já usado por
+    // orderService.ts/adminRoutes.ts/shipmentService.ts.
+    const carrierMap = await resolveCarrierNames(db, rows.map((r) => r.carrierId));
+
     const mapped = rows.map((item) => {
       const addr = (item.shippingAddressJson as any) || {};
-      const { status: mappedStatus, rawStatus: currentStatus } = mapOperationalStatus(item.orderStatus, item.paymentStatus, item.itemStatus);
+      const { status: mappedStatus, rawStatus: currentStatus } = mapOperationalStatus(item.orderStatus, item.paymentStatus, item.itemStatus, item.shipmentStatus);
 
       return {
         id: item.orderItemId,
@@ -1864,6 +2588,12 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
         variantTitle: item.variantTitle,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
+        // Fix (diagnóstico "Produtos (Subtotal): R$ 0,00" — Detalhamento
+        // Financeiro da Venda): order_items.subtotal já vinha calculado
+        // corretamente em getSellerOrderRows, mas nunca era copiado para a
+        // resposta HTTP — nenhum consumidor conseguia lê-lo. Campo aditivo,
+        // nunca substitui totalAmount/unitPrice já existentes.
+        subtotal: item.subtotal,
         totalAmount: item.totalAmount,
         currency: item.currency,
         fulfillmentMode: item.fulfillmentMode,
@@ -1889,6 +2619,13 @@ sellerRouter.get('/orders', async (req: AuthRequest, res: Response) => {
         shipmentId: item.shipmentId,
         shipmentStatus: item.shipmentStatus,
         trackingNumber: item.trackingNumber,
+        // Fix (diagnóstico "Transportadora" vazia no Seller > Pedidos de
+        // Venda): mesma resolução central já usada por orderService.ts
+        // (order detail do buyer), adminRoutes.ts (Expedição & Entregas) e
+        // shipmentService.ts (etiqueta/rastreio) — carrierId (persistente)
+        // tem prioridade, texto legado (shipments.carrier) é fallback,
+        // nunca derivado de trackingEvents/histórico textual.
+        shippingCarrier: pickCarrierName(item.carrierId, item.carrier, carrierMap),
         labelAvailable: Boolean(item.shipmentId),
         // Rótulo ciente de SELLER_FULFILLMENT vs NUSALI_FULFILLMENT — nunca
         // inventa evento, só traduz order_items.status + shipments.status reais.
@@ -2540,24 +3277,45 @@ sellerRouter.get('/questions', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// FASE D17-C1.1 — corrige gap de autorização confirmado na auditoria D17-C1:
+// esta rota gravava uma resposta real em product_answers sem NENHUMA
+// verificação de que o vendedor autenticado é dono do produto da pergunta —
+// qualquer seller autenticado podia responder qualquer pergunta de qualquer
+// produto de qualquer loja. productId nunca vem do body (nunca confiável);
+// vem exclusivamente da própria pergunta já persistida no banco, e a posse é
+// verificada com a MESMA autoridade canônica já usada pelas rotas de produto
+// vizinhas (checkSellerProductOwnership) — nenhuma checagem paralela nova.
 sellerRouter.post('/questions/:id/answer', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
+    if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+
     const { id } = req.params;
     const { answerText } = req.body;
     if (!answerText) return res.status(400).json({ success: false, message: 'Texto da resposta é obrigatório.' });
 
-    if (db) {
-      await db.insert(productAnswers).values({
-        id: `ans_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        questionId: id,
-        userId: req.user?.id || 'system',
-        answer: answerText,
-        isSeller: true,
-        createdAt: new Date(),
-      });
-      await db.update(productQuestions).set({ status: 'answered' }).where(eq(productQuestions.id, id));
+    const [question] = await db.select().from(productQuestions).where(eq(productQuestions.id, id)).limit(1);
+    if (!question) {
+      return res.status(404).json({ success: false, error: { code: 'QUESTION_NOT_FOUND', message: 'Pergunta não encontrada.' } });
     }
+
+    const check = await checkSellerProductOwnership(db, req.user.id, question.productId);
+    if (!check.authorized) {
+      return res.status(check.status).json({ success: false, error: { code: check.code, message: check.error } });
+    }
+
+    // isSeller sempre true e nunca lido do body — resposta gravada por esta
+    // rota é sempre de um vendedor real, já comprovado dono do produto acima.
+    await db.insert(productAnswers).values({
+      id: `ans_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      questionId: id,
+      userId: req.user.id,
+      answer: answerText,
+      isSeller: true,
+      createdAt: new Date(),
+    });
+    await db.update(productQuestions).set({ status: 'answered' }).where(eq(productQuestions.id, id));
+
     return res.json({ success: true, message: 'Resposta enviada com sucesso ao cliente!' });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });

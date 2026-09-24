@@ -32,11 +32,17 @@ const createOrderSchema = z.object({
 // POST /api/v1/orders and POST /api/v1/orders/orders
 orderRouter.post(['/', '/orders'], requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { shippingAddress, addressId, paymentMethod, notes, currency, countryCode } = req.body ?? {};
+    // FASE D16-H1.1 — recipientOverride repassado ao serviço tal como
+    // recebido (validação/normalização já feita pela função pura do
+    // frontend, checkoutAddressResolver.ts); o serviço (orderService.ts)
+    // é quem decide como aplicá-lo — nunca confundido com os campos
+    // geográficos de shippingAddress/addressId.
+    const { shippingAddress, addressId, recipientOverride, paymentMethod, notes, currency, countryCode } = req.body ?? {};
     const order = await OrderService.createOrderFromCart({
       userId: req.user!.id,
       shippingAddress,
       addressId,
+      recipientOverride,
       paymentMethod: paymentMethod || null,
       notes,
       currency,
@@ -50,6 +56,19 @@ orderRouter.post(['/', '/orders'], requireAuth, async (req: AuthRequest, res: Re
     });
   } catch (err: any) {
     const msg = err?.message || 'Erro ao criar pedido.';
+    // FASE D16-F6.2 — conflito de concorrência real do smart fulfillment
+    // (F5 perdeu a disputa pela candidate entre o planejamento do F4 e a
+    // reserva): 409, MESMA convenção já usada neste projeto para conflitos
+    // retryable (ver ESCROW_STATE_CHANGED_CONCURRENTLY em
+    // /orders/:id/confirm-delivery). A transaction inteira já foi revertida
+    // (nenhum order/reserva parcial) — o caller pode tentar o checkout de
+    // novo do zero.
+    if (msg.includes('FULFILLMENT_RESERVATION_CONFLICT')) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'FULFILLMENT_RESERVATION_CONFLICT', message: msg },
+      });
+    }
     const isStockError = msg.includes('INSUFFICIENT_STOCK') || msg.includes('Estoque insuficiente');
     return res.status(400).json({
       success: false,

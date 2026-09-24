@@ -69,7 +69,16 @@ export const addresses = pgTable('addresses', {
   zipCode: varchar('zip_code', { length: 50 }),
   phone: varchar('phone', { length: 50 }).notNull(),
   isDefault: boolean('is_default').notNull().default(false),
-  addressType: varchar('address_type', { length: 50 }).notNull().default('shipping'), // shipping, billing
+  addressType: varchar('address_type', { length: 50 }).notNull().default('shipping'), // shipping, billing, business (FASE D15-C)
+  // FASE D15-C — origem operacional do seller (fundação D15-A). NULLABLE de
+  // propósito: opt-in, nunca exigido globalmente — endereços de países sem
+  // geografia de frete por setor (ex.: BR) continuam com isto sempre NULL.
+  // Deliberadamente SEM um shippingRegionId paralelo: a região é SEMPRE
+  // derivada de shipping_sectors.region_id (nunca persistida aqui de novo),
+  // para nunca permitir a divergência region=X + sector=setor-de-Y. ON
+  // DELETE RESTRICT: um setor referenciado por algum endereço nunca pode
+  // ser removido fisicamente — só desativado (shipping_sectors.isActive).
+  shippingSectorId: varchar('shipping_sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
@@ -252,6 +261,14 @@ export const stores = pgTable('stores', {
   categoryId: varchar('category_id', { length: 255 }),
   addressJson: jsonb('address_json'),
   businessHoursJson: jsonb('business_hours_json'),
+  // FASE D15-C — ponteiro EXPLÍCITO para qual endereço (addresses.id) é a
+  // origem operacional desta loja. Nunca inferido por isDefault/primeiro
+  // endereço/addressType — sempre uma escolha explícita do seller (ou
+  // ausência = NULL, "ainda não configurado"). addressJson acima continua
+  // existindo e funcionando exatamente como hoje — nada aqui o substitui ou
+  // migra automaticamente. ON DELETE SET NULL: apagar o endereço nunca deixa
+  // a loja com uma referência inválida — só volta a "não configurado".
+  operationalAddressId: varchar('operational_address_id', { length: 255 }).references(() => addresses.id, { onDelete: 'set null' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
@@ -370,6 +387,13 @@ export const productVariants = pgTable('product_variants', {
   weight: numeric('weight', { precision: 8, scale: 2 }),
   imageUrl: text('image_url'),
   attributesJson: jsonb('attributes_json'),
+  // FASE D16-A1 (fundação de schema) — nullable seria ambíguo aqui (não há
+  // "não se aplica" para status de uma variante); NOT NULL DEFAULT true
+  // preserva 100% do comportamento atual para toda linha existente (nenhuma
+  // tem hoje como estar "inativa" — o conceito não existia). Nenhum writer
+  // grava esta coluna ainda; permanece true até uma fase futura introduzir a
+  // ação de pausar/despausar variante.
+  isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
@@ -434,8 +458,19 @@ export const warehouses = pgTable('warehouses', {
   managerName: varchar('manager_name', { length: 255 }),
   staffCount: integer('staff_count').default(1),
   status: varchar('status', { length: 50 }).notNull().default('active'),
+  // FASE D16-E3 — origem geográfica estruturada do HUB, mesmo princípio já
+  // usado por addresses.shippingSectorId: nullable/opt-in (países sem
+  // geografia por setor continuam funcionando com isto sempre NULL, nenhum
+  // warehouse histórico exige backfill), ON DELETE RESTRICT (um setor usado
+  // por algum warehouse nunca pode ser removido fisicamente — só
+  // desativado). Deliberadamente SEM um shippingRegionId paralelo: a região
+  // é SEMPRE derivada de shipping_sectors.region_id na leitura (mesma regra
+  // de addresses/fulfillment_locations) — nunca duas fontes divergentes.
+  shippingSectorId: varchar('shipping_sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+}, (table) => ({
+  warehouses_shipping_sector_idx: index('warehouses_shipping_sector_idx').on(table.shippingSectorId),
+}));
 
 export const inventory = pgTable('inventory', {
   id: varchar('id', { length: 255 }).primaryKey(),
@@ -447,12 +482,24 @@ export const inventory = pgTable('inventory', {
   quantityOnHand: integer('quantity_on_hand').notNull().default(0),
   quantityReserved: integer('quantity_reserved').notNull().default(0),
   minimumStockLevel: integer('minimum_stock_level').default(5),
+  // FASE D15-C3 (ajuste arquitetural) — nullable de propósito. `inventory`
+  // continua sendo a ÚNICA fonte de verdade de estoque (quantityOnHand/
+  // quantityReserved); esta coluna apenas aponta OPCIONALMENTE para ONDE
+  // (fulfillment_locations) aquela linha existe fisicamente, sem duplicar
+  // quantidade em nenhuma tabela paralela. NULL em todas as linhas
+  // existentes hoje — nenhum backfill nesta fase (ver comentário acima de
+  // fulfillmentLocations). locationType/warehouseId/sellerId legados
+  // permanecem intactos e continuam sendo a única coisa lida/escrita por
+  // checkout, reserva, despacho e catálogo até uma fase futura migrar esses
+  // consumidores explicitamente.
+  fulfillmentLocationId: varchar('fulfillment_location_id', { length: 255 }).references(() => fulfillmentLocations.id, { onDelete: 'restrict' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
   inventory_product_idx: index('inventory_product_idx').on(table.productId),
   inventory_warehouse_idx: index('inventory_warehouse_idx').on(table.warehouseId),
   inventory_seller_idx: index('inventory_seller_idx').on(table.sellerId),
+  inventory_fulfillment_location_idx: index('inventory_fulfillment_location_idx').on(table.fulfillmentLocationId),
 }));
 
 export const inventoryMovements = pgTable('inventory_movements', {
@@ -506,6 +553,85 @@ export const inventoryTransfers = pgTable('inventory_transfers', {
 }, (table) => ({
   inventory_transfers_seller_idx: index('inventory_transfers_seller_idx').on(table.sellerId),
   inventory_transfers_product_idx: index('inventory_transfers_product_idx').on(table.productId),
+}));
+
+// ============================================================================
+// FASE D15-C3 — FULFILLMENT LOCATIONS (fundação de múltiplas origens
+// físicas de estoque).
+//
+// AJUSTE ARQUITETURAL (mesma fase, antes do commit): a primeira versão desta
+// fundação incluía uma tabela `inventory_locations` paralela (sellerId +
+// productId + variantId + fulfillmentLocationId + quantityOnHand/
+// quantityReserved próprios). Auditoria identificou risco real de DUAS
+// FONTES DE VERDADE de estoque (`inventory` vs `inventory_locations`
+// divergindo para o mesmo seller/produto/local) — `inventory_locations` foi
+// REMOVIDA antes de qualquer aplicação em staging/produção. `inventory`
+// continua sendo a ÚNICA fonte de verdade de quantidade (quantityOnHand/
+// quantityReserved); ela apenas ganhou uma coluna opcional
+// `fulfillmentLocationId` (ver definição de `inventory` acima) que aponta
+// PARA ONDE aquela linha existe fisicamente, sem duplicar quantidade em
+// nenhuma tabela nova.
+//
+// fulfillment_locations = ONDE um estoque físico pode existir (uma loja do
+// seller OU um HUB/armazém Nusali) — nunca A QUEM o estoque pertence (isso
+// continua em `inventory.sellerId`, como sempre foi).
+// Um HUB pode guardar estoque de vários sellers ao mesmo tempo (sellerId
+// fica NULL para NUSALI_WAREHOUSE, de propósito). Geografia nunca duplicada:
+// para STORE, addressId/shippingSectorId são sempre um espelho (refrescado
+// por ensureStoreFulfillmentLocation) do que já está em
+// stores.operationalAddressId -> addresses.shippingSectorId — nunca uma
+// segunda fonte de verdade independente. Para NUSALI_WAREHOUSE, ambos ficam
+// NULL de propósito: warehouses ainda não tem addressId/shippingSectorId
+// estruturado hoje (confirmado por auditoria — só city/address/countryCode
+// texto livre) — nada é inventado para preencher essa lacuna.
+//
+// Nenhuma linha existente de `inventory` é backfillada nesta fase (nem HUB,
+// determinístico via warehouseId, nem SELLER_LOCATION, que hoje não tem
+// informação suficiente para saber a qual store pertence — ver auditoria).
+// shipmentService.ts/orderService.ts/checkout/frete/seleção inteligente
+// continuam usando exclusivamente locationType/warehouseId/sellerId nesta
+// fase — `fulfillmentLocationId` ainda não é lido por nenhum consumidor.
+// ============================================================================
+
+export const fulfillmentLocations = pgTable('fulfillment_locations', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  // NULL = HUB Nusali compartilhado (não pertence a nenhum seller
+  // específico). Preenchido apenas para locationType='STORE'.
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'restrict' }),
+  locationType: varchar('location_type', { length: 50 }).notNull(), // STORE | NUSALI_WAREHOUSE
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'restrict' }),
+  warehouseId: varchar('warehouse_id', { length: 255 }).references(() => warehouses.id, { onDelete: 'restrict' }),
+  // Espelho de stores.operationalAddressId no momento da última chamada de
+  // ensureStoreFulfillmentLocation — nunca uma fonte de verdade paralela.
+  addressId: varchar('address_id', { length: 255 }).references(() => addresses.id, { onDelete: 'set null' }),
+  countryCode: varchar('country_code', { length: 10 }).notNull(),
+  // Espelho de addresses.shippingSectorId (STORE) — sempre NULL para
+  // NUSALI_WAREHOUSE nesta fase (ver comentário acima).
+  shippingSectorId: varchar('shipping_sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  // Uma location por store / uma location por warehouse — idempotência
+  // garantida no schema, não só na aplicação. UNIQUE comum trataria NULL
+  // como distinto (permitiria N locations com storeId nulo); índices
+  // parciais resolvem isso (mesmo padrão de ledger_accounts acima).
+  fulfillment_locations_store_uq: uniqueIndex('fulfillment_locations_store_uq')
+    .on(table.storeId)
+    .where(sql`${table.storeId} IS NOT NULL`),
+  fulfillment_locations_warehouse_uq: uniqueIndex('fulfillment_locations_warehouse_uq')
+    .on(table.warehouseId)
+    .where(sql`${table.warehouseId} IS NOT NULL`),
+  fulfillment_locations_country_idx: index('fulfillment_locations_country_idx').on(table.countryCode),
+  fulfillment_locations_type_check: check('fulfillment_locations_type_check', sql`${table.locationType} IN ('STORE','NUSALI_WAREHOUSE')`),
+  // XOR estrutural: STORE sempre tem storeId (nunca warehouseId) e
+  // NUSALI_WAREHOUSE sempre tem warehouseId (nunca storeId) — nunca os dois
+  // nem nenhum dos dois.
+  fulfillment_locations_store_xor_warehouse_check: check(
+    'fulfillment_locations_store_xor_warehouse_check',
+    sql`(${table.locationType} = 'STORE' AND ${table.storeId} IS NOT NULL AND ${table.warehouseId} IS NULL) OR (${table.locationType} = 'NUSALI_WAREHOUSE' AND ${table.warehouseId} IS NOT NULL AND ${table.storeId} IS NULL)`
+  ),
 }));
 
 // ============================================================================
@@ -563,6 +689,161 @@ export const storeShippingPolicies = pgTable('store_shipping_policies', {
 }, (table) => ({
   store_shipping_policies_store_idx: index('store_shipping_policies_store_idx').on(table.storeId),
   store_shipping_policies_seller_idx: index('store_shipping_policies_seller_idx').on(table.sellerId),
+  // FASE D18-B2 — no máximo UMA política por LOJA. Deliberadamente NÃO é
+  // unique em seller_id: um seller pode ter várias lojas, cada uma com a sua
+  // política. Habilita upsert idempotente (ON CONFLICT (store_id)) nos
+  // writers de seller e admin, sem duas linhas nem 500 sob concorrência.
+  store_shipping_policies_store_uq: uniqueIndex('store_shipping_policies_store_uq').on(table.storeId),
+}));
+
+// FASE D18-C2 — fundação de dados para campanhas de subsídio de frete
+// financiadas pela NUSALI, separada de store_shipping_policies (D18-C1.1:
+// política permanente do seller nunca pode ser sobrescrita/apagada
+// silenciosamente por uma campanha administrativa — são estruturas
+// distintas, nunca a mesma linha).
+//
+// MODELO (decisões já tomadas em D18-C1.1, não revisitadas aqui):
+//   - target = BUYER_ONLY: uma campanha só pode subsidiar a parcela que
+//     sobraria para o comprador depois da política do seller já aplicada
+//     (D18-C3, ainda não implementado) — por isso não existe coluna
+//     targetLayer aqui: só há um valor possível, adicionar a coluna hoje
+//     seria dívida técnica sem uso real (YAGNI).
+//   - não-acumulável: só 1 campanha vale por child order (ver
+//     shipping_campaign_usages abaixo, UNIQUE(order_id)).
+//   - esta tabela NÃO é lida pelo checkout/resolver ainda (D18-C3+).
+//
+// ESCOPO COMBINÁVEL (nunca um enum mutuamente exclusivo — todos os campos
+// abaixo são nullable e combinados por AND por matchesShippingCampaignScope,
+// em shippingCampaignService.ts): campanha sem nenhum campo preenchido =
+// global. Cada campo preenchido é mais um critério que TODOS precisam bater
+// para a campanha valer (ex.: productId + routeId preenchidos = "só esse
+// produto, só nessa rota").
+//
+// Entidades geográficas usadas são as REAIS já existentes no projeto (D18-A/
+// B: shippingRegions/shippingSectors/shippingRoutes) — nenhuma tabela nova
+// de geografia foi criada. Não existe uma entidade "city" separada de
+// shipping_sectors (setor já é a granularidade mais fina, ex.: "Bissau",
+// "Gabú" — ver seedGuineaBissauShippingGeography) — por isso o campo abaixo
+// se chama sectorId, nunca cityId. routeId referencia shipping_routes
+// diretamente (origin+destination JÁ é uma entidade real, com sua própria
+// UNIQUE por país+origem+destino) — nunca duas colunas soltas de
+// originSectorId/destinationSectorId aqui, que duplicariam o que já existe.
+// Por convenção: countryCode/regionId/sectorId escopam o DESTINO da entrega
+// (é assim que uma campanha de marketing se anuncia: "grátis para entregas
+// em Cacheu"); routeId cobre o caso em que origem E destino importam juntos.
+export const shippingSubsidyCampaigns = pgTable('shipping_subsidy_campaigns', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  description: text('description'),
+
+  // FULL | PERCENTAGE | MAX_AMOUNT — mutuamente exclusivos entre si (nunca
+  // "PERCENTAGE E MAX_AMOUNT ao mesmo tempo"), validado em CHECK abaixo E em
+  // validateShippingCampaignDefinition (defesa em profundidade, mesmo padrão
+  // já usado em store_shipping_policies/D18-B1).
+  fundingMode: varchar('funding_mode', { length: 20 }).notNull(),
+  percentage: numeric('percentage', { precision: 5, scale: 2 }),
+  maxAmount: numeric('max_amount', { precision: 12, scale: 2 }),
+
+  isActive: boolean('is_active').notNull().default(true),
+  // Desempate determinístico quando duas campanhas ativas têm a MESMA
+  // especificidade (computeShippingCampaignSpecificity) — maior prioridade
+  // vence; id como desempate final (nunca um limit(1) sem ORDER BY, mesma
+  // lição do D18-B2.2).
+  priority: integer('priority').notNull().default(0),
+
+  // Janela [startsAt, endsAt) — semi-aberta de propósito (ver
+  // isShippingCampaignActiveAt): evita duas campanhas adjacentes ativas no
+  // mesmo instante exato de transição. NULL = sem limite naquele lado.
+  startsAt: timestamp('starts_at'),
+  endsAt: timestamp('ends_at'),
+
+  // Orçamento/limite — só schema e invariantes nesta fase; NENHUM consumo
+  // real acontece ainda (D18-C3/C4). campaignBudget/maxOrders NULL = sem
+  // teto. spentAmount/ordersServed sempre começam em 0.
+  campaignBudget: numeric('campaign_budget', { precision: 12, scale: 2 }),
+  spentAmount: numeric('spent_amount', { precision: 12, scale: 2 }).notNull().default('0.00'),
+  maxOrders: integer('max_orders'),
+  ordersServed: integer('orders_served').notNull().default(0),
+
+  // Escopo combinável (AND) — todos nullable, todos RESTRICT. NUNCA SET
+  // NULL: uma campanha de "Produto X" cujo produto seja removido não pode
+  // silenciosamente virar uma campanha GLOBAL (isso ampliaria o escopo e o
+  // gasto de forma perigosa) — RESTRICT bloqueia fisicamente a remoção do
+  // produto/loja/etc. enquanto a campanha (histórica ou não) existir, o
+  // mesmo raciocínio já usado em shipping_route_rates/fulfillment_locations.
+  countryCode: varchar('country_code', { length: 10 }).references(() => countries.code, { onDelete: 'restrict' }),
+  regionId: varchar('region_id', { length: 255 }).references(() => shippingRegions.id, { onDelete: 'restrict' }),
+  sectorId: varchar('sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  routeId: varchar('route_id', { length: 255 }).references(() => shippingRoutes.id, { onDelete: 'restrict' }),
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'restrict' }),
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'restrict' }),
+  categoryId: varchar('category_id', { length: 255 }).references(() => categories.id, { onDelete: 'restrict' }),
+  productId: varchar('product_id', { length: 255 }).references(() => products.id, { onDelete: 'restrict' }),
+
+  // Só rastreabilidade (quem criou) — SET NULL é seguro aqui: perder a
+  // referência ao admin não altera o escopo/gasto da campanha, nunca a
+  // amplia. Nunca usado para autorização (isso é sempre requireGlobalAdmin).
+  createdBy: varchar('created_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_subsidy_campaigns_active_idx: index('shipping_subsidy_campaigns_active_idx').on(table.isActive),
+  shipping_subsidy_campaigns_product_idx: index('shipping_subsidy_campaigns_product_idx').on(table.productId),
+  shipping_subsidy_campaigns_store_idx: index('shipping_subsidy_campaigns_store_idx').on(table.storeId),
+  shipping_subsidy_campaigns_seller_idx: index('shipping_subsidy_campaigns_seller_idx').on(table.sellerId),
+  shipping_subsidy_campaigns_route_idx: index('shipping_subsidy_campaigns_route_idx').on(table.routeId),
+  shipping_subsidy_campaigns_funding_mode_check: check(
+    'shipping_subsidy_campaigns_funding_mode_check',
+    sql`${table.fundingMode} IN ('FULL','PERCENTAGE','MAX_AMOUNT')`
+  ),
+  // Cada modo exige exatamente os campos que lhe pertencem e proíbe os dos
+  // outros — mesma regra de validateShippingCampaignDefinition, aplicada
+  // também no banco (defesa em profundidade: uma escrita direta que
+  // pulasse a validação da aplicação ainda não pode gravar um estado
+  // inconsistente).
+  shipping_subsidy_campaigns_funding_fields_check: check(
+    'shipping_subsidy_campaigns_funding_fields_check',
+    sql`(
+      (${table.fundingMode} = 'FULL' AND ${table.percentage} IS NULL AND ${table.maxAmount} IS NULL)
+      OR (${table.fundingMode} = 'PERCENTAGE' AND ${table.percentage} IS NOT NULL AND ${table.percentage} > 0 AND ${table.percentage} <= 100 AND ${table.maxAmount} IS NULL)
+      OR (${table.fundingMode} = 'MAX_AMOUNT' AND ${table.maxAmount} IS NOT NULL AND ${table.maxAmount} > 0 AND ${table.percentage} IS NULL)
+    )`
+  ),
+  shipping_subsidy_campaigns_dates_check: check(
+    'shipping_subsidy_campaigns_dates_check',
+    sql`${table.startsAt} IS NULL OR ${table.endsAt} IS NULL OR ${table.startsAt} < ${table.endsAt}`
+  ),
+  shipping_subsidy_campaigns_budget_check: check(
+    'shipping_subsidy_campaigns_budget_check',
+    sql`${table.spentAmount} >= 0 AND (${table.campaignBudget} IS NULL OR (${table.campaignBudget} >= 0 AND ${table.spentAmount} <= ${table.campaignBudget}))`
+  ),
+  shipping_subsidy_campaigns_orders_check: check(
+    'shipping_subsidy_campaigns_orders_check',
+    sql`${table.ordersServed} >= 0 AND (${table.maxOrders} IS NULL OR (${table.maxOrders} > 0 AND ${table.ordersServed} <= ${table.maxOrders}))`
+  ),
+  shipping_subsidy_campaigns_priority_check: check('shipping_subsidy_campaigns_priority_check', sql`${table.priority} >= 0`),
+}));
+
+// FASE D18-C2 — registro de USO de campanha por pedido, para idempotência e
+// auditoria futura (D18-C3+ nunca consome orçamento/incrementa contadores
+// sem gravar aqui na MESMA transaction). Depois do D18-B2.2, cada child
+// order já É a unidade (sellerId, commercialStoreId) — é o child order,
+// nunca o purchase_group inteiro, que resolve sua própria campanha. Como
+// campanhas não são acumuláveis (D18-C1.1), no máximo 1 campanha pode ter
+// sido usada por child order: UNIQUE(order_id) sozinho já garante isso —
+// nunca precisamos de UNIQUE(campaign_id, order_id), que permitiria (por
+// engano) duas linhas de campanhas DIFERENTES para o mesmo pedido.
+export const shippingCampaignUsages = pgTable('shipping_campaign_usages', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  campaignId: varchar('campaign_id', { length: 255 }).notNull().references(() => shippingSubsidyCampaigns.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  subsidyAmount: numeric('subsidy_amount', { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_campaign_usages_order_uq: uniqueIndex('shipping_campaign_usages_order_uq').on(table.orderId),
+  shipping_campaign_usages_campaign_idx: index('shipping_campaign_usages_campaign_idx').on(table.campaignId),
+  shipping_campaign_usages_subsidy_check: check('shipping_campaign_usages_subsidy_check', sql`${table.subsidyAmount} >= 0`),
 }));
 
 // Fase "Transportadoras Persistentes": entidade real de transportadora,
@@ -594,51 +875,46 @@ export const carriers = pgTable('carriers', {
   carriers_country_idx: index('carriers_country_idx').on(table.countryCode),
 }));
 
-export const shippingZones = pgTable('shipping_zones', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  countryCode: varchar('country_code', { length: 10 }).notNull(),
-  name: varchar('name', { length: 255 }).notNull(),
-  regionCode: varchar('region_code', { length: 50 }),
-  city: varchar('city', { length: 255 }),
-  postalCodePattern: varchar('postal_code_pattern', { length: 100 }),
-  isActive: boolean('is_active').notNull().default(true),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-}, (table) => ({
-  shipping_zones_country_idx: index('shipping_zones_country_idx').on(table.countryCode),
-}));
-
-export const shippingRates = pgTable('shipping_rates', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  zoneId: varchar('zone_id', { length: 255 }).references(() => shippingZones.id, { onDelete: 'cascade' }),
-  originCountry: varchar('origin_country', { length: 10 }).notNull(),
-  originRegion: varchar('origin_region', { length: 50 }),
-  destinationCountry: varchar('destination_country', { length: 10 }).notNull(),
-  destinationRegion: varchar('destination_region', { length: 50 }),
-  minWeightKg: numeric('min_weight_kg', { precision: 8, scale: 3 }).notNull().default('0.000'),
-  maxWeightKg: numeric('max_weight_kg', { precision: 8, scale: 3 }).notNull().default('999.000'),
-  price: numeric('price', { precision: 12, scale: 2 }).notNull(),
-  currency: varchar('currency', { length: 10 }).notNull(),
-  estimatedMinDays: integer('estimated_min_days').notNull().default(1),
-  estimatedMaxDays: integer('estimated_max_days').notNull().default(5),
-  // Correção (Fase "Transportadoras Persistentes"): coluna já existia como
-  // texto livre sem FK e nunca era lida por ShippingCalculatorService (só
-  // gravada pelo admin) — auditado em produção: as 2 linhas reais têm
-  // carrier_id NULL, então virar FK real é seguro (nenhuma conversão de
-  // dado, nenhuma tarifa quebrada).
-  carrierId: varchar('carrier_id', { length: 255 }).references(() => carriers.id, { onDelete: 'set null' }),
-  serviceType: varchar('service_type', { length: 100 }).notNull().default('standard'),
-  isActive: boolean('is_active').notNull().default(true),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
-  updatedAt: timestamp('updated_at').defaultNow().notNull(),
-}, (table) => ({
-  shipping_rates_route_idx: index('shipping_rates_route_idx').on(table.originCountry, table.destinationCountry),
-  shipping_rates_zone_idx: index('shipping_rates_zone_idx').on(table.zoneId),
-}));
+// FASE D16-I7-A — shippingZones/shippingRates (motor legado país/zona)
+// removidas destas definições: comprovadamente sem consumidor runtime
+// (auditorias D16-I1/I4/I5/I6/I6.1/I6.2), staging confirmado com só 2
+// linhas/0 pedidos+5 pedidos legados, todos com evidência financeira já
+// congelada em orders (orders.shippingRateId/shippingRateSource
+// PRESERVADOS como identificador histórico opaco — Estratégia A, D16-I6.2
+// — nenhum backfill, nenhuma coluna nova). A remoção física das tabelas em
+// si acontece pela migration gerada nesta mesma fase, nunca por edição
+// retroativa das migrations 0009/0010/0022 que as criaram/alteraram.
 
 // ============================================================================
 // 6. PEDIDOS (SNAPSHOT COMPLETO, HISTÓRICO DE STATUS)
 // ============================================================================
+
+// FASE A — arquitetura multi-vendedor (schema apenas; NENHUM código de
+// checkout/payment/escrow foi alterado nesta fase — ver orderService.ts,
+// paymentService.ts, refundService.ts, shipmentService.ts,
+// escrowAutoReleaseService.ts, todos intocados). purchase_groups é o
+// "recibo visual" de uma compra que pode conter itens de vários vendedores —
+// nunca uma fonte de verdade financeira. Cada vendedor continua tendo seu
+// próprio `orders` (1 order = 1 seller), e é essa linha de `orders` que
+// mantém toda a autoridade financeira já validada (escrow, commission,
+// sellerNetAmount, disputes, refunds) — nada disso muda de lugar.
+// totalAmount aqui é só a soma dos orders filhos para exibição agregada ao
+// comprador (nunca usado por nenhuma regra de escrow/release/wallet).
+export const purchaseGroups = pgTable('purchase_groups', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull(),
+  // Espelha/deriva do conjunto de orders filhos (nunca escrito diretamente
+  // por lógica de escrow/pagamento) — só para a UI agregada do comprador
+  // saber se mostra "processando"/"parcialmente entregue"/etc. sem precisar
+  // agregar os orders toda vez.
+  status: varchar('status', { length: 50 }).notNull().default('pending_payment'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  purchase_groups_buyer_created_idx: index('purchase_groups_buyer_created_idx').on(table.buyerId, table.createdAt),
+}));
 
 export const orders = pgTable('orders', {
   id: varchar('id', { length: 255 }).primaryKey(),
@@ -646,6 +922,13 @@ export const orders = pgTable('orders', {
   buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
   storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'set null' }),
   sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'set null' }),
+  // FASE A — NULLABLE de propósito: NULL = pedido legado/single-seller
+  // anterior a esta arquitetura (todo pedido existente hoje se encaixa
+  // aqui — auditoria confirmou 0 pedidos multi-seller em produção). Só
+  // pedidos novos criados pelo checkout multi-vendedor (fase futura, ainda
+  // não implementada) preenchem este campo. Nenhum código atual lê ou
+  // escreve esta coluna ainda.
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'set null' }),
   subtotal: numeric('subtotal', { precision: 12, scale: 2 }).notNull(),
   shippingFee: numeric('shipping_fee', { precision: 12, scale: 2 }).notNull().default('0.00'),
   customsDuty: numeric('customs_duty', { precision: 12, scale: 2 }).default('0.00'),
@@ -673,6 +956,23 @@ export const orders = pgTable('orders', {
   commissionBase: numeric('commission_base', { precision: 12, scale: 2 }),
   marketplaceCommission: numeric('marketplace_commission', { precision: 12, scale: 2 }),
   sellerNetAmount: numeric('seller_net_amount', { precision: 12, scale: 2 }),
+  // FASE D18-C2 — snapshots ADITIVOS para auditoria futura de campanhas
+  // (D18-C3+ ainda não os preenche; todos NULL até então). Escolha mínima
+  // deliberada (D18-C1.1, seção 13): sellerShippingPolicyId e
+  // shippingPolicyModeAtCheckout cobrem a política PERMANENTE (a FK sozinha
+  // não bastaria porque a linha referenciada pode ser editada depois — o
+  // modo em texto congela o que valeu de fato neste pedido, mesmo que
+  // store_shipping_policies.mode mude no futuro). shippingCampaignId +
+  // shippingCampaignSubsidy cobrem a campanha (RESTRICT na FK: nunca perder
+  // a rastreabilidade de um pedido que já usou uma campanha). Não
+  // snapshotamos nome/fundingMode/percentual/tetos da campanha aqui —
+  // shippingCampaignSubsidy (o valor real em dinheiro) já é a fonte
+  // financeiramente autoritativa; detalhe adicional fica para quando D18-C3
+  // efetivamente consumir campanhas, se a necessidade real aparecer.
+  sellerShippingPolicyId: varchar('seller_shipping_policy_id', { length: 255 }).references(() => storeShippingPolicies.id, { onDelete: 'restrict' }),
+  shippingPolicyModeAtCheckout: varchar('shipping_policy_mode_at_checkout', { length: 50 }),
+  shippingCampaignId: varchar('shipping_campaign_id', { length: 255 }).references(() => shippingSubsidyCampaigns.id, { onDelete: 'restrict' }),
+  shippingCampaignSubsidy: numeric('shipping_campaign_subsidy', { precision: 12, scale: 2 }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
@@ -680,6 +980,7 @@ export const orders = pgTable('orders', {
   orders_seller_status_idx: index('orders_seller_status_idx').on(table.sellerId, table.status),
   orders_store_status_idx: index('orders_store_status_idx').on(table.storeId, table.status),
   orders_status_created_idx: index('orders_status_created_idx').on(table.status, table.createdAt),
+  orders_purchase_group_idx: index('orders_purchase_group_idx').on(table.purchaseGroupId),
 }));
 
 export const orderItems = pgTable('order_items', {
@@ -699,9 +1000,54 @@ export const orderItems = pgTable('order_items', {
   storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'set null' }),
   productImage: text('product_image'),
   attributesJson: jsonb('attributes_json'),
+  // FASE D16-A1 (fundação de schema) — nullable de propósito: snapshot do
+  // preço riscado/comparação NO MOMENTO da compra, para o pedido nunca
+  // depender do compareAtPrice atual do produto/variante (que pode mudar ou
+  // desaparecer depois). NULL para todo pedido existente (histórico) e para
+  // todo pedido novo até um writer futuro passar a preenchê-lo — nenhum
+  // backfill, nenhum valor inventado.
+  compareAtPriceSnapshot: numeric('compare_at_price_snapshot', { precision: 12, scale: 2 }),
   inventoryId: varchar('inventory_id', { length: 255 }).references(() => inventory.id, { onDelete: 'set null' }),
   warehouseId: varchar('warehouse_id', { length: 255 }).references(() => warehouses.id, { onDelete: 'set null' }),
   shipmentId: varchar('shipment_id', { length: 255 }).references(() => shipments.id, { onDelete: 'set null' }),
+  // FASE D16-F6.1 (fundação de schema) — snapshots logísticos imutáveis da
+  // decisão de fulfillment (F2->F3->F4->F5) tomada no checkout, para
+  // reconstruir depois exatamente o que aconteceu sem depender de reler
+  // tarifa/setor/rota/serviço no estado ATUAL (que pode mudar ou ser
+  // desativado depois). NULLABLE de propósito — nenhum pedido existente é
+  // retroativamente preenchido (zero backfill) e nenhum writer novo é criado
+  // nesta fase (F6 ainda não integra o checkout). ON DELETE RESTRICT nas 5
+  // FKs abaixo: mesma convenção já usada em toda a cadeia de frete por setor
+  // (fulfillment_locations/shipping_sectors/shipping_routes/
+  // shipping_services/shipping_route_rates só são desativadas — isActive=
+  // false — nunca fisicamente deletadas, ver comentário da FASE D15-A mais
+  // abaixo) — deliberadamente diferente do SET NULL usado acima em
+  // inventoryId/warehouseId/shipmentId (esses são estado operacional
+  // corrente, que pode legitimamente ficar obsoleto; os campos abaixo são a
+  // decisão logística CONGELADA do checkout, que nunca deve perder seu
+  // ponteiro de rastreabilidade por causa de uma deleção física alheia).
+  // destinationShippingSectorId deliberadamente NÃO existe aqui: já
+  // congelado dentro de orders.shippingAddressJson (D16-F2). currency
+  // também não é repetida aqui: orders.currency continua a única
+  // autoridade monetária do child order.
+  fulfillmentLocationId: varchar('fulfillment_location_id', { length: 255 }).references(() => fulfillmentLocations.id, { onDelete: 'restrict' }),
+  originShippingSectorId: varchar('origin_shipping_sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  shippingRouteId: varchar('shipping_route_id', { length: 255 }).references(() => shippingRoutes.id, { onDelete: 'restrict' }),
+  shippingServiceId: varchar('shipping_service_id', { length: 255 }).references(() => shippingServices.id, { onDelete: 'restrict' }),
+  // Snapshot textual deliberado (nunca só a FK acima): o histórico não deve
+  // depender de reler shipping_services.code atual para saber qual serviço
+  // foi realmente usado no checkout.
+  shippingServiceCode: varchar('shipping_service_code', { length: 100 }),
+  shippingRateId: varchar('shipping_rate_id', { length: 255 }).references(() => shippingRouteRates.id, { onDelete: 'restrict' }),
+  // Snapshots escalares deliberados (nunca só a FK/estado atual do produto):
+  // peso e valor cobrado no momento real do checkout, imunes a uma edição
+  // posterior do peso do produto/variante ou da tarifa. Mesma precisão/
+  // escala já usada no projeto para peso (shipping_route_rates.min/max_
+  // weight_kg) e valores monetários (orders.shipping_fee, shipping_route_
+  // rates.amount).
+  unitWeightKg: numeric('unit_weight_kg', { precision: 8, scale: 3 }),
+  totalWeightKg: numeric('total_weight_kg', { precision: 8, scale: 3 }),
+  shippingAmount: numeric('shipping_amount', { precision: 12, scale: 2 }),
   fulfillmentMode: varchar('fulfillment_mode', { length: 50 }).notNull().default('SELLER_FULFILLMENT'), // NUSALI_FULFILLMENT, SELLER_FULFILLMENT
   status: varchar('status', { length: 50 }).notNull().default('pending_preparation'), // pending_preparation, preparing, ready_to_ship, shipped, cancelled
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -726,9 +1072,54 @@ export const orderStatusHistory = pgTable('order_status_history', {
 // 7. PAGAMENTOS, ATTEMPTS, REFUNDS E WEBHOOKS
 // ============================================================================
 
+// FASE C2 — arquitetura multi-vendedor (schema apenas; PaymentService,
+// webhook, refundService e releaseEscrowForOrder permanecem INTOCADOS nesta
+// fase — nenhum código ainda lê/escreve purchaseGroupId/settlementRole).
+//
+// orderId agora é NULLABLE: LEGADO/single-seller continua preenchendo
+// orderId (purchaseGroupId NULL); um pagamento futuro de purchase_group
+// (fase futura, não implementada) preencherá purchaseGroupId e deixará
+// orderId NULL. payments_owner_exclusive_check garante no banco que as duas
+// coisas nunca coexistem nem ficam ambas vazias. Nenhum payment histórico
+// precisa de backfill para satisfazer esse CHECK: toda linha existente já
+// tem orderId preenchido, e purchaseGroupId é uma coluna nova (nasce NULL
+// para todas elas automaticamente).
+//
+// settlementRole é ortogonal ao `status` (que permanece só o ciclo de vida
+// no PSP: pending/authorized/paid/failed/refunded/cancelled/expired).
+// settlementRole responde "este pagamento financia algo?": candidate (ainda
+// não se sabe — nenhum pagamento pendente pode ser tratado como vencedor
+// antes de qualquer confirmação real), primary (é o pagamento que de fato
+// financiou o(s) order(s)/allocations/escrow deste order ou purchase_group),
+// surplus (pagamento realmente recebido do PSP, mas excedente — ex.: retry
+// que também foi pago depois que outra tentativa já havia vencido —
+// dinheiro real que precisa de reconciliação/refund próprio, sem tocar
+// order/allocation/escrow). NUNCA tem DEFAULT no banco (ver nota abaixo) —
+// todo INSERT novo é obrigado a declarar o valor explicitamente; setting
+// implícito por omissão nunca deve promover algo a 'primary' em silêncio.
+//
+// Todo payment histórico (sempre single-seller, sempre a única cobrança que
+// financiou seu order) é classificado como 'primary' na própria migration
+// 0023, via o mecanismo "fast default" do Postgres (ADD COLUMN ... DEFAULT
+// 'primary' NOT NULL seguido de ALTER COLUMN DROP DEFAULT no mesmo
+// statement-breakpoint) — não um UPDATE manual. Ver comentário na migration
+// 0023 para a justificativa completa dessa escolha.
 export const payments = pgTable('payments', {
   id: varchar('id', { length: 255 }).primaryKey(),
-  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'restrict' }),
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'restrict' }),
+  // Nunca declarar `.default(...)` nem `.$defaultFn(...)` aqui — DEFAULT
+  // (SQL ou client-side) reabriria exatamente o risco que motivou este
+  // desenho (INSERT que esquece o campo nasceria 'primary'/qualquer valor
+  // em silêncio). NOT NULL sem nenhum default força o TypeScript a exigir
+  // o valor em TODO `.values()` novo — a auditoria da Fase C3 confirmou que
+  // os 3 INSERTs legítimos de runtime (paymentService.ts x2,
+  // asaasPaymentProvider.ts x1) já declaram 'primary' explicitamente, então
+  // não há mais nenhum call site legítimo que dependa de um default para
+  // compilar. (Fase C2 usou temporariamente um `$defaultFn` que lançava, só
+  // para destravar a checagem de tipos antes desta auditoria — removido
+  // aqui, como planejado desde então.)
+  settlementRole: varchar('settlement_role', { length: 20 }).notNull(), // candidate, primary, surplus
   buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
   amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
   currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
@@ -747,9 +1138,100 @@ export const payments = pgTable('payments', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
   payments_order_idx: index('payments_order_idx').on(table.orderId),
+  payments_purchase_group_idx: index('payments_purchase_group_idx').on(table.purchaseGroupId),
   payments_buyer_created_idx: index('payments_buyer_created_idx').on(table.buyerId, table.createdAt),
   payments_status_created_idx: index('payments_status_created_idx').on(table.status, table.createdAt),
   payments_transaction_ref_uq: uniqueIndex('payments_transaction_ref_uq').on(table.transactionRef),
+  // Barreira final (independente do lock de aplicação) contra dois primary
+  // no mesmo purchase_group — mesmo padrão de índice único parcial já usado
+  // por payment_allocations_order_active_uq/refunds_idempotency_uq.
+  // purchase_group_id NULL (todo pagamento legado) nunca colide entre si,
+  // porque SQL nunca trata NULL = NULL como igual num índice único.
+  payments_purchase_group_primary_uq: uniqueIndex('payments_purchase_group_primary_uq')
+    .on(table.purchaseGroupId)
+    .where(sql`${table.settlementRole} = 'primary'`),
+  payments_settlement_role_check: check(
+    'payments_settlement_role_check',
+    sql`${table.settlementRole} IN ('candidate', 'primary', 'surplus')`
+  ),
+  payments_owner_exclusive_check: check(
+    'payments_owner_exclusive_check',
+    sql`(${table.orderId} IS NOT NULL AND ${table.purchaseGroupId} IS NULL) OR (${table.orderId} IS NULL AND ${table.purchaseGroupId} IS NOT NULL)`
+  ),
+}));
+
+// FASE A — arquitetura multi-vendedor (schema apenas). Representa quanto de
+// UM payment real do comprador pertence a UM order filho (1 seller). Nunca
+// substitui `payments.orderId` (mantido intacto para todo pedido legado
+// single-seller) — só passa a existir quando o checkout multi-vendedor
+// (fase futura, NÃO implementada ainda) precisar dividir um único pagamento
+// entre vários orders. Tabela vazia nesta fase; nenhum código lê/escreve
+// nela ainda.
+//
+// UNIQUE(paymentId, orderId) é a garantia de idempotência de INSERÇÃO — nunca
+// duas linhas para o mesmo par payment/order — sem precisar de uma coluna de
+// idempotencyKey separada.
+//
+// Revisão Fase A (auditoria de retry de pagamento, antes da Fase B):
+// payments.orderId NÃO é 1:1 hoje — initiatePayment reutiliza a linha
+// 'pending' existente só quando ORDEM+PROVIDER coincidem (paymentService.ts,
+// bloco "Reuse an already-pending payment"); uma nova tentativa com OUTRO
+// provider/método cria uma segunda linha genuína em `payments` para o MESMO
+// order, coexistindo com a primeira (nada no código marca a antiga como
+// failed/expired). Ou seja: payment 1:N por order é uma possibilidade real
+// do sistema atual, não uma hipótese. O que NUNCA pode coexistir são DUAS
+// allocations financeiramente ATIVAS para o mesmo order (isso seria
+// duplicação de crédito) — por isso o índice único parcial abaixo, no
+// mesmo padrão já usado por refunds_idempotency_uq (índice único
+// condicionado a uma coluna, não em toda a tabela): garante no Postgres que
+// só existe 1 allocation com status='active' por order, mas permite
+// legitimamente uma segunda linha (histórica, já 'refunded') coexistir se um
+// reprocessamento genuíno precisar existir no futuro — sem inventar um
+// segundo mecanismo de idempotência.
+//
+// amount > 0 segue EXATAMENTE o padrão já existente em
+// ledger_entries_amount_check (ver ledgerEntries acima) — reaproveitado, não
+// inventado. refundedAmount >= 0 é a mesma família de guarda (nunca um valor
+// negativo). refundedAmount <= amount (revisão Fase A, 2ª rodada) é o
+// primeiro CHECK entre duas colunas deste schema — decisão explícita, não
+// automática: o Postgres suporta nativamente (CHECK enxerga toda a linha),
+// sem incompatibilidade técnica encontrada.
+//
+// refundedAmount + status seguem o mesmo padrão já usado por outras tabelas
+// financeiras deste schema (refunds.sellerDebitAmount, escrow_accounts.status)
+// para permitir refund parcial por order e auditoria sem recalcular a
+// qualquer momento: soma(payment_allocations.amount) deve sempre poder ser
+// comparada a payments.amount para reconciliação.
+export const paymentAllocations = pgTable('payment_allocations', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'set null' }),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
+  status: varchar('status', { length: 50 }).notNull().default('active'), // active, partially_refunded, refunded
+  refundedAmount: numeric('refunded_amount', { precision: 12, scale: 2 }).notNull().default('0.00'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  payment_allocations_payment_order_uq: uniqueIndex('payment_allocations_payment_order_uq').on(table.paymentId, table.orderId),
+  // Invariante financeira: nunca mais de 1 allocation ATIVA por order.
+  payment_allocations_order_active_uq: uniqueIndex('payment_allocations_order_active_uq')
+    .on(table.orderId)
+    .where(sql`${table.status} = 'active'`),
+  payment_allocations_order_idx: index('payment_allocations_order_idx').on(table.orderId),
+  payment_allocations_payment_idx: index('payment_allocations_payment_idx').on(table.paymentId),
+  payment_allocations_purchase_group_idx: index('payment_allocations_purchase_group_idx').on(table.purchaseGroupId),
+  payment_allocations_amount_check: check('payment_allocations_amount_check', sql`${table.amount} > 0`),
+  payment_allocations_refunded_amount_check: check('payment_allocations_refunded_amount_check', sql`${table.refundedAmount} >= 0`),
+  // Revisão Fase A (2ª rodada): CHECK entre duas colunas da MESMA linha —
+  // suportado nativamente pelo Postgres, sem incompatibilidade técnica.
+  // Garante no banco que uma allocation nunca registra mais reembolsado do
+  // que o valor que ela própria representa.
+  payment_allocations_refunded_not_exceed_amount_check: check(
+    'payment_allocations_refunded_not_exceed_amount_check',
+    sql`${table.refundedAmount} <= ${table.amount}`
+  ),
 }));
 
 export const paymentAttempts = pgTable('payment_attempts', {
@@ -777,10 +1259,50 @@ export const paymentCustomers = pgTable('payment_customers', {
   payment_customers_user_idx: index('payment_customers_user_idx').on(table.userId),
 }));
 
+// FASE C5.2-B — arquitetura multi-vendedor (schema apenas; refundService.ts,
+// paymentService.ts, asaasPaymentProvider.ts e asaasWebhookService.ts
+// permanecem INTOCADOS nesta fase — nenhum código ainda lê/escreve
+// purchaseGroupId aqui, nem decide runtime de refund parcial/surplus).
+//
+// order_id agora é NULLABLE — mesma classificação já usada para
+// payments.order_id na Fase C2: alteração de constraint não destrutiva e
+// compatível com os dados existentes (nenhuma linha atual seria invalidada
+// por deixar de exigir order_id — todas já o têm preenchido), NÃO uma
+// alteração "aditiva" no sentido de nunca ter existido antes.
+//
+// Dois regimes, nunca misturados (owner exclusivo, mesmo padrão de
+// payments_owner_exclusive_check da Fase C2):
+//
+//   A) REFUND DE ORDER (order_id preenchido, purchase_group_id NULL):
+//      cobre tanto o refund legacy quanto o refund de um CHILD ORDER de
+//      purchase_group — nos dois casos o vínculo financeiro é sempre
+//      order->payment (payment PRIMARY, no caso do child), nunca
+//      order->purchase_group diretamente. A relação do child com seu group
+//      já é resolvida via orders.purchaseGroupId + payment_allocations —
+//      não duplicada aqui.
+//
+//   B) REFUND DE PAYMENT/GROUP-LEVEL (purchase_group_id preenchido,
+//      order_id NULL): reservado para refund de um payment SURPLUS —
+//      dinheiro real recebido que nunca financiou nenhum order/allocation/
+//      escrow, então não há order nenhum para associar. paymentId aponta
+//      direto para o payment surplus.
+//
+// Nenhum campo refundKind/refundScope foi adicionado: o owner shape
+// (order_id XOR purchase_group_id) já distingue os dois casos de forma
+// completa e inequívoca — uma coluna extra só duplicaria essa informação
+// sem necessidade estrutural comprovada (nenhuma encontrada na auditoria
+// C5.2-A).
 export const refunds = pgTable('refunds', {
   id: varchar('id', { length: 255 }).primaryKey(),
   paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'restrict' }),
-  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'restrict' }),
+  // ON DELETE RESTRICT — mesmo padrão já usado por payments.purchaseGroupId
+  // (Fase C2): um refund é registro financeiro/auditoria, nunca deve perder
+  // seu owner silenciosamente (diferente de orders.purchaseGroupId/
+  // payment_allocations.purchaseGroupId, que usam SET NULL porque são
+  // referências de conveniência, não a própria prova de que o dinheiro
+  // existiu).
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'restrict' }),
   amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
   currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
   reason: text('reason'),
@@ -788,7 +1310,8 @@ export const refunds = pgTable('refunds', {
   approvedBy: varchar('approved_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
   // Fase "Refund/disputa/chargeback": quanto foi de fato debitado da wallet do
   // vendedor (proporcional a orders.sellerNetAmount) — null quando o refund
-  // aconteceu ANTES do escrow release (vendedor nunca recebeu, nada a debitar).
+  // aconteceu ANTES do escrow release (vendedor nunca recebeu, nada a debitar)
+  // OU quando é um refund de payment/group-level (surplus nunca toca wallet).
   // Auditável: mostra exatamente o que aconteceu com o dinheiro do vendedor em
   // cada refund, sem precisar recalcular.
   sellerDebitAmount: numeric('seller_debit_amount', { precision: 12, scale: 2 }),
@@ -798,13 +1321,124 @@ export const refunds = pgTable('refunds', {
   // nunca gerada aqui a partir do próprio ID recém-criado (isso seria sempre
   // único e não protegeria nada, o mesmo bug já corrigido em seller_payouts).
   idempotencyKey: varchar('idempotency_key', { length: 255 }),
+  // ==========================================================================
+  // Fase C5.2-D.2 — EVIDÊNCIA/CORRELAÇÃO DE REFUND EXTERNO (schema apenas;
+  // nenhum código de runtime lê/escreve estas colunas ainda — ver
+  // refundService.ts, inalterado nesta fase). Preparam o terreno para o
+  // fluxo futuro reserve -> external submit -> provider evidence ->
+  // reconciliation -> DONE -> local finalization (D.4/D.5/D.6), auditado
+  // oficialmente na Fase C5.2-D.1 contra docs.asaas.com.
+  //
+  // Todas nullable, SEM DEFAULT: todo refund legado (histórico e qualquer
+  // linha inserida pelo runtime atual, que não muda nesta fase) nasce/
+  // permanece com as 7 colunas abaixo = NULL — nenhum backfill, nenhuma
+  // inferência de provider histórico (seção 3 do pedido). O owner CHECK
+  // abaixo é preservado exatamente como estava.
+  //
+  // provider: NÃO hardcodar 'asaas' aqui (nem DEFAULT nem valor implícito) —
+  // a auditoria da seção 2 confirmou que `payments.provider` já é a fonte
+  // real da verdade (pix_engine, orange_money, mtn, stripe, nusali_pay,
+  // asaas, ...). O runtime futuro (D.4) deve copiar
+  // `refund.provider = paymentFinanciador.provider`, nunca inventar um
+  // valor fixo — este projeto já suporta múltiplos providers de payment.
+  provider: varchar('provider', { length: 50 }),
+  // providerCorrelationKey: nossa identidade de correlação do lado externo —
+  // NUNCA um id emitido pelo Asaas (a auditoria D.1 confirmou, com tripla
+  // fonte oficial, que o objeto de refund individual do Asaas NÃO possui
+  // campo `id` próprio, inclusive para Pix). O valor aqui é o mesmo que o
+  // runtime futuro envia como `description` na POST /v3/payments/{id}/refund
+  // (formato conceitual futuro: NUSALI_REFUND:<refundLocalId>) — é o único
+  // campo, confirmado pela doc oficial, que ecoa de volta em
+  // payment.refunds[]/GET /refunds/webhook. Chamado de "CorrelationKey" (não
+  // "Description") porque descreve o PAPEL da coluna no nosso desenho, não o
+  // nome do campo Asaas.
+  providerCorrelationKey: varchar('provider_correlation_key', { length: 255 }),
+  // providerStatus: valores REAIS do provedor externo (para Asaas, hoje:
+  // PENDING | CANCELLED | DONE — auditoria D.1, seção 6) — dimensão
+  // deliberadamente SEPARADA de `status` (LOCAL REFUND STATUS) acima, nunca
+  // misturada (seção 21 da D.1). Varchar livre, SEM CHECK nesta fase: é
+  // campo de integração externa, e um CHECK fixo hoje viraria migration
+  // obrigatória no dia em que o PSP acrescentar um novo status — validação
+  // de valores conhecidos é responsabilidade do runtime futuro, não do schema.
+  providerStatus: varchar('provider_status', { length: 50 }),
+  // providerRequestedAt: momento em que a tentativa externa foi de fato
+  // iniciada (chamada da POST) — nunca confundir com `createdAt` (criação da
+  // RESERVA local, que pode preceder o envio real). Sem DEFAULT NOW(): só o
+  // runtime futuro, no momento exato do envio, sabe gravar isto.
+  providerRequestedAt: timestamp('provider_requested_at'),
+  // providerConfirmedAt: momento em que observamos providerStatus=DONE (não
+  // o momento do 200 da POST, que a auditoria D.1 confirmou não ser
+  // necessariamente terminal).
+  providerConfirmedAt: timestamp('provider_confirmed_at'),
+  // providerRawResponse: snapshot do item de payment.refunds[] correlacionado
+  // (dateCreated/status/value/description/endToEndIdentifier/
+  // transactionReceiptUrl/refundedSplits) — nunca access_token, headers ou
+  // qualquer segredo de autenticação (seção 7 do pedido: nenhum segredo pode
+  // aparecer nesta coluna).
+  providerRawResponse: jsonb('provider_raw_response'),
+  // lastError: código/mensagem SANITIZADA do último erro definitivo ou
+  // problema de reconciliação (ex.: 400 de saldo insuficiente documentado na
+  // D.1, timeout, ambiguidade). Nunca access_token/headers/stack com
+  // segredos (seção 9 do pedido).
+  lastError: text('last_error'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => ({
   refunds_payment_idx: index('refunds_payment_idx').on(table.paymentId),
   refunds_order_idx: index('refunds_order_idx').on(table.orderId),
+  refunds_purchase_group_idx: index('refunds_purchase_group_idx').on(table.purchaseGroupId),
   refunds_idempotency_uq: uniqueIndex('refunds_idempotency_uq')
     .on(table.idempotencyKey)
     .where(sql`${table.idempotencyKey} IS NOT NULL`),
+  // Owner exclusivo — mesmo padrão de payments_owner_exclusive_check (Fase
+  // C2): todo refund histórico já tem order_id preenchido, logo satisfaz
+  // este CHECK trivialmente (purchase_group_id nasce NULL para todos eles,
+  // coluna nova) — sem nenhum backfill.
+  refunds_owner_exclusive_check: check(
+    'refunds_owner_exclusive_check',
+    sql`(${table.orderId} IS NOT NULL AND ${table.purchaseGroupId} IS NULL) OR (${table.orderId} IS NULL AND ${table.purchaseGroupId} IS NOT NULL)`
+  ),
+  // Fase C5.2-D.2, seção 4 — identidade externa nunca duplicada: duas rows
+  // locais nunca podem representar o MESMO estorno do MESMO provider. Escopo
+  // (provider, providerCorrelationKey) — não só a key isolada — porque a
+  // mesma string poderia teoricamente colidir entre providers diferentes sem
+  // representar o mesmo evento externo (seção 19, teste D: "provider
+  // diferente + mesma correlation -> PASS estruturalmente"). Partial: nasce
+  // vazio para 100% do legado (provider/providerCorrelationKey sempre NULL
+  // até o runtime D.4 existir), nunca bloqueado por dado histórico.
+  refunds_provider_correlation_uq: uniqueIndex('refunds_provider_correlation_uq')
+    .on(table.provider, table.providerCorrelationKey)
+    .where(sql`${table.provider} IS NOT NULL AND ${table.providerCorrelationKey} IS NOT NULL`),
+  // Fase C5.2-D.2, seções 10-16 — ACTIVE RESERVATION (defesa em profundidade,
+  // não a única proteção — locks+SELECT do fluxo de reservation continuam
+  // sendo a barreira primária). Impede duas reservas simultaneamente ativas
+  // do NOVO fluxo (provider-managed) para o MESMO alvo econômico.
+  //
+  // Por que `provider_correlation_key IS NOT NULL` distingue corretamente
+  // "novo fluxo" de "legacy", sem join com orders/payments (que um índice
+  // parcial do Postgres não pode fazer): todo refund legado, e toda linha
+  // que o runtime ATUAL (inalterado nesta fase) insere, nasce com
+  // provider_correlation_key SEMPRE NULL (seção 3) — logo nunca entra nesta
+  // condição WHERE, e múltiplos refunds legados/parciais para o mesmo order
+  // continuam 100% permitidos, exatamente como hoje. Só uma linha inserida
+  // pelo runtime FUTURO (D.4), que explicitamente grava
+  // providerCorrelationKey antes do external submit, pode colidir aqui.
+  //
+  // 'processed' e 'failed' são TERMINAIS (auditoria seção 12/13 do pedido:
+  // 'processed' = sucesso definitivo — o próprio runtime atual só insere
+  // com este status ao final de uma transação atômica que já finalizou tudo;
+  // 'failed' = falha definitiva, libera nova tentativa) — por isso NÃO
+  // entram nesta lista. Só os 3 estados verdadeiramente ativos/bloqueantes
+  // entram: 'pending' (reserva criada, ainda não enviada), 'provider_pending'
+  // (enviada, aguardando DONE) e 'ambiguous_timeout' (não reconciliado
+  // ainda — seção 14: precisa continuar bloqueando até reconciliação
+  // decidir). Nomes de status ainda não escritos por nenhum código (D.4/D.5
+  // os introduzem) — a coluna já aceita qualquer varchar hoje.
+  refunds_child_active_reservation_uq: uniqueIndex('refunds_child_active_reservation_uq')
+    .on(table.orderId)
+    .where(sql`${table.orderId} IS NOT NULL AND ${table.providerCorrelationKey} IS NOT NULL AND ${table.status} IN ('pending', 'provider_pending', 'ambiguous_timeout')`),
+  refunds_surplus_active_reservation_uq: uniqueIndex('refunds_surplus_active_reservation_uq')
+    .on(table.paymentId)
+    .where(sql`${table.orderId} IS NULL AND ${table.purchaseGroupId} IS NOT NULL AND ${table.providerCorrelationKey} IS NOT NULL AND ${table.status} IN ('pending', 'provider_pending', 'ambiguous_timeout')`),
 }));
 
 export const paymentWebhookEvents = pgTable('payment_webhook_events', {
@@ -820,6 +1454,153 @@ export const paymentWebhookEvents = pgTable('payment_webhook_events', {
 }, (table) => ({
   payment_webhook_provider_event_uq: uniqueIndex('payment_webhook_provider_event_uq').on(table.provider, table.eventId),
   payment_webhook_processed_idx: index('payment_webhook_processed_idx').on(table.processed, table.createdAt),
+}));
+
+// ============================================================================
+// Fase C5.3-B — payment_chargebacks (SCHEMA APENAS; nenhum código de runtime
+// lê/escreve esta tabela ainda — nenhum débito, nenhum bloqueio de release,
+// nenhum webhook. Ver auditoria C5.3-A/C5.3-A.1).
+//
+// 1 row = 1 chargeback Asaas, identificado por (provider,
+// providerChargebackId) — NUNCA por paymentId sozinho. A auditoria oficial
+// C5.3-A.1 (contra o schema OpenAPI real por trás de docs.asaas.com, não só
+// a prosa narrativa) confirmou que PaymentChargebackResponseDTO.id é um UUID
+// real, estável e documentado (ex.: "8e784c3e-afe8-4844-bb93-6b445763"),
+// recuperável via GET /v3/payments/{id}/chargeback e via GET
+// /v3/chargebacks/ (coleção paginada e filtrável) — logo um mesmo payment
+// PODE, estruturalmente, vir a ter mais de um chargeback ao longo do tempo;
+// nada aqui assume o contrário.
+//
+// Chargeback NÃO é refund (C5.3-A, seção 4): esta tabela é deliberadamente
+// separada de `refunds` — nunca reaproveita idempotencyKey nem o vocabulário
+// de status ('processed'/'failed') do refund, porque a origem da decisão
+// (emissor do cartão do comprador, nunca uma intenção local nossa) e a
+// identidade (chargeback tem id próprio; refund individual do Asaas
+// confirmadamente NÃO tem — C5.3-A.1, seção 1) são estruturalmente
+// diferentes.
+export const paymentChargebacks = pgTable('payment_chargebacks', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  // ON DELETE RESTRICT — mesmo padrão de refunds.paymentId: registro
+  // financeiro/auditoria nunca perde seu owner silenciosamente.
+  paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'restrict' }),
+  // Nullable: NULL para chargeback de payment legacy (orderId preenchido
+  // direto); preenchido só quando paymentId referencia um payment GROUP
+  // (settlementRole candidate/primary/surplus). Snapshot/referência de
+  // conveniência — paymentId continua sendo a ÚNICA autoridade financeira,
+  // nunca substituída por purchaseGroupId (mesmo cuidado de
+  // payment_allocations.purchaseGroupId). ON DELETE RESTRICT pelo mesmo
+  // motivo de refunds.purchaseGroupId (registro de auditoria, não
+  // conveniência) — diferente de orders.purchaseGroupId/
+  // payment_allocations.purchaseGroupId, que usam SET NULL.
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }).references(() => purchaseGroups.id, { onDelete: 'restrict' }),
+  // provider: NUNCA default — copiado de payments.provider pelo runtime
+  // futuro (ainda não implementado nesta fase). Mesmo cuidado de
+  // refunds.provider (Fase C5.2-D.2): um default esconderia silenciosamente
+  // qual provider realmente processou o chargeback.
+  provider: varchar('provider', { length: 50 }).notNull(),
+  // providerChargebackId: PaymentChargebackResponseDTO.id — diferente de
+  // refunds.providerCorrelationKey (que é uma correlation key NOSSA, porque
+  // o refund individual do Asaas não tem id), este É um id emitido pelo
+  // provider, confirmado documentado.
+  providerChargebackId: varchar('provider_chargeback_id', { length: 255 }).notNull(),
+  // providerStatus / providerDisputeStatus / providerReason: RAW, exatamente
+  // como recebido — SEM CHECK fechado (mesmo raciocínio de
+  // refunds.providerStatus). A própria doc oficial instrui explicitamente: "não traduza
+  // nem altere os valores dos enums... trate valores ainda não mapeados,
+  // preserve o valor original" (C5.3-A.1, seção 3.3) — um CHECK fechado aqui
+  // viraria migration obrigatória no dia em que a Asaas adicionar um valor
+  // novo. Hoje os valores conhecidos são:
+  //   providerStatus:        REQUESTED, IN_DISPUTE, DISPUTE_LOST, REVERSED, DONE
+  //   providerDisputeStatus: REQUESTED, ACCEPTED, REJECTED
+  // Validação/decisão financeira sobre esses valores é responsabilidade do
+  // runtime futuro, nunca do schema.
+  providerStatus: varchar('provider_status', { length: 50 }).notNull(),
+  providerDisputeStatus: varchar('provider_dispute_status', { length: 50 }),
+  providerReason: varchar('provider_reason', { length: 100 }),
+  // value: snapshot do chargeback.value do provider (campo confirmado
+  // existir via schema OpenAPI oficial — C5.3-A.1, seções 2 e 3). NUNCA
+  // assumido igual a payments.amount — nenhum CHECK cross-table é criado
+  // aqui (exigiria trigger, não CHECK simples; e a documentação nunca
+  // confirma nem proíbe chargeback parcial). Runtime futuro decide.
+  value: numeric('value', { precision: 12, scale: 2 }).notNull(),
+  // currency: a Asaas NÃO documenta campo de moeda em
+  // PaymentChargebackResponseDTO (auditado em C5.3-A.1) — este valor é
+  // SEMPRE um snapshot LOCAL, copiado do payment financiador no momento da
+  // persistência pelo runtime futuro, nunca um campo que "veio" do
+  // provider. Sem default: nenhuma linha pode nascer com moeda inventada.
+  currency: varchar('currency', { length: 10 }).notNull(),
+  // disputeStartDate / deadlineToSendDisputeDocuments: datas do PROVIDER
+  // (PaymentChargebackResponseDTO.disputeStartDate /
+  // .deadlineToSendDisputeDocuments). Tipo timestamp por consistência com o
+  // resto deste arquivo (nenhuma outra tabela usa um tipo `date` puro,
+  // nem está importado) — nunca confundir com createdAt/updatedAt locais
+  // abaixo, que são o ciclo de vida da NOSSA linha, não do chargeback no
+  // provider.
+  disputeStartDate: timestamp('dispute_start_date'),
+  deadlineToSendDisputeDocuments: timestamp('deadline_to_send_dispute_documents'),
+  // localStatus: enum NOSSO (não do provider) — CHECK fechado é seguro aqui
+  // porque somos nós que o escrevemos, mesmo padrão de
+  // payments_settlement_role_check.
+  //
+  // Fase C5.3-B.1 — CORREÇÃO: o DEFAULT 'active' original (C5.3-B) partia da
+  // premissa errada de que "toda linha nova nasce por termos acabado de
+  // observar um chargeback não-terminal". Falso: a PRIMEIRA observação de um
+  // chargeback.id pode perfeitamente já chegar terminal (ex.: redelivery de
+  // webhook atrasado, ou o runtime só processa o evento depois do desfecho já
+  // ter ocorrido no provider) — nesse caso a linha NUNCA deveria nascer
+  // 'active'. Um DEFAULT aqui esconderia exatamente esse erro de
+  // classificação. Runtime (C5.3-C1) SEMPRE calcula e fornece localStatus
+  // explicitamente a partir de chargeback.status observado (ver
+  // mapProviderChargebackStatusToLocalStatus em refundService.ts) — nenhum
+  // INSERT depende mais de um valor implícito.
+  //   active         — REQUESTED/IN_DISPUTE observados, sem desfecho terminal
+  //   lost           — DISPUTE_LOST observado (débito, quando implementado,
+  //                    aplicado exatamente uma vez)
+  //   reversed       — REVERSED observado, sem débito prévio
+  //   manual_review  — fatos insuficientes/conflitantes (C5.3-A.1, item 21;
+  //                    C5.3-C1: primeira observação DONE/desconhecida, ou
+  //                    conflito terminal lost<->reversed)
+  // Nenhum destes states aplica qualquer efeito financeiro nesta fase.
+  localStatus: varchar('local_status', { length: 20 }).notNull(),
+  // providerRawResponse: snapshot SANITIZADO do objeto chargeback (nunca o
+  // webhook inteiro, nunca segredos/headers) — mesmo padrão de
+  // refunds.providerRawResponse. Não preenchido nesta fase.
+  providerRawResponse: jsonb('provider_raw_response'),
+  // firstSeenEventId / lastSeenEventId: rastreabilidade, NUNCA autoridade
+  // financeira — apontam conceitualmente para payment_webhook_events.
+  // event_id (varchar(255), nullable, único só em par com provider — nunca
+  // sozinho). SEM FK: event_id não tem constraint unique/PK isolada naquela
+  // tabela (só via UNIQUE composto provider+event_id) e é nullable — uma FK
+  // exigiria uma coluna alvo unique própria, que não existe; além disso um
+  // campo puramente de auditoria não deveria travar numa eventual política
+  // futura de retenção/purga de payment_webhook_events. Não preenchido
+  // nesta fase.
+  firstSeenEventId: varchar('first_seen_event_id', { length: 255 }),
+  lastSeenEventId: varchar('last_seen_event_id', { length: 255 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  // Identidade externa: nunca duas rows para o MESMO chargeback do MESMO
+  // provider. Composto (provider, providerChargebackId) — não a key isolada
+  // — para manter namespace correto se outro PSP for adicionado no futuro
+  // (mesmo raciocínio de refunds_provider_correlation_uq).
+  payment_chargebacks_provider_external_uq: uniqueIndex('payment_chargebacks_provider_external_uq')
+    .on(table.provider, table.providerChargebackId),
+  payment_chargebacks_payment_idx: index('payment_chargebacks_payment_idx').on(table.paymentId),
+  payment_chargebacks_purchase_group_idx: index('payment_chargebacks_purchase_group_idx')
+    .on(table.purchaseGroupId)
+    .where(sql`${table.purchaseGroupId} IS NOT NULL`),
+  payment_chargebacks_local_status_idx: index('payment_chargebacks_local_status_idx').on(table.localStatus),
+  // Suporta diretamente a futura consulta de release-blocking
+  // (releaseEscrowForOrder: "existe chargeback ativo para este payment?"),
+  // ainda NÃO implementada nesta fase.
+  payment_chargebacks_payment_active_idx: index('payment_chargebacks_payment_active_idx')
+    .on(table.paymentId, table.localStatus),
+  payment_chargebacks_value_check: check('payment_chargebacks_value_check', sql`${table.value} > 0`),
+  payment_chargebacks_local_status_check: check(
+    'payment_chargebacks_local_status_check',
+    sql`${table.localStatus} IN ('active', 'lost', 'reversed', 'manual_review')`
+  ),
 }));
 
 // ============================================================================
@@ -1274,6 +2055,124 @@ export const countryRepresentatives = pgTable('country_representatives', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => ({
   country_representatives_country_idx: index('country_representatives_country_idx').on(table.countryCode),
+}));
+
+// ============================================================================
+// FASE D15-A — FUNDAÇÃO DE ROTAS DE FRETE POR SETOR (país > região > setor >
+// rota origem-setor→destino-setor > serviço > tarifa por faixa de peso).
+//
+// Sistema PARALELO ao modelo país/zona já existente acima (shippingZones/
+// shippingRates/storeShippingPolicies) — NENHUMA dessas tabelas foi alterada
+// e o checkout (ShippingCalculatorService/orderService.ts) NÃO usa este
+// modelo novo ainda; a integração é uma fase futura (D15-B). Nenhum pedido
+// histórico é afetado.
+//
+// "regions" (tabela RBAC logo acima) é um domínio DIFERENTE — supervisão
+// territorial de pessoas (supervisorEmail texto livre, freightBaseRate nunca
+// lido por nenhum cálculo real, só 4 linhas de demonstração). Não é
+// reaproveitada aqui de propósito, para nunca confundir os dois conceitos:
+// "Região Cacheu" (RBAC, se existisse) nunca é a mesma entidade que
+// "Região Cacheu" -> "Setor Cacheu" deste módulo de frete.
+//
+// Todas as FKs desta cadeia são ON DELETE RESTRICT (nunca CASCADE): a
+// operação administrativa normal é isActive=false (+ deletedAt em
+// shipping_routes) — nunca DELETE físico. Isso preserva rotas/tarifas
+// históricas mesmo que uma região/setor pare de ser usada.
+// ============================================================================
+
+export const shippingRegions = pgTable('shipping_regions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  code: varchar('code', { length: 100 }).notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_regions_country_code_uq: uniqueIndex('shipping_regions_country_code_uq').on(table.countryCode, table.code),
+  shipping_regions_country_idx: index('shipping_regions_country_idx').on(table.countryCode),
+}));
+
+export const shippingSectors = pgTable('shipping_sectors', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  // RESTRICT (ajuste 1): uma região com setores vinculados nunca pode ser
+  // removida fisicamente — só desativada (shipping_regions.isActive=false).
+  regionId: varchar('region_id', { length: 255 }).notNull().references(() => shippingRegions.id, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  code: varchar('code', { length: 100 }).notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_sectors_country_code_uq: uniqueIndex('shipping_sectors_country_code_uq').on(table.countryCode, table.code),
+  shipping_sectors_region_idx: index('shipping_sectors_region_idx').on(table.regionId),
+  shipping_sectors_country_idx: index('shipping_sectors_country_idx').on(table.countryCode),
+}));
+
+export const shippingRoutes = pgTable('shipping_routes', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  // RESTRICT (ajuste 1): um setor referenciado por qualquer rota nunca pode
+  // ser removido fisicamente — só desativado.
+  originSectorId: varchar('origin_sector_id', { length: 255 }).notNull().references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  destinationSectorId: varchar('destination_sector_id', { length: 255 }).notNull().references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  isActive: boolean('is_active').notNull().default(true),
+  // Remoção lógica (regra 5 do pedido): rotas nunca desaparecem fisicamente
+  // se puderem ter sido usadas por pedidos no futuro — isActive=false para
+  // "parar de oferecer", deletedAt como remoção lógica adicional se um dia
+  // for necessário distinguir "nunca existiu" de "existiu e foi desativada".
+  deletedAt: timestamp('deleted_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_routes_country_origin_dest_uq: uniqueIndex('shipping_routes_country_origin_dest_uq').on(table.countryCode, table.originSectorId, table.destinationSectorId),
+  shipping_routes_origin_idx: index('shipping_routes_origin_idx').on(table.originSectorId),
+  shipping_routes_destination_idx: index('shipping_routes_destination_idx').on(table.destinationSectorId),
+  shipping_routes_country_idx: index('shipping_routes_country_idx').on(table.countryCode),
+}));
+
+export const shippingServices = pgTable('shipping_services', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  countryCode: varchar('country_code', { length: 10 }).notNull().references(() => countries.code, { onDelete: 'restrict' }),
+  name: varchar('name', { length: 255 }).notNull(),
+  code: varchar('code', { length: 100 }).notNull(), // ex.: STANDARD, ECONOMY, EXPRESS
+  description: text('description'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_services_country_code_uq: uniqueIndex('shipping_services_country_code_uq').on(table.countryCode, table.code),
+}));
+
+// Nome deliberadamente DIFERENTE de "shipping_rates" (tabela já existente,
+// modelo país↔país, ativamente usada pelo checkout hoje) — evita colisão de
+// nome e evita qualquer confusão entre os dois sistemas paralelos.
+export const shippingRouteRates = pgTable('shipping_route_rates', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  // RESTRICT (ajuste 1): uma rota/serviço com tarifas cadastradas nunca pode
+  // ser removida fisicamente — só desativada. Preserva histórico de tarifas.
+  routeId: varchar('route_id', { length: 255 }).notNull().references(() => shippingRoutes.id, { onDelete: 'restrict' }),
+  serviceId: varchar('service_id', { length: 255 }).notNull().references(() => shippingServices.id, { onDelete: 'restrict' }),
+  // Semântica documentada e validada em código: [minWeightKg, maxWeightKg) —
+  // mínimo inclusivo, máximo exclusivo. 1kg pertence à faixa que o CONTÉM
+  // como mínimo, nunca à faixa anterior que o teria como máximo.
+  minWeightKg: numeric('min_weight_kg', { precision: 8, scale: 3 }).notNull(),
+  maxWeightKg: numeric('max_weight_kg', { precision: 8, scale: 3 }).notNull(),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  // Moeda por tarifa/mercado — nunca hardcoded (Guiné-Bissau usa XOF, não BRL).
+  currency: varchar('currency', { length: 10 }).notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  validFrom: timestamp('valid_from'),
+  validUntil: timestamp('valid_until'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_route_rates_route_idx: index('shipping_route_rates_route_idx').on(table.routeId),
+  shipping_route_rates_service_idx: index('shipping_route_rates_service_idx').on(table.serviceId),
+  shipping_route_rates_min_weight_check: check('shipping_route_rates_min_weight_check', sql`${table.minWeightKg} >= 0`),
+  shipping_route_rates_max_gt_min_check: check('shipping_route_rates_max_gt_min_check', sql`${table.maxWeightKg} > ${table.minWeightKg}`),
+  shipping_route_rates_amount_check: check('shipping_route_rates_amount_check', sql`${table.amount} >= 0`),
 }));
 
 export const platformSettings = pgTable('platform_settings', {

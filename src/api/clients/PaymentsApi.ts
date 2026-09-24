@@ -1,5 +1,5 @@
 import { apiClient, ApiResponse } from '../apiClient';
-import { PaymentFilters, PaginatedResponse } from '../types';
+import { PaymentFilters, PaginatedResponse, OrderPaymentInitiationResult, PurchaseGroupPaymentInitiationResult } from '../types';
 
 export class PaymentsApi {
   static async list(params?: PaymentFilters): Promise<ApiResponse<PaginatedResponse<any>>> {
@@ -14,8 +14,23 @@ export class PaymentsApi {
     return apiClient.post('/payments/process', data);
   }
 
-  static async initiate(data: { orderId: string; amount?: number; currency?: string; method: string; provider?: string; idempotencyKey?: string }): Promise<ApiResponse<any>> {
+  // Legado — preservado sem alteração de comportamento, só tipagem de
+  // retorno (Fase M1-D1). 1 order = 1 payment.
+  static async initiate(data: { orderId: string; amount?: number; currency?: string; method: string; provider?: string; idempotencyKey?: string }): Promise<ApiResponse<OrderPaymentInitiationResult>> {
     return apiClient.post('/payments/initiate', data);
+  }
+
+  // Fase M1-D1 — client tipado para o endpoint de checkout multi-seller já
+  // existente no backend (POST /payments/purchase-groups/:purchaseGroupId
+  // /initiate, ver paymentRoutes.ts). Recebe EXCLUSIVAMENTE purchaseGroupId
+  // (nunca orderId como substituto — um group nunca tem um único orderId
+  // que o represente). CheckoutView.tsx NÃO foi alterado para usar este
+  // método ainda (M1-D2) — só o contrato foi preparado.
+  static async initiatePurchaseGroupPayment(
+    purchaseGroupId: string,
+    data: { method: string; provider?: string }
+  ): Promise<ApiResponse<PurchaseGroupPaymentInitiationResult>> {
+    return apiClient.post(`/payments/purchase-groups/${purchaseGroupId}/initiate`, data);
   }
 
   static async update(id: string, data: any): Promise<ApiResponse<any>> {

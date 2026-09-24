@@ -2,13 +2,21 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useFavorites } from '../hooks/useFavorites';
 import { useProducts } from '../hooks/useProducts';
+import { usePreferences } from '../context/PreferencesContext';
 import { ProductCard } from './ProductCard';
 import { Heart } from 'lucide-react';
 
 export const FavoritesView: React.FC = () => {
   const navigate = useNavigate();
   const { favorites } = useFavorites();
-  const { data: products = [] } = useProducts();
+  // FASE D16-G1 — o universo carregado precisa respeitar destino+origem
+  // (mesmo gap de D16-G0): um favorito que deixou de ser elegível para o
+  // destino atual (ou foi excluído pelo filtro de origem) nunca deve vazar
+  // só porque o ID está salvo — a filtragem abaixo (favorites.includes)
+  // continua sendo local, mas sobre uma lista já corretamente restrita pelo
+  // servidor.
+  const { selectedCountry, catalogOriginFilter } = usePreferences();
+  const { data: products = [] } = useProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter });
 
   const favoriteProducts = products.filter((p) => favorites.includes(p.id));
 

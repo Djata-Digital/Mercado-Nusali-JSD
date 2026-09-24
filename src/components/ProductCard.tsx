@@ -40,6 +40,13 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   const priceInfo = formatPrice(priceValue, productCurrency);
   const origPriceInfo = origPriceValue ? formatPrice(origPriceValue, productCurrency) : null;
 
+  // FASE D16-C2.1 — produto com variantes reais ativas nunca é adicionado
+  // direto daqui: o cartão não tem como saber cor/tamanho, e escolher a
+  // primeira variante sozinho é exatamente o fallback silencioso que foi
+  // corrigido no D16-C2. Leva ao detalhe para o comprador selecionar antes
+  // de comprar.
+  const isVariableProduct = Boolean(product.hasVariants);
+
   return (
     <div className="bg-white rounded-lg border border-gray-200 hover:shadow-xl transition-all duration-200 flex flex-col justify-between overflow-hidden group relative">
       {/* Top badges: Favorite button + Share button + Offer tag */}
@@ -215,10 +222,14 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
           )}
 
           {/* Star Rating */}
+          {/* FASE D17-C3 — "|| 4.8" era uma nota falsa para produto sem
+              nenhuma review real (0 é falsy em JS, então um produto com
+              rating=0 real mostrava 4.8 inventado). ?? só cai no fallback
+              para null/undefined, nunca para um 0 real. */}
           <div className="mt-2 flex items-center gap-1 text-[11px] text-gray-500">
             <div className="flex items-center text-amber-400">
               <Star className="w-3 h-3 fill-amber-400" />
-              <span className="ml-1 font-bold text-gray-800">{product.rating || 4.8}</span>
+              <span className="ml-1 font-bold text-gray-800">{product.rating ?? 0}</span>
             </div>
             <span>({product.reviewsCount || 0})</span>
           </div>
@@ -233,11 +244,11 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             {product.condition === 'novo' ? 'Novo' : product.condition === 'usado' ? 'Usado' : product.condition === 'recondicionado' ? 'Recondicionado' : ''}
           </span>
           <button
-            onClick={() => addItem(product, 1)}
+            onClick={() => (isVariableProduct ? openProductDetail(product.id) : addItem(product, 1))}
             className="flex items-center gap-1.5 bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white px-3 py-1.5 rounded-md text-xs font-semibold transition"
           >
             <ShoppingCart className="w-3.5 h-3.5" />
-            <span>Adicionar</span>
+            <span>{isVariableProduct ? 'Ver opções' : 'Adicionar'}</span>
           </button>
         </div>
       </div>

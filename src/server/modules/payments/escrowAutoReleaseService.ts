@@ -112,6 +112,10 @@ export interface AutoReleaseRunResult {
  */
 function classifyFailureCode(message: string): string {
   if (message.includes('ESCROW_BLOCKED_BY_ACTIVE_DISPUTE')) return 'ACTIVE_DISPUTE';
+  // Fase C5.3-C2 — mesmo tratamento de ACTIVE_DISPUTE: bloqueio legítimo e
+  // esperado (chargeback local ativo/lost/manual_review no funding
+  // payment), nunca um erro inesperado do scanner.
+  if (message.includes('ACTIVE_PAYMENT_CHARGEBACK')) return 'ACTIVE_PAYMENT_CHARGEBACK';
   if (message.includes('PAYMENT_NOT_ELIGIBLE_FOR_RELEASE') || message.includes('PAYMENT_NOT_CONFIRMED')) return 'PAYMENT_NOT_ELIGIBLE';
   if (message.includes('ORDER_NOT_FULLY_DELIVERED')) return 'NOT_FULLY_DELIVERED';
   if (message.includes('AUTO_RELEASE_MISSING_OPERATIONAL_PROOF')) return 'MISSING_OPERATOR_PROOF';
@@ -120,7 +124,7 @@ function classifyFailureCode(message: string): string {
   return 'UNKNOWN_ERROR';
 }
 
-const BLOCKED_CODES = new Set(['ACTIVE_DISPUTE', 'PAYMENT_NOT_ELIGIBLE', 'NOT_FULLY_DELIVERED', 'MISSING_OPERATOR_PROOF', 'ESCROW_STATE_CHANGED', 'NOT_ELIGIBLE']);
+const BLOCKED_CODES = new Set(['ACTIVE_DISPUTE', 'ACTIVE_PAYMENT_CHARGEBACK', 'PAYMENT_NOT_ELIGIBLE', 'NOT_FULLY_DELIVERED', 'MISSING_OPERATOR_PROOF', 'ESCROW_STATE_CHANGED', 'NOT_ELIGIBLE']);
 
 /**
  * Processa UM candidato de forma totalmente independente — uma falha aqui

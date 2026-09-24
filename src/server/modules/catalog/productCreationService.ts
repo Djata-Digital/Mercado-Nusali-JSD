@@ -13,6 +13,11 @@ import {
 } from '../../../db/schema.js';
 import { eq, inArray, asc, or } from 'drizzle-orm';
 import { delCache } from '../../../db/redis.js';
+import { syncVariantsForProduct, type VariantSyncInput } from './variantService.js';
+// FASE D16-E2 — mesma função já usada por GET /seller/fulfillment-locations
+// (D15-C3) e agora por variantService.ts, para vincular o inventory NOVO do
+// produto simples à origem física real da store — nunca uma store adivinhada.
+import { ensureStoreFulfillmentLocation } from '../logistics/fulfillmentLocationService.js';
 
 export interface CreateProductInput {
   title: string;
@@ -44,6 +49,15 @@ export interface CreateProductInput {
   // Correção pré-piloto (condição opcional): NEW/USED/REFURBISHED ou
   // ausente/null — "não se aplica". Nunca um fallback para 'used'.
   condition?: 'new' | 'used' | 'refurbished' | null;
+  // FASE D16-A2 — produto variável real. Ausente/vazio = produto simples,
+  // fluxo idêntico ao de sempre (uma linha de inventory com variantId=null
+  // e o `stock` do produto). Presente e não-vazio = cada item vira uma
+  // linha real em product_variants + sua própria linha de inventory
+  // (variantId real); a linha de inventory "do produto" (variantId=null)
+  // NUNCA é criada nesse caso, para nunca somar duas vezes o mesmo estoque
+  // em computeLiveStockAndSales (que soma TODAS as linhas de inventory do
+  // productId, sem filtrar por variantId).
+  variants?: VariantSyncInput[];
 }
 
 /**
@@ -391,34 +405,57 @@ export class ProductCreationService {
         await tx.insert(productImages).values(imageInserts);
       }
 
-      // Insert initial SELLER_LOCATION inventory row (inventory.sellerId references sellers.id)
-      const initialInvId = `inv_seller_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      await tx.insert(inventory).values({
-        id: initialInvId,
-        locationType: 'SELLER_LOCATION',
-        sellerId: seller.id,
-        warehouseId: null,
-        productId,
-        variantId: null,
-        quantityOnHand: cleanStock,
-        quantityReserved: 0,
-        minimumStockLevel: 0,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
+      // FASE D16-A2 — produto variável: cada variante ganha sua PRÓPRIA
+      // linha de inventory (via VariantService, na MESMA transação — uma
+      // variante inválida derruba a criação inteira do produto, nunca fica
+      // parcial). A linha de inventory "do produto" (variantId=null) NUNCA
+      // é criada neste caso — computeLiveStockAndSales soma todas as linhas
+      // de inventory do productId sem filtrar por variantId, então mantê-la
+      // dobraria o estoque total exibido.
+      const hasVariants = Array.isArray(input.variants) && input.variants.length > 0;
+      if (hasVariants) {
+        await syncVariantsForProduct(tx, {
+          sellerId: seller.id,
+          productId,
+          variants: input.variants as VariantSyncInput[],
+          performedBy: seller.userId || null,
+        });
+      } else {
+        // Produto simples — fluxo idêntico ao de sempre, MAIS a origem
+        // física real (FASE D16-E2): `store` já foi validada/é obrigatória
+        // no topo desta função (PRODUCT_STORE_REQUIRED), então
+        // fulfillmentLocationId nunca fica null para produto criado a
+        // partir de agora — nunca uma store adivinhada.
+        const fulfillmentLocation = await ensureStoreFulfillmentLocation(store.id, tx);
+        const initialInvId = `inv_seller_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        await tx.insert(inventory).values({
+          id: initialInvId,
+          locationType: 'SELLER_LOCATION',
+          sellerId: seller.id,
+          warehouseId: null,
+          productId,
+          variantId: null,
+          quantityOnHand: cleanStock,
+          quantityReserved: 0,
+          minimumStockLevel: 0,
+          fulfillmentLocationId: fulfillmentLocation?.id || null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
 
-      await tx.insert(inventoryMovements).values({
-        id: `mov_${Date.now()}_init_${Math.random().toString(36).substring(2, 5)}`,
-        inventoryId: initialInvId,
-        warehouseId: null,
-        productId,
-        variantId: null,
-        type: 'IN',
-        quantity: cleanStock,
-        reason: 'Estoque inicial do produto cadastrado',
-        performedBy: seller.userId || null,
-        createdAt: new Date(),
-      });
+        await tx.insert(inventoryMovements).values({
+          id: `mov_${Date.now()}_init_${Math.random().toString(36).substring(2, 5)}`,
+          inventoryId: initialInvId,
+          warehouseId: null,
+          productId,
+          variantId: null,
+          type: 'IN',
+          quantity: cleanStock,
+          reason: 'Estoque inicial do produto cadastrado',
+          performedBy: seller.userId || null,
+          createdAt: new Date(),
+        });
+      }
     });
 
     // 7. Invalidate caches

@@ -47,7 +47,6 @@ import {
   SellerStoreData,
   SellerTeamMember,
   SellerProfileData,
-  SellerQuestion,
 } from '../data/mockSellerData';
 
 export const SellerHubView: React.FC = () => {
@@ -66,7 +65,10 @@ export const SellerHubView: React.FC = () => {
   const [team, setTeam] = useState<SellerTeamMember[]>(initialSellerTeam);
   const [warehouses, setWarehouses] = useState(initialWarehouses);
   const [orders, setOrders] = useState<any[]>(initialSellerOrders);
-  const [questions, setQuestions] = useState<SellerQuestion[]>(initialSellerQuestions);
+  // FASE D17-C4.3 — o backend real (GET/POST /seller/questions) nunca teve o
+  // formato mock de SellerQuestion (mockSellerData.ts); usa o mesmo padrão já
+  // usado acima por `orders` (any[]) para dados reais que não seguem o tipo mock.
+  const [questions, setQuestions] = useState<any[]>(initialSellerQuestions);
   const [sellerProducts, setSellerProducts] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -219,6 +221,16 @@ export const SellerHubView: React.FC = () => {
     }
   };
 
+  // FASE D15-C2 — SellerOperationalAddressManager já chamou a API real
+  // (PATCH /seller/stores/:id só com operationalAddressId) antes de invocar
+  // isto — aqui só sincroniza o estado local já carregado, nunca uma
+  // segunda requisição (diferente de handleUpdateStore, que reenvia a loja
+  // inteira e por isso não deve ser reaproveitado para uma troca tão
+  // pontual).
+  const handleOperationalAddressChanged = (storeId: string, addressId: string | null) => {
+    setStores((prev) => prev.map((s) => (s.id === storeId ? { ...s, operationalAddressId: addressId } : s)));
+  };
+
   const handleUpdateStore = async (updated: SellerStoreData) => {
     try {
       const res = await SellerService.updateStore(updated.id, updated);
@@ -266,22 +278,19 @@ export const SellerHubView: React.FC = () => {
   };
 
   // Q&A Handler
-  const handleAnswerQuestion = async (id: string, text: string) => {
-    try {
-      await SellerService.answerQuestion(id, text);
-      setQuestions(
-        questions.map((q) =>
-          q.id === id ? { ...q, answerText: text, answerDate: 'Agora mesmo', status: 'answered' } : q
-        )
-      );
-      showToast('Resposta enviada ao comprador com sucesso!');
-    } catch (err) {
-      setQuestions(
-        questions.map((q) =>
-          q.id === id ? { ...q, answerText: text, answerDate: 'Agora mesmo', status: 'answered' } : q
-        )
-      );
-      showToast('Resposta registrada!');
+  // FASE D17-C4.3 — antes, o catch duplicava exatamente a mesma atualização
+  // "otimista" de sucesso do try, então uma falha real (rede, 403, 500) era
+  // sempre relatada como sucesso ao vendedor. Agora: nenhuma atualização de
+  // estado acontece aqui sem o POST realmente ter resolvido — se ele rejeitar,
+  // a exceção sobe para quem chamou (SellerQuestions.tsx), que decide o que
+  // mostrar ao usuário. POST /seller/questions/:id/answer não devolve a
+  // resposta persistida (id/createdAt), então refazer o GET real é preferível
+  // a inventar answeredAt no cliente.
+  const handleAnswerQuestion = async (id: string, text: string): Promise<void> => {
+    await SellerService.answerQuestion(id, text);
+    const resQuestions = await SellerService.getQuestions();
+    if (resQuestions.success && Array.isArray(resQuestions.data)) {
+      setQuestions(resQuestions.data);
     }
   };
 
@@ -450,6 +459,15 @@ export const SellerHubView: React.FC = () => {
             profile={profile}
             showToast={showToast}
             onNavigateSection={setActiveSection}
+            /* Fase M1-D2.6 — prop obrigatória `onUpdateProfile` estava
+               faltando: em runtime `SellerAccount.handleSave` chamava
+               `onUpdateProfile(...)` (undefined) e quebrava o botão Salvar.
+               SellerAccount JÁ faz sua própria chamada a
+               SellerService.updateProfile + toast; o callback aqui só
+               precisa sincronizar o estado local `profile` do pai —
+               `setProfile` faz exatamente isso, sem chamada de API nem
+               toast duplicados (por isso não usamos handleUpdateProfile). */
+            onUpdateProfile={setProfile}
           />
         )}
 
@@ -469,6 +487,7 @@ export const SellerHubView: React.FC = () => {
             onSelectStore={setSelectedStoreId}
             onAddStore={handleAddStore}
             onUpdateStore={handleUpdateStore}
+            onOperationalAddressChanged={handleOperationalAddressChanged}
             showToast={showToast}
           />
         )}

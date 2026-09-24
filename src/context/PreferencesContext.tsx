@@ -21,6 +21,17 @@ interface PreferencesContextType {
   setSelectedCurrency: (currency: CurrencyCode) => void;
   displayCountry: CountryCode;
   displayCurrency: CurrencyCode;
+  // FASE D16-G1 — conceito INDEPENDENTE de selectedCountry/displayCountry
+  // (que continuam sendo a autoridade de buyerDeliveryCountry + moeda de
+  // exibição — nunca alterados por isto). catalogOriginFilter representa
+  // SOMENTE "de qual país eu quero ver produtos", nunca "onde eu moro" nem
+  // "para onde entregar" — nunca deve mudar destino/moeda/endereço/frete.
+  // 'ALL' (default, sempre na primeira visita) = todas as origens já
+  // elegíveis para o destino atual — nunca "catálogo mundial irrestrito"
+  // (a elegibilidade de destino continua sendo aplicada pelo servidor
+  // independente deste filtro — ver CatalogService.getProducts).
+  catalogOriginFilter: string;
+  setCatalogOriginFilter: (originFilter: string) => void;
   formatPrice: (amount: number, originalCurrency?: CurrencyCode) => FormattedPriceInfo;
   convertPrice: (amount: number, originalCurrency?: CurrencyCode) => number;
   language: string;
@@ -64,6 +75,26 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
     } catch (e) {}
     return (COUNTRY_TO_CURRENCY_MAP[selectedCountry] as CurrencyCode) || 'XOF';
   });
+
+  // FASE D16-G1 — chave de localStorage PRÓPRIA e NUNCA reaproveitada de
+  // 'nusali_display_country' (essa continua sendo só destino/moeda). Sem
+  // nada salvo (toda primeira visita, e todo comprador já existente antes
+  // desta fase), o resultado é sempre 'ALL' — nunca infere um país aqui.
+  const [catalogOriginFilter, setCatalogOriginFilterState] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('nusali_catalog_origin_filter');
+      if (saved) return saved;
+    } catch (e) {}
+    return 'ALL';
+  });
+
+  const setCatalogOriginFilter = useCallback((originFilter: string) => {
+    const normalized = (originFilter || 'ALL').toUpperCase();
+    setCatalogOriginFilterState(normalized);
+    try {
+      localStorage.setItem('nusali_catalog_origin_filter', normalized);
+    } catch (e) {}
+  }, []);
 
   // Melhoria pré-piloto (elegibilidade por país): storageService.getSelectedCountry()
   // alimenta o header X-Country-Code enviado em TODA requisição da API (apiClient.ts),
@@ -175,6 +206,8 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
         setSelectedCurrency,
         displayCountry: selectedCountry,
         displayCurrency: selectedCurrency,
+        catalogOriginFilter,
+        setCatalogOriginFilter,
         formatPrice,
         convertPrice,
         language,

@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { API_CONFIG } from '../config/api';
 import { OrdersApi } from '../api/clients/OrdersApi';
+import { BuyerService } from '../services/buyerService';
 
 export interface PixInitiateData {
   paymentId?: string;
@@ -27,18 +28,28 @@ export interface PixInitiateData {
   };
 }
 
+// Fase M1-D2 — a identidade que este modal usa para VERIFICAR o pagamento
+// (polling) é sempre a MESMA que o iniciou: `orderId` para legacy,
+// `purchaseGroupId` para purchase_group. NUNCA um child order id no modo
+// group — orders.paymentStatus de um child individual não é a fonte de
+// verdade da compra inteira (purchase_groups.status/payments.status é).
+// Exclusivo por construção: exatamente um dos dois é passado pelo chamador.
+type PixPollTarget =
+  | { mode: 'legacy'; orderId: string }
+  | { mode: 'purchase_group'; purchaseGroupId: string };
+
 interface PixPaymentModalProps {
   isOpen: boolean;
   onClose: () => void;
-  orderId: string;
+  pollTarget: PixPollTarget;
   paymentData: PixInitiateData | null;
-  onPaymentSuccess: (order: any) => void;
+  onPaymentSuccess: (freshData: any) => void;
 }
 
 export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
   isOpen,
   onClose,
-  orderId,
+  pollTarget,
   paymentData,
   onPaymentSuccess,
 }) => {
@@ -59,8 +70,17 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
   }, [isOpen, paymentData]);
 
   // 2. Controlled polling every 4 seconds for up to 5 minutes (300s = 75 ticks)
+  //
+  // Fase M1-D2 — legacy verifica orders.paymentStatus (como sempre); group
+  // verifica purchase_groups.status/payment.status via
+  // BuyerService.getPurchaseGroupById (GET /buyer/purchase-groups/:id,
+  // Fase M1-D1) — NUNCA um child order individual: orders.paymentStatus de
+  // um único child só é atualizado atomicamente junto com os demais quando
+  // PaymentService.confirmPurchaseGroupPayment finaliza (todos ficam 'paid'
+  // na MESMA transação), então checar um child funcionaria por acidente,
+  // mas checar o group é a fonte de verdade real e explícita.
   useEffect(() => {
-    if (!isOpen || !orderId || isSuccess) return;
+    if (!isOpen || isSuccess) return;
 
     let totalTicks = 0;
     const maxTicks = 75; // 75 ticks * 4s = 300s = 5 minutes
@@ -69,30 +89,52 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
       totalTicks++;
 
       try {
-        const res = await OrdersApi.getById(orderId);
-        if (res.success && res.data) {
-          const order = res.data;
-          const status = order.paymentStatus;
+        if (pollTarget.mode === 'legacy') {
+          const res = await OrdersApi.getById(pollTarget.orderId);
+          if (res.success && res.data) {
+            const order = res.data;
+            const status = order.paymentStatus;
 
-          // Single Source of Truth: Financial Payment Status ONLY (paid)
-          if (status === 'paid') {
-            clearInterval(interval);
-            setIsPollingActive(false);
-            setPaymentStatus('paid');
-            setIsSuccess(true);
-            setTimeout(() => {
-              onPaymentSuccess(order);
-            }, 1200);
-            return;
-          } else if (status === 'failed' || status === 'expired' || status === 'overdue') {
-            clearInterval(interval);
-            setIsPollingActive(false);
-            setPaymentStatus(status === 'overdue' ? 'expired' : status);
-            return;
+            // Single Source of Truth: Financial Payment Status ONLY (paid)
+            if (status === 'paid') {
+              clearInterval(interval);
+              setIsPollingActive(false);
+              setPaymentStatus('paid');
+              setIsSuccess(true);
+              setTimeout(() => onPaymentSuccess(order), 1200);
+              return;
+            } else if (status === 'failed' || status === 'expired' || status === 'overdue') {
+              clearInterval(interval);
+              setIsPollingActive(false);
+              setPaymentStatus(status === 'overdue' ? 'expired' : status);
+              return;
+            }
+          }
+        } else {
+          const res = await BuyerService.getPurchaseGroupById(pollTarget.purchaseGroupId);
+          if (res.success && res.data) {
+            const group = res.data;
+
+            // Single Source of Truth: purchase_groups.status (nunca um child
+            // individual) — só vira 'paid' quando TODOS os children já
+            // foram confirmados na mesma transação (ver comentário acima).
+            if (group.status === 'paid') {
+              clearInterval(interval);
+              setIsPollingActive(false);
+              setPaymentStatus('paid');
+              setIsSuccess(true);
+              setTimeout(() => onPaymentSuccess(group), 1200);
+              return;
+            } else if (group.payment?.status === 'failed') {
+              clearInterval(interval);
+              setIsPollingActive(false);
+              setPaymentStatus('failed');
+              return;
+            }
           }
         }
       } catch (err) {
-        console.warn('Polling error on order status:', err);
+        console.warn('Polling error on payment status:', err);
       }
 
       // If maxTicks reached, stop active polling without artificially altering paymentStatus
@@ -103,7 +145,11 @@ export const PixPaymentModal: React.FC<PixPaymentModalProps> = ({
     }, 4000);
 
     return () => clearInterval(interval);
-  }, [isOpen, orderId, isSuccess, onPaymentSuccess]);
+    // pollTarget é recriado a cada render em CheckoutView (objeto literal) —
+    // usamos seus campos primitivos como dependências reais para nunca
+    // reiniciar o polling por uma referência nova com o MESMO conteúdo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, pollTarget.mode, pollTarget.mode === 'legacy' ? pollTarget.orderId : pollTarget.purchaseGroupId, isSuccess, onPaymentSuccess]);
 
   if (!isOpen || !paymentData) return null;
 

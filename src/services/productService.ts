@@ -24,6 +24,39 @@ export const ProductService = {
     return ProductsApi.getById(id, destinationCountry);
   },
 
+  // FASE D17-B2 — mesma normalização já aplicada a getProducts (condition
+  // cru 'new'/'used' -> 'novo'/'usado' etc.) reaproveitada aqui: os itens
+  // vêm do MESMO CatalogService.getProducts() por trás do endpoint de
+  // recomendações, então têm exatamente o mesmo formato cru.
+  async getProductRecommendations(
+    id: string,
+    destinationCountry?: string,
+    originCountryFilter?: string
+  ): Promise<ApiResponse<{ productId: string; relatedProducts: Product[]; sameStoreProducts: Product[]; youMayAlsoLike: Product[] }>> {
+    const res = await ProductsApi.getRecommendations(id, { destinationCountry, originCountryFilter });
+    const data = res.data || { productId: id, relatedProducts: [], sameStoreProducts: [], youMayAlsoLike: [] };
+    return {
+      success: res.success,
+      data: {
+        productId: data.productId,
+        relatedProducts: (data.relatedProducts || []).map(normalizeProduct),
+        sameStoreProducts: (data.sameStoreProducts || []).map(normalizeProduct),
+        youMayAlsoLike: (data.youMayAlsoLike || []).map(normalizeProduct),
+      },
+      message: res.message,
+    };
+  },
+
+  // FASE D17-C4 — Perguntas e Respostas reais (substitui o falso fluxo
+  // /api/gemini/seller-answer, que nunca chegou a existir no backend).
+  async getProductQuestions(productId: string): Promise<ApiResponse<any[]>> {
+    return ProductsApi.getQuestions(productId);
+  },
+
+  async createProductQuestion(productId: string, question: string): Promise<ApiResponse<any>> {
+    return ProductsApi.createQuestion(productId, question);
+  },
+
   async getCategories(): Promise<ApiResponse<Category[]>> {
     return CategoriesApi.list();
   },

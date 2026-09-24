@@ -108,12 +108,16 @@ const themeConfig: Record<
 export const Header: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { selectedCountry, setSelectedCountry, headerTheme, setHeaderTheme } = usePreferences();
+  const { selectedCountry, headerTheme, setHeaderTheme, catalogOriginFilter, setCatalogOriginFilter } = usePreferences();
   const { user, isAuthenticated, logout, activeRole, switchActiveRole } = useAuth();
   const { totalCount: cartItemCount } = useCart();
   const { favorites } = useFavorites();
   const { data: disputes = [] } = useDisputes();
-  const { data: allProducts = [] } = useProducts();
+  // FASE D16-G1 — corrige o gap de D16-G0: a busca rápida do header (dropdown
+  // de resultados ao digitar) e a contagem de ofertas por categoria usavam
+  // useProducts() sem filtro algum — nunca refaziam a busca ao trocar
+  // destino/origem. Mesmo padrão de Home/Search.
+  const { data: allProducts = [] } = useProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter });
 
   const [searchInput, setSearchInput] = useState('');
   const [isSearchFocused, setIsSearchFocused] = useState(false);
@@ -127,8 +131,6 @@ export const Header: React.FC = () => {
 
   const categoryMenuRef = useRef<HTMLDivElement>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
-
-  const userLocation = { city: 'Bissau', country: selectedCountry };
 
   const pendingDisputesCount = disputes.filter(
     (d: any) => d.status === 'opened' || d.status === 'under_admin_review'
@@ -238,6 +240,13 @@ export const Header: React.FC = () => {
   // não carregou — nunca decide quais países existem, só evita a UI vazia
   // durante o primeiro carregamento.
   const currentCountry = currentCountryReal || countriesConfig[selectedCountry] || { flag: '🏳️', name: selectedCountry, currency: '' };
+  // FASE D16-G1 — exibição do filtro de ORIGEM do catálogo (catalogOriginFilter),
+  // INDEPENDENTE de currentCountry acima (que continua sendo só o destino de
+  // entrega, exibido separadamente em "Enviar para", mais abaixo). 'ALL'
+  // mostra "Todos" — nunca deve parecer um país específico "selecionado".
+  const currentOrigin = catalogOriginFilter === 'ALL'
+    ? { flag: '🌐', name: 'Todos' }
+    : (operationalCountries?.find((c) => c.code === catalogOriginFilter) || { flag: '🏳️', name: catalogOriginFilter });
   const curTheme = themeConfig[headerTheme] || themeConfig.green;
 
   return (
@@ -255,18 +264,18 @@ export const Header: React.FC = () => {
             <NusaliLogo size="md" variant="horizontal" animated={true} darkBg={curTheme.logoDarkBg} />
           </button>
 
-          {/* Multi-Country Selector Dropdown */}
+          {/* FASE D16-G1 — Catalog Origin Filter Dropdown (NUNCA muda destino/
+              moeda/endereço — só "de qual país eu quero ver produtos", dentro
+              do que já é elegível para o meu destino real). O destino real
+              continua exibido separadamente em "Enviar para", mais abaixo. */}
           <div className="relative shrink-0">
             <button
               onClick={() => setIsCountryMenuOpen(!isCountryMenuOpen)}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md font-bold text-xs shadow-2xs transition ${curTheme.countryBtn}`}
-              title="Mudar país e moeda"
+              title="Filtrar catálogo por país de origem"
             >
-              <span className="text-base leading-none">{currentCountry.flag}</span>
-              <span className="hidden md:inline font-extrabold">{currentCountry.name}</span>
-              <span className="bg-emerald-100 text-emerald-900 px-1 py-0.2 rounded text-[10px] font-black">
-                {currentCountry.currency}
-              </span>
+              <span className="text-base leading-none">{currentOrigin.flag}</span>
+              <span className="hidden md:inline font-extrabold">{currentOrigin.name}</span>
               <ChevronDown className="w-3.5 h-3.5 opacity-70" />
             </button>
 
@@ -276,37 +285,43 @@ export const Header: React.FC = () => {
                 onMouseLeave={() => setIsCountryMenuOpen(false)}
               >
                 <div className="px-3 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100">
-                  Selecione o País de Operação
+                  Ver produtos de
                 </div>
+                <button
+                  onClick={() => {
+                    setCatalogOriginFilter('ALL');
+                    setIsCountryMenuOpen(false);
+                  }}
+                  className={`w-full text-left px-3.5 py-2 text-xs flex items-center gap-2 font-medium transition ${
+                    catalogOriginFilter === 'ALL'
+                      ? 'bg-emerald-50 text-emerald-900 font-bold border-l-4 border-emerald-600'
+                      : 'text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  <span className="text-lg">🌐</span>
+                  <span>Todos</span>
+                </button>
                 {countriesLoading && (
                   <div className="px-3.5 py-3 text-xs text-gray-500">Carregando países...</div>
                 )}
                 {!countriesLoading && countriesError && (
                   <div className="px-3.5 py-3 text-xs text-red-600">Não foi possível carregar os países. Tente novamente.</div>
                 )}
-                {!countriesLoading && !countriesError && (!operationalCountries || operationalCountries.length === 0) && (
-                  <div className="px-3.5 py-3 text-xs text-amber-700">Nenhum país operacional disponível.</div>
-                )}
                 {!countriesLoading && !countriesError && operationalCountries?.map((conf) => (
                   <button
                     key={conf.code}
                     onClick={() => {
-                      setSelectedCountry(conf.code);
+                      setCatalogOriginFilter(conf.code);
                       setIsCountryMenuOpen(false);
                     }}
-                    className={`w-full text-left px-3.5 py-2 text-xs flex items-center justify-between font-medium transition ${
-                      selectedCountry === conf.code
+                    className={`w-full text-left px-3.5 py-2 text-xs flex items-center gap-2 font-medium transition ${
+                      catalogOriginFilter === conf.code
                         ? 'bg-emerald-50 text-emerald-900 font-bold border-l-4 border-emerald-600'
                         : 'text-gray-700 hover:bg-gray-50'
                     }`}
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="text-lg">{conf.flag}</span>
-                      <span>{conf.name}</span>
-                    </div>
-                    <span className="text-[10px] font-black text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
-                      {conf.currency} ({conf.currencySymbol})
-                    </span>
+                    <span className="text-lg">{conf.flag}</span>
+                    <span>{conf.name}</span>
                   </button>
                 ))}
               </div>
@@ -500,8 +515,13 @@ export const Header: React.FC = () => {
               <MapPin className="w-4 h-4 text-emerald-400" />
               <div className="flex flex-col text-left">
                 <span className={`text-[10px] leading-3 ${curTheme.addressSubtext}`}>Enviar para</span>
+                {/* Correção crítica (bug cosmético): não existe cidade real do
+                    comprador disponível aqui — "Bissau" era um valor fixo,
+                    exibido mesmo quando o país selecionado era outro (ex.:
+                    "Bissau, Brasil"). Mostra só o país real (currentCountry
+                    já deriva de selectedCountry), nunca uma cidade inventada. */}
                 <span className={`font-semibold leading-3 ${curTheme.addressMaintext}`}>
-                  {userLocation.city}, {currentCountry.name}
+                  {currentCountry.name}
                 </span>
               </div>
             </button>
@@ -773,11 +793,14 @@ export const Header: React.FC = () => {
                         <span className="bg-blue-100 text-blue-900 text-[9px] font-black px-1.5 py-0.5 rounded">
                           {activeRole}
                         </span>
-                        {user?.isVerifiedSeller && (
-                          <span className="bg-emerald-100 text-emerald-800 text-[9px] font-black px-1.5 py-0.5 rounded flex items-center gap-0.5">
-                            <ShieldCheck className="w-3 h-3" /> Vendedor Verificado
-                          </span>
-                        )}
+                        {/* Fase M1-D2.6 — badge "Vendedor Verificado" removido:
+                            lia `user.isVerifiedSeller`, campo que NUNCA existiu
+                            em nenhuma resposta de API (a condição era sempre
+                            undefined → o badge nunca renderizava). Um indicador
+                            de KYC, se desejado, deve ser ligado a
+                            `user.kycStatus === 'verified'` numa fase de UI
+                            dedicada — não introduzido aqui para não alterar o
+                            visual. */}
                       </div>
                     </div>
 
@@ -832,7 +855,12 @@ export const Header: React.FC = () => {
                       >
                         <LayoutDashboard className="w-4 h-4 text-emerald-700" /> Painel Admin Global
                       </button>
-                    ) : user?.role === 'SELLER' || user?.role === 'STORE_MANAGER' || user?.role === 'SELLER_STAFF' ? (
+                    ) : user?.role === 'SELLER' ? (
+                    /* Fase M1-D2.6 — removidos `|| 'STORE_MANAGER' || 'SELLER_STAFF'`:
+                       nenhum desses valores existe em users.role no backend
+                       (BUYER, SELLER, ADMIN, COUNTRY_REPRESENTATIVE,
+                       REGIONAL_SUPERVISOR, LOGISTICS_OPERATOR, SUPPORT_AGENT,
+                       FINANCE) — a comparação era sempre falsa. */
                       <button
                         onClick={() => {
                           switchActiveRole('SELLER');

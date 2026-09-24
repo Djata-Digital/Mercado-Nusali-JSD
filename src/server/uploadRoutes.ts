@@ -55,12 +55,17 @@ const ALLOWED_TYPES: Record<UploadFolder, Set<string>> = {
     'image/avif',
   ]),
 
+  // FASE D17-C7.1 — mp4/webm removidos especificamente desta pasta: nenhuma
+  // funcionalidade real usa vídeo em reviews (confirmado por busca no código
+  // — uploadService.uploadReview só é chamado por ProductReviewModal.tsx,
+  // que só aceita imagem). Isso fecha o bypass onde um cliente poderia
+  // enviar um vídeo para /upload/reviews e depois anexar essa URL (que
+  // passaria em isOwnedPublicObjectUrl, já que prova só ownership/prefixo,
+  // nunca o tipo real do conteúdo) como "foto" em POST /buyer/reviews.
   reviews: new Set([
     'image/jpeg',
     'image/png',
     'image/webp',
-    'video/mp4',
-    'video/webm',
   ]),
 
   kyc: new Set([

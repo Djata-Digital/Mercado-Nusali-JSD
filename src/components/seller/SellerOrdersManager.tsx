@@ -445,7 +445,7 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                 const {
                   subtotal, commissionRateLabel, commission, sellerSubsidy, sellerNet,
                   shippingCost, shippingChargedToBuyer, shippingMarketplaceSubsidy, nusaliAbsorbedShipping,
-                } = computeSellerOrderFinancialBreakdown(selectedOrder as any);
+                } = computeSellerOrderFinancialBreakdown(selectedOrder);
 
                 return (
                   <div className="space-y-1.5 pt-1">

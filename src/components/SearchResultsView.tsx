@@ -5,17 +5,30 @@ import { ProductCard } from './ProductCard';
 import { SlidersHorizontal, ArrowUpDown, X, Check, Sparkles, HelpCircle, AlertCircle, ArrowRight } from 'lucide-react';
 import { ProductCondition, FilterState } from '../types';
 import { searchProductsIntelligent, getSynonymsForTerm } from '../utils/searchEngine';
+import { usePreferences } from '../context/PreferencesContext';
 
 export const SearchResultsView: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryParam = searchParams.get('q') || '';
-  const { data: products = [] } = useProducts();
+  // FASE D16-G1 — corrige o gap encontrado em D16-G0: useProducts() era
+  // chamado SEM filtro nenhum, então a queryKey do React Query nunca incluía
+  // país nenhum — trocar destino OU filtro de origem no header não refazia
+  // a busca (cache preso no primeiro país visto). Passar ambos aqui, mesmo
+  // padrão já usado em HomePage.tsx. `/categories/:slug` reaproveita este
+  // MESMO componente (ver App.tsx) — corrige os dois de uma vez.
+  const { selectedCountry, catalogOriginFilter } = usePreferences();
+  const { data: products = [] } = useProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter });
 
+  // Fase M1-D2.6 — removidos `brand: ''` e `officialStoresOnly: false`: não
+  // existem em FilterState (src/types.ts) e este componente nunca os LÊ em
+  // lugar nenhum (a filtragem aqui é 100% client-side sobre os campos reais:
+  // category/condition/priceMin/priceMax/freeShippingOnly/fullOnly/
+  // arrivesTomorrowOnly/sellerPlatinumOnly/sortBy). Eram campos de estado
+  // mortos. Nenhum seletor de UI os alimentava.
   const [filterState, setFilterState] = useState<FilterState>({
     query: queryParam,
     category: '',
-    brand: '',
     priceMin: undefined,
     priceMax: undefined,
     condition: 'all',
@@ -23,7 +36,9 @@ export const SearchResultsView: React.FC = () => {
     fullOnly: false,
     arrivesTomorrowOnly: false,
     sellerPlatinumOnly: false,
-    officialStoresOnly: false,
+    // Campo obrigatório de FilterState que este literal omitia (mascarado
+    // pelos erros de excess-property `brand`/`officialStoresOnly` antes).
+    internationalOnly: false,
     sortBy: 'relevance',
   });
 
@@ -40,7 +55,6 @@ export const SearchResultsView: React.FC = () => {
     setFilterState({
       query: '',
       category: '',
-      brand: '',
       priceMin: undefined,
       priceMax: undefined,
       condition: 'all',
@@ -48,7 +62,7 @@ export const SearchResultsView: React.FC = () => {
       fullOnly: false,
       arrivesTomorrowOnly: false,
       sellerPlatinumOnly: false,
-      officialStoresOnly: false,
+      internationalOnly: false,
       sortBy: 'relevance',
     });
     setSearchParams({});
