@@ -42,7 +42,6 @@ import { useCart } from '../hooks/useCart';
 import { useFavorites } from '../hooks/useFavorites';
 import { useDisputes } from '../hooks/useDisputes';
 import { useProducts, useCategories } from '../hooks/useProducts';
-import { LocationModal } from './LocationModal';
 import { countriesConfig } from '../utils/currencyUtils';
 import { CountryCode } from '../types';
 import { useCountries } from '../hooks/useCountries';
@@ -108,7 +107,7 @@ const themeConfig: Record<
 export const Header: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { selectedCountry, headerTheme, setHeaderTheme, catalogOriginFilter, setCatalogOriginFilter } = usePreferences();
+  const { selectedCountry, setSelectedCountry, headerTheme, setHeaderTheme, catalogOriginFilter, setCatalogOriginFilter } = usePreferences();
   const { user, isAuthenticated, logout, activeRole, switchActiveRole } = useAuth();
   const { totalCount: cartItemCount } = useCart();
   const { favorites } = useFavorites();
@@ -121,7 +120,13 @@ export const Header: React.FC = () => {
 
   const [searchInput, setSearchInput] = useState('');
   const [isSearchFocused, setIsSearchFocused] = useState(false);
-  const [isLocationOpen, setIsLocationOpen] = useState(false);
+  // D18-C2.7 — reconstrói o seletor de DESTINO real de "Enviar para"
+  // (regressão introduzida em 23d5aff, que reaproveitou o dropdown de país
+  // para "Ver produtos de"/originCountryFilter sem recriar um seletor de
+  // destino). isDestinationMenuOpen é INDEPENDENTE de isCountryMenuOpen
+  // (origem) — cada dropdown controla só o seu próprio estado, exatamente
+  // como já acontece entre "Ver produtos de" e o menu de categorias.
+  const [isDestinationMenuOpen, setIsDestinationMenuOpen] = useState(false);
   const [isCategoryMenuOpen, setIsCategoryMenuOpen] = useState(false);
   const [activeCategorySlug, setActiveCategorySlug] = useState<string>('celulares-e-telefonia');
   const [isCountryMenuOpen, setIsCountryMenuOpen] = useState(false);
@@ -164,6 +169,7 @@ export const Header: React.FC = () => {
       if (e.key === 'Escape') {
         setIsCategoryMenuOpen(false);
         setIsCountryMenuOpen(false);
+        setIsDestinationMenuOpen(false);
         setIsUserMenuOpen(false);
         setIsSearchFocused(false);
       }
@@ -507,24 +513,70 @@ export const Header: React.FC = () => {
         <div className={`mt-2 pt-2 border-t ${curTheme.borderTopNav} flex items-center justify-between text-xs relative z-30`}>
           {/* Left Navigation: Location + Category Mega Dropdown */}
           <div className="flex items-center gap-2 shrink-0">
-            {/* Address Button */}
-            <button
-              onClick={() => setIsLocationOpen(true)}
-              className={`flex items-center gap-1.5 py-1 px-2 rounded-md transition shrink-0 ${curTheme.addressBtn}`}
-            >
-              <MapPin className="w-4 h-4 text-emerald-400" />
-              <div className="flex flex-col text-left">
-                <span className={`text-[10px] leading-3 ${curTheme.addressSubtext}`}>Enviar para</span>
-                {/* Correção crítica (bug cosmético): não existe cidade real do
-                    comprador disponível aqui — "Bissau" era um valor fixo,
-                    exibido mesmo quando o país selecionado era outro (ex.:
-                    "Bissau, Brasil"). Mostra só o país real (currentCountry
-                    já deriva de selectedCountry), nunca uma cidade inventada. */}
-                <span className={`font-semibold leading-3 ${curTheme.addressMaintext}`}>
-                  {currentCountry.name}
-                </span>
-              </div>
-            </button>
+            {/* Destination Country Selector ("Enviar para") — D18-C2.7:
+                restaura o seletor de DESTINO real, removido em 23d5aff
+                quando este mesmo dropdown foi reaproveitado para "Ver
+                produtos de" (origem). INDEPENDENTE do dropdown de origem
+                abaixo: chama exclusivamente setSelectedCountry, nunca
+                setCatalogOriginFilter. Mesma fonte dinâmica
+                (operationalCountries) e mesmo padrão visual/interação
+                (onMouseLeave) do dropdown de origem — nenhuma lista
+                hardcoded, qualquer país ativo novo aparece automaticamente. */}
+            <div className="relative shrink-0">
+              <button
+                onClick={() => setIsDestinationMenuOpen(!isDestinationMenuOpen)}
+                className={`flex items-center gap-1.5 py-1 px-2 rounded-md transition shrink-0 ${curTheme.addressBtn}`}
+                title="Alterar país de destino da entrega"
+              >
+                <MapPin className="w-4 h-4 text-emerald-400" />
+                <div className="flex flex-col text-left">
+                  <span className={`text-[10px] leading-3 ${curTheme.addressSubtext}`}>Enviar para</span>
+                  {/* Correção crítica (bug cosmético): não existe cidade real do
+                      comprador disponível aqui — "Bissau" era um valor fixo,
+                      exibido mesmo quando o país selecionado era outro (ex.:
+                      "Bissau, Brasil"). Mostra só o país real (currentCountry
+                      já deriva de selectedCountry), nunca uma cidade inventada. */}
+                  <span className={`font-semibold leading-3 ${curTheme.addressMaintext}`}>
+                    {currentCountry.name}
+                  </span>
+                </div>
+                <ChevronDown className="w-3.5 h-3.5 opacity-70" />
+              </button>
+
+              {isDestinationMenuOpen && (
+                <div
+                  className="absolute left-0 mt-1 w-56 bg-white text-gray-900 rounded-lg shadow-xl border border-gray-200 py-2 z-50 animate-fadeIn"
+                  onMouseLeave={() => setIsDestinationMenuOpen(false)}
+                >
+                  <div className="px-3 py-1 text-[10px] font-bold text-gray-400 uppercase tracking-wider border-b border-gray-100">
+                    Enviar para
+                  </div>
+                  {countriesLoading && (
+                    <div className="px-3.5 py-3 text-xs text-gray-500">Carregando países...</div>
+                  )}
+                  {!countriesLoading && countriesError && (
+                    <div className="px-3.5 py-3 text-xs text-red-600">Não foi possível carregar os países. Tente novamente.</div>
+                  )}
+                  {!countriesLoading && !countriesError && operationalCountries?.map((conf) => (
+                    <button
+                      key={conf.code}
+                      onClick={() => {
+                        setSelectedCountry(conf.code);
+                        setIsDestinationMenuOpen(false);
+                      }}
+                      className={`w-full text-left px-3.5 py-2 text-xs flex items-center gap-2 font-medium transition ${
+                        selectedCountry === conf.code
+                          ? 'bg-emerald-50 text-emerald-900 font-bold border-l-4 border-emerald-600'
+                          : 'text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      <span className="text-lg">{conf.flag}</span>
+                      <span>{conf.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
             {/* Categorias Mega Menu Toggle Button */}
             <div className="relative" ref={categoryMenuRef}>
@@ -1021,9 +1073,6 @@ export const Header: React.FC = () => {
           </div>
         )}
       </div>
-
-      {/* Location Modal */}
-      <LocationModal isOpen={isLocationOpen} onClose={() => setIsLocationOpen(false)} />
 
       {/* Daily Exchange Rate & Currency Converter Modal */}
       <CurrencyConverterModal
