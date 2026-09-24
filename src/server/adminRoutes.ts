@@ -24,6 +24,7 @@ import {
   disputes,
   sellers,
   storeShippingPolicies,
+  shippingSubsidyCampaigns,
   sellerProfiles,
   sellerKyc,
   sellerDocuments,
@@ -86,6 +87,7 @@ import {
 } from './modules/shipping/shippingGeographyService.js';
 import { ensureWarehouseFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
 import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
+import { validateShippingCampaignDefinition } from './modules/shipping/shippingCampaignService.js';
 
 export const adminRouter = Router();
 
@@ -4856,5 +4858,243 @@ adminRouter.post('/stores/:id/shipping-policy', requireGlobalAdmin, async (req: 
     return res.json({ success: true, message: 'Política de frete da loja atualizada com sucesso!', data: updated });
   } catch (error: any) {
     return sendAdminError(res, error);
+  }
+});
+
+// ==========================================
+// CAMPANHAS DE SUBSÍDIO DE FRETE — NUSALI (D18-C2.1)
+// ==========================================
+// CRUD administrativo mínimo sobre shipping_subsidy_campaigns (D18-C2).
+// Somente GLOBAL_ADMIN — não existe (nem deve existir nesta fase) rota de
+// criação/edição para seller ou buyer. NADA aqui é lido pelo checkout ainda
+// (D18-C3 fica responsável por isso); esta tela só administra a DEFINIÇÃO
+// da campanha. spentAmount/ordersServed nunca são expostos como campos
+// editáveis por este CRUD — são contadores de consumo real (D18-C3/C4),
+// não atributos de configuração, e editá-los aqui abriria um atalho
+// indevido para "consumir orçamento" fora do fluxo de checkout.
+const SHIPPING_CAMPAIGN_SCOPE_FIELDS = ['countryCode', 'regionId', 'sectorId', 'routeId', 'sellerId', 'storeId', 'categoryId', 'productId'] as const;
+
+function shippingCampaignPgErrorCode(error: any): string | undefined {
+  return error?.cause?.code || error?.code;
+}
+
+function sendShippingCampaignError(res: Response, error: unknown) {
+  const code = shippingCampaignPgErrorCode(error);
+  // FK RESTRICT violado (id de escopo inexistente, ou tentativa de apagar
+  // uma campanha ainda referenciada) — nunca deixamos isso virar um 500 cru.
+  if (code === '23503') {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_SHIPPING_CAMPAIGN_REFERENCE', message: 'Um ou mais ids de escopo (país/região/setor/rota/seller/loja/categoria/produto) não existem, ou a campanha ainda está referenciada por um pedido/uso e não pode ser removida.' },
+      message: 'Referência inválida.',
+    });
+  }
+  // CHECK constraint violado no banco (defesa em profundidade — a validação
+  // em memória já deveria ter barrado isso antes de chegar aqui).
+  if (code === '23514') {
+    return res.status(400).json({
+      success: false,
+      error: { code: 'INVALID_SHIPPING_CAMPAIGN_DEFINITION', message: 'Definição de campanha inválida (violação de invariante no banco).' },
+      message: 'Definição de campanha inválida.',
+    });
+  }
+  return sendAdminError(res, error);
+}
+
+/** Converte uma linha do banco (numeric como string) para o formato usado por validateShippingCampaignDefinition. */
+function toShippingCampaignDomainNumbers(row: {
+  percentage: string | null; maxAmount: string | null; campaignBudget: string | null; spentAmount: string;
+  maxOrders: number | null; ordersServed: number; priority: number; startsAt: Date | null; endsAt: Date | null;
+}) {
+  return {
+    percentage: row.percentage === null ? null : Number(row.percentage),
+    maxAmount: row.maxAmount === null ? null : Number(row.maxAmount),
+    campaignBudget: row.campaignBudget === null ? null : Number(row.campaignBudget),
+    spentAmount: Number(row.spentAmount),
+    maxOrders: row.maxOrders,
+    ordersServed: row.ordersServed,
+    priority: row.priority,
+    startsAt: row.startsAt,
+    endsAt: row.endsAt,
+  };
+}
+
+adminRouter.get('/shipping-campaigns', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const { isActive, productId, storeId, sellerId } = req.query as Record<string, string | undefined>;
+    const conditions = [];
+    if (isActive === 'true') conditions.push(eq(shippingSubsidyCampaigns.isActive, true));
+    if (isActive === 'false') conditions.push(eq(shippingSubsidyCampaigns.isActive, false));
+    if (productId) conditions.push(eq(shippingSubsidyCampaigns.productId, productId));
+    if (storeId) conditions.push(eq(shippingSubsidyCampaigns.storeId, storeId));
+    if (sellerId) conditions.push(eq(shippingSubsidyCampaigns.sellerId, sellerId));
+
+    const rows = await db.select().from(shippingSubsidyCampaigns)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(shippingSubsidyCampaigns.createdAt), asc(shippingSubsidyCampaigns.id));
+    return res.json({ success: true, data: rows });
+  } catch (error: any) {
+    return sendShippingCampaignError(res, error);
+  }
+});
+
+adminRouter.get('/shipping-campaigns/:id', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const [row] = await db.select().from(shippingSubsidyCampaigns).where(eq(shippingSubsidyCampaigns.id, req.params.id)).limit(1);
+    if (!row) return res.status(404).json({ success: false, message: 'Campanha não encontrada.' });
+    return res.json({ success: true, data: row });
+  } catch (error: any) {
+    return sendShippingCampaignError(res, error);
+  }
+});
+
+adminRouter.post('/shipping-campaigns', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const body = req.body ?? {};
+
+    const candidate = {
+      name: String(body.name ?? ''),
+      fundingMode: body.fundingMode,
+      percentage: body.percentage === undefined || body.percentage === null ? null : Number(body.percentage),
+      maxAmount: body.maxAmount === undefined || body.maxAmount === null ? null : Number(body.maxAmount),
+      priority: body.priority === undefined ? 0 : Number(body.priority),
+      startsAt: body.startsAt ? new Date(body.startsAt) : null,
+      endsAt: body.endsAt ? new Date(body.endsAt) : null,
+      campaignBudget: body.campaignBudget === undefined || body.campaignBudget === null ? null : Number(body.campaignBudget),
+      spentAmount: 0,
+      maxOrders: body.maxOrders === undefined || body.maxOrders === null ? null : Number(body.maxOrders),
+      ordersServed: 0,
+    };
+    const validation = validateShippingCampaignDefinition(candidate);
+    if (validation.ok === false) {
+      const message = validation.errors.join(' ');
+      return res.status(400).json({ success: false, error: { code: 'INVALID_SHIPPING_CAMPAIGN_DEFINITION', message }, message });
+    }
+
+    const id = `camp_admin_${Date.now()}_${randomBytes(3).toString('hex')}`;
+    const values: any = {
+      id,
+      name: candidate.name,
+      description: body.description ?? null,
+      fundingMode: candidate.fundingMode,
+      percentage: candidate.percentage === null ? null : String(candidate.percentage),
+      maxAmount: candidate.maxAmount === null ? null : String(candidate.maxAmount),
+      isActive: body.isActive === undefined ? true : Boolean(body.isActive),
+      priority: candidate.priority,
+      startsAt: candidate.startsAt,
+      endsAt: candidate.endsAt,
+      campaignBudget: candidate.campaignBudget === null ? null : String(candidate.campaignBudget),
+      spentAmount: '0.00',
+      maxOrders: candidate.maxOrders,
+      ordersServed: 0,
+      createdBy: req.user?.id || null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    for (const field of SHIPPING_CAMPAIGN_SCOPE_FIELDS) {
+      values[field] = body[field] ?? null;
+    }
+
+    await db.insert(shippingSubsidyCampaigns).values(values);
+    await writeRealAudit(req, 'admin.shipping_campaign.created', 'shipping_subsidy_campaigns', id, body);
+
+    const [created] = await db.select().from(shippingSubsidyCampaigns).where(eq(shippingSubsidyCampaigns.id, id)).limit(1);
+    return res.status(201).json({ success: true, message: 'Campanha de subsídio de frete criada com sucesso!', data: created });
+  } catch (error: any) {
+    return sendShippingCampaignError(res, error);
+  }
+});
+
+adminRouter.patch('/shipping-campaigns/:id', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const { id } = req.params;
+    const body = req.body ?? {};
+
+    const [existing] = await db.select().from(shippingSubsidyCampaigns).where(eq(shippingSubsidyCampaigns.id, id)).limit(1);
+    if (!existing) return res.status(404).json({ success: false, message: 'Campanha não encontrada.' });
+
+    // D18-C2.1 seção 7: NUNCA validar só os campos recebidos isoladamente —
+    // carregamos o estado atual, aplicamos o patch em memória, e validamos a
+    // DEFINIÇÃO RESULTANTE inteira antes de persistir qualquer coisa. Um
+    // PATCH {fundingMode:'PERCENTAGE'} sobre uma campanha FULL (percentage
+    // já null) é corretamente rejeitado, em vez de gravar um estado
+    // inconsistente — a troca de modo exige que o chamador também informe
+    // explicitamente os campos que precisam mudar de valor.
+    const current = toShippingCampaignDomainNumbers(existing as any);
+    const has = (k: string) => Object.prototype.hasOwnProperty.call(body, k);
+    const merged = {
+      name: has('name') ? String(body.name ?? '') : existing.name,
+      fundingMode: has('fundingMode') ? body.fundingMode : existing.fundingMode,
+      percentage: has('percentage') ? (body.percentage === null ? null : Number(body.percentage)) : current.percentage,
+      maxAmount: has('maxAmount') ? (body.maxAmount === null ? null : Number(body.maxAmount)) : current.maxAmount,
+      priority: has('priority') ? Number(body.priority) : current.priority,
+      startsAt: has('startsAt') ? (body.startsAt === null ? null : new Date(body.startsAt)) : current.startsAt,
+      endsAt: has('endsAt') ? (body.endsAt === null ? null : new Date(body.endsAt)) : current.endsAt,
+      campaignBudget: has('campaignBudget') ? (body.campaignBudget === null ? null : Number(body.campaignBudget)) : current.campaignBudget,
+      spentAmount: current.spentAmount,
+      maxOrders: has('maxOrders') ? (body.maxOrders === null ? null : Number(body.maxOrders)) : current.maxOrders,
+      ordersServed: current.ordersServed,
+    };
+    const validation = validateShippingCampaignDefinition(merged);
+    if (validation.ok === false) {
+      const message = validation.errors.join(' ');
+      return res.status(400).json({ success: false, error: { code: 'INVALID_SHIPPING_CAMPAIGN_DEFINITION', message }, message });
+    }
+
+    const updateFields: any = {
+      name: merged.name,
+      fundingMode: merged.fundingMode,
+      percentage: merged.percentage === null ? null : String(merged.percentage),
+      maxAmount: merged.maxAmount === null ? null : String(merged.maxAmount),
+      priority: merged.priority,
+      startsAt: merged.startsAt,
+      endsAt: merged.endsAt,
+      campaignBudget: merged.campaignBudget === null ? null : String(merged.campaignBudget),
+      maxOrders: merged.maxOrders,
+      updatedAt: new Date(),
+    };
+    if (has('description')) updateFields.description = body.description;
+    if (has('isActive')) updateFields.isActive = Boolean(body.isActive);
+    for (const field of SHIPPING_CAMPAIGN_SCOPE_FIELDS) {
+      if (has(field)) updateFields[field] = body[field] === undefined ? null : body[field];
+    }
+
+    await db.update(shippingSubsidyCampaigns).set(updateFields).where(eq(shippingSubsidyCampaigns.id, id));
+    await writeRealAudit(req, 'admin.shipping_campaign.updated', 'shipping_subsidy_campaigns', id, body);
+
+    const [updated] = await db.select().from(shippingSubsidyCampaigns).where(eq(shippingSubsidyCampaigns.id, id)).limit(1);
+    return res.json({ success: true, message: 'Campanha de subsídio de frete atualizada com sucesso!', data: updated });
+  } catch (error: any) {
+    return sendShippingCampaignError(res, error);
+  }
+});
+
+adminRouter.patch('/shipping-campaigns/:id/status', requireGlobalAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, message: 'Banco indisponível.' });
+    const { id } = req.params;
+    const { isActive } = req.body ?? {};
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'isActive (boolean) é obrigatório.' });
+    }
+    const [existing] = await db.select().from(shippingSubsidyCampaigns).where(eq(shippingSubsidyCampaigns.id, id)).limit(1);
+    if (!existing) return res.status(404).json({ success: false, message: 'Campanha não encontrada.' });
+
+    await db.update(shippingSubsidyCampaigns).set({ isActive, updatedAt: new Date() }).where(eq(shippingSubsidyCampaigns.id, id));
+    await writeRealAudit(req, isActive ? 'admin.shipping_campaign.activated' : 'admin.shipping_campaign.deactivated', 'shipping_subsidy_campaigns', id);
+
+    const [updated] = await db.select().from(shippingSubsidyCampaigns).where(eq(shippingSubsidyCampaigns.id, id)).limit(1);
+    return res.json({ success: true, message: isActive ? 'Campanha ativada.' : 'Campanha desativada.', data: updated });
+  } catch (error: any) {
+    return sendShippingCampaignError(res, error);
   }
 });

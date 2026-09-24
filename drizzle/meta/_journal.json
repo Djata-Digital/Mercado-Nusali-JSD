@@ -225,6 +225,13 @@
       "when": 1789759222771,
       "tag": "0031_aberrant_crystal",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1790216934797,
+      "tag": "0032_left_queen_noir",
+      "breakpoints": true
     }
   ]
 }

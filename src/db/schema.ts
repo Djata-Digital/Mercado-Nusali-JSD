@@ -696,6 +696,156 @@ export const storeShippingPolicies = pgTable('store_shipping_policies', {
   store_shipping_policies_store_uq: uniqueIndex('store_shipping_policies_store_uq').on(table.storeId),
 }));
 
+// FASE D18-C2 — fundação de dados para campanhas de subsídio de frete
+// financiadas pela NUSALI, separada de store_shipping_policies (D18-C1.1:
+// política permanente do seller nunca pode ser sobrescrita/apagada
+// silenciosamente por uma campanha administrativa — são estruturas
+// distintas, nunca a mesma linha).
+//
+// MODELO (decisões já tomadas em D18-C1.1, não revisitadas aqui):
+//   - target = BUYER_ONLY: uma campanha só pode subsidiar a parcela que
+//     sobraria para o comprador depois da política do seller já aplicada
+//     (D18-C3, ainda não implementado) — por isso não existe coluna
+//     targetLayer aqui: só há um valor possível, adicionar a coluna hoje
+//     seria dívida técnica sem uso real (YAGNI).
+//   - não-acumulável: só 1 campanha vale por child order (ver
+//     shipping_campaign_usages abaixo, UNIQUE(order_id)).
+//   - esta tabela NÃO é lida pelo checkout/resolver ainda (D18-C3+).
+//
+// ESCOPO COMBINÁVEL (nunca um enum mutuamente exclusivo — todos os campos
+// abaixo são nullable e combinados por AND por matchesShippingCampaignScope,
+// em shippingCampaignService.ts): campanha sem nenhum campo preenchido =
+// global. Cada campo preenchido é mais um critério que TODOS precisam bater
+// para a campanha valer (ex.: productId + routeId preenchidos = "só esse
+// produto, só nessa rota").
+//
+// Entidades geográficas usadas são as REAIS já existentes no projeto (D18-A/
+// B: shippingRegions/shippingSectors/shippingRoutes) — nenhuma tabela nova
+// de geografia foi criada. Não existe uma entidade "city" separada de
+// shipping_sectors (setor já é a granularidade mais fina, ex.: "Bissau",
+// "Gabú" — ver seedGuineaBissauShippingGeography) — por isso o campo abaixo
+// se chama sectorId, nunca cityId. routeId referencia shipping_routes
+// diretamente (origin+destination JÁ é uma entidade real, com sua própria
+// UNIQUE por país+origem+destino) — nunca duas colunas soltas de
+// originSectorId/destinationSectorId aqui, que duplicariam o que já existe.
+// Por convenção: countryCode/regionId/sectorId escopam o DESTINO da entrega
+// (é assim que uma campanha de marketing se anuncia: "grátis para entregas
+// em Cacheu"); routeId cobre o caso em que origem E destino importam juntos.
+export const shippingSubsidyCampaigns = pgTable('shipping_subsidy_campaigns', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  description: text('description'),
+
+  // FULL | PERCENTAGE | MAX_AMOUNT — mutuamente exclusivos entre si (nunca
+  // "PERCENTAGE E MAX_AMOUNT ao mesmo tempo"), validado em CHECK abaixo E em
+  // validateShippingCampaignDefinition (defesa em profundidade, mesmo padrão
+  // já usado em store_shipping_policies/D18-B1).
+  fundingMode: varchar('funding_mode', { length: 20 }).notNull(),
+  percentage: numeric('percentage', { precision: 5, scale: 2 }),
+  maxAmount: numeric('max_amount', { precision: 12, scale: 2 }),
+
+  isActive: boolean('is_active').notNull().default(true),
+  // Desempate determinístico quando duas campanhas ativas têm a MESMA
+  // especificidade (computeShippingCampaignSpecificity) — maior prioridade
+  // vence; id como desempate final (nunca um limit(1) sem ORDER BY, mesma
+  // lição do D18-B2.2).
+  priority: integer('priority').notNull().default(0),
+
+  // Janela [startsAt, endsAt) — semi-aberta de propósito (ver
+  // isShippingCampaignActiveAt): evita duas campanhas adjacentes ativas no
+  // mesmo instante exato de transição. NULL = sem limite naquele lado.
+  startsAt: timestamp('starts_at'),
+  endsAt: timestamp('ends_at'),
+
+  // Orçamento/limite — só schema e invariantes nesta fase; NENHUM consumo
+  // real acontece ainda (D18-C3/C4). campaignBudget/maxOrders NULL = sem
+  // teto. spentAmount/ordersServed sempre começam em 0.
+  campaignBudget: numeric('campaign_budget', { precision: 12, scale: 2 }),
+  spentAmount: numeric('spent_amount', { precision: 12, scale: 2 }).notNull().default('0.00'),
+  maxOrders: integer('max_orders'),
+  ordersServed: integer('orders_served').notNull().default(0),
+
+  // Escopo combinável (AND) — todos nullable, todos RESTRICT. NUNCA SET
+  // NULL: uma campanha de "Produto X" cujo produto seja removido não pode
+  // silenciosamente virar uma campanha GLOBAL (isso ampliaria o escopo e o
+  // gasto de forma perigosa) — RESTRICT bloqueia fisicamente a remoção do
+  // produto/loja/etc. enquanto a campanha (histórica ou não) existir, o
+  // mesmo raciocínio já usado em shipping_route_rates/fulfillment_locations.
+  countryCode: varchar('country_code', { length: 10 }).references(() => countries.code, { onDelete: 'restrict' }),
+  regionId: varchar('region_id', { length: 255 }).references(() => shippingRegions.id, { onDelete: 'restrict' }),
+  sectorId: varchar('sector_id', { length: 255 }).references(() => shippingSectors.id, { onDelete: 'restrict' }),
+  routeId: varchar('route_id', { length: 255 }).references(() => shippingRoutes.id, { onDelete: 'restrict' }),
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'restrict' }),
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'restrict' }),
+  categoryId: varchar('category_id', { length: 255 }).references(() => categories.id, { onDelete: 'restrict' }),
+  productId: varchar('product_id', { length: 255 }).references(() => products.id, { onDelete: 'restrict' }),
+
+  // Só rastreabilidade (quem criou) — SET NULL é seguro aqui: perder a
+  // referência ao admin não altera o escopo/gasto da campanha, nunca a
+  // amplia. Nunca usado para autorização (isso é sempre requireGlobalAdmin).
+  createdBy: varchar('created_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_subsidy_campaigns_active_idx: index('shipping_subsidy_campaigns_active_idx').on(table.isActive),
+  shipping_subsidy_campaigns_product_idx: index('shipping_subsidy_campaigns_product_idx').on(table.productId),
+  shipping_subsidy_campaigns_store_idx: index('shipping_subsidy_campaigns_store_idx').on(table.storeId),
+  shipping_subsidy_campaigns_seller_idx: index('shipping_subsidy_campaigns_seller_idx').on(table.sellerId),
+  shipping_subsidy_campaigns_route_idx: index('shipping_subsidy_campaigns_route_idx').on(table.routeId),
+  shipping_subsidy_campaigns_funding_mode_check: check(
+    'shipping_subsidy_campaigns_funding_mode_check',
+    sql`${table.fundingMode} IN ('FULL','PERCENTAGE','MAX_AMOUNT')`
+  ),
+  // Cada modo exige exatamente os campos que lhe pertencem e proíbe os dos
+  // outros — mesma regra de validateShippingCampaignDefinition, aplicada
+  // também no banco (defesa em profundidade: uma escrita direta que
+  // pulasse a validação da aplicação ainda não pode gravar um estado
+  // inconsistente).
+  shipping_subsidy_campaigns_funding_fields_check: check(
+    'shipping_subsidy_campaigns_funding_fields_check',
+    sql`(
+      (${table.fundingMode} = 'FULL' AND ${table.percentage} IS NULL AND ${table.maxAmount} IS NULL)
+      OR (${table.fundingMode} = 'PERCENTAGE' AND ${table.percentage} IS NOT NULL AND ${table.percentage} > 0 AND ${table.percentage} <= 100 AND ${table.maxAmount} IS NULL)
+      OR (${table.fundingMode} = 'MAX_AMOUNT' AND ${table.maxAmount} IS NOT NULL AND ${table.maxAmount} > 0 AND ${table.percentage} IS NULL)
+    )`
+  ),
+  shipping_subsidy_campaigns_dates_check: check(
+    'shipping_subsidy_campaigns_dates_check',
+    sql`${table.startsAt} IS NULL OR ${table.endsAt} IS NULL OR ${table.startsAt} < ${table.endsAt}`
+  ),
+  shipping_subsidy_campaigns_budget_check: check(
+    'shipping_subsidy_campaigns_budget_check',
+    sql`${table.spentAmount} >= 0 AND (${table.campaignBudget} IS NULL OR (${table.campaignBudget} >= 0 AND ${table.spentAmount} <= ${table.campaignBudget}))`
+  ),
+  shipping_subsidy_campaigns_orders_check: check(
+    'shipping_subsidy_campaigns_orders_check',
+    sql`${table.ordersServed} >= 0 AND (${table.maxOrders} IS NULL OR (${table.maxOrders} > 0 AND ${table.ordersServed} <= ${table.maxOrders}))`
+  ),
+  shipping_subsidy_campaigns_priority_check: check('shipping_subsidy_campaigns_priority_check', sql`${table.priority} >= 0`),
+}));
+
+// FASE D18-C2 — registro de USO de campanha por pedido, para idempotência e
+// auditoria futura (D18-C3+ nunca consome orçamento/incrementa contadores
+// sem gravar aqui na MESMA transaction). Depois do D18-B2.2, cada child
+// order já É a unidade (sellerId, commercialStoreId) — é o child order,
+// nunca o purchase_group inteiro, que resolve sua própria campanha. Como
+// campanhas não são acumuláveis (D18-C1.1), no máximo 1 campanha pode ter
+// sido usada por child order: UNIQUE(order_id) sozinho já garante isso —
+// nunca precisamos de UNIQUE(campaign_id, order_id), que permitiria (por
+// engano) duas linhas de campanhas DIFERENTES para o mesmo pedido.
+export const shippingCampaignUsages = pgTable('shipping_campaign_usages', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  campaignId: varchar('campaign_id', { length: 255 }).notNull().references(() => shippingSubsidyCampaigns.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  subsidyAmount: numeric('subsidy_amount', { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_campaign_usages_order_uq: uniqueIndex('shipping_campaign_usages_order_uq').on(table.orderId),
+  shipping_campaign_usages_campaign_idx: index('shipping_campaign_usages_campaign_idx').on(table.campaignId),
+  shipping_campaign_usages_subsidy_check: check('shipping_campaign_usages_subsidy_check', sql`${table.subsidyAmount} >= 0`),
+}));
+
 // Fase "Transportadoras Persistentes": entidade real de transportadora,
 // substitui a tela mock/in-memory (AdminCarriersManager.tsx) e o texto
 // livre de shipments.carrier para NOVOS shipments. shipments.carrier
@@ -806,6 +956,23 @@ export const orders = pgTable('orders', {
   commissionBase: numeric('commission_base', { precision: 12, scale: 2 }),
   marketplaceCommission: numeric('marketplace_commission', { precision: 12, scale: 2 }),
   sellerNetAmount: numeric('seller_net_amount', { precision: 12, scale: 2 }),
+  // FASE D18-C2 — snapshots ADITIVOS para auditoria futura de campanhas
+  // (D18-C3+ ainda não os preenche; todos NULL até então). Escolha mínima
+  // deliberada (D18-C1.1, seção 13): sellerShippingPolicyId e
+  // shippingPolicyModeAtCheckout cobrem a política PERMANENTE (a FK sozinha
+  // não bastaria porque a linha referenciada pode ser editada depois — o
+  // modo em texto congela o que valeu de fato neste pedido, mesmo que
+  // store_shipping_policies.mode mude no futuro). shippingCampaignId +
+  // shippingCampaignSubsidy cobrem a campanha (RESTRICT na FK: nunca perder
+  // a rastreabilidade de um pedido que já usou uma campanha). Não
+  // snapshotamos nome/fundingMode/percentual/tetos da campanha aqui —
+  // shippingCampaignSubsidy (o valor real em dinheiro) já é a fonte
+  // financeiramente autoritativa; detalhe adicional fica para quando D18-C3
+  // efetivamente consumir campanhas, se a necessidade real aparecer.
+  sellerShippingPolicyId: varchar('seller_shipping_policy_id', { length: 255 }).references(() => storeShippingPolicies.id, { onDelete: 'restrict' }),
+  shippingPolicyModeAtCheckout: varchar('shipping_policy_mode_at_checkout', { length: 50 }),
+  shippingCampaignId: varchar('shipping_campaign_id', { length: 255 }).references(() => shippingSubsidyCampaigns.id, { onDelete: 'restrict' }),
+  shippingCampaignSubsidy: numeric('shipping_campaign_subsidy', { precision: 12, scale: 2 }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
