@@ -1077,12 +1077,21 @@ export async function getFormattedUserCart(db: any, userId: string, destinationC
   };
 }
 
+// FASE D18-C2.14 — X-Country-Code é o destino EXPLICITAMENTE selecionado
+// pelo comprador na sessão atual ("Enviar para", PreferencesContext.
+// selectedCountry — apiClient.ts sempre o envia). Isso é autoridade sobre
+// um endereço padrão salvo, que pode estar desatualizado: um comprador que
+// mudou "Enviar para" para GW não pode ter sua escolha silenciosamente
+// substituída por um endereço padrão antigo em outro país (isso rejeitava
+// produtos national/GW mesmo com a UI mostrando "Enviar para: Guiné-
+// Bissau" — achado real em staging). O endereço padrão continua sendo o
+// fallback quando a requisição não informa nenhum destino explícito.
 async function resolveCartDestinationCountry(db: any, userId: string, req: AuthRequest): Promise<string | undefined> {
-  const [defaultAddress] = await db.select().from(addresses).where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true))).limit(1);
-  if (defaultAddress?.countryCode) return defaultAddress.countryCode;
   const header = req.headers['x-country-code'];
   const headerVal = Array.isArray(header) ? header[0] : header;
-  return headerVal || undefined;
+  if (headerVal) return headerVal;
+  const [defaultAddress] = await db.select().from(addresses).where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true))).limit(1);
+  return defaultAddress?.countryCode || undefined;
 }
 
 buyerRouter.get('/cart', requireAuth, async (req: AuthRequest, res: Response) => {
@@ -1310,18 +1319,25 @@ export async function addItemToCartForUser(
 
     // Melhoria pré-piloto (elegibilidade por país): backend revalida mesmo que
     // o produto tenha "escapado" do catálogo filtrado (ex.: link direto, cache
-    // desatualizado). Prioridade do destino a validar: (1) endereço de entrega
-    // padrão do comprador — sinal mais real que existe; (2) destinationCountry
-    // explícito enviado pelo frontend; (3) país já em uso no carrinho atual
-    // (carrinho não pode misturar destinos, mesma lógica já aplicada à moeda).
-    // Sem nenhum desses (comprador novíssimo, sem endereço, carrinho vazio),
-    // não há como determinar o destino ainda — o checkout continua sendo o
-    // portão definitivo que nunca pode ser contornado.
+    // desatualizado). FASE D18-C2.14 — prioridade do destino a validar: (1)
+    // destinationCountry explícito da requisição atual (payload.destinationCountry,
+    // já resolvido pelo route handler a partir do body ou de X-Country-Code —
+    // "Enviar para" da sessão atual, PreferencesContext.selectedCountry) —
+    // uma escolha explícita do comprador NUNCA pode ser silenciosamente
+    // substituída por um endereço padrão desatualizado (achado real em
+    // staging: comprador com "Enviar para: GW" e endereço padrão salvo em
+    // outro país tinha produtos GW rejeitados); (2) endereço de entrega
+    // padrão do comprador, como fallback quando a requisição não informa
+    // nenhum destino explícito; (3) país já em uso no carrinho atual
+    // (carrinho não pode misturar destinos, mesma lógica já aplicada à
+    // moeda). Sem nenhum desses (comprador novíssimo, sem endereço, carrinho
+    // vazio), não há como determinar o destino ainda — o checkout continua
+    // sendo o portão definitivo que nunca pode ser contornado.
     const [defaultAddress] = await db.select().from(addresses).where(and(eq(addresses.userId, userId), eq(addresses.isDefault, true))).limit(1);
     const existingCartForDestination = (await db.select().from(carts).where(eq(carts.userId, userId)).limit(1))[0];
     const destinationCountry: string | undefined =
-      defaultAddress?.countryCode ||
       payload.destinationCountry ||
+      defaultAddress?.countryCode ||
       (existingCartForDestination && (await db.select().from(cartItems).where(eq(cartItems.cartId, existingCartForDestination.id)).limit(1)).length > 0
         ? existingCartForDestination.countryCode
         : undefined);

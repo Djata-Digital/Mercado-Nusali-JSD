@@ -97,6 +97,14 @@ apiRouter.get('/shipping/preview', async (req: Request, res: Response) => {
       });
     }
 
+    // FASE D18-C2.13 — corrige o contrato HTTP: resolveShippingPreview() já
+    // calcula os campos pós-política desde D18-C2.10 (mesma
+    // resolveShippingPayerPolicy que /shipping/preview-cart usa, ver
+    // handler abaixo), mas este handler continuava montando a resposta com
+    // a lista de campos ANTERIOR a D18-C2.10, descartando-os silenciosamente
+    // — o comprador recebia shippingChargedToBuyer=undefined e a UI tratava
+    // isso como frete grátis, para QUALQUER política. Só repassa os valores
+    // já calculados pelo serviço — nenhuma regra de política duplicada aqui.
     return res.json({
       success: true,
       data: {
@@ -106,6 +114,11 @@ apiRouter.get('/shipping/preview', async (req: Request, res: Response) => {
         serviceCode: result.serviceCode,
         serviceName: result.serviceName,
         fulfillmentType: result.fulfillmentType,
+        shippingChargedToBuyer: result.shippingChargedToBuyer,
+        shippingSellerSubsidy: result.shippingSellerSubsidy,
+        shippingMarketplaceSubsidy: result.shippingMarketplaceSubsidy,
+        shippingPayer: result.shippingPayer,
+        policyMode: result.policyMode,
       },
     });
   } catch (err: any) {
