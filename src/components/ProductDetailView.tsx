@@ -393,7 +393,12 @@ export const ProductDetailView: React.FC = () => {
   const [deliveryPreview, setDeliveryPreview] = useState<{
     loading: boolean;
     available: boolean;
+    // FASE D18-C2.10 — shippingAmount é o custo logístico REAL (nunca
+    // exibido diretamente ao comprador a partir de agora);
+    // shippingChargedToBuyer é o valor pós-política (SELLER_FREE_SHIPPING/
+    // SELLER_SUBSIDIZED/etc.) — o que a UI deve mostrar como "Frete".
     shippingAmount: number;
+    shippingChargedToBuyer: number;
     currency: string;
     serviceCode?: string;
     serviceName?: string;
@@ -423,11 +428,11 @@ export const ProductDetailView: React.FC = () => {
     // Backend também valida isto de forma independente (defesa em
     // profundidade) — aqui só evita uma requisição desnecessária.
     if (!destinationShippingSectorId) {
-      setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: product.currency || 'XOF', code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
+      setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, shippingChargedToBuyer: 0, currency: product.currency || 'XOF', code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
       return;
     }
 
-    setDeliveryPreview((prev) => ({ ...(prev || { loading: true, available: false, shippingAmount: 0, currency: product.currency || 'XOF' }), loading: true }));
+    setDeliveryPreview((prev) => ({ ...(prev || { loading: true, available: false, shippingAmount: 0, shippingChargedToBuyer: 0, currency: product.currency || 'XOF' }), loading: true }));
 
     ShippingService.getPreview({
       productId: product.id,
@@ -443,6 +448,7 @@ export const ProductDetailView: React.FC = () => {
             loading: false,
             available: true,
             shippingAmount: data.shippingAmount,
+            shippingChargedToBuyer: data.shippingChargedToBuyer,
             currency: data.currency,
             serviceCode: data.serviceCode,
             serviceName: data.serviceName,
@@ -450,10 +456,10 @@ export const ProductDetailView: React.FC = () => {
         } else {
           const unavailableCode: string = data.code;
           const unavailableMessage: string = data.message;
-          setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: product.currency || 'XOF', code: unavailableCode, message: unavailableMessage });
+          setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, shippingChargedToBuyer: 0, currency: product.currency || 'XOF', code: unavailableCode, message: unavailableMessage });
         }
       } else {
-        setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, currency: product.currency || 'XOF', code: res.error?.code, message: res.error?.message || 'Frete indisponível para este destino no momento.' });
+        setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, shippingChargedToBuyer: 0, currency: product.currency || 'XOF', code: res.error?.code, message: res.error?.message || 'Frete indisponível para este destino no momento.' });
       }
     });
 
@@ -1398,8 +1404,14 @@ export const ProductDetailView: React.FC = () => {
                     Frete{deliveryPreview.serviceCode ? ` (${deliveryPreview.serviceCode})` : ''}:
                   </span>
                   <span className="font-black text-emerald-700">
-                    {deliveryPreview.shippingAmount > 0
-                      ? formatCurrency(deliveryPreview.shippingAmount, deliveryPreview.currency as any)
+                    {/* FASE D18-C2.10 — exibe o valor PÓS-política
+                        (shippingChargedToBuyer), nunca o custo logístico
+                        bruto (shippingAmount): um produto com frete grátis
+                        do vendedor (SELLER_FREE_SHIPPING) tem
+                        shippingAmount > 0 mas shippingChargedToBuyer === 0,
+                        e deve mostrar "GRÁTIS" aqui, nunca o custo real. */}
+                    {deliveryPreview.shippingChargedToBuyer > 0
+                      ? formatCurrency(deliveryPreview.shippingChargedToBuyer, deliveryPreview.currency as any)
                       : 'GRÁTIS'}
                   </span>
                 </div>

@@ -3,11 +3,19 @@ import { ShippingApi } from '../api/clients/ShippingApi';
 
 export interface ShippingPreviewAvailable {
   available: true;
+  // FASE D18-C2.10 — shippingAmount é o custo logístico REAL, nunca zerado
+  // por uma política de frete grátis do seller. shippingChargedToBuyer é o
+  // valor pós-política, o que a UI deve exibir como "Frete" ao comprador.
   shippingAmount: number;
   currency: string;
   serviceCode: string;
   serviceName: string;
   fulfillmentType?: 'SELLER_LOCATION' | 'NUSALI_HUB';
+  shippingChargedToBuyer: number;
+  shippingSellerSubsidy: number;
+  shippingMarketplaceSubsidy: number;
+  shippingPayer: 'buyer' | 'seller' | 'marketplace' | 'shared';
+  policyMode: string;
 }
 export interface ShippingPreviewUnavailable {
   available: false;

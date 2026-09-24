@@ -41,7 +41,13 @@ export interface ShippingPreviewInput {
   destinationShippingSectorId?: string | null;
 }
 
-export interface ShippingPreviewAvailable {
+// FASE D16-G2 — forma bruta (só F3/F4, ANTES de qualquer política de
+// pagador): shippingAmount é o custo logístico real. Núcleo compartilhado
+// por resolveShippingPreviewLine — usado tanto pelo preview de produto
+// único (que agora aplica a política em cima disto, D18-C2.10) quanto pelo
+// preview de carrinho (que agrega várias linhas RAW por grupo antes de
+// aplicar a política uma vez por grupo, D16-G3) — nunca duplicado.
+interface ShippingPreviewRawShape {
   ok: true;
   available: true;
   shippingAmount: number;
@@ -51,10 +57,31 @@ export interface ShippingPreviewAvailable {
   fulfillmentType: 'SELLER_LOCATION' | 'NUSALI_HUB';
 }
 
+export interface ShippingPreviewAvailable extends ShippingPreviewRawShape {
+  // FASE D18-C2.10 — shippingAmount (herdado acima) continua sendo o custo
+  // logístico REAL, nunca vira 0 por causa de uma política de frete grátis
+  // do seller. Os campos abaixo são os valores PÓS-política (mesma função e
+  // mesmos nomes que resolveCartShippingPreview/orderService já usam) —
+  // aditivos, para nunca quebrar um consumidor antigo que só lia
+  // shippingAmount. Valor efetivamente cobrado do comprador —
+  // shippingChargedToBuyer é o que a tela de produto deve exibir como
+  // "Frete" a partir de agora, nunca shippingAmount bruto.
+  shippingChargedToBuyer: number;
+  shippingSellerSubsidy: number;
+  shippingMarketplaceSubsidy: number;
+  shippingPayer: 'buyer' | 'seller' | 'marketplace' | 'shared';
+  policyMode: string;
+}
+
 export interface ShippingPreviewUnavailable {
   ok: true;
   available: false;
-  code: 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY' | 'DELIVERY_SECTOR_REQUIRED' | 'SHIPPING_ROUTE_NOT_AVAILABLE' | 'SHIPPING_RATE_NOT_AVAILABLE';
+  // FASE D18-C2.10 — inclui os mesmos códigos de "política de frete não
+  // aplicável" que resolveCartShippingPreview/checkout já usam
+  // (ShippingPolicyNotApplicableCode) — mesma semântica de "checkout
+  // bloqueado" nos dois lugares, nunca um código novo inventado aqui.
+  code: 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY' | 'DELIVERY_SECTOR_REQUIRED' | 'SHIPPING_ROUTE_NOT_AVAILABLE' | 'SHIPPING_RATE_NOT_AVAILABLE'
+    | 'SELLER_SHIPPING_POLICY_INVALID' | 'SELLER_SUBSIDY_EXCEEDS_NET' | 'SHIPPING_FUNDING_INVARIANT_VIOLATION';
   message: string;
 }
 
@@ -72,7 +99,7 @@ export type ShippingPreviewResult = ShippingPreviewAvailable | ShippingPreviewUn
 // (nunca exposto por resolveShippingPreview, o contrato público de produto
 // único permanece idêntico ao de D16-G2) para permitir agrupar por
 // vendedor no preview de carrinho (D16-G3) sem duplicar a resolução F4/F3.
-interface ShippingPreviewLineAvailable extends ShippingPreviewAvailable {
+interface ShippingPreviewLineAvailable extends ShippingPreviewRawShape {
   sellerId: string;
   // FASE D18-B2.2 - storeId aqui e a FULFILLMENT store (bc.storeId, null em
   // fulfillment por HUB). commercialStoreId e a loja a qual o produto
@@ -211,11 +238,40 @@ export async function resolveShippingPreview(input: ShippingPreviewInput, execut
   if (line.ok === false) return line;
   if (line.available === false) return line;
 
-  // Contrato público de produto único (D16-G2) permanece IDÊNTICO —
-  // sellerId/storeId nunca são expostos aqui (só usados internamente pelo
-  // preview de carrinho, D16-G3, para agrupar por vendedor).
-  const { sellerId, storeId, commercialStoreId, ...publicShape } = line;
-  return publicShape;
+  // FASE D18-C2.10 — corrige o bug confirmado em D18-C2.9: este preview de
+  // produto único mostrava sempre o custo logístico BRUTO (F3/F4) como se
+  // fosse o valor devido pelo comprador, nunca aplicando a política de
+  // pagador da loja (SELLER_FREE_SHIPPING/SELLER_SUBSIDIZED/etc.) — um
+  // produto com frete grátis do vendedor continuava exibindo frete cobrado
+  // na página do produto. Reaproveita EXATAMENTE resolveShippingPayerPolicy
+  // (nunca uma segunda implementação da regra financeira), pela loja
+  // COMERCIAL do produto (line.commercialStoreId = products.storeId, nunca
+  // a fulfillment store — D18-B2.2: mesma autoridade que carrinho/checkout
+  // já usam, HUB ou não).
+  let policy;
+  try {
+    policy = await resolveShippingPayerPolicy(line.shippingAmount, { storeId: line.commercialStoreId, sellerId: line.sellerId }, db);
+  } catch (err) {
+    if (err instanceof ShippingPolicyNotApplicableError) {
+      return { ok: true, available: false, code: err.code, message: err.message.replace(/^[A-Z_]+: /, '') };
+    }
+    throw err;
+  }
+
+  // Contrato público de produto único (D16-G2) preserva shippingAmount
+  // (custo real, nunca zerado) e segue NUNCA expondo sellerId/storeId/
+  // commercialStoreId (só usados internamente aqui e pelo preview de
+  // carrinho, D16-G3, para agrupar por vendedor) — só adiciona os campos
+  // pós-política (D18-C2.10).
+  const { sellerId, storeId, commercialStoreId, ...rawPublicShape } = line;
+  return {
+    ...rawPublicShape,
+    shippingChargedToBuyer: policy.shippingChargedToBuyer,
+    shippingSellerSubsidy: policy.shippingSellerSubsidy,
+    shippingMarketplaceSubsidy: policy.shippingMarketplaceSubsidy,
+    shippingPayer: policy.shippingPayer,
+    policyMode: policy.policyMode,
+  };
 }
 
 // ---------------------------------------------------------------------------
