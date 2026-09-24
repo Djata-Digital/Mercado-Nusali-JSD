@@ -157,6 +157,12 @@ export function deriveLogisticsStatus(
   return 'READY_TO_SHIP';
 }
 
+// FASE D18-B2.2 — chave de agrupamento para itens SEM commercialStoreId
+// (products.store_id NULL, dado legado). Nunca é um id de loja real (nenhuma
+// tabela usa "::" em ids), então não pode colidir com um commercialStoreId
+// verdadeiro nem se misturar a um grupo de loja real do mesmo seller.
+const LEGACY_NO_STORE_GROUP_KEY = '__LEGACY_NO_STORE__';
+
 export class OrderService {
   // `executor` opcional: permite testar esta função contra um Postgres
   // Docker isolado (mesmo padrão já usado em payoutService/refundService),
@@ -438,7 +444,18 @@ export class OrderService {
         unitPrice: number;
         subtotal: number;
         sellerId: string | null;
+        // FASE D18-B2.1/B2.2 - storeId aqui e a FULFILLMENT store (de onde o
+        // item sai fisicamente; bestCandidate.storeId, null quando o item sai
+        // de um NUSALI_WAREHOUSE/HUB). commercialStoreId e a loja A QUAL O
+        // PRODUTO PERTENCE (products.storeId) - NUNCA muda por causa de
+        // fulfillment. A politica de quem paga o frete e decidida SEMPRE por
+        // commercialStoreId, nunca por storeId (ver bySeller/computeGroupFinancials
+        // abaixo). Os dois coincidem hoje no caminho comum (produto simples,
+        // fulfillment na propria loja - ver ProductCreationService,
+        // ensureStoreFulfillmentLocation(store.id)), mas DIVERGEM sempre que o
+        // item e despachado por HUB.
         storeId: string | null;
+        commercialStoreId: string | null;
         productImage: string | null;
         attributesJson: any;
         inventoryId: string;
@@ -590,6 +607,7 @@ export class OrderService {
           subtotal: itemSubtotal,
           sellerId: prod.sellerId || null,
           storeId: bestCandidate.storeId || null,
+          commercialStoreId: prod.storeId || null,
           productImage: prod.image || null,
           attributesJson: ci.selectedAttributesJson || null,
           inventoryId: bestCandidate.inventoryId,
@@ -733,10 +751,16 @@ export class OrderService {
       async function computeGroupFinancials(
         items: typeof verifiedItems,
         groupSellerId: string | null,
-        freightRes: Awaited<ReturnType<typeof computeSmartFulfillmentFreightRes>>
+        freightRes: Awaited<ReturnType<typeof computeSmartFulfillmentFreightRes>>,
+        // FASE D18-B2.2 - commercial store do grupo, decidida pelo CHAMADOR
+        // (bySeller agora agrupa por sellerId+commercialStoreId - ver abaixo),
+        // nunca mais derivada de items[].storeId (fulfillment). orders.storeId
+        // passa a ser SEMPRE a loja comercial, mesmo quando o item saiu de um
+        // HUB (bestCandidate.storeId null nesse caso).
+        groupCommercialStoreId: string | null
       ) {
         const groupSubtotal = items.reduce((s, i) => s + i.subtotal, 0);
-        const groupStoreId = items.find((i) => i.storeId)?.storeId || null;
+        const groupStoreId = groupCommercialStoreId;
 
         let groupSellerCommissionRate: number | null = null;
         if (groupSellerId) {
@@ -994,11 +1018,21 @@ export class OrderService {
           throw new Error(`ORDER_ITEM_SELLER_REQUIRED: O produto "${missingSeller.productTitle}" não possui vendedor associado — checkout multi-vendedor exige que todo item tenha um vendedor real.`);
         }
 
-        const bySeller = new Map<string, typeof verifiedItems>();
+        // FASE D18-B2.2 - child order key = (sellerId, commercialStoreId),
+        // nunca so sellerId: um seller pode ter varias lojas comerciais
+        // (D18-B2 permite 1 politica por loja), e cada uma financia o
+        // proprio frete de forma independente, mesmo quando ambas despacham
+        // do MESMO HUB. Produtos legados sem commercialStoreId (products.store_id
+        // NULL) formam um grupo separado por seller (LEGACY_NO_STORE_GROUP_KEY)
+        // - nunca misturados com um grupo de loja real, mesmo do mesmo seller.
+        const bySeller = new Map<string, { sellerId: string; commercialStoreId: string | null; items: typeof verifiedItems }>();
         for (const item of verifiedItems) {
-          const key = item.sellerId as string;
-          if (!bySeller.has(key)) bySeller.set(key, []);
-          bySeller.get(key)!.push(item);
+          const sellerId = item.sellerId as string;
+          const commercialStoreId = item.commercialStoreId;
+          const key = sellerId + '::' + (commercialStoreId ?? LEGACY_NO_STORE_GROUP_KEY);
+          const existing = bySeller.get(key);
+          if (existing) existing.items.push(item);
+          else bySeller.set(key, { sellerId, commercialStoreId, items: [item] });
         }
 
         // Fase 1: calcula (somente leitura) o financeiro de CADA vendedor
@@ -1014,10 +1048,14 @@ export class OrderService {
           financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>;
           freightRes: Awaited<ReturnType<typeof computeSmartFulfillmentFreightRes>>;
         }> = [];
-        for (const [sellerId, items] of bySeller) {
-          const groupStoreId = items.find((i) => i.storeId)?.storeId || null;
-          const smartFreightRes = await computeSmartFulfillmentFreightRes(items, groupStoreId, sellerId);
-          const { financials, freightRes, storeId } = await computeGroupFinancials(items, sellerId, smartFreightRes);
+        for (const { sellerId, commercialStoreId, items } of bySeller.values()) {
+          // FASE D18-B2.2 - a politica de frete e SEMPRE resolvida pela loja
+          // comercial do grupo, nunca pela fulfillment store do candidate F4
+          // (que e null em fulfillment por HUB). Grupo legado (commercialStoreId
+          // null) cai no fallback por seller_id ja existente em
+          // resolveShippingPayerPolicy - nunca inventa uma loja.
+          const smartFreightRes = await computeSmartFulfillmentFreightRes(items, commercialStoreId, sellerId);
+          const { financials, freightRes, storeId } = await computeGroupFinancials(items, sellerId, smartFreightRes, commercialStoreId);
           groupComputations.push({ sellerId, items, storeId, financials, freightRes });
         }
 

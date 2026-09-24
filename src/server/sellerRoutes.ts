@@ -989,28 +989,33 @@ sellerRouter.post('/shipping-policy', async (req: AuthRequest, res: Response) =>
 
     const storeId = targetStoreId;
 
-    const existingPolicy = await db.select().from(storeShippingPolicies).where(and(eq(storeShippingPolicies.storeId, storeId), eq(storeShippingPolicies.sellerId, seller.id))).limit(1);
-
-    if (existingPolicy.length > 0) {
-      await db.update(storeShippingPolicies)
-        .set({
-          mode: finalMode,
-          sellerSubsidyMaxAmount: finalMaxAmt !== null ? String(finalMaxAmt) : null,
-          sellerSubsidyPercent: finalPct !== null ? String(finalPct) : null,
-          updatedAt: new Date(),
-        })
-        .where(eq(storeShippingPolicies.id, existingPolicy[0].id));
-    } else {
-      await db.insert(storeShippingPolicies).values({
-        id: `pol_${Date.now()}`,
+    // FASE D18-B2 — upsert atômico por LOJA (UNIQUE store_id): duas requisições
+    // simultâneas para a mesma loja nunca criam duas políticas nem geram 500
+    // por violação de unicidade — a segunda vira UPDATE. O storeId já foi
+    // provado como pertencente ao seller autenticado acima (validStore), então
+    // a política dessa loja é dele por definição. isActive só é definido na
+    // criação (o update nunca o altera, como antes).
+    const sellerSubsidyMaxAmountValue = finalMaxAmt !== null ? String(finalMaxAmt) : null;
+    const sellerSubsidyPercentValue = finalPct !== null ? String(finalPct) : null;
+    await db.insert(storeShippingPolicies)
+      .values({
+        id: `pol_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         storeId,
         sellerId: seller.id,
         mode: finalMode,
-        sellerSubsidyMaxAmount: finalMaxAmt !== null ? String(finalMaxAmt) : null,
-        sellerSubsidyPercent: finalPct !== null ? String(finalPct) : null,
+        sellerSubsidyMaxAmount: sellerSubsidyMaxAmountValue,
+        sellerSubsidyPercent: sellerSubsidyPercentValue,
         isActive: true,
+      })
+      .onConflictDoUpdate({
+        target: storeShippingPolicies.storeId,
+        set: {
+          mode: finalMode,
+          sellerSubsidyMaxAmount: sellerSubsidyMaxAmountValue,
+          sellerSubsidyPercent: sellerSubsidyPercentValue,
+          updatedAt: new Date(),
+        },
       });
-    }
 
     return res.json({
       success: true,

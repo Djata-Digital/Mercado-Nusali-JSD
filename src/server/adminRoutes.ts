@@ -4829,26 +4829,26 @@ adminRouter.post('/stores/:id/shipping-policy', requireGlobalAdmin, async (req: 
       if (!validateSubsidyPercent(marketplaceSubsidyPercent).ok) return res.status(400).json({ success: false, message: 'Teto de subsídio (percentual) deve estar entre 0 e 100.' });
     }
 
-    const existing = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.storeId, storeId)).limit(1);
     const updateFields: any = { updatedAt: new Date() };
     if (mode !== undefined) updateFields.mode = mode;
     if (marketplaceSubsidyMaxAmount !== undefined) updateFields.marketplaceSubsidyMaxAmount = marketplaceSubsidyMaxAmount === null ? null : String(Number(marketplaceSubsidyMaxAmount));
     if (marketplaceSubsidyPercent !== undefined) updateFields.marketplaceSubsidyPercent = marketplaceSubsidyPercent === null ? null : String(Number(marketplaceSubsidyPercent));
     if (isActive !== undefined) updateFields.isActive = Boolean(isActive);
 
-    if (existing.length > 0) {
-      await db.update(storeShippingPolicies).set(updateFields).where(eq(storeShippingPolicies.id, existing[0].id));
-    } else {
-      await db.insert(storeShippingPolicies).values({
-        id: `pol_admin_${Date.now()}`,
+    // FASE D18-B2 — upsert atômico por LOJA (UNIQUE store_id): sem duas linhas
+    // nem 500 sob concorrência. Se a loja já tem política, só os campos
+    // enviados (updateFields) são alterados — exatamente como antes.
+    await db.insert(storeShippingPolicies)
+      .values({
+        id: `pol_admin_${Date.now()}_${randomBytes(3).toString('hex')}`,
         storeId,
         sellerId: store.sellerId,
         mode: mode || 'CUSTOMER_PAYS',
         marketplaceSubsidyMaxAmount: marketplaceSubsidyMaxAmount !== undefined && marketplaceSubsidyMaxAmount !== null ? String(Number(marketplaceSubsidyMaxAmount)) : null,
         marketplaceSubsidyPercent: marketplaceSubsidyPercent !== undefined && marketplaceSubsidyPercent !== null ? String(Number(marketplaceSubsidyPercent)) : null,
         isActive: isActive !== undefined ? Boolean(isActive) : true,
-      });
-    }
+      })
+      .onConflictDoUpdate({ target: storeShippingPolicies.storeId, set: updateFields });
 
     await writeRealAudit(req, 'admin.shipping_policy.updated', 'store_shipping_policies', storeId, req.body);
 

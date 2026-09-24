@@ -1,6 +1,6 @@
 import { getDb } from '../../../db/index.js';
 import { storeShippingPolicies, sellers, stores, platformSettings } from '../../../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { eq, asc } from 'drizzle-orm';
 
 // FASE D16-I5 — VOLUMETRIC_DIVISOR_SETTING_KEY/getVolumetricDivisor/
 // computeBillableWeightKg (peso volumétrico) removidos: existiam
@@ -182,10 +182,21 @@ export async function resolveShippingPayerPolicy(
     try {
       let policyRows = [];
       if (input.storeId) {
+        // FASE D18-B2 — UNIQUE(store_id) garante no máximo 1 linha aqui;
+        // já é determinístico por construção do banco, sem precisar de ORDER BY.
         policyRows = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.storeId, input.storeId)).limit(1);
       }
       if (policyRows.length === 0 && input.sellerId) {
-        policyRows = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.sellerId, input.sellerId)).limit(1);
+        // FASE D18-B2.2 — fallback LEGADO apenas (chamador nunca usa isto
+        // quando a loja comercial do item é conhecida — ver orderService.ts/
+        // shippingPreviewService.ts, grupo LEGACY_NO_STORE). Sem UNIQUE em
+        // seller_id (um seller pode ter várias lojas — D18-B2), então esta
+        // consulta pode ter mais de uma linha; ORDER BY explícito evita que
+        // um limit(1) sem ordenação escolha uma linha diferente a cada
+        // execução. Não representa preferência comercial nenhuma, só
+        // elimina o não-determinismo: a mais antiga (created_at), com o id
+        // como desempate final.
+        policyRows = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.sellerId, input.sellerId)).orderBy(asc(storeShippingPolicies.createdAt), asc(storeShippingPolicies.id)).limit(1);
       }
       if (policyRows.length > 0 && policyRows[0].isActive) {
         const pol = policyRows[0];

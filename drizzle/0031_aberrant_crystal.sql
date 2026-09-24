@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "store_shipping_policies_store_uq" ON "store_shipping_policies" USING btree ("store_id");

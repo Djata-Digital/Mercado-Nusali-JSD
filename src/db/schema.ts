@@ -689,6 +689,11 @@ export const storeShippingPolicies = pgTable('store_shipping_policies', {
 }, (table) => ({
   store_shipping_policies_store_idx: index('store_shipping_policies_store_idx').on(table.storeId),
   store_shipping_policies_seller_idx: index('store_shipping_policies_seller_idx').on(table.sellerId),
+  // FASE D18-B2 — no máximo UMA política por LOJA. Deliberadamente NÃO é
+  // unique em seller_id: um seller pode ter várias lojas, cada uma com a sua
+  // política. Habilita upsert idempotente (ON CONFLICT (store_id)) nos
+  // writers de seller e admin, sem duas linhas nem 500 sob concorrência.
+  store_shipping_policies_store_uq: uniqueIndex('store_shipping_policies_store_uq').on(table.storeId),
 }));
 
 // Fase "Transportadoras Persistentes": entidade real de transportadora,

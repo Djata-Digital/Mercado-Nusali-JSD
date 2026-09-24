@@ -74,7 +74,12 @@ export type ShippingPreviewResult = ShippingPreviewAvailable | ShippingPreviewUn
 // vendedor no preview de carrinho (D16-G3) sem duplicar a resolução F4/F3.
 interface ShippingPreviewLineAvailable extends ShippingPreviewAvailable {
   sellerId: string;
+  // FASE D18-B2.2 - storeId aqui e a FULFILLMENT store (bc.storeId, null em
+  // fulfillment por HUB). commercialStoreId e a loja a qual o produto
+  // pertence (products.storeId) - autoridade para a politica de frete,
+  // nunca storeId.
   storeId: string | null;
+  commercialStoreId: string | null;
 }
 type ShippingPreviewLineResult = ShippingPreviewLineAvailable | ShippingPreviewUnavailable | ShippingPreviewInvalid;
 
@@ -194,6 +199,7 @@ async function resolveShippingPreviewLine(input: ShippingPreviewInput, db: any):
     fulfillmentType: bc.locationType,
     sellerId: product.sellerId,
     storeId: bc.storeId || null,
+    commercialStoreId: product.storeId || null,
   };
 }
 
@@ -208,7 +214,7 @@ export async function resolveShippingPreview(input: ShippingPreviewInput, execut
   // Contrato público de produto único (D16-G2) permanece IDÊNTICO —
   // sellerId/storeId nunca são expostos aqui (só usados internamente pelo
   // preview de carrinho, D16-G3, para agrupar por vendedor).
-  const { sellerId, storeId, ...publicShape } = line;
+  const { sellerId, storeId, commercialStoreId, ...publicShape } = line;
   return publicShape;
 }
 
@@ -396,17 +402,23 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
 
   const resolvedLines = lineResults as ShippingPreviewLineAvailable[];
 
-  // Agrupa por sellerId — MESMA chave que orderService.ts usa para separar
-  // child orders (bySeller, F6.2) — nunca por um valor vindo do frontend.
-  const bySeller = new Map<string, ShippingPreviewLineAvailable[]>();
-  const itemsBySeller = new Map<string, CartShippingPreviewLineInput[]>();
+  // FASE D18-B2.2 - agrupa por (sellerId, commercialStoreId) - MESMA chave
+  // que orderService.ts usa para separar child orders (bySeller, F6.2/B2.2)
+  // - nunca por sellerId sozinho (um seller pode ter varias lojas, cada uma
+  // com politica propria) e nunca por um valor vindo do frontend. Grupo
+  // legado (commercialStoreId null) usa o mesmo sentinel conceitual do
+  // checkout - nunca se mistura com um grupo de loja real do mesmo seller.
+  const LEGACY_NO_STORE_GROUP_KEY = '__LEGACY_NO_STORE__';
+  const bySeller = new Map<string, { sellerId: string; commercialStoreId: string | null; lines: ShippingPreviewLineAvailable[] }>();
+  const itemsByGroup = new Map<string, CartShippingPreviewLineInput[]>();
   resolvedLines.forEach((line, idx) => {
-    const existing = bySeller.get(line.sellerId);
-    if (existing) existing.push(line);
-    else bySeller.set(line.sellerId, [line]);
-    const existingItems = itemsBySeller.get(line.sellerId);
+    const key = line.sellerId + '::' + (line.commercialStoreId ?? LEGACY_NO_STORE_GROUP_KEY);
+    const existing = bySeller.get(key);
+    if (existing) existing.lines.push(line);
+    else bySeller.set(key, { sellerId: line.sellerId, commercialStoreId: line.commercialStoreId, lines: [line] });
+    const existingItems = itemsByGroup.get(key);
     if (existingItems) existingItems.push(input.items[idx]);
-    else itemsBySeller.set(line.sellerId, [input.items[idx]]);
+    else itemsByGroup.set(key, [input.items[idx]]);
   });
 
   const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -416,12 +428,15 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
   let shippingCost = 0;
   let shippingSellerSubsidy = 0;
 
-  for (const [sellerId, lines] of bySeller) {
+  for (const { sellerId, commercialStoreId, lines } of bySeller.values()) {
+    const groupKey = sellerId + '::' + (commercialStoreId ?? LEGACY_NO_STORE_GROUP_KEY);
     // Soma ADITIVA por linha dentro do grupo — mesma regra de
     // computeSmartFulfillmentFreightRes (F6.2): nunca consolidação de
     // pacote nesta fase, mesmo que no futuro isso possa ser otimizado.
     const groupRawShippingCost = round2(lines.reduce((s, l) => s + l.shippingAmount, 0));
-    const storeId = lines.find((l) => l.storeId)?.storeId || null;
+    // FASE D18-B2.2 - politica resolvida SEMPRE pela loja comercial do
+    // grupo, nunca pela fulfillment store (identico ao checkout).
+    const storeId = commercialStoreId;
     // FASE D18-B1 — política inválida / seller net <= 0 => available:false
     // explícito (mesmos códigos do checkout), nunca uma cotação que o
     // checkout depois recusaria.
@@ -429,7 +444,7 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
     try {
       policy = await resolveShippingPayerPolicy(groupRawShippingCost, { storeId, sellerId }, db);
       if (policy.shippingSellerSubsidy > 0) {
-        const netInputs = await resolveSellerGroupNetInputs(db, sellerId, itemsBySeller.get(sellerId) || []);
+        const netInputs = await resolveSellerGroupNetInputs(db, sellerId, itemsByGroup.get(groupKey) || []);
         if (netInputs) {
           const netCheck = checkSellerNetForShippingShare({ ...netInputs, shippingSellerSubsidy: policy.shippingSellerSubsidy });
           if (!netCheck.ok) throw sellerSubsidyExceedsNetError(netCheck.sellerNetAmount, policy.shippingSellerSubsidy);
