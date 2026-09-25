@@ -232,6 +232,13 @@
       "when": 1790216934797,
       "tag": "0032_left_queen_noir",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1790373083518,
+      "tag": "0033_greedy_ogun",
+      "breakpoints": true
     }
   ]
 }

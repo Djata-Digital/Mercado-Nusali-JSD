@@ -88,6 +88,7 @@ import {
 } from './modules/shipping/shippingGeographyService.js';
 import { listFulfillmentLocationsForSeller, ensureStoreFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
 import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
+import { validateCouponDefinition, normalizeCouponCode } from './modules/coupons/couponService.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -216,18 +217,6 @@ export interface SellerReviewItem {
   repliedAt?: string;
 }
 
-export interface SellerCouponItem {
-  id: string;
-  code: string;
-  discountType: 'percentage' | 'fixed';
-  discountValue: number;
-  minPurchase: number;
-  usageLimit: number;
-  usageCount: number;
-  expiresAt: string;
-  status: 'active' | 'expired' | 'disabled';
-}
-
 export interface SellerCampaignItem {
   id: string;
   title: string;
@@ -307,7 +296,8 @@ let currentSellerProducts: any[] = [];
 
 let currentQuestions: SellerQuestion[] = [];
 let currentReviews: SellerReviewItem[] = [];
-let currentCoupons: SellerCouponItem[] = [];
+// FASE D18-C3.1B — mock currentCoupons removido: cupons agora são
+// 100% Postgres-backed (tabela coupons, ver couponRoutes abaixo).
 let currentCampaigns: SellerCampaignItem[] = [];
 let currentAds: SellerAdItem[] = [];
 
@@ -3364,42 +3354,313 @@ sellerRouter.post('/reviews/:id/reply', async (req: AuthRequest, res: Response) 
 // 8. MARKETING, COUPONS, CAMPAIGNS & ADS
 // ==========================================
 
-sellerRouter.get('/coupons', async (req: Request, res: Response) => {
-  return res.json({
-    success: true,
-    data: currentCoupons,
-  });
-});
+// FASE D18-C3.1B — cupons do vendedor: CRUD real, Postgres-backed.
+// Cupom pertence ao seller autenticado E a uma de suas stores comerciais
+// (nunca confiar em sellerId vindo do body; storeId é sempre revalidado
+// contra o seller autenticado). Consumo (coupon_usages), integração com
+// carrinho/checkout/calculateOrderFinancials e regras de moeda cruzada
+// entre pedidos ficam para uma fase futura — ver couponService.ts.
 
-sellerRouter.post('/coupons', async (req: Request, res: Response) => {
-  const { code, discountType, discountValue, minPurchase, usageLimit, expiresAt } = req.body;
-  const newCoupon: SellerCouponItem = {
-    id: `coup_${Date.now()}`,
-    code: (code || 'DESCONTO').toUpperCase(),
-    discountType: discountType || 'percentage',
-    discountValue: Number(discountValue) || 10,
-    minPurchase: Number(minPurchase) || 0,
-    usageLimit: Number(usageLimit) || 100,
-    usageCount: 0,
-    expiresAt: expiresAt || '31/12/2026',
-    status: 'active',
+function mapCouponRow(row: typeof coupons.$inferSelect, storeName?: string | null) {
+  return {
+    id: row.id,
+    code: row.code,
+    title: row.title,
+    storeId: row.storeId,
+    storeName: storeName ?? null,
+    discountType: row.discountType,
+    discountValue: Number(row.discountValue),
+    currency: row.currency,
+    minimumSpend: row.minimumSpend !== null ? Number(row.minimumSpend) : 0,
+    maxDiscount: row.maxDiscount !== null ? Number(row.maxDiscount) : null,
+    usageLimit: row.usageLimit,
+    usageLimitPerUser: row.usageLimitPerUser,
+    usageCount: row.usageCount,
+    startDate: row.startDate,
+    endDate: row.endDate,
+    isActive: row.isActive,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
+}
 
-  currentCoupons.unshift(newCoupon);
-  return res.json({
-    success: true,
-    message: `Cupom de desconto "${newCoupon.code}" criado com sucesso!`,
-    data: newCoupon,
-  });
+async function resolveAuthenticatedSeller(req: AuthRequest, res: Response) {
+  const db = getDb();
+  if (!db || !req.user?.id) {
+    res.status(401).json({ success: false, message: 'Não autorizado.' });
+    return null;
+  }
+  const [seller] = await db.select().from(sellers).where(eq(sellers.userId, req.user.id)).limit(1);
+  if (!seller) {
+    res.status(403).json({ success: false, message: 'Vendedor não encontrado.' });
+    return null;
+  }
+  return { db, seller };
+}
+
+async function validateCouponCurrency(db: NonNullable<ReturnType<typeof getDb>>, currency: string): Promise<boolean> {
+  const [match] = await db.select({ code: countries.currency }).from(countries).where(eq(countries.currency, currency.toUpperCase())).limit(1);
+  return !!match;
+}
+
+sellerRouter.get('/coupons', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const rows = await db
+      .select({ coupon: coupons, storeName: storesTable.name })
+      .from(coupons)
+      .leftJoin(storesTable, eq(coupons.storeId, storesTable.id))
+      .where(eq(coupons.sellerId, seller.id))
+      .orderBy(desc(coupons.createdAt));
+
+    return res.json({ success: true, data: rows.map((r) => mapCouponRow(r.coupon, r.storeName)) });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
 });
 
-sellerRouter.delete('/coupons/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  currentCoupons = currentCoupons.filter(c => c.id !== id);
-  return res.json({
-    success: true,
-    message: 'Cupom removido.',
-  });
+sellerRouter.get('/coupons/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const [row] = await db
+      .select({ coupon: coupons, storeName: storesTable.name })
+      .from(coupons)
+      .leftJoin(storesTable, eq(coupons.storeId, storesTable.id))
+      .where(and(eq(coupons.id, req.params.id), eq(coupons.sellerId, seller.id)))
+      .limit(1);
+
+    if (!row) return res.status(404).json({ success: false, message: 'Cupom não encontrado.' });
+    return res.json({ success: true, data: mapCouponRow(row.coupon, row.storeName) });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+sellerRouter.post('/coupons', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const {
+      code, title, storeId, discountType, discountValue, currency,
+      minimumSpend, maxDiscount, usageLimit, usageLimitPerUser, startDate, endDate,
+    } = req.body ?? {};
+
+    if (!storeId) {
+      return res.status(400).json({ success: false, error: { code: 'STORE_ID_REQUIRED', message: 'storeId é obrigatório.' } });
+    }
+    const [store] = await db.select().from(storesTable).where(and(eq(storesTable.id, storeId), eq(storesTable.sellerId, seller.id))).limit(1);
+    if (!store) {
+      return res.status(404).json({ success: false, error: { code: 'STORE_NOT_FOUND', message: 'Store não encontrada para este vendedor.' } });
+    }
+
+    const normalizedCode = typeof code === 'string' ? normalizeCouponCode(code) : '';
+    const startDateParsed = startDate ? new Date(startDate) : null;
+    const endDateParsed = endDate ? new Date(endDate) : null;
+
+    const validation = validateCouponDefinition({
+      code: normalizedCode,
+      title,
+      discountType,
+      discountValue: Number(discountValue),
+      minimumSpend: minimumSpend !== undefined && minimumSpend !== null ? Number(minimumSpend) : null,
+      maxDiscount: maxDiscount !== undefined && maxDiscount !== null ? Number(maxDiscount) : null,
+      currency: typeof currency === 'string' ? currency.toUpperCase() : '',
+      usageLimit: usageLimit !== undefined && usageLimit !== null ? Number(usageLimit) : null,
+      usageLimitPerUser: usageLimitPerUser !== undefined && usageLimitPerUser !== null ? Number(usageLimitPerUser) : null,
+      startDate: startDateParsed,
+      endDate: endDateParsed,
+    });
+    if (validation.ok === false) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_FAILED', message: validation.errors.join(' ') } });
+    }
+
+    const currencyUpper = String(currency).toUpperCase();
+    const currencyIsReal = await validateCouponCurrency(db, currencyUpper);
+    if (!currencyIsReal) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_CURRENCY', message: `Moeda "${currencyUpper}" não corresponde a nenhum país cadastrado.` } });
+    }
+
+    const newId = `coup_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    try {
+      const [inserted] = await db.insert(coupons).values({
+        id: newId,
+        code: normalizedCode,
+        title: String(title).trim(),
+        sellerId: seller.id,
+        storeId: store.id,
+        discountType,
+        discountValue: String(discountValue),
+        currency: currencyUpper,
+        minimumSpend: minimumSpend !== undefined && minimumSpend !== null ? String(minimumSpend) : '0.00',
+        maxDiscount: maxDiscount !== undefined && maxDiscount !== null ? String(maxDiscount) : null,
+        usageLimit: usageLimit !== undefined && usageLimit !== null ? Number(usageLimit) : null,
+        usageLimitPerUser: usageLimitPerUser !== undefined && usageLimitPerUser !== null ? Number(usageLimitPerUser) : null,
+        usageCount: 0,
+        startDate: startDateParsed,
+        endDate: endDateParsed,
+        isActive: true,
+      }).returning();
+
+      return res.status(201).json({
+        success: true,
+        message: `Cupom "${inserted.code}" criado com sucesso!`,
+        data: mapCouponRow(inserted, store.name),
+      });
+    } catch (insertErr: any) {
+      if (insertErr?.code === '23505' || insertErr?.cause?.code === '23505') {
+        return res.status(409).json({ success: false, error: { code: 'DUPLICATE_CODE', message: `Você já tem um cupom com o código "${normalizedCode}".` } });
+      }
+      throw insertErr;
+    }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+sellerRouter.patch('/coupons/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const [existing] = await db.select().from(coupons).where(and(eq(coupons.id, req.params.id), eq(coupons.sellerId, seller.id))).limit(1);
+    if (!existing) return res.status(404).json({ success: false, message: 'Cupom não encontrado.' });
+
+    const body = req.body ?? {};
+    let storeRow = { id: existing.storeId, name: null as string | null };
+    if (body.storeId !== undefined && body.storeId !== existing.storeId) {
+      const [store] = await db.select().from(storesTable).where(and(eq(storesTable.id, body.storeId), eq(storesTable.sellerId, seller.id))).limit(1);
+      if (!store) return res.status(404).json({ success: false, error: { code: 'STORE_NOT_FOUND', message: 'Store não encontrada para este vendedor.' } });
+      storeRow = { id: store.id, name: store.name };
+    } else if (existing.storeId) {
+      const [store] = await db.select().from(storesTable).where(eq(storesTable.id, existing.storeId)).limit(1);
+      storeRow = { id: existing.storeId, name: store?.name ?? null };
+    }
+
+    // Merge-then-validate: a definição COMPLETA resultante é validada, não
+    // apenas os campos tocados pelo PATCH (mesmo padrão de
+    // shippingCampaignService.ts / admin shipping-campaigns).
+    const merged = {
+      code: body.code !== undefined ? normalizeCouponCode(String(body.code)) : existing.code,
+      title: body.title !== undefined ? String(body.title) : existing.title,
+      discountType: body.discountType !== undefined ? body.discountType : existing.discountType,
+      discountValue: body.discountValue !== undefined ? Number(body.discountValue) : Number(existing.discountValue),
+      minimumSpend: body.minimumSpend !== undefined ? Number(body.minimumSpend) : (existing.minimumSpend !== null ? Number(existing.minimumSpend) : 0),
+      maxDiscount: body.maxDiscount !== undefined ? (body.maxDiscount === null ? null : Number(body.maxDiscount)) : (existing.maxDiscount !== null ? Number(existing.maxDiscount) : null),
+      currency: body.currency !== undefined ? String(body.currency).toUpperCase() : (existing.currency ?? ''),
+      usageLimit: body.usageLimit !== undefined ? (body.usageLimit === null ? null : Number(body.usageLimit)) : existing.usageLimit,
+      usageLimitPerUser: body.usageLimitPerUser !== undefined ? (body.usageLimitPerUser === null ? null : Number(body.usageLimitPerUser)) : existing.usageLimitPerUser,
+      startDate: body.startDate !== undefined ? (body.startDate ? new Date(body.startDate) : null) : existing.startDate,
+      endDate: body.endDate !== undefined ? (body.endDate ? new Date(body.endDate) : null) : existing.endDate,
+    };
+
+    const validation = validateCouponDefinition(merged);
+    if (validation.ok === false) {
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_FAILED', message: validation.errors.join(' ') } });
+    }
+
+    const currencyIsReal = await validateCouponCurrency(db, merged.currency);
+    if (!currencyIsReal) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_CURRENCY', message: `Moeda "${merged.currency}" não corresponde a nenhum país cadastrado.` } });
+    }
+
+    try {
+      const [updated] = await db.update(coupons).set({
+        code: merged.code,
+        title: merged.title,
+        storeId: storeRow.id,
+        discountType: merged.discountType,
+        discountValue: String(merged.discountValue),
+        currency: merged.currency,
+        minimumSpend: String(merged.minimumSpend),
+        maxDiscount: merged.maxDiscount !== null ? String(merged.maxDiscount) : null,
+        usageLimit: merged.usageLimit,
+        usageLimitPerUser: merged.usageLimitPerUser,
+        startDate: merged.startDate,
+        endDate: merged.endDate,
+        updatedAt: new Date(),
+        // usageCount NUNCA é setável via PATCH — sempre preservado a partir da linha existente.
+      }).where(and(eq(coupons.id, req.params.id), eq(coupons.sellerId, seller.id))).returning();
+
+      return res.json({ success: true, message: 'Cupom atualizado com sucesso!', data: mapCouponRow(updated, storeRow.name) });
+    } catch (updateErr: any) {
+      if (updateErr?.code === '23505' || updateErr?.cause?.code === '23505') {
+        return res.status(409).json({ success: false, error: { code: 'DUPLICATE_CODE', message: `Você já tem um cupom com o código "${merged.code}".` } });
+      }
+      throw updateErr;
+    }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+sellerRouter.patch('/coupons/:id/status', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const { isActive } = req.body ?? {};
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_STATUS', message: 'isActive deve ser boolean.' } });
+    }
+
+    const [updated] = await db.update(coupons)
+      .set({ isActive, updatedAt: new Date() })
+      .where(and(eq(coupons.id, req.params.id), eq(coupons.sellerId, seller.id)))
+      .returning();
+
+    if (!updated) return res.status(404).json({ success: false, message: 'Cupom não encontrado.' });
+    return res.json({ success: true, message: isActive ? 'Cupom ativado.' : 'Cupom desativado.', data: mapCouponRow(updated) });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// DELETE só é permitido para cupons NUNCA usados (coupon_usages.couponId
+// referencia coupons.id com ON DELETE RESTRICT — histórico financeiro nunca
+// pode ser apagado). Preferência do produto é desativar (PATCH .../status);
+// DELETE fica disponível apenas como atalho seguro para cupons sem uso real.
+sellerRouter.delete('/coupons/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const [existing] = await db.select().from(coupons).where(and(eq(coupons.id, req.params.id), eq(coupons.sellerId, seller.id))).limit(1);
+    if (!existing) return res.status(404).json({ success: false, message: 'Cupom não encontrado.' });
+
+    const [usage] = await db.select({ id: couponUsages.id }).from(couponUsages).where(eq(couponUsages.couponId, existing.id)).limit(1);
+    if (usage) {
+      return res.status(409).json({
+        success: false,
+        error: { code: 'COUPON_ALREADY_USED', message: 'Este cupom já foi utilizado e não pode ser excluído. Desative-o para impedir novos usos.' },
+      });
+    }
+
+    try {
+      await db.delete(coupons).where(and(eq(coupons.id, req.params.id), eq(coupons.sellerId, seller.id)));
+      return res.json({ success: true, message: 'Cupom removido.' });
+    } catch (deleteErr: any) {
+      if (deleteErr?.code === '23503' || deleteErr?.cause?.code === '23503') {
+        return res.status(409).json({
+          success: false,
+          error: { code: 'COUPON_ALREADY_USED', message: 'Este cupom já foi utilizado e não pode ser excluído. Desative-o para impedir novos usos.' },
+        });
+      }
+      throw deleteErr;
+    }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
 });
 
 sellerRouter.get('/campaigns', async (req: Request, res: Response) => {

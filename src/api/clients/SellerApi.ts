@@ -242,8 +242,20 @@ export class SellerApi {
     return apiClient.get('/seller/coupons');
   }
 
+  static async getCoupon(id: string): Promise<ApiResponse<any>> {
+    return apiClient.get(`/seller/coupons/${id}`);
+  }
+
   static async createCoupon(data: any): Promise<ApiResponse<any>> {
     return apiClient.post('/seller/coupons', data);
+  }
+
+  static async updateCoupon(id: string, data: any): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/seller/coupons/${id}`, data);
+  }
+
+  static async setCouponStatus(id: string, isActive: boolean): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/seller/coupons/${id}/status`, { isActive });
   }
 
   static async deleteCoupon(id: string): Promise<ApiResponse<any>> {

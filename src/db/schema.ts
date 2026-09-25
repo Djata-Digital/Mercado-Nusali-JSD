@@ -1783,9 +1783,11 @@ export const proofOfDelivery = pgTable('proof_of_delivery', {
 
 export const coupons = pgTable('coupons', {
   id: varchar('id', { length: 255 }).primaryKey(),
-  code: varchar('code', { length: 50 }).notNull().unique(),
+  // FASE D18-C3.1B: unicidade global de code substituída por unicidade
+  // por seller (ver coupons_seller_code_uq abaixo) — .unique() removido daqui.
+  code: varchar('code', { length: 50 }).notNull(),
   title: varchar('title', { length: 255 }).notNull(),
-  discountType: varchar('discount_type', { length: 20 }).notNull(), // percentage, fixed
+  discountType: varchar('discount_type', { length: 20 }).notNull(), // PERCENTAGE, FIXED
   discountValue: numeric('discount_value', { precision: 10, scale: 2 }).notNull(),
   minimumSpend: numeric('minimum_spend', { precision: 10, scale: 2 }).default('0.00'),
   maxDiscount: numeric('max_discount', { precision: 10, scale: 2 }),
@@ -1796,7 +1798,38 @@ export const coupons = pgTable('coupons', {
   countryCode: varchar('country_code', { length: 10 }).default('GW'),
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
-});
+  // FASE D18-C3.1B — cupom pertence e é financiado pelo seller, associado a
+  // uma de suas stores comerciais. Nullable: linhas legadas (nenhum backend
+  // real jamais escreveu nesta tabela) ficam com seller_id/store_id NULL e
+  // permanecem invisíveis ao novo CRUD (nunca aparecem para nenhum seller).
+  sellerId: varchar('seller_id', { length: 255 }).references(() => sellers.id, { onDelete: 'restrict' }),
+  storeId: varchar('store_id', { length: 255 }).references(() => stores.id, { onDelete: 'restrict' }),
+  // Obrigatório para novos cupons (aplicado na validação da camada de
+  // serviço); nullable no banco para não quebrar linhas legadas.
+  currency: varchar('currency', { length: 10 }),
+  // NULL = sem limite por usuário (mesma convenção de "NULL = ilimitado" já
+  // usada em shipping_subsidy_campaigns.maxOrders). Não assumimos DEFAULT 1:
+  // isso seria uma restrição de negócio silenciosa não pedida explicitamente.
+  usageLimitPerUser: integer('usage_limit_per_user'),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  coupons_seller_idx: index('coupons_seller_idx').on(table.sellerId),
+  coupons_store_idx: index('coupons_store_idx').on(table.storeId),
+  coupons_active_idx: index('coupons_active_idx').on(table.isActive),
+  // Unicidade por seller, case-insensitive, garantida no próprio banco (defesa
+  // em profundidade) via índice funcional sobre upper(code) — não depende
+  // apenas da normalização feita na camada de aplicação.
+  coupons_seller_code_uq: uniqueIndex('coupons_seller_code_uq').on(table.sellerId, sql`upper(${table.code})`),
+  // CHECKs abaixo cobrem apenas colunas NOVAS (sempre NULL nas linhas
+  // legadas, portanto nunca podem falhar ao aplicar a migration). Não
+  // adicionamos CHECK para discountType/discountValue/minimumSpend/maxDiscount/
+  // startDate/endDate porque essas colunas já existiam e podem conter dados
+  // legados desconhecidos em staging — validar isso é responsabilidade da
+  // camada de serviço (couponService.ts), não de uma constraint de banco que
+  // poderia quebrar a migration de forma imprevisível.
+  coupons_currency_format_check: check('coupons_currency_format_check', sql`${table.currency} IS NULL OR char_length(${table.currency}) = 3`),
+  coupons_usage_limit_per_user_check: check('coupons_usage_limit_per_user_check', sql`${table.usageLimitPerUser} IS NULL OR ${table.usageLimitPerUser} > 0`),
+}));
 
 export const couponUsages = pgTable('coupon_usages', {
   id: varchar('id', { length: 255 }).primaryKey(),
