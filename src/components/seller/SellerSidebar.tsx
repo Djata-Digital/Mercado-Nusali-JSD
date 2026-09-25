@@ -17,10 +17,8 @@ import {
   Wallet,
   ArrowUpRight,
   FileText,
-  Tag,
   Gift,
   Megaphone,
-  Sparkles,
   Users as UserGroup,
   MessageSquare,
   Star,
@@ -57,10 +55,8 @@ export type SellerNavSection =
   | 'wallet'
   | 'payouts'
   | 'invoices'
-  | 'promos'
   | 'coupons'
   | 'campaigns'
-  | 'ads'
   | 'customers'
   | 'questions'
   | 'reviews'
@@ -155,10 +151,8 @@ export const SellerSidebar: React.FC<SellerSidebarProps> = ({
     {
       title: 'MARKETING & PROMOÇÕES',
       items: [
-        { id: 'promos', label: 'Promoções & Ofertas', icon: Tag },
         { id: 'coupons', label: 'Cupons do Vendedor', icon: Gift },
         { id: 'campaigns', label: 'Campanhas Sazonais', icon: Megaphone },
-        { id: 'ads', label: 'Anúncios Patrocinados', icon: Sparkles },
       ],
     },
     {
