@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { formatCurrency } from '../utils/currencyUtils';
 import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
 import { BuyerService } from '../services/buyerService';
+import { CartApi } from '../api/clients/CartApi';
 import { sanitizeQuantityDigits, resolveQuantityInputValue, getCartItemAvailableStock } from '../utils/quantityInput';
 import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
 import { DeliveryDestinationModal } from './DeliveryDestinationModal';
@@ -25,9 +26,26 @@ export const CartView: React.FC = () => {
   const { data: operationalCountriesForDelivery } = useCountries();
   const cartDestinationCountry = operationalCountriesForDelivery?.find((c) => c.code === selectedCountry);
 
-  const [couponCode, setCouponCode] = useState('');
-  const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
-  const [couponError, setCouponError] = useState('');
+  // FASE D18-C3.2 — cupom real por loja (preview/validação via backend, ver
+  // POST /cart/coupons/preview). Um código de cupom só é único POR SELLER
+  // (D18-C3.1B) — em um carrinho multi-seller, o MESMO código pode existir
+  // em lojas diferentes com significados diferentes, então o cupom é sempre
+  // aplicado dentro do grupo de uma loja específica (storeId), nunca "para
+  // o carrinho inteiro". Tudo aqui é só PREVIEW: nada é persistido no banco
+  // até o checkout real (fase futura, D18-C3.3+) — remover um cupom aqui é
+  // só limpar este estado local, nunca desconsome nada.
+  interface AppliedStoreCoupon {
+    couponId: string;
+    code: string;
+    discountType: string;
+    discountValue: number;
+    discountAmount: number;
+    currency: string;
+  }
+  const [couponInputs, setCouponInputs] = useState<Record<string, string>>({});
+  const [appliedCoupons, setAppliedCoupons] = useState<Record<string, AppliedStoreCoupon>>({});
+  const [couponErrors, setCouponErrors] = useState<Record<string, string>>({});
+  const [couponLoading, setCouponLoading] = useState<Record<string, boolean>>({});
 
   // FASE D16-H2 — quantidade digitável no carrinho (além dos botões −/+).
   // `qtyDrafts` guarda o texto EM EDIÇÃO por item (permite vazio temporário
@@ -55,20 +73,131 @@ export const CartView: React.FC = () => {
     }
   };
 
-  const handleApplyCoupon = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (couponCode.toUpperCase() === 'NUSALI10') {
-      setAppliedCoupon('NUSALI10 (10% OFF)');
-      setCouponError('');
-    } else if (couponCode.toUpperCase() === 'FRETEGRATIS') {
-      setAppliedCoupon('FRETEGRATIS (Frete Grátis)');
-      setCouponError('');
-    } else {
-      setCouponError('Cupom inválido. Tente NUSALI10');
+  // Grupos por loja (products.storeId — mesmo vínculo comercial usado pelo
+  // checkout/orderService.ts, nunca a store de fulfillment). Itens sem
+  // storeId (produto legado) ficam de fora: cupons desta fase exigem
+  // storeId (D18-C3.1B), então não têm como se aplicar a eles.
+  const storeGroups = useMemo(() => {
+    const map = new Map<string, { storeId: string; storeName: string; subtotal: number; currency: string }>();
+    for (const item of cart) {
+      const storeId = item.product.storeId;
+      if (!storeId) continue;
+      const unitPrice = item.unitPriceOverride || item.product.price;
+      const itemSubtotal = unitPrice * item.quantity;
+      const currency = item.product?.currency || (item as any).currency || 'XOF';
+      const existing = map.get(storeId);
+      if (existing) {
+        existing.subtotal += itemSubtotal;
+      } else {
+        map.set(storeId, {
+          storeId,
+          storeName: item.product.seller?.name || 'Loja',
+          subtotal: itemSubtotal,
+          currency,
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [cart]);
+
+  // Um cupom aplicado para uma loja que saiu do carrinho (todos os itens
+  // removidos) não deve continuar "pendurado" — nunca desconta algo que não
+  // existe mais no preview.
+  useEffect(() => {
+    const validStoreIds = new Set(storeGroups.map((g) => g.storeId));
+    setAppliedCoupons((prev) => {
+      const next: Record<string, AppliedStoreCoupon> = {};
+      let changed = false;
+      for (const [storeId, coupon] of Object.entries(prev)) {
+        if (validStoreIds.has(storeId)) next[storeId] = coupon;
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeGroups.map((g) => g.storeId).join('|')]);
+
+  // Subtotal de uma loja pode mudar (quantidade editada) enquanto um cupom
+  // já está aplicado — o desconto exibido é sempre RECALCULADO no backend
+  // (nunca só multiplicado de novo no frontend), então revalida em segundo
+  // plano sempre que o subtotal elegível daquela loja muda.
+  const storeSubtotalsKey = storeGroups.map((g) => `${g.storeId}:${g.subtotal}`).join('|');
+  useEffect(() => {
+    for (const [storeId, coupon] of Object.entries(appliedCoupons)) {
+      CartApi.previewCoupon(storeId, coupon.code).then((res) => {
+        if (res.success && res.data?.valid) {
+          setAppliedCoupons((prev) => (prev[storeId] ? { ...prev, [storeId]: { ...prev[storeId], discountAmount: res.data.discountAmount } } : prev));
+        } else {
+          // Deixou de valer (ex.: minimumSpend não é mais atingido após
+          // reduzir quantidade) — remove do preview e avisa, nunca mantém
+          // um desconto que o backend não confirma mais.
+          setAppliedCoupons((prev) => {
+            if (!prev[storeId]) return prev;
+            const next = { ...prev };
+            delete next[storeId];
+            return next;
+          });
+          setCouponErrors((prev) => ({ ...prev, [storeId]: res.error?.message || 'Este cupom deixou de ser válido para o novo subtotal.' }));
+        }
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeSubtotalsKey]);
+
+  const handleApplyStoreCoupon = async (storeId: string) => {
+    const code = (couponInputs[storeId] || '').trim();
+    if (!code) return;
+    setCouponLoading((prev) => ({ ...prev, [storeId]: true }));
+    setCouponErrors((prev) => {
+      if (!(storeId in prev)) return prev;
+      const next = { ...prev };
+      delete next[storeId];
+      return next;
+    });
+    try {
+      const res = await CartApi.previewCoupon(storeId, code);
+      if (res.success && res.data?.valid) {
+        setAppliedCoupons((prev) => ({
+          ...prev,
+          [storeId]: {
+            couponId: res.data.couponId,
+            code: res.data.code,
+            discountType: res.data.discountType,
+            discountValue: res.data.discountValue,
+            discountAmount: res.data.discountAmount,
+            currency: res.data.currency,
+          },
+        }));
+        setCouponInputs((prev) => ({ ...prev, [storeId]: '' }));
+      } else {
+        setCouponErrors((prev) => ({ ...prev, [storeId]: res.error?.message || res.message || 'Cupom inválido.' }));
+      }
+    } catch (err: any) {
+      setCouponErrors((prev) => ({ ...prev, [storeId]: err?.message || 'Erro ao validar cupom.' }));
+    } finally {
+      setCouponLoading((prev) => {
+        const next = { ...prev };
+        delete next[storeId];
+        return next;
+      });
     }
   };
 
-  const couponDiscount = appliedCoupon?.includes('NUSALI10') ? cartTotal * 0.10 : 0;
+  const handleRemoveStoreCoupon = (storeId: string) => {
+    setAppliedCoupons((prev) => {
+      const next = { ...prev };
+      delete next[storeId];
+      return next;
+    });
+    setCouponErrors((prev) => {
+      if (!(storeId in prev)) return prev;
+      const next = { ...prev };
+      delete next[storeId];
+      return next;
+    });
+  };
+
+  const couponDiscount = Object.values(appliedCoupons).reduce((sum, c) => sum + c.discountAmount, 0);
 
   // FASE D16-G3 — preview de frete via F4/F3 (mesma arquitetura já validada
   // no Product Detail, D16-G2) em vez do motor legado
@@ -424,32 +553,62 @@ export const CartView: React.FC = () => {
             })}
           </div>
 
-          {/* Coupon Input */}
-          <div className="bg-white p-4 rounded-lg border border-gray-200 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-xs text-gray-700">
-              <Tag className="w-4 h-4 text-emerald-600" />
-              <span>Possui cupom de desconto? Use o cupom <strong className="text-emerald-700">NUSALI10</strong></span>
-            </div>
-            <form onSubmit={handleApplyCoupon} className="flex gap-2 w-full sm:w-auto">
-              <input
-                type="text"
-                value={couponCode}
-                onChange={(e) => setCouponCode(e.target.value)}
-                placeholder="Código do cupom"
-                className="px-3 py-1.5 text-xs border border-gray-300 rounded-md focus:outline-hidden focus:ring-1 focus:ring-blue-500 uppercase font-semibold"
-              />
-              <button
-                type="submit"
-                className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-4 py-1.5 rounded-md transition"
-              >
-                Aplicar
-              </button>
-            </form>
-          </div>
-          {couponError && <p className="text-xs text-red-600 font-medium pl-2">{couponError}</p>}
-          {appliedCoupon && (
-            <p className="text-xs text-green-700 font-bold pl-2">✓ Cupom {appliedCoupon} aplicado com sucesso!</p>
-          )}
+          {/* Cupom por loja — D18-C3.2: um cupom pertence a UMA loja e só
+              desconta o subtotal dos itens daquela loja neste carrinho. */}
+          {storeGroups.map((group) => {
+            const applied = appliedCoupons[group.storeId];
+            const error = couponErrors[group.storeId];
+            const loading = !!couponLoading[group.storeId];
+            const discountInfo = applied ? formatPrice(applied.discountAmount, applied.currency as any) : null;
+            return (
+              <div key={group.storeId} className="bg-white p-4 rounded-lg border border-gray-200 shadow-xs space-y-2">
+                <div className="flex items-center gap-2 text-xs text-gray-700">
+                  <Tag className="w-4 h-4 text-emerald-600" />
+                  <span>Cupom da loja <strong className="text-gray-900">{group.storeName}</strong></span>
+                </div>
+                {applied ? (
+                  <div className="flex items-center justify-between gap-3 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">
+                    <p className="text-xs font-bold text-emerald-800">
+                      ✓ {applied.code} aplicado — Desconto: -{discountInfo!.formatted}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveStoreCoupon(group.storeId)}
+                      className="text-[11px] font-bold text-red-600 hover:text-red-800 underline shrink-0"
+                    >
+                      Remover
+                    </button>
+                  </div>
+                ) : (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleApplyStoreCoupon(group.storeId);
+                    }}
+                    className="flex gap-2"
+                  >
+                    <input
+                      type="text"
+                      value={couponInputs[group.storeId] || ''}
+                      onChange={(e) => setCouponInputs((prev) => ({ ...prev, [group.storeId]: e.target.value }))}
+                      placeholder="Código do cupom"
+                      disabled={loading}
+                      className="flex-1 px-3 py-1.5 text-xs border border-gray-300 rounded-md focus:outline-hidden focus:ring-1 focus:ring-blue-500 uppercase font-semibold disabled:opacity-60"
+                    />
+                    <button
+                      type="submit"
+                      disabled={loading || !(couponInputs[group.storeId] || '').trim()}
+                      className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-bold text-xs px-4 py-1.5 rounded-md transition flex items-center gap-1.5 shrink-0"
+                    >
+                      {loading && <Loader2 className="w-3 h-3 animate-spin" />}
+                      Aplicar
+                    </button>
+                  </form>
+                )}
+                {error && <p className="text-[11px] text-red-600 font-medium">{error}</p>}
+              </div>
+            );
+          })}
         </div>
 
         {/* Order Summary Sidebar (4 cols) */}

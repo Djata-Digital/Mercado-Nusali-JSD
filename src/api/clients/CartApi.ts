@@ -42,4 +42,10 @@ export class CartApi {
   static async clear(): Promise<ApiResponse<any>> {
     return apiClient.delete('/cart');
   }
+
+  // FASE D18-C3.2 — preview/validação real de cupom de vendedor no carrinho
+  // (somente leitura; nunca consome coupon_usages).
+  static async previewCoupon(storeId: string, code: string): Promise<ApiResponse<any>> {
+    return apiClient.post('/cart/coupons/preview', { storeId, code });
+  }
 }

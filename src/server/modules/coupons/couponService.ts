@@ -33,6 +33,135 @@ export function normalizeCouponCode(code: string): string {
   return code.trim().toUpperCase();
 }
 
+// ============================================================================
+// FASE D18-C3.2 — preview/validação do cupom no carrinho (SOMENTE LEITURA).
+//
+// As funções abaixo continuam puras: nunca tocam coupon_usages, nunca
+// incrementam usageCount, nunca decidem por si só qual coupon buscar (isso é
+// responsabilidade de quem chama — o handler HTTP resolve store->seller->
+// coupon e calcula eligibleSubtotal a partir do carrinho real ANTES de
+// chamar evaluateCouponForCartPreview). Estas funções só decidem: dado um
+// cupom já resolvido e os números já apurados pelo caller, ele é aplicável
+// agora, e por quanto?
+// ============================================================================
+
+/**
+ * Janela de vigência semi-aberta [startDate, endDate) — mesma semântica já
+ * estabelecida em shippingCampaignService.ts:isShippingCampaignActiveAt,
+ * só com os nomes de campo reais de `coupons` (startDate/endDate em vez de
+ * startsAt/endsAt). isActive=false sempre vence sobre qualquer janela.
+ */
+export function isCouponActiveAt(coupon: { isActive: boolean; startDate: Date | null; endDate: Date | null }, instant: Date): boolean {
+  if (!coupon.isActive) return false;
+  if (coupon.startDate && instant.getTime() < coupon.startDate.getTime()) return false;
+  if (coupon.endDate && instant.getTime() >= coupon.endDate.getTime()) return false;
+  return true;
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/**
+ * PERCENTAGE: eligibleSubtotal * discountValue/100, com teto em maxDiscount
+ * quando informado. FIXED: o próprio discountValue. Em ambos os casos, nunca
+ * ultrapassa eligibleSubtotal (um cupom nunca pode gerar desconto negativo
+ * para o subtotal do comprador). Mesma convenção de arredondamento
+ * (Math.round(n*100)/100) já usada em shippingPreviewService.ts/orderService.ts.
+ */
+export function computeCouponDiscountAmount(input: {
+  discountType: CouponDiscountType | string;
+  discountValue: number;
+  maxDiscount: number | null;
+  eligibleSubtotal: number;
+}): number {
+  let raw = input.discountType === 'FIXED' ? input.discountValue : input.eligibleSubtotal * (input.discountValue / 100);
+  if (input.maxDiscount !== null) raw = Math.min(raw, input.maxDiscount);
+  raw = Math.min(raw, input.eligibleSubtotal);
+  return round2(Math.max(0, raw));
+}
+
+export interface CouponRedemptionCheckInput {
+  coupon: {
+    discountType: CouponDiscountType | string;
+    discountValue: number;
+    maxDiscount: number | null;
+    minimumSpend: number;
+    currency: string | null;
+    isActive: boolean;
+    startDate: Date | null;
+    endDate: Date | null;
+    usageLimit: number | null;
+    usageLimitPerUser: number | null;
+  };
+  /** Subtotal real do carrinho, calculado pelo caller, restrito SOMENTE aos
+   * itens da store/seller do cupom — nunca o carrinho inteiro. */
+  eligibleSubtotal: number;
+  /** Moeda efetiva dos itens elegíveis (nunca a moeda de um OUTRO grupo do
+   * carrinho multi-seller). */
+  cartCurrency: string;
+  /** Contagem real de coupon_usages para este couponId (nunca o campo
+   * denormalizado coupons.usageCount, que esta fase não mantém). */
+  totalUsageCount: number;
+  /** Contagem real de coupon_usages para este couponId + este userId. */
+  userUsageCount: number;
+  instant: Date;
+}
+
+// Discriminante em string ('VALID'/'INVALID'), não boolean — mesmo motivo
+// documentado em ledgerTestDbGuard.ts: narrowing de union por negação
+// (`!result.valid`) de um discriminante boolean não se comporta de forma
+// confiável neste toolchain (tsconfig sem strict/strictNullChecks).
+export type CouponRedemptionCheckResult =
+  | { status: 'VALID'; discountAmount: number }
+  | { status: 'INVALID'; code: string; message: string };
+
+/**
+ * Decide se um cupom JÁ RESOLVIDO (seller/store corretos) pode ser aplicado
+ * AGORA a um subtotal elegível JÁ CALCULADO pelo caller a partir do carrinho
+ * real. Nunca consulta o banco, nunca decide ownership/resolução de código —
+ * isso é do handler HTTP. Ordem de checagem escolhida para dar ao comprador
+ * o motivo mais específico/útil primeiro (janela de vigência antes de
+ * minimumSpend, por exemplo, porque um cupom expirado é inválido
+ * independente do valor do carrinho).
+ */
+export function evaluateCouponForCartPreview(input: CouponRedemptionCheckInput): CouponRedemptionCheckResult {
+  const { coupon } = input;
+
+  if (!coupon.isActive) {
+    return { status: 'INVALID', code: 'COUPON_INACTIVE', message: 'Este cupom está desativado.' };
+  }
+  if (coupon.startDate && input.instant.getTime() < coupon.startDate.getTime()) {
+    return { status: 'INVALID', code: 'COUPON_NOT_STARTED', message: 'Este cupom ainda não está disponível.' };
+  }
+  if (coupon.endDate && input.instant.getTime() >= coupon.endDate.getTime()) {
+    return { status: 'INVALID', code: 'COUPON_EXPIRED', message: 'Este cupom expirou.' };
+  }
+  if (coupon.currency && input.cartCurrency && coupon.currency !== input.cartCurrency) {
+    return { status: 'INVALID', code: 'CURRENCY_MISMATCH', message: `Este cupom é válido apenas em ${coupon.currency}.` };
+  }
+  if (input.eligibleSubtotal <= 0) {
+    return { status: 'INVALID', code: 'EMPTY_ELIGIBLE_CART', message: 'Seu carrinho não contém itens desta loja.' };
+  }
+  if (input.eligibleSubtotal < coupon.minimumSpend) {
+    return { status: 'INVALID', code: 'MINIMUM_SPEND_NOT_MET', message: `Este cupom exige compra mínima de ${coupon.minimumSpend} ${coupon.currency || ''}.`.trim() };
+  }
+  if (coupon.usageLimit !== null && input.totalUsageCount >= coupon.usageLimit) {
+    return { status: 'INVALID', code: 'USAGE_LIMIT_REACHED', message: 'Este cupom atingiu o limite total de usos.' };
+  }
+  if (coupon.usageLimitPerUser !== null && input.userUsageCount >= coupon.usageLimitPerUser) {
+    return { status: 'INVALID', code: 'USER_USAGE_LIMIT_REACHED', message: 'Você já utilizou este cupom o número máximo de vezes permitido.' };
+  }
+
+  const discountAmount = computeCouponDiscountAmount({
+    discountType: coupon.discountType,
+    discountValue: coupon.discountValue,
+    maxDiscount: coupon.maxDiscount,
+    eligibleSubtotal: input.eligibleSubtotal,
+  });
+  return { status: 'VALID', discountAmount };
+}
+
 /**
  * Valida a DEFINIÇÃO de um cupom (os mesmos invariantes de negócio, prontos
  * para reforçar no futuro com CHECK constraints quando os dados legados de

@@ -46,7 +46,7 @@ import {
   stores,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
-import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
+import { eq, desc, asc, and, or, isNull, inArray, sql } from 'drizzle-orm';
 import { createBuyerDispute, RefundValidationError } from './modules/payments/refundService.js';
 import { postBuyerDisputeMessage, DisputeMessageValidationError } from './modules/disputes/disputeMessageService.js';
 // Fase M1-D1 — MESMA whitelist já usada por /admin/overview (única fonte de
@@ -71,6 +71,7 @@ import {
 // única de verdade do catálogo — nunca uma segunda fórmula divergente.
 import { computeLiveVariantStock, computeLiveStockAndSales, recomputeProductReviewAggregates, lockProductRowForReviewMutation } from './modules/catalog/catalogService.js';
 import { isOwnedPublicObjectUrl } from './infra/storage.js';
+import { normalizeCouponCode, evaluateCouponForCartPreview } from './modules/coupons/couponService.js';
 
 export const buyerRouter = Router();
 buyerRouter.use(requireAuth);
@@ -1649,6 +1650,108 @@ buyerRouter.delete('/cart', requireAuth, async (req: AuthRequest, res: Response)
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, error: { code: 'CART_CLEAR_FAILED', message: error?.message || 'Erro ao limpar carrinho.' } });
+  }
+});
+
+// FASE D18-C3.2 — preview/validação REAL de cupom de vendedor no carrinho.
+// SOMENTE LEITURA: nunca cria coupon_usages, nunca incrementa usageCount,
+// nunca reserva o cupom. O consumo definitivo (transacional, no checkout)
+// é uma fase futura (D18-C3.3+).
+//
+// Resolução determinística store->seller->coupon: como o código do cupom só
+// é único POR SELLER (D18-C3.1B), um código sozinho é ambíguo num carrinho
+// multi-seller (SELLER_A e SELLER_B podem ambos ter "CLIENTE10"). O
+// comprador aplica o cupom dentro do grupo visual da loja, então o
+// storeId enviado é a autoridade: a store é buscada no banco (nunca
+// confiada do body além do id), seu sellerId REAL é lido de lá, e o cupom é
+// procurado por sellerId+storeId reais — nunca por um sellerId vindo do
+// cliente.
+buyerRouter.post('/cart/coupons/preview', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
+
+    const userId = req.user!.id;
+    const { storeId, code } = req.body ?? {};
+    if (!storeId || typeof storeId !== 'string' || !code || typeof code !== 'string') {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_FIELDS', message: 'storeId e code são obrigatórios.' } });
+    }
+
+    const [store] = await db.select().from(stores).where(eq(stores.id, storeId)).limit(1);
+    if (!store) {
+      return res.status(404).json({ success: false, error: { code: 'STORE_NOT_FOUND', message: 'Loja não encontrada.' } });
+    }
+
+    const normalizedCode = normalizeCouponCode(code);
+    const [couponRow] = await db
+      .select()
+      .from(coupons)
+      .where(and(eq(coupons.sellerId, store.sellerId), eq(coupons.storeId, store.id), sql`upper(${coupons.code}) = ${normalizedCode}`))
+      .limit(1);
+    if (!couponRow) {
+      return res.status(404).json({ success: false, error: { code: 'COUPON_NOT_FOUND', message: 'Cupom não encontrado para esta loja.' } });
+    }
+
+    // Subtotal elegível SEMPRE recalculado no backend a partir do carrinho
+    // real — nunca confiado a um valor enviado pelo frontend. Restrito aos
+    // itens cujo products.storeId bate com a loja do cupom (a mesma
+    // autoridade de vínculo produto->loja comercial usada em todo o
+    // checkout — ver getFormattedUserCart/orderService.ts).
+    const cart = await getFormattedUserCart(db, userId);
+    const eligibleItems = (cart.items || []).filter((item: any) => item.product?.storeId === storeId);
+    const eligibleSubtotal = eligibleItems.reduce((sum: number, item: any) => sum + item.subtotal, 0);
+    const cartCurrency = eligibleItems[0]?.currency || cart.currency;
+
+    const [totalUsageRow] = await db
+      .select({ c: sql<number>`count(*)::int` })
+      .from(couponUsages)
+      .where(eq(couponUsages.couponId, couponRow.id));
+    const [userUsageRow] = await db
+      .select({ c: sql<number>`count(*)::int` })
+      .from(couponUsages)
+      .where(and(eq(couponUsages.couponId, couponRow.id), eq(couponUsages.userId, userId)));
+
+    const result = evaluateCouponForCartPreview({
+      coupon: {
+        discountType: couponRow.discountType,
+        discountValue: Number(couponRow.discountValue),
+        maxDiscount: couponRow.maxDiscount !== null ? Number(couponRow.maxDiscount) : null,
+        minimumSpend: couponRow.minimumSpend !== null ? Number(couponRow.minimumSpend) : 0,
+        currency: couponRow.currency,
+        isActive: couponRow.isActive,
+        startDate: couponRow.startDate,
+        endDate: couponRow.endDate,
+        usageLimit: couponRow.usageLimit,
+        usageLimitPerUser: couponRow.usageLimitPerUser,
+      },
+      eligibleSubtotal,
+      cartCurrency,
+      totalUsageCount: totalUsageRow?.c ?? 0,
+      userUsageCount: userUsageRow?.c ?? 0,
+      instant: new Date(),
+    });
+
+    if (result.status === 'INVALID') {
+      return res.status(400).json({ success: false, error: { code: result.code, message: result.message } });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        valid: true,
+        couponId: couponRow.id,
+        code: couponRow.code,
+        sellerId: couponRow.sellerId,
+        storeId: couponRow.storeId,
+        discountType: couponRow.discountType,
+        discountValue: Number(couponRow.discountValue),
+        eligibleSubtotal,
+        discountAmount: result.discountAmount,
+        currency: couponRow.currency,
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: { code: 'COUPON_PREVIEW_FAILED', message: error?.message || 'Erro ao validar cupom.' } });
   }
 });
 
