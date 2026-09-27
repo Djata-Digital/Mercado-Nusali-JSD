@@ -37,7 +37,11 @@ orderRouter.post(['/', '/orders'], requireAuth, async (req: AuthRequest, res: Re
     // frontend, checkoutAddressResolver.ts); o serviço (orderService.ts)
     // é quem decide como aplicá-lo — nunca confundido com os campos
     // geográficos de shippingAddress/addressId.
-    const { shippingAddress, addressId, recipientOverride, paymentMethod, notes, currency, countryCode } = req.body ?? {};
+    // FASE D18-C3.4 — storeCoupons repassado tal como recebido: só a
+    // INTENÇÃO (storeId + code), nunca discountAmount/eligibleSubtotal/
+    // sellerId do cliente. orderService.ts é quem resolve/trava/revalida
+    // tudo contra o grupo real do pedido, dentro da transação de checkout.
+    const { shippingAddress, addressId, recipientOverride, paymentMethod, notes, currency, countryCode, storeCoupons } = req.body ?? {};
     const order = await OrderService.createOrderFromCart({
       userId: req.user!.id,
       shippingAddress,
@@ -47,6 +51,7 @@ orderRouter.post(['/', '/orders'], requireAuth, async (req: AuthRequest, res: Re
       notes,
       currency,
       countryCode,
+      storeCoupons: Array.isArray(storeCoupons) ? storeCoupons : undefined,
     });
 
     return res.status(201).json({

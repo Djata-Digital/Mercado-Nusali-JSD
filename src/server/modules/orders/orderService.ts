@@ -17,8 +17,15 @@ import {
   disputes,
   purchaseGroups,
   payments,
+  coupons,
+  couponUsages,
 } from '../../../db/schema.js';
-import { eq, and, desc, asc, inArray } from 'drizzle-orm';
+import { eq, and, desc, asc, inArray, sql } from 'drizzle-orm';
+// FASE D18-C3.4 — reaproveita a MESMA lógica pura já usada pelo preview do
+// carrinho (POST /cart/coupons/preview, buyerRoutes.ts) para revalidar um
+// cupom de vendedor dentro do checkout real — nunca uma segunda regra de
+// negócio divergente.
+import { normalizeCouponCode, evaluateCouponForCartPreview } from '../coupons/couponService.js';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
@@ -62,6 +69,13 @@ export interface CreateOrderRequestDTO {
   notes?: string;
   currency?: string;
   countryCode?: string;
+  // FASE D18-C3.4 — INTENÇÃO de cupom por loja comercial, nunca autoridade.
+  // O backend nunca confia em discountAmount/eligibleSubtotal/sellerId
+  // vindos do cliente (só existiam no preview, read-only) — aqui só chega o
+  // storeId (revalidado contra o grupo real do pedido) e o código
+  // normalizado; tudo o mais é recalculado do zero, dentro da MESMA
+  // transação de criação do pedido.
+  storeCoupons?: Array<{ storeId: string; code: string }>;
 }
 
 // Fase M1-D1 — contrato explícito de createOrderFromCart. `CreatedOrder` é
@@ -91,6 +105,9 @@ export interface CreatedOrder {
   buyerId: string;
   sellerId: string | null;
   subtotal: number;
+  // FASE D18-C3.4 — desconto real do cupom de vendedor aplicado a este
+  // order (0 quando não há cupom).
+  discountAmount: number;
   shippingFee: number;
   shippingCost: number;
   shippingSellerSubsidy: number;
@@ -176,6 +193,17 @@ export class OrderService {
     }
 
     const { userId, paymentMethod, notes } = data;
+
+    // FASE D18-C3.4 — intenção de cupom por loja comercial (storeId real,
+    // nunca sellerId do cliente). Código já normalizado aqui (trim+uppercase)
+    // — a comparação final no banco usa upper(code) de qualquer forma
+    // (defesa em profundidade, mesmo padrão de couponService.ts), então
+    // normalizar duas vezes é idempotente e inofensivo.
+    const couponIntentByStore = new Map<string, string>(
+      (data.storeCoupons || [])
+        .filter((c) => c && typeof c.storeId === 'string' && typeof c.code === 'string' && c.code.trim())
+        .map((c) => [c.storeId, normalizeCouponCode(c.code)])
+    );
 
     // 1. Resolve Shipping Address
     // FASE D16-H1.1 — endurece a resolução do endereço de entrega:
@@ -757,7 +785,12 @@ export class OrderService {
         // nunca mais derivada de items[].storeId (fulfillment). orders.storeId
         // passa a ser SEMPRE a loja comercial, mesmo quando o item saiu de um
         // HUB (bestCandidate.storeId null nesse caso).
-        groupCommercialStoreId: string | null
+        groupCommercialStoreId: string | null,
+        // FASE D18-C3.4 — desconto de cupom do vendedor JÁ revalidado e
+        // travado (resolveGroupCouponLocked, chamado pelo CHAMADOR antes
+        // desta função) para este grupo específico. 0 = nenhum cupom
+        // aplicado, comportamento idêntico a antes desta fase.
+        groupSellerCouponDiscount: number = 0
       ) {
         const groupSubtotal = items.reduce((s, i) => s + i.subtotal, 0);
         const groupStoreId = groupCommercialStoreId;
@@ -807,9 +840,87 @@ export class OrderService {
           precomputedCommissionAmount: groupCommission,
           customsDuty: 0,
           buyerDiscounts: 0,
+          sellerCouponDiscount: groupSellerCouponDiscount,
         });
 
         return { financials: groupFinancials, freightRes: groupFreightRes, storeId: groupStoreId };
+      }
+
+      /**
+       * FASE D18-C3.4 — resolve, TRAVA (`.for('update')`, mesmo padrão já
+       * usado em fulfillmentReservationService.ts/inventoryService.ts para
+       * proteger reserva de estoque contra concorrência) e revalida um cupom
+       * de vendedor para UM grupo seller/store deste checkout, dentro da
+       * MESMA transação. Reaproveita a MESMA função pura do preview
+       * (evaluateCouponForCartPreview) — nenhuma segunda regra de negócio.
+       *
+       * NUNCA insere coupon_usages aqui (ainda não existe orderId — essa
+       * tabela exige orderId NOT NULL) — só resolve/trava/calcula. O
+       * consumo real (INSERT + increment usageCount) acontece depois,
+       * quando insertOrderRow já produziu um orderId de verdade para este
+       * grupo, mas a mesma trava de linha (mantida pelo Postgres até o
+       * commit/rollback desta transação) já protege as duas fases juntas —
+       * um segundo checkout concorrente disputando o MESMO cupom fica
+       * bloqueado aqui até este commitar ou reverter.
+       *
+       * Resolução SEMPRE por seller/store REAIS do grupo (nunca um sellerId
+       * vindo do cliente) + código normalizado — nunca só por code global.
+       */
+      async function resolveGroupCouponLocked(
+        groupSellerId: string,
+        groupCommercialStoreId: string | null,
+        rawCode: string,
+        groupSubtotal: number
+      ): Promise<{ couponId: string; discountAmount: number }> {
+        if (!groupCommercialStoreId) {
+          throw new Error('COUPON_REQUIRES_STORE: Este grupo de itens não está associado a uma loja comercial — cupons exigem uma loja real.');
+        }
+        const normalizedCode = normalizeCouponCode(rawCode);
+
+        const [couponRow] = await tx
+          .select()
+          .from(coupons)
+          .where(and(eq(coupons.sellerId, groupSellerId), eq(coupons.storeId, groupCommercialStoreId), sql`upper(${coupons.code}) = ${normalizedCode}`))
+          .for('update')
+          .limit(1);
+        if (!couponRow) {
+          throw new Error(`COUPON_NOT_FOUND: Cupom "${normalizedCode}" não encontrado para esta loja.`);
+        }
+
+        const [totalUsageRow] = await tx
+          .select({ c: sql<number>`count(*)::int` })
+          .from(couponUsages)
+          .where(eq(couponUsages.couponId, couponRow.id));
+        const [userUsageRow] = await tx
+          .select({ c: sql<number>`count(*)::int` })
+          .from(couponUsages)
+          .where(and(eq(couponUsages.couponId, couponRow.id), eq(couponUsages.userId, userId)));
+
+        const result = evaluateCouponForCartPreview({
+          coupon: {
+            discountType: couponRow.discountType,
+            discountValue: Number(couponRow.discountValue),
+            maxDiscount: couponRow.maxDiscount !== null ? Number(couponRow.maxDiscount) : null,
+            minimumSpend: couponRow.minimumSpend !== null ? Number(couponRow.minimumSpend) : 0,
+            currency: couponRow.currency,
+            isActive: couponRow.isActive,
+            startDate: couponRow.startDate,
+            endDate: couponRow.endDate,
+            usageLimit: couponRow.usageLimit,
+            usageLimitPerUser: couponRow.usageLimitPerUser,
+          },
+          eligibleSubtotal: groupSubtotal,
+          cartCurrency: currency,
+          totalUsageCount: totalUsageRow?.c ?? 0,
+          userUsageCount: userUsageRow?.c ?? 0,
+          instant: new Date(),
+        });
+
+        if (result.status === 'INVALID') {
+          throw new Error(`${result.code}: ${result.message}`);
+        }
+
+        return { couponId: couponRow.id, discountAmount: result.discountAmount };
       }
 
       /**
@@ -886,7 +997,13 @@ export class OrderService {
           commissionBase: String(financials.commissionBase),
           marketplaceCommission: String(financials.marketplaceCommission),
           sellerNetAmount: String(financials.sellerNetAmount),
-          discountAmount: '0.00',
+          // FASE D18-C3.4 — antes sempre '0.00' (coluna nunca usada); agora
+          // reflete o desconto REAL do cupom de vendedor deste grupo (0 quando
+          // não há cupom, comportamento idêntico ao anterior). subtotal acima
+          // continua guardando o valor BRUTO (financials.productSubtotal,
+          // pré-desconto) — a rastreabilidade de QUAL cupom gerou este valor
+          // vive em coupon_usages (couponId+orderId), nunca duplicada aqui.
+          discountAmount: String(financials.sellerCouponDiscount),
           customsDuty: '0.00',
           totalAmount: String(financials.buyerPaidTotal),
           currency,
@@ -979,6 +1096,9 @@ export class OrderService {
           buyerId: userId,
           sellerId: groupSellerId,
           subtotal: financials.productSubtotal,
+          // FASE D18-C3.4 — desconto real do cupom de vendedor deste grupo
+          // (0 quando não há cupom).
+          discountAmount: financials.sellerCouponDiscount,
           shippingFee: financials.shippingChargedToBuyer,
           shippingCost: financials.shippingCost,
           shippingSellerSubsidy: financials.shippingSellerSubsidy,
@@ -1047,6 +1167,7 @@ export class OrderService {
           storeId: string | null;
           financials: ReturnType<typeof ShippingCalculatorService.calculateOrderFinancials>;
           freightRes: Awaited<ReturnType<typeof computeSmartFulfillmentFreightRes>>;
+          couponConsumption: { couponId: string; discountAmount: number } | null;
         }> = [];
         for (const { sellerId, commercialStoreId, items } of bySeller.values()) {
           // FASE D18-B2.2 - a politica de frete e SEMPRE resolvida pela loja
@@ -1055,8 +1176,21 @@ export class OrderService {
           // null) cai no fallback por seller_id ja existente em
           // resolveShippingPayerPolicy - nunca inventa uma loja.
           const smartFreightRes = await computeSmartFulfillmentFreightRes(items, commercialStoreId, sellerId);
-          const { financials, freightRes, storeId } = await computeGroupFinancials(items, sellerId, smartFreightRes, commercialStoreId);
-          groupComputations.push({ sellerId, items, storeId, financials, freightRes });
+
+          // FASE D18-C3.4 — resolve/trava/revalida o cupom (se houver
+          // intenção para a loja deste grupo) ANTES de calcular os
+          // financials, para que o desconto já entre na base da comissão.
+          // Subtotal usado na revalidação é o REAL deste grupo, recalculado
+          // agora — nunca um eligibleSubtotal antigo de um preview anterior.
+          let couponConsumption: { couponId: string; discountAmount: number } | null = null;
+          const couponCodeForStore = commercialStoreId ? couponIntentByStore.get(commercialStoreId) : undefined;
+          if (couponCodeForStore) {
+            const groupSubtotalForCoupon = items.reduce((s, i) => s + i.subtotal, 0);
+            couponConsumption = await resolveGroupCouponLocked(sellerId, commercialStoreId, couponCodeForStore, groupSubtotalForCoupon);
+          }
+
+          const { financials, freightRes, storeId } = await computeGroupFinancials(items, sellerId, smartFreightRes, commercialStoreId, couponConsumption?.discountAmount ?? 0);
+          groupComputations.push({ sellerId, items, storeId, financials, freightRes, couponConsumption });
         }
 
         // SUM(order.totalAmount) = purchase_group.totalAmount por construção
@@ -1103,6 +1237,29 @@ export class OrderService {
         for (const g of groupComputations) {
           const { orderId, orderNumber } = await insertOrderRow(g.sellerId, g.storeId, g.financials, g.freightRes, purchaseGroupId);
           groupOrderRows.push({ sellerId: g.sellerId, items: g.items, financials: g.financials, orderId, orderNumber });
+
+          // FASE D18-C3.4 — CONSUMO real do cupom: só agora existe um
+          // orderId real (coupon_usages.orderId é NOT NULL). A trava de
+          // linha adquirida em resolveGroupCouponLocked (.for('update'))
+          // continua ativa até o commit/rollback desta MESMA transação, então
+          // isto é atômico com a criação do order — se qualquer coisa depois
+          // falhar (F5, outro grupo, etc.), o rollback desfaz o INSERT e o
+          // increment de usageCount junto com tudo o mais, nunca deixando um
+          // dos dois "meio aplicado".
+          if (g.couponConsumption) {
+            await tx.insert(couponUsages).values({
+              id: `cusg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+              couponId: g.couponConsumption.couponId,
+              userId,
+              orderId,
+              discountApplied: String(g.couponConsumption.discountAmount),
+              usedAt: new Date(),
+            });
+            await tx
+              .update(coupons)
+              .set({ usageCount: sql`${coupons.usageCount} + 1`, updatedAt: new Date() })
+              .where(eq(coupons.id, g.couponConsumption.couponId));
+          }
         }
 
         type PlannedReservation = {

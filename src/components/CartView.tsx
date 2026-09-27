@@ -11,8 +11,29 @@ import { BuyerService } from '../services/buyerService';
 import { CartApi } from '../api/clients/CartApi';
 import { sanitizeQuantityDigits, resolveQuantityInputValue, getCartItemAvailableStock } from '../utils/quantityInput';
 import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
+import { useCartCouponIntent } from '../context/CartCouponIntentContext';
 import { DeliveryDestinationModal } from './DeliveryDestinationModal';
 import { Trash2, ShieldCheck, Truck, ArrowRight, Tag, ShoppingBag, Loader2, MapPin } from 'lucide-react';
+
+// FASE D18-C3.3 — causa raiz do "Request failed with status code 400"
+// aparecendo para o comprador: apiClient.ts (post/get/patch/delete) faz
+// `const res = await this.instance.post(...); return res.data;` — o Axios,
+// por padrão, REJEITA a promise para qualquer status fora de 200-299, então
+// o corpo real do backend ({success:false, error:{code,message}}, já com
+// mensagens humanas) nunca chega a ser lido: a chamada cai direto no
+// `catch`, e `err.message` ali é a string genérica do Axios, não a mensagem
+// de negócio. Esta função extrai a mensagem REAL (err.response.data.error.
+// message) sempre que existir; só cai para um texto genérico e seguro
+// quando não há corpo de erro do backend (falha de rede) ou quando o status
+// é 5xx (erro interno — nunca expõe err.message bruto, que pode conter
+// detalhe de banco/stack; o erro real de verdade já foi logado no servidor).
+export function extractCouponErrorMessage(err: any): string {
+  const backendMessage = err?.response?.data?.error?.message || err?.response?.data?.message;
+  if (typeof backendMessage === 'string' && backendMessage.trim()) return backendMessage;
+  const status = err?.response?.status;
+  if (status && status >= 400 && status < 500) return 'Cupom inválido para esta loja.';
+  return 'Não foi possível validar o cupom agora. Tente novamente.';
+}
 
 export const CartView: React.FC = () => {
   const navigate = useNavigate();
@@ -46,6 +67,10 @@ export const CartView: React.FC = () => {
   const [appliedCoupons, setAppliedCoupons] = useState<Record<string, AppliedStoreCoupon>>({});
   const [couponErrors, setCouponErrors] = useState<Record<string, string>>({});
   const [couponLoading, setCouponLoading] = useState<Record<string, boolean>>({});
+  // FASE D18-C3.4 — ponte Cart -> Checkout: só {storeId, code} (nunca
+  // discountAmount/sellerId/eligibleSubtotal) viaja para fora deste
+  // componente. O backend revalida e recalcula tudo do zero no checkout.
+  const { setStoreCouponIntent, clearStoreCouponIntent } = useCartCouponIntent();
 
   // FASE D16-H2 — quantidade digitável no carrinho (além dos botões −/+).
   // `qtyDrafts` guarda o texto EM EDIÇÃO por item (permite vazio temporário
@@ -110,7 +135,10 @@ export const CartView: React.FC = () => {
       let changed = false;
       for (const [storeId, coupon] of Object.entries(prev)) {
         if (validStoreIds.has(storeId)) next[storeId] = coupon;
-        else changed = true;
+        else {
+          changed = true;
+          clearStoreCouponIntent(storeId);
+        }
       }
       return changed ? next : prev;
     });
@@ -122,24 +150,42 @@ export const CartView: React.FC = () => {
   // (nunca só multiplicado de novo no frontend), então revalida em segundo
   // plano sempre que o subtotal elegível daquela loja muda.
   const storeSubtotalsKey = storeGroups.map((g) => `${g.storeId}:${g.subtotal}`).join('|');
+  const dropStaleStoreCoupon = (storeId: string, message: string) => {
+    // Deixou de valer (ex.: minimumSpend não é mais atingido após reduzir
+    // quantidade) — remove do preview e avisa, nunca mantém um desconto que
+    // o backend não confirma mais. Também limpa a intenção compartilhada com
+    // o checkout — nunca deixar um código que o backend já rejeitou seguir
+    // para POST /orders (ele seria revalidado e rejeitado lá também, mas
+    // não faz sentido nem tentar).
+    setAppliedCoupons((prev) => {
+      if (!prev[storeId]) return prev;
+      const next = { ...prev };
+      delete next[storeId];
+      return next;
+    });
+    setCouponErrors((prev) => ({ ...prev, [storeId]: message }));
+    clearStoreCouponIntent(storeId);
+  };
+
   useEffect(() => {
     for (const [storeId, coupon] of Object.entries(appliedCoupons)) {
-      CartApi.previewCoupon(storeId, coupon.code).then((res) => {
-        if (res.success && res.data?.valid) {
-          setAppliedCoupons((prev) => (prev[storeId] ? { ...prev, [storeId]: { ...prev[storeId], discountAmount: res.data.discountAmount } } : prev));
-        } else {
-          // Deixou de valer (ex.: minimumSpend não é mais atingido após
-          // reduzir quantidade) — remove do preview e avisa, nunca mantém
-          // um desconto que o backend não confirma mais.
-          setAppliedCoupons((prev) => {
-            if (!prev[storeId]) return prev;
-            const next = { ...prev };
-            delete next[storeId];
-            return next;
-          });
-          setCouponErrors((prev) => ({ ...prev, [storeId]: res.error?.message || 'Este cupom deixou de ser válido para o novo subtotal.' }));
-        }
-      });
+      CartApi.previewCoupon(storeId, coupon.code)
+        .then((res) => {
+          if (res.success && res.data?.valid) {
+            setAppliedCoupons((prev) => (prev[storeId] ? { ...prev, [storeId]: { ...prev[storeId], discountAmount: res.data.discountAmount } } : prev));
+          } else {
+            // O backend deste projeto sempre rejeita com um status HTTP não-2xx
+            // (nunca 200 + success:false) — este ramo é um fallback defensivo,
+            // não o caminho normal de erro (ver .catch abaixo).
+            dropStaleStoreCoupon(storeId, res.error?.message || 'Este cupom deixou de ser válido para o novo subtotal.');
+          }
+        })
+        .catch((err: any) => {
+          // Caminho REAL de erro: Axios rejeita a promise para qualquer
+          // status não-2xx, então uma resposta 400 do backend (ex.: cupom
+          // deixou de atingir minimumSpend) cai aqui, nunca no .then acima.
+          dropStaleStoreCoupon(storeId, extractCouponErrorMessage(err));
+        });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storeSubtotalsKey]);
@@ -169,11 +215,24 @@ export const CartView: React.FC = () => {
           },
         }));
         setCouponInputs((prev) => ({ ...prev, [storeId]: '' }));
+        // Só a intenção {storeId, code} viaja para o checkout — nunca o
+        // discountAmount/couponId já calculados aqui, que o backend nunca
+        // confia de qualquer forma.
+        setStoreCouponIntent(storeId, res.data.code);
       } else {
-        setCouponErrors((prev) => ({ ...prev, [storeId]: res.error?.message || res.message || 'Cupom inválido.' }));
+        // Fallback defensivo (ver nota acima): o backend sempre responde com
+        // status não-2xx para rejeição de negócio, então o caminho REAL de
+        // erro é o catch abaixo, não este else.
+        setCouponErrors((prev) => ({ ...prev, [storeId]: res.error?.message || res.message || 'Cupom inválido para esta loja.' }));
       }
     } catch (err: any) {
-      setCouponErrors((prev) => ({ ...prev, [storeId]: err?.message || 'Erro ao validar cupom.' }));
+      // Causa raiz do bug relatado ("Request failed with status code 400"
+      // aparecendo para o comprador): Axios rejeita a promise para qualquer
+      // resposta não-2xx, então a mensagem de negócio do backend
+      // (err.response.data.error.message, já humana) nunca era lida — só a
+      // string genérica do Axios (err.message). extractCouponErrorMessage
+      // corrige isso de forma genérica para qualquer cupom/motivo de rejeição.
+      setCouponErrors((prev) => ({ ...prev, [storeId]: extractCouponErrorMessage(err) }));
     } finally {
       setCouponLoading((prev) => {
         const next = { ...prev };
@@ -195,6 +254,7 @@ export const CartView: React.FC = () => {
       delete next[storeId];
       return next;
     });
+    clearStoreCouponIntent(storeId);
   };
 
   const couponDiscount = Object.values(appliedCoupons).reduce((sum, c) => sum + c.discountAmount, 0);

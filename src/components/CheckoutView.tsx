@@ -40,6 +40,7 @@ import { BuyerService } from '../services/buyerService';
 import { CreateOrderFromCartResult } from '../api/types';
 import { resolveCheckoutPaymentTarget, resolveCheckoutConfirmationUrl, initiateCheckoutPixPayment } from '../services/checkoutPaymentRouting';
 import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
+import { useCartCouponIntent } from '../context/CartCouponIntentContext';
 
 export const CheckoutView: React.FC = () => {
   const navigate = useNavigate();
@@ -115,6 +116,13 @@ export const CheckoutView: React.FC = () => {
   // revalidado contra a lista de endereços DO PRÓPRIO comprador antes de
   // ser aceito, e o backend/F6.2 continuam a autoridade final).
   const { destination: deliveryDestinationIntent, setSavedAddressIntent, setSectorIntent } = useDeliveryDestination();
+
+  // FASE D18-C3.4 — intenção de cupom por loja, carregada do CartView (onde
+  // já passou por preview). Só {storeId, code} é transmitido ao backend —
+  // nunca discountAmount/eligibleSubtotal/sellerId, que o backend nunca
+  // confiaria de qualquer forma. Revalidado e recalculado do zero dentro da
+  // transação de criação do pedido (orderService.ts).
+  const { toStoreCouponsPayload, clearAllCouponIntents } = useCartCouponIntent();
 
   // Carrega os endereços reais do comprador (lista completa, não só o
   // padrão) — mesma fonte já usada por CartView/ProductDetailView.
@@ -468,6 +476,9 @@ export const CheckoutView: React.FC = () => {
           paymentMethod: paymentMethod,
           currency: orderCurrency,
           countryCode: country,
+          // FASE D18-C3.4 — só a intenção {storeId, code}; o backend resolve
+          // seller/store reais do grupo e revalida/recalcula tudo do zero.
+          storeCoupons: toStoreCouponsPayload(),
         });
 
         if (!res.success || !res.data) {
@@ -492,6 +503,10 @@ export const CheckoutView: React.FC = () => {
         }
 
         createdOrder = res.data;
+        // Pedido criado com sucesso -> cupom(ns) já foram consumidos
+        // atomicamente no backend (coupon_usages + usageCount). Limpa a
+        // intenção local para não reenviá-la numa eventual nova compra.
+        clearAllCouponIntents();
         // A partir daqui o checkout entra em ORDER MODE: o pedido (não o
         // carrinho, que o backend já apagou) é a fonte de verdade para o
         // restante desta tentativa.

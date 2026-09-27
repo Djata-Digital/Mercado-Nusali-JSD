@@ -328,25 +328,53 @@ export class ShippingCalculatorService {
     precomputedCommissionAmount?: number;
     customsDuty?: number;
     buyerDiscounts?: number;
+    // FASE D18-C3.4 — desconto de CUPOM DO VENDEDOR (nunca da Nusali, nunca
+    // de frete). Ao contrário de buyerDiscounts (que só reduz buyerPaidTotal
+    // — um desconto genérico não financiado pelo vendedor, nunca de fato
+    // usado até esta fase), sellerCouponDiscount reduz a BASE de tudo que
+    // depende do subtotal de produtos: a comissão da marketplace é cobrada
+    // sobre o subtotal JÁ descontado, e o valor líquido do vendedor reflete
+    // que foi ELE quem financiou o desconto. Aditivo: ausente/0 preserva
+    // exatamente o comportamento anterior (discountedProductSubtotal ==
+    // productSubtotal).
+    sellerCouponDiscount?: number;
   }) {
     const productSubtotal = params.productSubtotal;
-    const commissionBase = productSubtotal;
-    const marketplaceCommission = params.precomputedCommissionAmount !== undefined
-      ? Math.round(params.precomputedCommissionAmount * 100) / 100
-      : Math.round((commissionBase * (params.commissionRatePercent / 100)) * 100) / 100;
+    const sellerCouponDiscount = Math.round(Math.max(0, params.sellerCouponDiscount || 0) * 100) / 100;
+    // Nunca desconta mais do que o próprio subtotal (mesma regra já aplicada
+    // no preview do carrinho, couponService.ts:computeCouponDiscountAmount).
+    const discountedProductSubtotal = Math.round(Math.max(0, productSubtotal - sellerCouponDiscount) * 100) / 100;
+
+    const commissionBase = discountedProductSubtotal;
+    let marketplaceCommission: number;
+    if (params.precomputedCommissionAmount !== undefined) {
+      // O valor pré-computado foi somado por item (categoria pode divergir
+      // item a item) SOBRE O SUBTOTAL CHEIO — esta função nunca viu os itens
+      // individualmente para recalculá-lo aqui. Escalado pela mesma razão do
+      // desconto do cupom para refletir a base pós-desconto sem perder o peso
+      // relativo de taxas mistas por item/categoria. Quando não há desconto
+      // (razão=1), resultado idêntico ao valor pré-computado original —
+      // comportamento anterior 100% preservado.
+      const ratio = productSubtotal > 0 ? discountedProductSubtotal / productSubtotal : 1;
+      marketplaceCommission = Math.round(params.precomputedCommissionAmount * ratio * 100) / 100;
+    } else {
+      marketplaceCommission = Math.round((commissionBase * (params.commissionRatePercent / 100)) * 100) / 100;
+    }
     // commissionRateSnapshot é sempre a taxa EFETIVA real (derivada do valor
-    // realmente cobrado), nunca inventada — igual à taxa única quando não há
-    // comissão pré-computada por item.
+    // realmente cobrado sobre a base já descontada), nunca inventada.
     const commissionRateSnapshot = commissionBase > 0
       ? Math.round((marketplaceCommission / commissionBase) * 10000) / 100
       : params.commissionRatePercent;
 
-    const sellerNetAmount = Math.round((productSubtotal - marketplaceCommission - params.shippingSellerSubsidy) * 100) / 100;
+    const sellerNetAmount = Math.round((discountedProductSubtotal - marketplaceCommission - params.shippingSellerSubsidy) * 100) / 100;
     // FASE D18-B1 — seller nunca cria uma venda com net <= 0 por causa da
     // própria parcela de frete (o escrow não liberaria). Bloqueio explícito;
-    // nunca transfere o excedente para a Nusali nem muda a política.
+    // nunca transfere o excedente para a Nusali nem muda a política. Usa a
+    // base JÁ descontada (D18-C3.4) — um cupom do próprio vendedor que
+    // deixaria o net <= 0 combinado com a parcela de frete é bloqueado aqui,
+    // exatamente como já acontecia sem cupom.
     const netCheck = checkSellerNetForShippingShare({
-      productSubtotal,
+      productSubtotal: discountedProductSubtotal,
       marketplaceCommission,
       shippingSellerSubsidy: params.shippingSellerSubsidy,
     });
@@ -355,10 +383,17 @@ export class ShippingCalculatorService {
     }
     const customsDuty = params.customsDuty || 0;
     const buyerDiscounts = params.buyerDiscounts || 0;
-    const buyerPaidTotal = Math.round((productSubtotal + params.shippingChargedToBuyer + customsDuty - buyerDiscounts) * 100) / 100;
+    // Frete NUNCA participa do desconto do cupom — shippingChargedToBuyer
+    // entra aqui exatamente como antes, só a parcela de produtos é que já
+    // vem descontada.
+    const buyerPaidTotal = Math.round((discountedProductSubtotal + params.shippingChargedToBuyer + customsDuty - buyerDiscounts) * 100) / 100;
 
     return {
+      // Subtotal ORIGINAL, pré-desconto — orders.subtotal continua
+      // guardando o valor bruto dos produtos, nunca o já descontado.
       productSubtotal,
+      discountedProductSubtotal,
+      sellerCouponDiscount,
       shippingCost: params.shippingCost,
       shippingChargedToBuyer: params.shippingChargedToBuyer,
       shippingSellerSubsidy: params.shippingSellerSubsidy,

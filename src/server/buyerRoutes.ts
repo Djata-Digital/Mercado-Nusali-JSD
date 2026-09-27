@@ -1751,7 +1751,11 @@ buyerRouter.post('/cart/coupons/preview', requireAuth, async (req: AuthRequest, 
       },
     });
   } catch (error: any) {
-    return res.status(500).json({ success: false, error: { code: 'COUPON_PREVIEW_FAILED', message: error?.message || 'Erro ao validar cupom.' } });
+    // FASE D18-C3.3 — o erro REAL (que pode conter detalhe de SQL/driver)
+    // fica só no log do servidor; o comprador nunca vê error.message bruto
+    // aqui, só uma mensagem genérica e segura.
+    console.error('[COUPON_PREVIEW_FAILED]', error);
+    return res.status(500).json({ success: false, error: { code: 'COUPON_PREVIEW_FAILED', message: 'Não foi possível validar o cupom agora. Tente novamente.' } });
   }
 });
 

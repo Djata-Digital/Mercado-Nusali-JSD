@@ -5,6 +5,7 @@ import { PreferencesProvider } from './context/PreferencesContext';
 import { AuthProvider } from './context/AuthContext';
 import { MarketplaceProvider } from './context/MarketplaceContext';
 import { DeliveryDestinationProvider } from './context/DeliveryDestinationContext';
+import { CartCouponIntentProvider } from './context/CartCouponIntentContext';
 
 // Layouts
 import { PublicLayout } from './layouts/PublicLayout';
@@ -66,6 +67,7 @@ export default function App() {
       <AuthProvider>
         <PreferencesProvider>
           <DeliveryDestinationProvider>
+          <CartCouponIntentProvider>
           <MarketplaceProvider>
             <BrowserRouter>
               <Routes>
@@ -173,6 +175,7 @@ export default function App() {
               </Routes>
             </BrowserRouter>
           </MarketplaceProvider>
+          </CartCouponIntentProvider>
           </DeliveryDestinationProvider>
         </PreferencesProvider>
       </AuthProvider>
