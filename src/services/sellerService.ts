@@ -218,14 +218,6 @@ export const SellerService = {
     return SellerApi.joinCampaign(id);
   },
 
-  async getAds(): Promise<ApiResponse<any>> {
-    return SellerApi.getAds();
-  },
-
-  async createAd(data: any): Promise<ApiResponse<any>> {
-    return SellerApi.createAd(data);
-  },
-
   // Settings & Shipping Policy
   async getSettings(): Promise<ApiResponse<any>> {
     return SellerApi.getSettings();

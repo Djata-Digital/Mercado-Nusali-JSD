@@ -270,14 +270,6 @@ export class SellerApi {
     return apiClient.post(`/seller/campaigns/${id}/join`);
   }
 
-  static async getAds(): Promise<ApiResponse<any>> {
-    return apiClient.get('/seller/ads');
-  }
-
-  static async createAd(data: any): Promise<ApiResponse<any>> {
-    return apiClient.post('/seller/ads', data);
-  }
-
   // Settings & Shipping Policy
   static async getSettings(): Promise<ApiResponse<any>> {
     return apiClient.get('/seller/settings');

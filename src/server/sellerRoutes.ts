@@ -229,19 +229,6 @@ export interface SellerCampaignItem {
   joinedProductsCount: number;
 }
 
-export interface SellerAdItem {
-  id: string;
-  productTitle: string;
-  productImage: string;
-  dailyBudget: number;
-  clicks: number;
-  impressions: number;
-  spend: number;
-  revenue: number;
-  roas: number;
-  status: 'active' | 'paused';
-}
-
 export interface SellerWalletData {
   available: number;
   retained: number;
@@ -299,17 +286,10 @@ let currentReviews: SellerReviewItem[] = [];
 // FASE D18-C3.1B — mock currentCoupons removido: cupons agora são
 // 100% Postgres-backed (tabela coupons, ver couponRoutes abaixo).
 let currentCampaigns: SellerCampaignItem[] = [];
-let currentAds: SellerAdItem[] = [];
-
-let currentSettings = {
-  notificationEmail: true,
-  notificationWhatsapp: true,
-  autoAcceptOrders: true,
-  defaultCarrier: 'Nusali Logística Express',
-  returnWindowDays: 7,
-  warrantyTerms: '12 meses contra defeitos de fabricação',
-  crossBorderShippingEnabled: true,
-};
+// FASE D18-C4.1 — currentAds/currentSettings (estado global em memória,
+// compartilhado por TODOS os vendedores) removidos. /ads era código morto
+// (nenhum frontend real o chamava); /settings agora é real e por vendedor —
+// ver GET/PATCH /settings mais abaixo, na seção 9.
 
 // ==========================================
 // 1. OVERVIEW & ANALYTICS ENDPOINTS
@@ -3687,52 +3667,81 @@ sellerRouter.post('/campaigns/:id/join', async (req: Request, res: Response) => 
   });
 });
 
-sellerRouter.get('/ads', async (req: Request, res: Response) => {
-  return res.json({
-    success: true,
-    data: currentAds,
-  });
-});
-
-sellerRouter.post('/ads', async (req: Request, res: Response) => {
-  const { productTitle, dailyBudget } = req.body;
-  const newAd: SellerAdItem = {
-    id: `ad_${Date.now()}`,
-    productTitle: productTitle || currentSellerProducts[0]?.title || 'Anúncio Patrocinado',
-    productImage: currentSellerProducts[0]?.image || 'https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?auto=format&fit=crop&q=80&w=200',
-    dailyBudget: Number(dailyBudget) || 5000,
-    clicks: 0,
-    impressions: 0,
-    spend: 0,
-    revenue: 0,
-    roas: 0,
-    status: 'active',
-  };
-
-  currentAds.unshift(newAd);
-  return res.json({
-    success: true,
-    message: 'Campanha de anúncio patrocinado ativada!',
-    data: newAd,
-  });
-});
+// FASE D18-C4.1 — "Anúncios Patrocinados" (/ads) foi removido: recurso já
+// deliberadamente desativado no produto (mesma decisão de D18-C3.6 para
+// Campanhas Sazonais) e confirmado, nesta auditoria, como código morto real
+// — nenhum componente do frontend chama SellerService.getAds/createAd em
+// lugar nenhum (grep completo). Manter esse backend só perpetuaria o mesmo
+// anti-padrão de estado global em memória (`currentAds`) corrigido abaixo
+// para /settings, para um recurso que nem está mais acessível.
 
 // ==========================================
 // 9. SETTINGS
 // ==========================================
 
-sellerRouter.get('/settings', async (req: Request, res: Response) => {
-  return res.json({
-    success: true,
-    data: currentSettings,
-  });
+// FASE D18-C4.1 — GET/PATCH reais, por vendedor autenticado, substituindo o
+// objeto global `currentSettings` (compartilhado por TODOS os vendedores —
+// P0 da auditoria D18-C4: PATCH de um vendedor sobrescrevia o que todos os
+// outros liam). Persistido em sellerProfiles.settingsJson (coluna JSONB
+// nova, nullable — sellerProfiles já é 1:1 por seller, nenhuma tabela nova
+// foi criada). seller.id SEMPRE vem de resolveAuthenticatedSeller (sessão),
+// nunca do body — impossível Seller A ler/alterar configuração de Seller B.
+// Só os 5 campos que a tela real (SellerSettings.tsx) de fato lê/escreve
+// são aceitos; os campos do mock antigo (notificationEmail/autoAcceptOrders/
+// defaultCarrier/returnWindowDays/warrantyTerms/crossBorderShippingEnabled)
+// não são usados por nenhum código real e não foram persistidos.
+const SELLER_SETTINGS_DEFAULTS = {
+  vacationMode: false,
+  emailAlerts: true,
+  smsAlerts: true,
+  autoFreeShipping: false,
+  nifTaxId: null as string | null,
+};
+
+sellerRouter.get('/settings', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const [profile] = await db.select({ settingsJson: sellerProfiles.settingsJson }).from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
+    const saved = (profile?.settingsJson as Record<string, any>) || {};
+
+    return res.json({ success: true, data: { ...SELLER_SETTINGS_DEFAULTS, ...saved } });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar configurações.' });
+  }
 });
 
-sellerRouter.patch('/settings', async (req: Request, res: Response) => {
-  currentSettings = { ...currentSettings, ...req.body };
-  return res.json({
-    success: true,
-    message: 'Configurações operacionais salvas com sucesso!',
-    data: currentSettings,
-  });
+sellerRouter.patch('/settings', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const body = req.body ?? {};
+    const patch: Record<string, any> = {};
+    if (typeof body.vacationMode === 'boolean') patch.vacationMode = body.vacationMode;
+    if (typeof body.emailAlerts === 'boolean') patch.emailAlerts = body.emailAlerts;
+    if (typeof body.smsAlerts === 'boolean') patch.smsAlerts = body.smsAlerts;
+    if (typeof body.autoFreeShipping === 'boolean') patch.autoFreeShipping = body.autoFreeShipping;
+    if (typeof body.nifTaxId === 'string') patch.nifTaxId = body.nifTaxId.trim().slice(0, 100);
+
+    const [existing] = await db.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
+    const merged = { ...SELLER_SETTINGS_DEFAULTS, ...((existing?.settingsJson as Record<string, any>) || {}), ...patch };
+
+    if (existing) {
+      await db.update(sellerProfiles).set({ settingsJson: merged, updatedAt: new Date() }).where(eq(sellerProfiles.sellerId, seller.id));
+    } else {
+      await db.insert(sellerProfiles).values({
+        id: `prof_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        sellerId: seller.id,
+        settingsJson: merged,
+      });
+    }
+
+    return res.json({ success: true, message: 'Configurações operacionais salvas com sucesso!', data: merged });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao salvar configurações.' });
+  }
 });

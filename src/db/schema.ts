@@ -192,6 +192,18 @@ export const sellerProfiles = pgTable('seller_profiles', {
   shippingPolicy: text('shipping_policy'),
   bannerUrl: text('banner_url'),
   verifiedAt: timestamp('verified_at'),
+  // FASE D18-C4.1 — substitui o objeto global em memória `currentSettings`
+  // (sellerRoutes.ts, corrigido nesta fase — era compartilhado por TODOS os
+  // vendedores, um PATCH de qualquer um sobrescrevia o que os outros viam).
+  // Os 5 campos aqui são exatamente os que a tela real (SellerSettings.tsx)
+  // lê/escreve hoje (vacationMode/emailAlerts/smsAlerts/autoFreeShipping/
+  // nifTaxId) — nenhum campo do mock antigo (notificationEmail/
+  // autoAcceptOrders/defaultCarrier/returnWindowDays/warrantyTerms/
+  // crossBorderShippingEnabled) é usado por nenhum código real, então não
+  // foi persistido. JSONB nullable numa tabela JÁ 1:1 por seller (nunca uma
+  // tabela nova) — é o único formato real que ainda não existia no schema
+  // para esse conjunto de preferências.
+  settingsJson: jsonb('settings_json'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

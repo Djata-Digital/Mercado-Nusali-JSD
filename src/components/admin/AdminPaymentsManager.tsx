@@ -1,14 +1,25 @@
-import React, { useState } from 'react';
-import { CreditCard, DollarSign, ShieldAlert, CheckCircle, RefreshCw, Filter, Search } from 'lucide-react';
-import { mockAdminPaymentsList, AdminPaymentRecord } from '../../data/mockAdminPayments';
+import React from 'react';
+import { CreditCard, Info } from 'lucide-react';
 
 interface AdminPaymentsManagerProps {
   showToast: (msg: string) => void;
 }
 
-export const AdminPaymentsManager: React.FC<AdminPaymentsManagerProps> = ({ showToast }) => {
-  const [payments, setPayments] = useState<AdminPaymentRecord[]>(mockAdminPaymentsList);
-
+// FASE D18-C4.1 (P0-B) — o botão "Estornar" desta tela só chamava
+// showToast(...), sem NENHUMA chamada ao backend: um admin podia acreditar
+// que um estorno real tinha ocorrido quando nada foi movimentado. Auditoria
+// completa (D18-C4/D18-C4.1): a lista desta tela (`mockAdminPaymentsList`)
+// é dado fictício (e sempre vazia hoje — nenhum código a popula), sem
+// orderId/payment reais para validar contra `processRefund()` (que exige um
+// order/payment de verdade — ver refundService.ts). Reaproveitar
+// processRefund() aqui exigiria primeiro construir uma listagem real de
+// transações (endpoint novo, fora do escopo mínimo desta correção) — sem
+// isso, não há precondições suficientes para um refund financeiro seguro.
+// Por isso a AÇÃO foi removida, não substituída por um novo motor
+// financeiro paralelo. O reembolso real de devoluções já existe e funciona
+// em Devoluções (POST /admin/returns/:id/refund) e Disputas (resolver
+// disputa com reembolso) — ambos reutilizam o MESMO processRefund().
+export const AdminPaymentsManager: React.FC<AdminPaymentsManagerProps> = () => {
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-2xl p-6 border border-gray-200 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -23,59 +34,17 @@ export const AdminPaymentsManager: React.FC<AdminPaymentsManagerProps> = ({ show
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-6 space-y-4">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200 text-gray-500 uppercase font-black text-[10px]">
-                <th className="p-3">Ref Transação / Data</th>
-                <th className="p-3">Pedido</th>
-                <th className="p-3">Comprador ➔ Vendedor</th>
-                <th className="p-3">Gateway / Meio</th>
-                <th className="p-3">Valor / Taxa</th>
-                <th className="p-3">Risco</th>
-                <th className="p-3">Status</th>
-                <th className="p-3 text-right">Ações</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {payments.map(p => (
-                <tr key={p.id} className="hover:bg-gray-50/50">
-                  <td className="p-3 font-extrabold text-gray-900">
-                    {p.transactionRef}
-                    <span className="block text-[10px] text-gray-400 font-normal">{p.date}</span>
-                  </td>
-                  <td className="p-3 font-bold text-purple-700">{p.orderId}</td>
-                  <td className="p-3 font-bold text-gray-800">{p.buyerName} ➔ {p.sellerName}</td>
-                  <td className="p-3 font-bold text-gray-700">{p.method} ({p.country})</td>
-                  <td className="p-3 font-black text-emerald-700">
-                    {p.amountFormatted}
-                    <span className="block text-[10px] text-gray-400 font-normal">Taxa: {p.feeAmountFormatted}</span>
-                  </td>
-                  <td className="p-3">
-                    <span className={`font-bold ${p.riskLevel === 'alto' ? 'text-red-600' : 'text-emerald-600'}`}>
-                      {p.riskLevel.toUpperCase()}
-                    </span>
-                  </td>
-                  <td className="p-3">
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
-                      p.status === 'pago' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-                    }`}>
-                      {p.status.toUpperCase()}
-                    </span>
-                  </td>
-                  <td className="p-3 text-right">
-                    <button
-                      onClick={() => showToast(`Estorno manual acionado para transação ${p.transactionRef}`)}
-                      className="px-2 py-1 bg-red-50 text-red-600 font-bold rounded-lg hover:bg-red-100"
-                    >
-                      Estornar
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-8">
+        <div className="flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-xl p-4 text-blue-900">
+          <Info className="w-5 h-5 shrink-0 mt-0.5" />
+          <div className="text-xs space-y-1">
+            <p className="font-bold">Listagem de transações ainda não conectada a um endpoint real.</p>
+            <p>
+              Para processar um reembolso de verdade, use <strong>Devoluções</strong> (após o vendedor confirmar
+              recebimento e inspeção) ou a resolução de <strong>Disputas</strong> — ambos já usam o motor financeiro
+              real (mesma lógica de escrow/wallet, nunca duplicada).
+            </p>
+          </div>
         </div>
       </div>
     </div>

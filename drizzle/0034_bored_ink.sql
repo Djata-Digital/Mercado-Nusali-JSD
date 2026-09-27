@@ -1,0 +1,1 @@
+ALTER TABLE "seller_profiles" ADD COLUMN "settings_json" jsonb;
