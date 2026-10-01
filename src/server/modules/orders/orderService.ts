@@ -19,8 +19,9 @@ import {
   payments,
   coupons,
   couponUsages,
+  stockReservations,
 } from '../../../db/schema.js';
-import { eq, and, desc, asc, inArray, sql } from 'drizzle-orm';
+import { eq, and, desc, asc, inArray, sql, lte } from 'drizzle-orm';
 // FASE D18-C3.4 — reaproveita a MESMA lógica pura já usada pelo preview do
 // carrinho (POST /cart/coupons/preview, buyerRoutes.ts) para revalidar um
 // cupom de vendedor dentro do checkout real — nunca uma segunda regra de
@@ -1660,6 +1661,118 @@ export class OrderService {
     });
 
     return this.getOrderById(orderId);
+  }
+
+  /**
+   * FASE D18-C5.2 — contraparte SEGURA de `cancelOrder` para o job automático
+   * de expiração de pending_payment (nunca chamada por um endpoint público,
+   * nunca recebe userId/buyerId do chamador). `cancelOrder` acima foi
+   * desenhada para o cancelamento interativo do comprador (verifica
+   * `buyerId === userId`) e NÃO adquire nenhum advisory lock — segura para
+   * esse uso porque, na prática, um comprador só cancela um pedido que ele
+   * mesmo ainda não pagou. Um job automático não tem essa garantia implícita:
+   * precisa serializar explicitamente contra uma confirmação de pagamento
+   * concorrente para o MESMO orderId. Por isso esta função:
+   *
+   *   1. Adquire pg_advisory_xact_lock(hashtext(orderId)) PRIMEIRO — a MESMA
+   *      chave já usada por PaymentService.initiatePayment/confirmOrderPayment/
+   *      releaseEscrowForOrder — nunca uma segunda convenção de lock. Isso
+   *      serializa esta função contra qualquer confirmação de pagamento
+   *      concorrente para este pedido (a que chegar primeiro ganha; a outra
+   *      espera o commit e relê o estado já atualizado).
+   *   2. Sob o lock, revalida do zero (nunca confia no que o chamador
+   *      observou antes de adquirir o lock): status ainda é 'pending_payment',
+   *      paymentStatus ainda é 'pending', escrowStatus ainda é 'pending' (se
+   *      qualquer um desses já mudou — pagamento confirmado nesse meio tempo,
+   *      por exemplo — a função recusa e devolve um código, nunca cancela).
+   *   3. Reutiliza EXATAMENTE `InventoryService.releaseStock` (o mesmo usado
+   *      por `cancelOrder`) — nenhuma segunda lógica de liberação de estoque.
+   *      `releaseStock` só afeta reservations com status='active' — chamar
+   *      esta função duas vezes para o mesmo pedido é seguro (idempotente): a
+   *      segunda chamada não encontra reservation 'active' expirada e recusa
+   *      via NO_EXPIRED_ACTIVE_RESERVATION.
+   *   4. Marca também qualquer `payments` pendente deste pedido como
+   *      'cancelled' (nunca criado antes, nunca com efeito financeiro —
+   *      apenas mantém `payments.status` coerente com o pedido cancelado).
+   *
+   * Pedidos multi-vendedor (orders.purchaseGroupId preenchido) são
+   * DELIBERADAMENTE rejeitados aqui (PURCHASE_GROUP_ORDER_NOT_SUPPORTED) —
+   * o pagamento de um purchase_group trava hashtext(purchaseGroupId), não
+   * hashtext(orderId), e tem sua própria máquina de estados
+   * (candidate/primary/surplus) não auditada nesta fase. O job chamador
+   * (pendingPaymentExpirationService.ts) já filtra esses pedidos fora da
+   * seleção de candidatos; este guard é a segunda camada de segurança.
+   */
+  static async cancelExpiredPendingPaymentOrder(orderId: string, executor?: any): Promise<{ cancelled: boolean; code: string }> {
+    const run = async (tx: any): Promise<{ cancelled: boolean; code: string }> => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`);
+
+      const [ord] = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      if (!ord) return { cancelled: false, code: 'ORDER_NOT_FOUND' };
+
+      if (ord.purchaseGroupId) {
+        return { cancelled: false, code: 'PURCHASE_GROUP_ORDER_NOT_SUPPORTED' };
+      }
+      if (ord.status !== 'pending_payment') {
+        return { cancelled: false, code: 'ORDER_NOT_PENDING_PAYMENT' };
+      }
+      if (ord.paymentStatus !== 'pending') {
+        return { cancelled: false, code: 'PAYMENT_STATUS_NOT_PENDING' };
+      }
+      if (ord.escrowStatus !== 'pending') {
+        return { cancelled: false, code: 'ESCROW_STATUS_NOT_PENDING' };
+      }
+
+      // Revalida SOB o lock que ainda existe uma reserva ativa e
+      // efetivamente expirada — nunca confia na pré-seleção do job (que roda
+      // fora de qualquer lock). Se nada for encontrado aqui, ou já foi
+      // liberada por uma execução anterior (idempotência) ou nunca existiu.
+      const [stillExpiredActive] = await tx
+        .select({ id: stockReservations.id })
+        .from(stockReservations)
+        .where(and(
+          eq(stockReservations.orderId, orderId),
+          eq(stockReservations.status, 'active'),
+          lte(stockReservations.expiresAt, new Date()),
+        ))
+        .limit(1);
+      if (!stillExpiredActive) {
+        return { cancelled: false, code: 'NO_EXPIRED_ACTIVE_RESERVATION' };
+      }
+
+      await tx
+        .update(orders)
+        .set({ status: 'cancelled', escrowStatus: 'refunded', updatedAt: new Date() })
+        .where(eq(orders.id, orderId));
+
+      await tx.insert(orderStatusHistory).values({
+        id: `osh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        orderId,
+        previousStatus: ord.status,
+        newStatus: 'cancelled',
+        reason: 'Pagamento não confirmado dentro do prazo — pedido cancelado automaticamente e reserva de estoque liberada.',
+        changedBy: null,
+        createdAt: new Date(),
+      });
+
+      // Mesma função central já usada por cancelOrder — nenhuma segunda
+      // lógica de liberação de estoque.
+      await InventoryService.releaseStock(orderId, tx);
+
+      // Mantém payments.status coerente (nunca teve efeito financeiro real —
+      // era 'pending' e nunca chegou a 'paid').
+      await tx
+        .update(payments)
+        .set({ status: 'cancelled', updatedAt: new Date() })
+        .where(and(eq(payments.orderId, orderId), eq(payments.status, 'pending')));
+
+      return { cancelled: true, code: 'CANCELLED' };
+    };
+
+    if (executor) return run(executor);
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível.');
+    return db.transaction(run);
   }
 
   static async trackOrder(orderId: string, userId: string) {

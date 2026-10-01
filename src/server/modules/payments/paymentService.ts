@@ -1,5 +1,5 @@
 import { getDb } from '../../../db/index.js';
-import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions, ledgerEntries, ledgerAccounts, disputes, proofOfDelivery, auditLogs, purchaseGroups, platformSettings, paymentAllocations } from '../../../db/schema.js';
+import { users, sellers, payments, paymentAttempts, orders, escrowAccounts, escrowTransactions, orderStatusHistory, notifications, shipments, wallets, walletTransactions, ledgerEntries, ledgerAccounts, disputes, returns, proofOfDelivery, auditLogs, purchaseGroups, platformSettings, paymentAllocations } from '../../../db/schema.js';
 import { syncOrderFulfillmentStatus } from '../orders/orderService.js';
 import { eq, and, ne, sql, inArray, desc } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -864,6 +864,25 @@ export class PaymentService {
         throw err;
       }
 
+      // FASE D18-C5.2 — achado da auditoria de concorrência (teste da corrida
+      // real payment-confirmation x expiração automática): esta função só
+      // verificava `paymentStatus==='paid'` para idempotência, nunca
+      // `status==='cancelled'`. OrderService.cancelExpiredPendingPaymentOrder
+      // (job de expiração) NUNCA altera paymentStatus (nenhum pagamento real
+      // aconteceu) — só `status`/`escrowStatus`. Sem este guard, uma
+      // confirmação de pagamento que vencesse o advisory lock DEPOIS de um
+      // cancelamento automático já commitado marcaria paymentStatus='paid' e
+      // criaria escrow para um pedido já cancelado (exatamente o estado
+      // misto que o ticket exige nunca existir). Mesmo lock
+      // (hashtext(orderId)) já usado pelos dois lados — nenhum mecanismo novo,
+      // só a checagem de estado que faltava.
+      if (ord.status === 'cancelled') {
+        const err: any = new Error(`ORDER_CANCELLED_CANNOT_CONFIRM_PAYMENT: O pedido "${ord.id}" já foi cancelado (ex.: expiração automática de pending_payment) e não pode mais ter seu pagamento confirmado.`);
+        err.code = 'ORDER_CANCELLED_CANNOT_CONFIRM_PAYMENT';
+        err.status = 409;
+        throw err;
+      }
+
       // Requirement 6: Strict seller verification (no dummy seller_default)
       if (!ord.sellerId) {
         throw new Error(`ORDER_SELLER_NOT_FOUND: O pedido "${ord.id}" não possui um vendedor associado para a retenção de escrow.`);
@@ -1560,6 +1579,47 @@ export class PaymentService {
       if (activeDisputes.length > 0) {
         throw new Error(
           `ESCROW_BLOCKED_BY_ACTIVE_DISPUTE: Existe uma disputa em aberto (status "${activeDisputes[0].status}") para o pedido ${orderId} — a liberação do escrow está bloqueada até a disputa ser resolvida.`
+        );
+      }
+
+      // FASE D18-C3.7C — mesmo princípio do bloqueio por disputa acima, agora
+      // para devoluções (tabela `returns`, D18-C3.7A/B/B.1). Verificação
+      // DIRETA na tabela `returns`, sob o MESMO pg_advisory_xact_lock(hashtext
+      // (orderId)) já adquirido no topo desta função — é o MESMO lock que
+      // POST /buyer/returns (buyerRoutes.ts) adquire ANTES de checar
+      // duplicidade e inserir a devolução. Isso serializa completamente
+      // "criar devolução" x "liberar escrow" para o mesmo orderId: nenhuma
+      // das duas transações lê o estado da outra pela metade — quem chegar
+      // primeiro ao lock termina (commit ou rollback) antes da outra prosseguir,
+      // fechando a janela de TOCTOU. Nenhum segundo mecanismo de lock foi
+      // inventado.
+      //
+      // Estados ATIVOS de returns.status (aprovados na fase D18-C3.7B.1) —
+      // qualquer um bloqueia a liberação: pending_approval (aguardando o
+      // vendedor decidir), approved (vendedor aceitou, nenhuma logística
+      // reversa criada ainda), label_generated/item_shipped/received_inspected
+      // (fases futuras de logística reversa, ainda não alcançáveis por nenhum
+      // código real hoje, mas já contempladas na classificação para quando
+      // existirem). 'rejected' encerra a devolução sem bloquear. 'refunded'
+      // TAMBÉM não bloqueia por esta função — auditado nesta fase: nenhum
+      // código real hoje escreve returns.status='refunded' (D18-C3.7A/B/B.1
+      // só escrevem pending_approval/approved/rejected; a integração real com
+      // reembolso fica para uma fase futura, ainda não construída). O
+      // reembolso FINANCEIRO de verdade é rastreado de forma totalmente
+      // independente em escrow_accounts.status='refunded'/'disputed', já
+      // verificado alguns parágrafos abaixo (ESCROW_ALREADY_REVERSED) — não
+      // há hoje nenhum caminho real em que um `returns.status='refunded'`
+      // coexista com um escrow ainda liberável, então classificar 'refunded'
+      // como não-ativo aqui não abre nenhum risco financeiro novo.
+      const ACTIVE_RETURN_STATUSES = ['pending_approval', 'approved', 'label_generated', 'item_shipped', 'received_inspected'];
+      const activeReturns = await tx
+        .select({ id: returns.id, status: returns.status })
+        .from(returns)
+        .where(and(eq(returns.orderId, orderId), inArray(returns.status, ACTIVE_RETURN_STATUSES)))
+        .limit(1);
+      if (activeReturns.length > 0) {
+        throw new Error(
+          `ACTIVE_RETURN_BLOCKS_ESCROW_RELEASE: Existe uma devolução ativa (status "${activeReturns[0].status}") para o pedido ${orderId} — a liberação do escrow está bloqueada até a devolução ser encerrada.`
         );
       }
 
