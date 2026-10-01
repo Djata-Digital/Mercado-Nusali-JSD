@@ -2,7 +2,6 @@ import { Router, Request, Response } from 'express';
 import { adminRouter } from './adminRoutes.js';
 import { sellerRouter } from './sellerRoutes.js';
 import { buyerRouter } from './buyerRoutes.js';
-import { pixRouter } from './pixRoutes.js';
 import { ratesRouter } from './ratesRoutes.js';
 import { authRouter } from './modules/auth/authRoutes.js';
 import { catalogRouter, getProductsHandler, getProductByIdHandler, getProductRecommendationsHandler, getProductQuestionsHandler, createProductQuestionHandler } from './modules/catalog/catalogRoutes.js';
@@ -46,7 +45,13 @@ apiRouter.use('/seller', sellerRouter);
 // Etiqueta única do shipment — compartilhada entre seller e logística/HUB/admin
 apiRouter.use('/shipments', shipmentRouter);
 apiRouter.use('/buyer', buyerRouter);
-apiRouter.use('/pix', pixRouter);
+// FASE D18-C5.4 — /pix (pixRoutes.ts) foi removido: simulador de PSP em
+// memória, sem autenticação e sem gate de ambiente, que escrevia
+// orders.status/paymentStatus='paid' de verdade a partir de qualquer
+// requisição HTTP não autenticada (achado P0 do Gate D18-C5.3). Auditoria
+// confirmou zero uso real — o checkout de verdade (PIX/BRL via Asaas)
+// nunca chamou este router; PIX não faz parte do lançamento inicial na
+// Guiné-Bissau (XOF, Orange Money/TeleTaku).
 apiRouter.use('/rates', ratesRouter);
 apiRouter.use('/upload', uploadRouter);
 // Public read-only countries catalog (source of truth: `countries` table, active only)

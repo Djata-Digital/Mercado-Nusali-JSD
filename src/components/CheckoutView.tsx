@@ -24,8 +24,7 @@ import { countriesConfig, formatCurrency } from '../utils/currencyUtils';
 import { useCountries } from '../hooks/useCountries';
 import { useAuth } from '../context/AuthContext';
 import { PixPaymentModal } from './PixPaymentModal';
-import { PixService } from '../services/pixService';
-import { convertToBRL, PixTransaction } from '../utils/pixEngine';
+import { convertToBRL } from '../utils/pixEngine';
 import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
 import {
   resolveCheckoutAddress,
