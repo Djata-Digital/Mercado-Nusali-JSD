@@ -82,6 +82,11 @@ export class AdminApi {
     return apiClient.post(`/admin/escrow/${id}/freeze`, { reason });
   }
 
+  // FASE D18-C4.2 — pedidos reais (antes, AdminOrdersManager.tsx era mock).
+  static async getOrders(limit?: number): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/orders', limit ? { params: { limit } } : undefined);
+  }
+
   // FASE D18-C3.7E — devoluções reais (antes, AdminReturnsManager.tsx era mock).
   static async getReturns(): Promise<ApiResponse<any[]>> {
     return apiClient.get('/admin/returns');

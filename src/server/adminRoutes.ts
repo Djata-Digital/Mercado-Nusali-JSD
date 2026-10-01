@@ -2118,6 +2118,70 @@ adminRouter.post('/escrow/:id/release', requireFinanceApproval, async (req: Auth
   }
 });
 
+// FASE D18-C4.2 — listagem real de pedidos para o admin (antes,
+// AdminOrdersManager.tsx era 100% mock: useState(mockAdminOrdersList) nunca
+// substituído por dados reais). SOMENTE LEITURA — nenhuma escrita em orders/
+// payments/escrow/estoque/cupons/frete. Mesmo padrão de escopo por país já
+// usado em GET /admin/disputes e GET /admin/returns: país vem SEMPRE de
+// resolveAdministrativeScope(req.user) (sessão), nunca de query/body — um
+// admin de escopo país nunca vê pedidos de vendedores de outro país. Uma
+// única query com JOINs (nunca N+1): todo o necessário para a tela
+// (comprador, vendedor/loja, valores, status de pagamento/escrow/logística,
+// rastreio) já vive diretamente em `orders` ou é resolvido por um JOIN
+// direto — nenhuma tabela de escrow/shipment precisa ser consultada à parte
+// nesta fase (orders.escrowStatus/paymentMethod/trackingCode/status já são
+// os campos reais e atuais). `?limit=` é só uma dica de paginação de
+// exibição — nunca um mecanismo de autorização.
+adminRouter.get('/orders', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.json({ success: true, data: [] });
+
+    const scope = resolveAdministrativeScope(req.user);
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 200) : 100;
+
+    const rows = await db
+      .select({
+        order: orders,
+        buyerName: users.fullName,
+        sellerCompanyName: sellers.companyName,
+        sellerTradingName: sellers.tradingName,
+        sellerCountry: sellers.countryCode,
+        storeName: stores.name,
+      })
+      .from(orders)
+      .innerJoin(users, eq(orders.buyerId, users.id))
+      .leftJoin(sellers, eq(orders.sellerId, sellers.id))
+      .leftJoin(stores, eq(orders.storeId, stores.id))
+      .where(scope.kind === 'GLOBAL' ? undefined : eq(sellers.countryCode, scope.countryCode))
+      .orderBy(desc(orders.createdAt))
+      .limit(limit);
+
+    const data = rows.map((r) => ({
+      id: r.order.id,
+      orderNumber: r.order.orderNumber,
+      buyerName: r.buyerName,
+      sellerName: r.sellerTradingName || r.sellerCompanyName || null,
+      storeName: r.storeName,
+      totalAmount: Number(r.order.totalAmount),
+      currency: r.order.currency,
+      paymentMethod: r.order.paymentMethod,
+      paymentStatus: r.order.paymentStatus,
+      escrowStatus: r.order.escrowStatus,
+      status: r.order.status,
+      countryCode: r.order.countryCode,
+      sellerCountry: r.sellerCountry,
+      trackingCode: r.order.trackingCode,
+      createdAt: r.order.createdAt,
+    }));
+
+    return res.json({ success: true, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
 // FASE D18-C3.7E — listagem real de devoluções para o admin (antes,
 // AdminReturnsManager.tsx era 100% mock: useState([]) nunca preenchido).
 // Mesmo padrão de escopo por país já usado em GET /admin/disputes.

@@ -75,6 +75,10 @@ export const AdminService = {
     return AdminApi.freezeEscrow(id, reason);
   },
 
+  async getOrders(limit?: number): Promise<ApiResponse<any[]>> {
+    return AdminApi.getOrders(limit);
+  },
+
   async getReturns(): Promise<ApiResponse<any[]>> {
     return AdminApi.getReturns();
   },
