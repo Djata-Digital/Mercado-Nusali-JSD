@@ -1,9 +1,10 @@
 /**
  * Fase 1 do AUTO-RELEASE de escrow — endpoint interno para disparar UMA
- * execução do reconciliador. NÃO existe scheduler nesta fase (sem
- * node-cron/setInterval/BullMQ repeatable job/Render Cron) — este endpoint só
- * permite que um mecanismo externo (a ser decidido em fase futura) dispare
- * uma execução manual/controlada.
+ * execução do reconciliador. FASE D18-C4.3 — o gatilho periódico real agora é
+ * scripts/run-escrow-auto-release.ts (pensado para um Render Cron Job); este
+ * endpoint HTTP continua existindo, inalterado, como gatilho manual/
+ * alternativo (ex.: disparo ad-hoc por um operador, sem esperar o próximo
+ * ciclo do Cron).
  *
  * Autenticação: MESMO padrão já usado por AsaasWebhookService.isTokenValid
  * (header comparado via crypto.timingSafeEqual contra um segredo de
@@ -19,6 +20,7 @@ import crypto from 'crypto';
 import { createRateLimiter } from '../../infra/rateLimiter.js';
 import { runEscrowAutoReleaseOnce } from '../payments/escrowAutoReleaseService.js';
 import { runRefundRecoveryOnce } from '../payments/refundRecoveryService.js';
+import { runPendingPaymentExpirationOnce } from '../orders/pendingPaymentExpirationService.js';
 import { logger } from '../../infra/logger.js';
 
 export const internalJobsRouter = Router();
@@ -151,6 +153,57 @@ internalJobsRouter.post('/refund-recovery', internalJobsLimiter, async (req: Req
     return res.status(500).json({
       success: false,
       error: { code: 'REFUND_RECOVERY_JOB_ERROR', message: 'Falha ao executar o recovery de refunds.' },
+    });
+  }
+});
+
+// FASE D18-C5.2 — expiração automática de pedidos pending_payment com reserva
+// de estoque vencida (Orange Money/TeleTaku e qualquer outro método sem
+// confirmação automática). MESMO padrão exato dos dois endpoints acima:
+// mesmo limiter, mesma autenticação (isInternalJobsSecretValid/
+// INTERNAL_JOBS_SECRET), nenhum mecanismo novo.
+// POST /api/v1/internal/jobs/expire-pending-payments
+internalJobsRouter.post('/expire-pending-payments', internalJobsLimiter, async (req: Request, res: Response) => {
+  const secretHeader = req.headers['x-internal-jobs-secret'] as string | undefined;
+
+  if (!process.env.INTERNAL_JOBS_SECRET || !process.env.INTERNAL_JOBS_SECRET.trim()) {
+    logger.error({}, 'INTERNAL_JOBS_SECRET_NOT_CONFIGURED');
+    return res.status(503).json({
+      success: false,
+      error: { code: 'INTERNAL_JOBS_NOT_CONFIGURED', message: 'Endpoint interno não configurado no servidor.' },
+    });
+  }
+
+  if (!isInternalJobsSecretValid(secretHeader)) {
+    logger.warn({}, 'INTERNAL_JOBS_SECRET_INVALID');
+    return res.status(401).json({
+      success: false,
+      error: { code: 'INVALID_INTERNAL_JOBS_SECRET', message: 'Credencial interna inválida ou ausente.' },
+    });
+  }
+
+  try {
+    const rawBatchSize = req.body?.batchSize;
+    const batchSize = typeof rawBatchSize === 'number' && Number.isFinite(rawBatchSize) ? rawBatchSize : undefined;
+
+    const result = await runPendingPaymentExpirationOnce({ batchSize });
+
+    // Nunca retorna dados sensíveis — só orderId (identificador de negócio,
+    // não PII) e classificação. Nenhum valor monetário/dado de comprador.
+    return res.status(200).json({
+      success: true,
+      data: {
+        status: result.status,
+        batchSize: result.batchSize,
+        candidateCount: result.candidateCount,
+        results: result.results,
+      },
+    });
+  } catch (err: any) {
+    logger.error({ error: err?.message }, 'PENDING_PAYMENT_EXPIRATION_JOB_ERROR');
+    return res.status(500).json({
+      success: false,
+      error: { code: 'PENDING_PAYMENT_EXPIRATION_JOB_ERROR', message: 'Falha ao executar a expiração de pending_payment.' },
     });
   }
 });

@@ -9,10 +9,16 @@
  *     AsaasWebhookService.isTokenValid (ASAAS_WEBHOOK_AUTH_TOKEN, comparação
  *     com crypto.timingSafeEqual), reaproveitado aqui como padrão para
  *     INTERNAL_JOBS_SECRET.
- *   - Não existe nenhum scheduler (sem node-cron, sem setInterval, sem BullMQ
- *     repeatable job, sem Render Cron/render.yaml) — nesta fase,
- *     deliberadamente, continua não existindo. Este arquivo só implementa o
- *     reconciliador em si; NADA aqui o aciona automaticamente.
+ *   - FASE D18-C4.3 — o gatilho periódico real passou a existir:
+ *     scripts/run-escrow-auto-release.ts (runner de linha de comando, chama
+ *     só runEscrowAutoReleaseOnce(), nenhuma lógica financeira nova),
+ *     pensado para ser executado por um Render Cron Job (ainda não
+ *     configurado no Render real — ver relatório da fase para o passo
+ *     operacional exato). Continua sem node-cron/setInterval/BullMQ
+ *     repeatable job rodando DENTRO do processo do servidor web — o
+ *     agendamento em si vive fora deste código-fonte, no Cron Job externo.
+ *     Este arquivo continua implementando só o reconciliador em si; nada
+ *     aqui decide QUANDO rodar.
  *   - platformSettings é key/value JSONB (ver src/db/schema.ts), lido/escrito
  *     via GET/POST /admin/settings — reaproveitado sem alterações de schema.
  *
@@ -21,9 +27,10 @@
  * PaymentService.finalizeDelivery(orderId, {source:'AUTO'}), a MESMA função
  * já usada e testada pelo fluxo manual do comprador. finalizeDelivery (via
  * releaseEscrowForOrder) já revalida do zero, sob o advisory lock
- * (pg_advisory_xact_lock(hashtext(orderId))): disputa ativa, payment
- * elegível, escrow.status, shipments DELIVERED, prova operacional. Este
- * arquivo nunca escreve em wallets/escrow_accounts diretamente.
+ * (pg_advisory_xact_lock(hashtext(orderId))): disputa ativa, devolução ativa
+ * (D18-C3.7C), payment elegível, escrow.status, shipments DELIVERED, prova
+ * operacional. Este arquivo nunca escreve em wallets/escrow_accounts
+ * diretamente.
  */
 import { getDb } from '../../../db/index.js';
 import { escrowAccounts, platformSettings } from '../../../db/schema.js';
@@ -112,6 +119,10 @@ export interface AutoReleaseRunResult {
  */
 function classifyFailureCode(message: string): string {
   if (message.includes('ESCROW_BLOCKED_BY_ACTIVE_DISPUTE')) return 'ACTIVE_DISPUTE';
+  // FASE D18-C3.7C — mesmo tratamento de ACTIVE_DISPUTE: bloqueio legítimo e
+  // esperado (devolução ativa ligada ao orderId), nunca um erro inesperado
+  // do scanner.
+  if (message.includes('ACTIVE_RETURN_BLOCKS_ESCROW_RELEASE')) return 'ACTIVE_RETURN';
   // Fase C5.3-C2 — mesmo tratamento de ACTIVE_DISPUTE: bloqueio legítimo e
   // esperado (chargeback local ativo/lost/manual_review no funding
   // payment), nunca um erro inesperado do scanner.
@@ -124,7 +135,7 @@ function classifyFailureCode(message: string): string {
   return 'UNKNOWN_ERROR';
 }
 
-const BLOCKED_CODES = new Set(['ACTIVE_DISPUTE', 'ACTIVE_PAYMENT_CHARGEBACK', 'PAYMENT_NOT_ELIGIBLE', 'NOT_FULLY_DELIVERED', 'MISSING_OPERATOR_PROOF', 'ESCROW_STATE_CHANGED', 'NOT_ELIGIBLE']);
+const BLOCKED_CODES = new Set(['ACTIVE_DISPUTE', 'ACTIVE_RETURN', 'ACTIVE_PAYMENT_CHARGEBACK', 'PAYMENT_NOT_ELIGIBLE', 'NOT_FULLY_DELIVERED', 'MISSING_OPERATOR_PROOF', 'ESCROW_STATE_CHANGED', 'NOT_ELIGIBLE']);
 
 /**
  * Processa UM candidato de forma totalmente independente — uma falha aqui
@@ -156,12 +167,13 @@ async function processOneCandidate(db: any, orderId: string): Promise<AutoReleas
 }
 
 /**
- * Ponto de entrada único do reconciliador. NÃO é chamado por nenhum
- * cron/scheduler nesta fase — só pelo endpoint interno protegido, e pelos
- * testes. Sempre reavalia autoReleaseEnabled/escrowHoldingHours do zero a
- * cada execução (nunca cacheado) — se a configuração for corrigida/quebrada
- * entre duas execuções, o comportamento reflete o estado ATUAL, nunca um
- * valor obtido em execução anterior.
+ * Ponto de entrada único do reconciliador. Chamado por: o endpoint interno
+ * protegido (POST /internal/jobs/escrow-auto-release), o runner de linha de
+ * comando (scripts/run-escrow-auto-release.ts, D18-C4.3 — pensado para rodar
+ * via Render Cron Job), e os testes. Sempre reavalia autoReleaseEnabled/
+ * escrowHoldingHours do zero a cada execução (nunca cacheado) — se a
+ * configuração for corrigida/quebrada entre duas execuções, o comportamento
+ * reflete o estado ATUAL, nunca um valor obtido em execução anterior.
  */
 export async function runEscrowAutoReleaseOnce(options?: { batchSize?: number; db?: any }): Promise<AutoReleaseRunResult> {
   const db = options?.db ?? getDb();
