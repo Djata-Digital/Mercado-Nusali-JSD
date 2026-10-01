@@ -1944,7 +1944,7 @@ export const returns = pgTable('returns', {
   reason: text('reason').notNull(),
   amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
   currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
-  status: varchar('status', { length: 50 }).notNull().default('pending_approval'), // pending_approval, label_generated, item_shipped, received_inspected, refunded, rejected
+  status: varchar('status', { length: 50 }).notNull().default('pending_approval'), // pending_approval, approved, label_generated, item_shipped, received_inspected, refunded, rejected
   trackingCode: varchar('tracking_code', { length: 100 }),
   resolution: text('resolution'),
   createdAt: timestamp('created_at').defaultNow().notNull(),

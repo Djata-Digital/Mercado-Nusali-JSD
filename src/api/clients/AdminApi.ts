@@ -82,6 +82,15 @@ export class AdminApi {
     return apiClient.post(`/admin/escrow/${id}/freeze`, { reason });
   }
 
+  // FASE D18-C3.7E — devoluções reais (antes, AdminReturnsManager.tsx era mock).
+  static async getReturns(): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/returns');
+  }
+
+  static async refundReturn(id: string): Promise<ApiResponse<any>> {
+    return apiClient.post(`/admin/returns/${id}/refund`, {});
+  }
+
   static async getFinanceOverview(): Promise<ApiResponse<any>> {
     return apiClient.get('/admin/finance/overview');
   }

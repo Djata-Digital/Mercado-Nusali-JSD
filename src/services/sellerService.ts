@@ -145,6 +145,23 @@ export const SellerService = {
     return SellerApi.sendDisputeMessage(disputeId, message);
   },
 
+  // FASE D18-C3.7B — devoluções reais do vendedor (antes 100% mock).
+  async getReturns(): Promise<ApiResponse<any[]>> {
+    return SellerApi.getReturns();
+  },
+
+  async getReturn(id: string): Promise<ApiResponse<any>> {
+    return SellerApi.getReturn(id);
+  },
+
+  async decideReturn(id: string, decision: 'approve' | 'reject', resolution?: string): Promise<ApiResponse<any>> {
+    return SellerApi.decideReturn(id, decision, resolution);
+  },
+
+  async confirmReturnReceived(id: string): Promise<ApiResponse<any>> {
+    return SellerApi.confirmReturnReceived(id);
+  },
+
   // Financials & Wallet
   async getWallet(currency?: string): Promise<ApiResponse<any>> {
     return SellerApi.getWallet(currency);

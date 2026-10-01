@@ -178,6 +178,26 @@ export class SellerApi {
     return apiClient.patch(`/seller/orders/${id}/status`, data);
   }
 
+  // FASE D18-C3.7B — devoluções reais do vendedor. sellerId sempre resolvido
+  // no backend a partir da sessão (nunca enviado por aqui).
+  static async getReturns(): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/seller/returns');
+  }
+
+  static async getReturn(id: string): Promise<ApiResponse<any>> {
+    return apiClient.get(`/seller/returns/${id}`);
+  }
+
+  static async decideReturn(id: string, decision: 'approve' | 'reject', resolution?: string): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/seller/returns/${id}/status`, { decision, resolution });
+  }
+
+  // FASE D18-C3.7E — vendedor confirma recebimento/inspeção do produto
+  // devolvido. Não dispara refund (ação exclusivamente administrativa).
+  static async confirmReturnReceived(id: string): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/seller/returns/${id}/received`, {});
+  }
+
   // Bank Accounts
   static async getBankAccounts(): Promise<ApiResponse<any[]>> {
     return apiClient.get('/seller/bank-accounts');

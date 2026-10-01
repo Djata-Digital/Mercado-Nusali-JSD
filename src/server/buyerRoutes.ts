@@ -1127,6 +1127,23 @@ class CartOperationError extends Error {
   }
 }
 
+// FASE D18-C3.7A — mesmo padrão de CartOperationError acima, para a criação
+// de devolução (POST /buyer/returns): lançado dentro de db.transaction()
+// para que o ROLLBACK aconteça sozinho, traduzido para {error} só na borda
+// HTTP. Deliberadamente uma classe própria (não RefundValidationError, já
+// importada de refundService.ts para disputas) — esta fase NÃO integra
+// reembolso algum, e reaproveitar um erro nomeado "Refund" aqui confundiria
+// o próximo leitor sobre o que esta fase realmente faz.
+class ReturnOperationError extends Error {
+  status: number;
+  code: string;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
 // Extraído de addItemToCartForUser (D16-D2) para ser reutilizado também pelo
 // batch (POST /cart/items/batch) — MESMA regra de moeda/país única no
 // carrinho, nunca uma segunda versão divergente. `executor` é `db` (chamada
@@ -2211,45 +2228,173 @@ buyerRouter.get('/returns', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// FASE D18-C3.7A — criação real e autoritativa de devolução. MVP = devolução
+// do ORDER INTEIRO (nunca por item — não existe return_items nesta fase).
+// O backend NUNCA confia em sellerId/buyerId/amount/currency vindos do
+// corpo da requisição — todos são derivados do próprio order real, dentro
+// da mesma transação que o trava. Fora de escopo desta fase (ver ticket):
+// não altera orders.status, não cria/edita coupon_usages/usageCount, não
+// toca escrow/payment/refund, não gera etiqueta/logística reversa real.
 buyerRouter.post('/returns', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
     if (!req.user?.id) return res.status(401).json({ success: false, message: 'Usuário não autenticado.' });
     const userId = req.user.id;
-    const { orderId, reason, description, amount } = req.body;
 
-    if (!orderId || !reason) {
-      return res.status(400).json({ success: false, message: 'ID do pedido e motivo são obrigatórios.' });
+    const { orderId, reason, description } = req.body ?? {};
+    if (!orderId || typeof orderId !== 'string') {
+      return res.status(400).json({ success: false, error: { code: 'MISSING_ORDER_ID', message: 'ID do pedido é obrigatório.' } });
     }
 
-    const retId = `ret_${Date.now()}`;
-    const newReturn = {
-      id: retId,
-      orderId,
-      buyerId: userId,
-      reason: `${reason}: ${description || ''}`,
-      amount: String(amount || 0),
-      currency: 'XOF',
-      status: 'pending_approval',
-      trackingCode: `DEV-GW-${Math.floor(10000 + Math.random() * 90000)}-NSL`,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
+    // `reason` já chega do frontend como um rótulo curto (ex.: "Produto com
+    // defeito ou avaria de fábrica") — preserva a mesma concatenação com
+    // `description` que já existia, apenas validada de verdade agora. Não
+    // existe enum/CHECK real na coluna (é `text` livre) — nenhuma categoria
+    // nova foi inventada, só uma validação mínima de tamanho.
+    const reasonLabel = typeof reason === 'string' ? reason.trim() : '';
+    const descriptionText = typeof description === 'string' ? description.trim() : '';
+    const combinedReason = descriptionText ? `${reasonLabel}: ${descriptionText}` : reasonLabel;
+    if (!combinedReason || combinedReason.replace(/^:\s*/, '').trim().length < 3) {
+      return res.status(400).json({ success: false, error: { code: 'REASON_REQUIRED', message: 'Descreva o motivo da devolução (mínimo 3 caracteres).' } });
+    }
+    if (combinedReason.length > 2000) {
+      return res.status(400).json({ success: false, error: { code: 'REASON_TOO_LONG', message: 'O motivo da devolução é longo demais (máximo 2000 caracteres).' } });
+    }
 
-    if (db) {
-      await db.insert(returns).values(newReturn);
+    const inserted = await db.transaction(async (tx: any) => {
+      // Mesmo advisory lock já usado por createBuyerDispute/releaseEscrowForOrder
+      // (refundService.ts/paymentService.ts) — serializa QUALQUER operação
+      // concorrente sobre o MESMO pedido, inclusive duas tentativas de criar
+      // devolução ao mesmo tempo (testado com Promise.allSettled — ver
+      // scratch). Como o MVP não tem UNIQUE(order_id) em `returns` (schema
+      // não alterado nesta fase), este lock é a única linha de defesa contra
+      // duas linhas para o mesmo pedido — por isso é adquirido ANTES de
+      // qualquer leitura/checagem de duplicidade abaixo, nunca depois.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`);
+
+      const [order] = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      if (!order) {
+        throw new ReturnOperationError(404, 'ORDER_NOT_FOUND', 'Pedido não encontrado.');
+      }
+      // Mesmo padrão já usado em createBuyerDispute (refundService.ts) e na
+      // checagem de posse de GET /orders/:id — 403, não um 404 uniforme: é
+      // assim que este projeto já trata "pedido existe mas não é seu" em
+      // toda a área de pós-venda, não uma convenção nova inventada aqui.
+      if (order.buyerId !== userId) {
+        throw new ReturnOperationError(403, 'FORBIDDEN', 'Você não tem permissão para solicitar devolução deste pedido.');
+      }
+      // MVP: somente pedido efetivamente ENTREGUE pode ser devolvido — status
+      // real do projeto (orders.status='delivered', schema.ts), nenhuma
+      // string nova inventada. Janela de prazo (dias após entrega) NÃO existe
+      // de verdade em lugar nenhum do projeto hoje (ver relatório) — não foi
+      // implementada nesta fase para não inventar um prazo arbitrário.
+      if (order.status !== 'delivered') {
+        throw new ReturnOperationError(409, 'ORDER_NOT_DELIVERED', 'Só é possível solicitar devolução de pedidos já entregues.');
+      }
+
+      // MVP é por ORDER INTEIRO: uma devolução em andamento OU já concluída
+      // com sucesso (refunded) bloqueia uma nova tentativa para o MESMO
+      // pedido. Só 'rejected' é considerado terminal-e-reabrível (o
+      // comprador pode tentar de novo com justificativa melhor) — decisão
+      // explícita, não silenciosa.
+      const existingReturns = await tx.select().from(returns).where(eq(returns.orderId, orderId));
+      const blockingReturn = existingReturns.find((r: any) => r.status !== 'rejected');
+      if (blockingReturn) {
+        throw new ReturnOperationError(409, 'DUPLICATE_RETURN', 'Já existe uma solicitação de devolução em andamento ou concluída para este pedido.');
+      }
+
+      const retId = `ret_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const [row] = await tx.insert(returns).values({
+        id: retId,
+        orderId: order.id,
+        buyerId: userId,
+        // sellerId/amount/currency SEMPRE do order real — nunca do body,
+        // mesmo que o cliente tente enviar algo nesses campos (o
+        // destructuring acima nem os lê).
+        sellerId: order.sellerId,
+        reason: combinedReason,
+        amount: String(order.totalAmount),
+        currency: order.currency,
+        status: 'pending_approval',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }).returning();
+
+      return row;
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Solicitação de devolução registrada com sucesso!',
+      data: { ...inserted, amount: Number(inserted.amount) },
+    });
+  } catch (err: any) {
+    if (err instanceof ReturnOperationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// FASE D18-C3.7E — comprador informa que enviou o produto de volta. MVP sem
+// transportadora integrada (auditado nesta fase: shipments/shipping_labels/
+// tracking_events são todos do envio ORIGINAL do pedido, sem nenhum FK para
+// devolução — construir logística reversa real está fora de escopo).
+// Reaproveita returns.trackingCode (coluna já existente, nunca uma nova) como
+// texto livre informado pelo comprador — NUNCA validado contra nenhuma
+// transportadora real. NUNCA lê buyerId/sellerId/orderId/amount/currency/
+// status do body — só trackingCode, opcional.
+buyerRouter.patch('/returns/:id/shipped', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco de dados indisponível.' } });
+    const userId = req.user!.id;
+
+    const { trackingCode } = req.body ?? {};
+    let trimmedTracking: string | null = null;
+    if (trackingCode !== undefined && trackingCode !== null) {
+      if (typeof trackingCode !== 'string') {
+        return res.status(400).json({ success: false, error: { code: 'INVALID_TRACKING_CODE', message: 'trackingCode deve ser texto.' } });
+      }
+      trimmedTracking = trackingCode.trim();
+      if (trimmedTracking.length > 100) {
+        return res.status(400).json({ success: false, error: { code: 'TRACKING_CODE_TOO_LONG', message: 'Código de rastreio muito longo (máximo 100 caracteres).' } });
+      }
+      if (!trimmedTracking) trimmedTracking = null;
+    }
+
+    // Escopo por buyerId na PRÓPRIA leitura de existência — return de outro
+    // comprador responde 404 uniforme, nunca revela que pertence a outro
+    // buyer (mesmo padrão já usado por GET/PATCH de returns em todo o
+    // projeto desde D18-C3.7A/B).
+    const [existing] = await db.select().from(returns).where(and(eq(returns.id, req.params.id), eq(returns.buyerId, userId))).limit(1);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: { code: 'RETURN_NOT_FOUND', message: 'Devolução não encontrada.' } });
+    }
+    if (existing.status !== 'approved') {
+      return res.status(409).json({ success: false, error: { code: 'RETURN_NOT_APPROVED', message: `Só é possível informar envio de devoluções aprovadas pelo vendedor (status atual: ${existing.status}).` } });
+    }
+
+    // UPDATE condicional (WHERE status='approved'): mesma proteção de
+    // concorrência já usada em PATCH /seller/returns/:id/status (D18-C3.7B.1)
+    // — duas tentativas do comprador informando envio ao mesmo tempo nunca
+    // produzem dupla transição; a segunda encontra 0 linhas e recebe 409.
+    const [updated] = await db.update(returns)
+      .set({ trackingCode: trimmedTracking, status: 'item_shipped', updatedAt: new Date() })
+      .where(and(eq(returns.id, req.params.id), eq(returns.buyerId, userId), eq(returns.status, 'approved')))
+      .returning();
+    if (!updated) {
+      return res.status(409).json({ success: false, error: { code: 'RETURN_ALREADY_DECIDED', message: 'O status desta devolução já mudou.' } });
     }
 
     return res.json({
       success: true,
-      message: 'Solicitação de devolução registrada com sucesso!',
-      data: {
-        ...newReturn,
-        amount: Number(newReturn.amount),
-      },
+      message: 'Envio da devolução registrado.',
+      data: { id: updated.id, orderId: updated.orderId, status: updated.status, trackingCode: updated.trackingCode, updatedAt: updated.updatedAt },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message });
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao registrar envio da devolução.' });
   }
 });
 

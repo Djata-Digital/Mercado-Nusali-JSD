@@ -574,6 +574,208 @@ sellerRouter.post('/disputes/:id/messages', async (req: AuthRequest, res: Respon
   }
 });
 
+// FASE D18-C3.7B — devoluções REAIS do vendedor (antes, SellerReturnsManager.tsx
+// era 100% mock: useState([]) nunca preenchido, com status fictícios e um
+// modal de etiqueta reversa que nunca existiu de verdade). sellerId SEMPRE
+// vem de resolveAuthenticatedSeller(req,res) (sessão), nunca de query/body —
+// impossível Seller A ver/decidir return de Seller B.
+sellerRouter.get('/returns', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const rows = await db
+      .select({ ret: returns, orderNumber: orders.orderNumber, buyerFullName: users.fullName })
+      .from(returns)
+      .innerJoin(orders, eq(returns.orderId, orders.id))
+      .innerJoin(users, eq(returns.buyerId, users.id))
+      .where(eq(returns.sellerId, seller.id))
+      .orderBy(desc(returns.createdAt));
+
+    const data = rows.map((r: any) => ({
+      id: r.ret.id,
+      orderId: r.ret.orderId,
+      orderNumber: r.orderNumber,
+      buyerName: r.buyerFullName,
+      reason: r.ret.reason,
+      amount: Number(r.ret.amount),
+      currency: r.ret.currency,
+      status: r.ret.status,
+      trackingCode: r.ret.trackingCode,
+      resolution: r.ret.resolution,
+      createdAt: r.ret.createdAt,
+      updatedAt: r.ret.updatedAt,
+    }));
+
+    return res.json({ success: true, data });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar devoluções.' });
+  }
+});
+
+// Lookup SEMPRE com AND sellerId=seller.id na mesma query — uma devolução de
+// outro vendedor responde exatamente como "não existe" (404 uniforme), nunca
+// revela que o recurso pertence a outra loja.
+sellerRouter.get('/returns/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const [row] = await db
+      .select({ ret: returns, orderNumber: orders.orderNumber, buyerFullName: users.fullName })
+      .from(returns)
+      .innerJoin(orders, eq(returns.orderId, orders.id))
+      .innerJoin(users, eq(returns.buyerId, users.id))
+      .where(and(eq(returns.id, req.params.id), eq(returns.sellerId, seller.id)))
+      .limit(1);
+
+    if (!row) return res.status(404).json({ success: false, error: { code: 'RETURN_NOT_FOUND', message: 'Devolução não encontrada.' } });
+
+    return res.json({
+      success: true,
+      data: {
+        id: row.ret.id,
+        orderId: row.ret.orderId,
+        orderNumber: row.orderNumber,
+        buyerName: row.buyerFullName,
+        reason: row.ret.reason,
+        amount: Number(row.ret.amount),
+        currency: row.ret.currency,
+        status: row.ret.status,
+        trackingCode: row.ret.trackingCode,
+        resolution: row.ret.resolution,
+        createdAt: row.ret.createdAt,
+        updatedAt: row.ret.updatedAt,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar devolução.' });
+  }
+});
+
+// FASE D18-C3.7B.1 — correção semântica: 'approved' é um status PRÓPRIO,
+// distinto de 'label_generated'. returns.status é varchar(50) livre, sem
+// CHECK/enum de banco (única migration que toca a tabela é a 0000 — auditado
+// nesta fase), então adicionar 'approved' não exige schema/migration nenhuma.
+// Decisão do vendedor sobre uma devolução pending_approval. NUNCA lê
+// buyerId/sellerId/orderId/amount/currency/createdAt do body — só
+// `decision` ('approve'|'reject') e, para rejeição, `resolution` (campo já
+// existente no schema, nenhuma coluna nova). "approve" transiciona para
+// 'approved' ("vendedor aceitou a solicitação, nenhuma etiqueta/logística
+// reversa foi criada ainda") — NUNCA para 'label_generated', que fica
+// reservado exclusivamente para quando uma etiqueta real de fato existir
+// (fase futura, ainda não implementada). trackingCode permanece null.
+// Sequência conceitual completa: pending_approval -> approved ->
+// label_generated -> item_shipped -> received_inspected -> refunded, ou
+// pending_approval -> rejected. Esta fase implementa somente as duas
+// primeiras transições (-> approved e -> rejected).
+sellerRouter.patch('/returns/:id/status', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const { decision, resolution } = req.body ?? {};
+    if (decision !== 'approve' && decision !== 'reject') {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_DECISION', message: 'decision deve ser "approve" ou "reject".' } });
+    }
+
+    const [existing] = await db.select().from(returns).where(and(eq(returns.id, req.params.id), eq(returns.sellerId, seller.id))).limit(1);
+    if (!existing) return res.status(404).json({ success: false, error: { code: 'RETURN_NOT_FOUND', message: 'Devolução não encontrada.' } });
+
+    if (existing.status !== 'pending_approval') {
+      return res.status(409).json({ success: false, error: { code: 'RETURN_ALREADY_DECIDED', message: `Esta devolução já foi decidida (status atual: ${existing.status}).` } });
+    }
+
+    let resolutionText: string | null;
+    if (decision === 'reject') {
+      const trimmed = typeof resolution === 'string' ? resolution.trim() : '';
+      if (trimmed.length < 3) {
+        return res.status(400).json({ success: false, error: { code: 'RESOLUTION_REQUIRED', message: 'Informe uma justificativa para rejeitar a devolução (mínimo 3 caracteres).' } });
+      }
+      if (trimmed.length > 2000) {
+        return res.status(400).json({ success: false, error: { code: 'RESOLUTION_TOO_LONG', message: 'Justificativa longa demais (máximo 2000 caracteres).' } });
+      }
+      resolutionText = trimmed;
+    } else {
+      resolutionText = typeof resolution === 'string' && resolution.trim() ? resolution.trim().slice(0, 2000) : null;
+    }
+
+    const newStatus = decision === 'approve' ? 'approved' : 'rejected';
+
+    // UPDATE atômico com status='pending_approval' também no WHERE: se duas
+    // decisões concorrentes chegarem para a mesma return, a segunda (depois
+    // que a primeira der commit) não encontra mais a linha nesse estado e
+    // afeta 0 linhas -> 409 controlado. Nenhum advisory lock explícito
+    // necessário aqui (diferente da criação em buyerRoutes.ts, que faz
+    // SELECT+INSERT): esta é uma única instrução UPDATE condicional, já
+    // atômica pelo MVCC do Postgres (a segunda transação reavalia o WHERE
+    // contra a linha já commitada antes de decidir quantas linhas afetar).
+    const [updated] = await db.update(returns)
+      .set({ status: newStatus, resolution: resolutionText, updatedAt: new Date() })
+      .where(and(eq(returns.id, req.params.id), eq(returns.sellerId, seller.id), eq(returns.status, 'pending_approval')))
+      .returning();
+
+    if (!updated) {
+      return res.status(409).json({ success: false, error: { code: 'RETURN_ALREADY_DECIDED', message: 'Esta devolução já foi decidida por outra requisição.' } });
+    }
+
+    return res.json({
+      success: true,
+      message: decision === 'approve' ? 'Devolução aprovada.' : 'Devolução rejeitada.',
+      data: {
+        id: updated.id,
+        orderId: updated.orderId,
+        status: updated.status,
+        resolution: updated.resolution,
+        updatedAt: updated.updatedAt,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao decidir devolução.' });
+  }
+});
+
+// FASE D18-C3.7E — vendedor confirma que recebeu e inspecionou o produto
+// devolvido. Significa APENAS isso — nunca que o refund já ocorreu (essa
+// decisão é exclusivamente administrativa/financeira, ver POST
+// /admin/returns/:id/refund). NÃO lê nenhum campo do body — nada aqui é
+// forjável.
+sellerRouter.patch('/returns/:id/received', async (req: AuthRequest, res: Response) => {
+  try {
+    const resolved = await resolveAuthenticatedSeller(req, res);
+    if (!resolved) return;
+    const { db, seller } = resolved;
+
+    const [existing] = await db.select().from(returns).where(and(eq(returns.id, req.params.id), eq(returns.sellerId, seller.id))).limit(1);
+    if (!existing) return res.status(404).json({ success: false, error: { code: 'RETURN_NOT_FOUND', message: 'Devolução não encontrada.' } });
+
+    if (existing.status !== 'item_shipped') {
+      return res.status(409).json({ success: false, error: { code: 'RETURN_NOT_SHIPPED', message: `Só é possível confirmar recebimento de devoluções já enviadas pelo comprador (status atual: ${existing.status}).` } });
+    }
+
+    // Mesma proteção de concorrência já usada em .../status e no PATCH de
+    // envio do comprador: UPDATE condicional com o status de origem no WHERE.
+    const [updated] = await db.update(returns)
+      .set({ status: 'received_inspected', updatedAt: new Date() })
+      .where(and(eq(returns.id, req.params.id), eq(returns.sellerId, seller.id), eq(returns.status, 'item_shipped')))
+      .returning();
+    if (!updated) {
+      return res.status(409).json({ success: false, error: { code: 'RETURN_ALREADY_DECIDED', message: 'O status desta devolução já mudou.' } });
+    }
+
+    return res.json({
+      success: true,
+      message: 'Recebimento confirmado.',
+      data: { id: updated.id, orderId: updated.orderId, status: updated.status, updatedAt: updated.updatedAt },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Erro ao confirmar recebimento.' });
+  }
+});
+
 function canSellerOperate(seller: any): boolean {
   if (!seller) return false;
   if (seller.isEmailVerified === false) return false;

@@ -75,6 +75,14 @@ export const AdminService = {
     return AdminApi.freezeEscrow(id, reason);
   },
 
+  async getReturns(): Promise<ApiResponse<any[]>> {
+    return AdminApi.getReturns();
+  },
+
+  async refundReturn(id: string): Promise<ApiResponse<any>> {
+    return AdminApi.refundReturn(id);
+  },
+
   async getFinanceOverview(): Promise<ApiResponse<any>> {
     return AdminApi.getFinanceOverview();
   },

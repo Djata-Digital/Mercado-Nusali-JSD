@@ -22,6 +22,8 @@ import {
   countryRepresentatives,
   platformSettings,
   disputes,
+  returns,
+  refunds,
   sellers,
   storeShippingPolicies,
   shippingSubsidyCampaigns,
@@ -75,7 +77,7 @@ import { PaymentService } from './modules/payments/paymentService.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { resolveCarrierNames, pickCarrierName } from './modules/logistics/carrierResolver.js';
 import { processPayoutStatusChange } from './modules/wallet/payoutService.js';
-import { resolveDispute, RefundValidationError } from './modules/payments/refundService.js';
+import { resolveDispute, processRefund, RefundValidationError } from './modules/payments/refundService.js';
 import {
   validateShippingRouteRateInput,
   // FASE D16-E3 — MESMA validação/derivação já usada pelo endereço
@@ -2113,6 +2115,129 @@ adminRouter.post('/escrow/:id/release', requireFinanceApproval, async (req: Auth
       return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
     }
     return res.status(400).json({ success: false, message: err?.message || 'Falha ao liberar custódia.' });
+  }
+});
+
+// FASE D18-C3.7E — listagem real de devoluções para o admin (antes,
+// AdminReturnsManager.tsx era 100% mock: useState([]) nunca preenchido).
+// Mesmo padrão de escopo por país já usado em GET /admin/disputes.
+adminRouter.get('/returns', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.json({ success: true, data: [] });
+
+    const scope = resolveAdministrativeScope(req.user);
+    const rows = await db
+      .select({ ret: returns, orderNumber: orders.orderNumber, buyerName: users.fullName, sellerCountry: sellers.countryCode })
+      .from(returns)
+      .innerJoin(orders, eq(returns.orderId, orders.id))
+      .innerJoin(users, eq(returns.buyerId, users.id))
+      .innerJoin(sellers, eq(returns.sellerId, sellers.id))
+      .where(scope.kind === 'GLOBAL' ? undefined : eq(sellers.countryCode, scope.countryCode))
+      .orderBy(desc(returns.createdAt));
+
+    return res.json({
+      success: true,
+      data: rows.map((r) => ({
+        id: r.ret.id,
+        orderId: r.ret.orderId,
+        orderNumber: r.orderNumber,
+        buyerName: r.buyerName,
+        reason: r.ret.reason,
+        amount: Number(r.ret.amount),
+        currency: r.ret.currency,
+        status: r.ret.status,
+        trackingCode: r.ret.trackingCode,
+        resolution: r.ret.resolution,
+        createdAt: r.ret.createdAt,
+        updatedAt: r.ret.updatedAt,
+      })),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// FASE D18-C3.7E — fecha o fluxo MVP de devoluções: reembolso administrativo
+// explícito para uma devolução já recebida/inspecionada pelo vendedor.
+// Reutiliza INTEGRALMENTE processRefund() (refundService.ts) — nenhuma
+// lógica financeira nova é escrita aqui. amount SEMPRE derivado do order
+// real (orders.totalAmount), nunca do body — este endpoint nem lê o body.
+// idempotencyKey segue a convenção já documentada em
+// refunds.idempotencyKey ("dispute_resolution:...", "payment_refunded_
+// webhook:...") — aqui "return_refund:{returnId}". returns.status só vira
+// 'refunded' DEPOIS que processRefund() conclui com sucesso, nunca antes
+// (evita marcar reembolsado sem o efeito financeiro ter de fato ocorrido).
+adminRouter.post('/returns/:id/refund', requireFinanceApproval, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    const { id } = req.params;
+    if (!db) return res.status(503).json({ success: false, message: 'Banco de dados indisponível.' });
+
+    const retRows = await db
+      .select({ ret: returns, sellerCountry: sellers.countryCode })
+      .from(returns)
+      .innerJoin(sellers, eq(returns.sellerId, sellers.id))
+      .where(eq(returns.id, id))
+      .limit(1);
+    if (retRows.length === 0) {
+      return res.status(404).json({ success: false, error: { code: 'RETURN_NOT_FOUND', message: 'Devolução não encontrada.' } });
+    }
+    const ret = retRows[0].ret;
+    const scope = resolveAdministrativeScope(req.user);
+    assertCountryAccess(scope, retRows[0].sellerCountry);
+
+    // Idempotente: retry de um clique duplo cuja primeira chamada já
+    // concluiu responde sucesso sem chamar processRefund() de novo — mesmo
+    // idioma já usado por releaseEscrowForOrder (escrowStatus==='released'
+    // -> retorno idempotente antecipado, sem repetir a escrita).
+    if (ret.status === 'refunded') {
+      return res.json({ success: true, message: 'Esta devolução já havia sido reembolsada anteriormente.', data: { id: ret.id, status: ret.status, alreadyProcessed: true } });
+    }
+    if (ret.status !== 'received_inspected') {
+      return res.status(409).json({ success: false, error: { code: 'RETURN_NOT_INSPECTED', message: `Só é possível reembolsar devoluções já recebidas e inspecionadas pelo vendedor (status atual: ${ret.status}).` } });
+    }
+
+    const [order] = await db.select().from(orders).where(eq(orders.id, ret.orderId)).limit(1);
+    if (!order) {
+      return res.status(404).json({ success: false, error: { code: 'ORDER_NOT_FOUND', message: 'Pedido associado à devolução não encontrado.' } });
+    }
+
+    const performedBy = req.user?.id || 'admin';
+    const idempotencyKey = `return_refund:${ret.id}`;
+    const refundResult = await processRefund({
+      orderId: order.id,
+      amount: Number(order.totalAmount),
+      reason: 'Reembolso de devolução aprovada, enviada e inspecionada pelo vendedor.',
+      idempotencyKey,
+      performedBy,
+    });
+
+    // UPDATE condicional (WHERE status='received_inspected'): se outra
+    // requisição concorrente com a MESMA idempotencyKey já tiver completado
+    // esta transição um instante antes, 0 linhas são afetadas aqui — releio
+    // o estado atual em vez de assumir falha (processRefund já garantiu que
+    // nenhum dinheiro foi movimentado duas vezes, via seu próprio advisory
+    // lock + idempotencyKey).
+    const [updatedReturn] = await db.update(returns)
+      .set({ status: 'refunded', updatedAt: new Date() })
+      .where(and(eq(returns.id, ret.id), eq(returns.status, 'received_inspected')))
+      .returning();
+    const finalReturn = updatedReturn || (await db.select().from(returns).where(eq(returns.id, ret.id)).limit(1))[0];
+
+    return res.json({
+      success: true,
+      message: refundResult.alreadyProcessed ? 'Reembolso já havia sido processado anteriormente (idempotente).' : 'Reembolso processado com sucesso.',
+      data: { returnId: finalReturn.id, returnStatus: finalReturn.status, refund: refundResult },
+    });
+  } catch (err: any) {
+    if (err instanceof ScopeError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    if (err instanceof RefundValidationError) {
+      return res.status(err.status).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    return res.status(400).json({ success: false, message: err?.message || 'Falha ao processar reembolso da devolução.' });
   }
 });
 

@@ -127,16 +127,27 @@ export interface BuyerNotification {
   targetView?: 'tracking' | 'order_detail' | 'coupons' | 'profile' | 'wallet' | 'disputes';
 }
 
+// FASE D18-C3.7A/D18-C3.7B.1 — campos alinhados ao que o backend REALMENTE
+// persiste e devolve (returns, schema.ts), nunca mais um contrato inventado
+// à parte. status usa os 7 valores reais documentados na coluna (nenhum
+// deles é escrito hoje além de 'pending_approval'/'approved'/'rejected' — o
+// restante existe no schema para fases futuras de logística/reembolso,
+// ainda não implementadas). 'approved' != 'label_generated': o vendedor
+// aceitou a solicitação, mas nenhuma etiqueta/logística reversa foi criada
+// ainda — 'label_generated' fica reservado para quando isso de fato existir.
 export interface BuyerReturn {
   id: string;
   orderId: string;
-  productTitle: string;
+  buyerId: string;
+  sellerId: string | null;
   reason: string;
   amount: number;
-  currency?: string;
-  status: 'under_review' | 'approved' | 'completed' | 'rejected';
-  date: string;
-  trackingLabelCode: string;
+  currency: string;
+  status: 'pending_approval' | 'approved' | 'label_generated' | 'item_shipped' | 'received_inspected' | 'refunded' | 'rejected';
+  trackingCode: string | null;
+  resolution: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface BuyerWalletTransaction {
@@ -295,6 +306,13 @@ export const BuyerService = {
 
   async createReturn(data: any): Promise<ApiResponse<any>> {
     return apiClient.post('/buyer/returns', data);
+  },
+
+  // FASE D18-C3.7E — comprador informa que enviou o produto de volta.
+  // trackingCode é texto livre informado pelo comprador (sem transportadora
+  // integrada nesta fase) — nunca validado automaticamente.
+  async reportReturnShipped(id: string, trackingCode?: string): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/buyer/returns/${id}/shipped`, { trackingCode });
   },
 
   // 9. Disputes & Escrow
