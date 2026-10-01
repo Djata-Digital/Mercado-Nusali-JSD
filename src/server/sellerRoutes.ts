@@ -217,18 +217,6 @@ export interface SellerReviewItem {
   repliedAt?: string;
 }
 
-export interface SellerCampaignItem {
-  id: string;
-  title: string;
-  description: string;
-  startDate: string;
-  endDate: string;
-  discountRequirement: string;
-  status: 'active' | 'upcoming' | 'ended';
-  isJoined: boolean;
-  joinedProductsCount: number;
-}
-
 export interface SellerWalletData {
   available: number;
   retained: number;
@@ -285,7 +273,10 @@ let currentQuestions: SellerQuestion[] = [];
 let currentReviews: SellerReviewItem[] = [];
 // FASE D18-C3.1B — mock currentCoupons removido: cupons agora são
 // 100% Postgres-backed (tabela coupons, ver couponRoutes abaixo).
-let currentCampaigns: SellerCampaignItem[] = [];
+// FASE D18-C3.6 — mock currentCampaigns ("Campanhas Sazonais") removido:
+// tela nunca chamava a API mesmo, funcionalidade 100% enganosa nos dois
+// lados (auditoria D18-C3.5). A tabela `campaigns` (legada, não usada por
+// este fluxo) permanece intocada no schema.
 // FASE D18-C4.1 — currentAds/currentSettings (estado global em memória,
 // compartilhado por TODOS os vendedores) removidos. /ads era código morto
 // (nenhum frontend real o chamava); /settings agora é real e por vendedor —
@@ -3533,7 +3524,7 @@ sellerRouter.post('/reviews/:id/reply', async (req: AuthRequest, res: Response) 
 });
 
 // ==========================================
-// 8. MARKETING, COUPONS, CAMPAIGNS & ADS
+// 8. MARKETING, COUPONS & ADS
 // ==========================================
 
 // FASE D18-C3.1B — cupons do vendedor: CRUD real, Postgres-backed.
@@ -3843,30 +3834,6 @@ sellerRouter.delete('/coupons/:id', async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
   }
-});
-
-sellerRouter.get('/campaigns', async (req: Request, res: Response) => {
-  return res.json({
-    success: true,
-    data: currentCampaigns,
-  });
-});
-
-sellerRouter.post('/campaigns/:id/join', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const camp = currentCampaigns.find(c => c.id === id);
-  if (!camp) {
-    return res.status(404).json({ success: false, message: 'Campanha não encontrada.' });
-  }
-
-  camp.isJoined = true;
-  camp.joinedProductsCount = currentSellerProducts.length;
-
-  return res.json({
-    success: true,
-    message: `Sua loja aderiu com sucesso à campanha "${camp.title}"!`,
-    data: camp,
-  });
 });
 
 // FASE D18-C4.1 — "Anúncios Patrocinados" (/ads) foi removido: recurso já

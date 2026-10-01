@@ -227,14 +227,6 @@ export const SellerService = {
     return SellerApi.deleteCoupon(id);
   },
 
-  async getCampaigns(): Promise<ApiResponse<any>> {
-    return SellerApi.getCampaigns();
-  },
-
-  async joinCampaign(id: string): Promise<ApiResponse<any>> {
-    return SellerApi.joinCampaign(id);
-  },
-
   // Settings & Shipping Policy
   async getSettings(): Promise<ApiResponse<any>> {
     return SellerApi.getSettings();

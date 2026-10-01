@@ -282,14 +282,6 @@ export class SellerApi {
     return apiClient.delete(`/seller/coupons/${id}`);
   }
 
-  static async getCampaigns(): Promise<ApiResponse<any>> {
-    return apiClient.get('/seller/campaigns');
-  }
-
-  static async joinCampaign(id: string): Promise<ApiResponse<any>> {
-    return apiClient.post(`/seller/campaigns/${id}/join`);
-  }
-
   // Settings & Shipping Policy
   static async getSettings(): Promise<ApiResponse<any>> {
     return apiClient.get('/seller/settings');

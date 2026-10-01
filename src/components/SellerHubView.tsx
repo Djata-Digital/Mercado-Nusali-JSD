@@ -24,7 +24,6 @@ import { SellerPayouts } from './seller/SellerPayouts';
 import { SellerInvoices } from './seller/SellerInvoices';
 import { SellerLogisticsFulfillment } from './seller/SellerLogisticsFulfillment';
 import { SellerCoupons } from './seller/SellerCoupons';
-import { SellerCampaigns } from './seller/SellerCampaigns';
 import { SellerCustomers } from './seller/SellerCustomers';
 import { SellerQuestions } from './seller/SellerQuestions';
 import { SellerReviews } from './seller/SellerReviews';
@@ -607,10 +606,6 @@ export const SellerHubView: React.FC = () => {
 
         {activeSection === 'coupons' && (
           <SellerCoupons showToast={showToast} />
-        )}
-
-        {activeSection === 'campaigns' && (
-          <SellerCampaigns showToast={showToast} />
         )}
 
         {activeSection === 'customers' && (

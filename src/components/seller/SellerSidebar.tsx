@@ -18,7 +18,6 @@ import {
   ArrowUpRight,
   FileText,
   Gift,
-  Megaphone,
   Users as UserGroup,
   MessageSquare,
   Star,
@@ -56,7 +55,6 @@ export type SellerNavSection =
   | 'payouts'
   | 'invoices'
   | 'coupons'
-  | 'campaigns'
   | 'customers'
   | 'questions'
   | 'reviews'
@@ -152,7 +150,6 @@ export const SellerSidebar: React.FC<SellerSidebarProps> = ({
       title: 'MARKETING & PROMOÇÕES',
       items: [
         { id: 'coupons', label: 'Cupons do Vendedor', icon: Gift },
-        { id: 'campaigns', label: 'Campanhas Sazonais', icon: Megaphone },
       ],
     },
     {
