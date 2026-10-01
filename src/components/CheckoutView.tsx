@@ -521,7 +521,32 @@ export const CheckoutView: React.FC = () => {
       // retry id, nem aqui nem em src/services/checkoutPaymentRouting.ts.
       const paymentTarget = resolveCheckoutPaymentTarget(createdOrder);
 
-      // 2. Non-PIX payment: navigate directly to confirmation
+      // 2. Orange Money / TeleTaku (FASE D18-C5.1): a integração externa
+      // ainda não existe, mas o pedido NUNCA deve ficar sem nenhuma
+      // tentativa de pagamento registrada (correção do comportamento
+      // anterior, que navegava direto para a confirmação sem chamar
+      // /payments/initiate). Cria a tentativa de forma segura — o backend
+      // nunca marca isso como pago; a confirmação real só acontecerá quando
+      // a Orange Guiné-Bissau/Telecel conectar sua API (callback/webhook
+      // futuro -> PaymentService.confirmOrderPayment).
+      if (paymentMethod === 'orange_money' || paymentMethod === 'teletaku') {
+        const attemptRes = await initiateCheckoutPixPayment(paymentTarget, { method: paymentMethod });
+        if (!attemptRes.success) {
+          setErrorMessage(attemptRes.error?.message || attemptRes.message || 'Não foi possível registrar a tentativa de pagamento. Tente novamente.');
+          setIsProcessing(false);
+          return;
+        }
+        clearCart();
+        setIsProcessing(false);
+        navigate(resolveCheckoutConfirmationUrl(paymentTarget), {
+          state: createdOrder.mode === 'purchase_group' ? { purchaseGroup: createdOrder.purchaseGroup } : { order: createdOrder },
+        });
+        return;
+      }
+
+      // 3. Demais métodos não-PIX (fora do escopo desta fase): navega
+      // diretamente para a confirmação, que já exibe honestamente
+      // "Pagamento Pendente" (nenhum destes é tratado aqui como concluído).
       if (paymentMethod !== 'pix') {
         clearCart();
         setIsProcessing(false);
@@ -1036,6 +1061,22 @@ export const CheckoutView: React.FC = () => {
                 </button>
               )}
 
+              {countryPayments.includes('teletaku') && (
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('teletaku')}
+                  className={`p-3 rounded-xl border flex flex-col items-center justify-center text-center gap-1 transition cursor-pointer ${
+                    paymentMethod === 'teletaku'
+                      ? 'border-red-500 bg-red-50/70 ring-2 ring-red-500/20'
+                      : 'border-gray-200 hover:border-gray-300 bg-white'
+                  }`}
+                >
+                  <Smartphone className="w-6 h-6 text-red-600" />
+                  <span className="text-xs font-bold text-gray-900">TeleTaku</span>
+                  <span className="text-[10px] text-red-700 font-semibold">Telecel (XOF)</span>
+                </button>
+              )}
+
               {countryPayments.includes('mtn_money') && (
                 <button
                   type="button"
@@ -1097,10 +1138,10 @@ export const CheckoutView: React.FC = () => {
                 </div>
               )}
 
-              {(paymentMethod === 'orange_money' || paymentMethod === 'mtn_money') && (
+              {(paymentMethod === 'orange_money' || paymentMethod === 'teletaku' || paymentMethod === 'mtn_money') && (
                 <div className="space-y-2">
                   <label className="block font-semibold text-gray-800">
-                    Número de Telefone {paymentMethod === 'orange_money' ? 'Orange Money' : 'MTN Mobile Money'}
+                    Número de Telefone {paymentMethod === 'orange_money' ? 'Orange Money' : paymentMethod === 'teletaku' ? 'TeleTaku' : 'MTN Mobile Money'}
                   </label>
                   <input
                     type="text"
@@ -1110,9 +1151,20 @@ export const CheckoutView: React.FC = () => {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 font-bold bg-white"
                     required
                   />
-                  <p className="text-[11px] text-gray-500">
-                    Você receberá um prompt USSD no seu telemóvel em Guiné-Bissau para confirmar o PIN de segurança do pagamento.
-                  </p>
+                  {(paymentMethod === 'orange_money' || paymentMethod === 'teletaku') ? (
+                    <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                      <span className="bg-amber-200 text-amber-900 text-[9px] font-black px-1.5 py-0.5 rounded-full shrink-0 mt-0.5">
+                        INTEGRAÇÃO EM PREPARAÇÃO
+                      </span>
+                      <p className="text-[11px] text-amber-800 font-medium">
+                        Seu pedido será registrado normalmente, mas a confirmação automática de pagamento via {paymentMethod === 'orange_money' ? 'Orange Money' : 'TeleTaku'} ainda não está disponível — a Nusali está finalizando essa integração com a operadora.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-gray-500">
+                      Você receberá um prompt USSD no seu telemóvel em Guiné-Bissau para confirmar o PIN de segurança do pagamento.
+                    </p>
+                  )}
                 </div>
               )}
 

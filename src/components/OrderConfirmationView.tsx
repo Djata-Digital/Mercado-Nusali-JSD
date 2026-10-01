@@ -277,6 +277,13 @@ export const OrderConfirmationView: React.FC = () => {
   const rawPaymentMethod = activeOrder.paymentMethod ? String(activeOrder.paymentMethod).toLowerCase() : null;
   const formattedPaymentMethod = rawPaymentMethod ? rawPaymentMethod.replace('_', ' ').toUpperCase() : 'Não selecionado';
 
+  // FASE D18-C5.1 — Orange Money e TeleTaku ainda não têm integração externa
+  // conectada: nunca mostrar apenas "Pagamento Pendente" genérico para esses
+  // dois métodos (isso pareceria um processamento em andamento) — o texto
+  // precisa deixar claro que a confirmação automática ainda não está
+  // disponível, sem fingir que algo está "processando" de verdade.
+  const isAwaitingPartnerIntegration = !isPaid && (rawPaymentMethod === 'orange_money' || rawPaymentMethod === 'teletaku');
+
   // Shipment & Tracking (Strictly real backend data)
   const shipment = activeOrder.shipment || (activeOrder.shipments && activeOrder.shipments[0]) || null;
   const trackingCode = activeOrder.trackingCode || shipment?.trackingNumber || null;
@@ -556,11 +563,14 @@ export const OrderConfirmationView: React.FC = () => {
           </div>
           <h1 className="text-2xl sm:text-3xl font-black">Pedido Criado com Sucesso!</h1>
           <p className="text-sm font-medium text-slate-300 max-w-xl mx-auto">
-            Seu pedido <strong className="text-amber-400 font-extrabold">#{activeOrder.orderNumber || activeOrder.id}</strong> foi registrado e aguarda o pagamento.
+            {isAwaitingPartnerIntegration
+              ? <>Seu pedido <strong className="text-amber-400 font-extrabold">#{activeOrder.orderNumber || activeOrder.id}</strong> foi registrado. A confirmação automática de pagamento via {formattedPaymentMethod} ainda não está disponível — você será avisado assim que a integração com a operadora estiver concluída.</>
+              : <>Seu pedido <strong className="text-amber-400 font-extrabold">#{activeOrder.orderNumber || activeOrder.id}</strong> foi registrado e aguarda o pagamento.</>
+            }
           </p>
           <div className="inline-flex items-center gap-2 bg-amber-500/20 px-4 py-1.5 rounded-full text-xs font-semibold text-amber-300 border border-amber-500/30">
             <Clock className="w-3.5 h-3.5" />
-            <span>Status: Pagamento Pendente ({formattedPaymentMethod})</span>
+            <span>{isAwaitingPartnerIntegration ? `Integração em preparação (${formattedPaymentMethod})` : `Status: Pagamento Pendente (${formattedPaymentMethod})`}</span>
           </div>
 
           {/* Fase M1-D3 — se este pedido é um child de uma compra

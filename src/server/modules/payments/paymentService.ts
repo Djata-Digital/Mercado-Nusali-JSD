@@ -5,8 +5,28 @@ import { eq, and, ne, sql, inArray, desc } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { broadcastToUser, broadcastAdminEvent } from '../../infra/websocket.js';
 import { AsaasPaymentProvider } from './providers/asaasPaymentProvider.js';
+import { OrangeMoneyPaymentProvider } from './providers/orangeMoneyPaymentProvider.js';
+import { TeleTakuPaymentProvider } from './providers/teleTakuPaymentProvider.js';
 import { FinancialLedgerService } from '../ledger/financialLedgerService.js';
 import { assertNoBlockingChargebackForPayment } from './chargebackService.js';
+
+/**
+ * FASE D18-C5.1 — meios de pagamento realmente reconhecidos por
+ * `PaymentService.initiatePayment`. Qualquer `method` fora desta lista é
+ * rejeitado explicitamente (PAYMENT_METHOD_NOT_SUPPORTED) em vez de cair
+ * silenciosamente no branch genérico 'nusali_pay' — nunca confiar
+ * implicitamente num método desconhecido vindo do cliente.
+ */
+const SUPPORTED_PAYMENT_METHODS = new Set([
+  'pix',
+  'orange_money',
+  'teletaku',
+  'mtn_money',
+  'credit_card',
+  'nusali_wallet',
+  'boleto',
+  'stripe_paypal',
+]);
 
 export interface InitiatePaymentDTO {
   orderId: string;
@@ -171,7 +191,38 @@ export class PaymentService {
         throw err;
       }
 
-      const provider = data.provider || (data.method === 'pix' ? 'pix_engine' : data.method.includes('orange') ? 'orange_money' : 'nusali_pay');
+      // FASE D18-C5.1 — método desconhecido é rejeitado explicitamente, nunca
+      // aceito em silêncio no branch genérico 'nusali_pay' (que existia antes
+      // desta fase para qualquer string não reconhecida).
+      if (!SUPPORTED_PAYMENT_METHODS.has(data.method)) {
+        const err: any = new Error(`PAYMENT_METHOD_NOT_SUPPORTED: O método de pagamento "${data.method}" não é reconhecido pelo Mercado Nusali.`);
+        err.code = 'PAYMENT_METHOD_NOT_SUPPORTED';
+        err.status = 400;
+        throw err;
+      }
+
+      // FASE D18-C5.1 — TeleTaku é um meio de pagamento exclusivo da
+      // Guiné-Bissau (XOF), mesmo raciocínio já aplicado ao PIX/BRL logo
+      // abaixo: nunca criar uma tentativa de pagamento neste meio para um
+      // pedido em outra moeda, mesmo que o cliente envie o método
+      // explicitamente. orange_money NÃO recebe a mesma restrição aqui:
+      // auditoria (scratch/test-payment-currency-mismatch.ts, caso D) já
+      // confirma orange_money sendo usado legitimamente para pedidos em GMD,
+      // não apenas XOF — restringi-lo quebraria esse comportamento real e
+      // preexistente, não relacionado a esta fase.
+      if (data.method === 'teletaku' && realCurrency !== 'XOF') {
+        const err: any = new Error(`PAYMENT_METHOD_NOT_AVAILABLE_FOR_CURRENCY: TeleTaku está disponível apenas para pedidos em Francos CFA (XOF). Este pedido está em ${realCurrency}.`);
+        err.code = 'PAYMENT_METHOD_NOT_AVAILABLE_FOR_CURRENCY';
+        err.status = 400;
+        throw err;
+      }
+
+      const provider = data.provider || (
+        data.method === 'pix' ? 'pix_engine'
+        : data.method === 'orange_money' ? 'orange_money'
+        : data.method === 'teletaku' ? 'teletaku'
+        : 'nusali_pay'
+      );
 
       if (provider === 'asaas') {
         const asaasProvider = new AsaasPaymentProvider();
@@ -224,6 +275,73 @@ export class PaymentService {
       if (existingPending.length > 0) {
         logger.info({ orderId: order.id, provider }, 'Returning existing pending local payment (idempotent)');
         return existingPending[0];
+      }
+
+      // FASE D18-C5.1 — Orange Money / TeleTaku: cria a tentativa de
+      // pagamento de forma segura (mesmas validações de ownership/amount/
+      // currency/idempotência já aplicadas acima) através do boundary real
+      // `PaymentProvider` (paymentProvider.ts), o mesmo já usado por
+      // `AsaasPaymentProvider`. Nenhuma chamada de rede é feita — as classes
+      // `OrangeMoneyPaymentProvider`/`TeleTakuPaymentProvider` devolvem um
+      // status PENDING honesto até a Orange Guiné-Bissau/Telecel conectarem
+      // suas APIs reais. payments.status NUNCA se torna 'paid' aqui — só
+      // `PaymentService.confirmOrderPayment` (chamado pelo webhook real
+      // futuro, nunca pelo frontend) pode fazer essa transição.
+      if (provider === 'orange_money' || provider === 'teletaku') {
+        const providerInstance = provider === 'orange_money' ? new OrangeMoneyPaymentProvider() : new TeleTakuPaymentProvider();
+        const gatewayRes = await providerInstance.initiatePayment({
+          orderId: order.id,
+          amount: realAmount,
+          currency: realCurrency,
+          customerName: '',
+          customerEmail: '',
+          paymentMethod: data.method,
+          metadata: {
+            buyerId: data.buyerId,
+            idempotencyKey: data.idempotencyKey,
+          },
+        });
+
+        const paymentId = `pay_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+        await tx.insert(payments).values({
+          id: paymentId,
+          orderId: order.id,
+          settlementRole: 'primary',
+          buyerId: data.buyerId,
+          amount: String(realAmount),
+          currency: realCurrency,
+          provider,
+          method: data.method,
+          status: 'pending',
+          transactionRef: gatewayRes.transactionRef,
+          idempotencyKey: data.idempotencyKey,
+          rawResponseJson: gatewayRes.rawResponse,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+
+        await tx.insert(paymentAttempts).values({
+          id: `att_${Date.now()}`,
+          paymentId,
+          provider,
+          status: 'initiated',
+          rawPayloadJson: gatewayRes.rawResponse,
+          createdAt: new Date(),
+        });
+
+        logger.info({ paymentId, orderId: order.id, provider, method: data.method }, 'Payment attempt safely recorded — awaiting partner integration');
+
+        return {
+          id: paymentId,
+          orderId: order.id,
+          amount: realAmount,
+          currency: realCurrency,
+          method: data.method,
+          provider,
+          status: 'pending',
+          integrationStatus: 'AWAITING_PARTNER_INTEGRATION',
+        };
       }
 
       // Correção crítica (PAYMENT_CURRENCY_MISMATCH): PIX é um método

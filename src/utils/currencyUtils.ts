@@ -10,7 +10,12 @@ export const countriesConfig: Record<CountryCode, CountryConfig> = {
     currencySymbol: 'CFA',
     exchangeRateToUSD: 603.5, // 1 USD = 603.50 CFA (BCEAO)
     phonePrefix: '+245',
-    paymentMethods: ['orange_money', 'mtn_money', 'nusali_wallet', 'credit_card'],
+    // FASE D18-C5.1 — meios de pagamento oficiais do lançamento na
+    // Guiné-Bissau: Orange Money (Orange Guiné-Bissau) e TeleTaku (Telecel).
+    // mtn_money removido: não é um parceiro do lançamento — mantê-lo
+    // selecionável perpetuaria exatamente o mesmo problema corrigido nesta
+    // fase (pedido criado sem nenhuma possibilidade real de pagamento).
+    paymentMethods: ['orange_money', 'teletaku', 'nusali_wallet', 'credit_card'],
   },
   BR: {
     code: 'BR',

@@ -948,7 +948,7 @@ export const orders = pgTable('orders', {
   totalAmount: numeric('total_amount', { precision: 12, scale: 2 }).notNull(),
   currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
   status: varchar('status', { length: 50 }).notNull().default('pending_payment'), // pending_payment, paid, processing, ready_to_ship, shipped, in_transit, delivered, cancelled, refund_requested, refunded, disputed
-  paymentMethod: varchar('payment_method', { length: 100 }), // pix, orange_money, mtn_money, card, nusali_wallet
+  paymentMethod: varchar('payment_method', { length: 100 }), // pix, orange_money, teletaku, mtn_money, card, nusali_wallet
   paymentStatus: varchar('payment_status', { length: 50 }).notNull().default('pending'), // pending, paid, failed, refunded
   escrowStatus: varchar('escrow_status', { length: 50 }).notNull().default('pending'), // pending, held, releasing, released, disputed, refunded
   shippingAddressJson: jsonb('shipping_address_json').notNull(),
@@ -1135,7 +1135,7 @@ export const payments = pgTable('payments', {
   buyerId: varchar('buyer_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
   amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
   currency: varchar('currency', { length: 10 }).notNull().default('XOF'),
-  provider: varchar('provider', { length: 50 }).notNull(), // pix_engine, orange_money, mtn, stripe, nusali_pay
+  provider: varchar('provider', { length: 50 }).notNull(), // pix_engine, orange_money, teletaku, mtn, stripe, nusali_pay
   method: varchar('method', { length: 50 }).notNull(),
   status: varchar('status', { length: 50 }).notNull().default('pending'), // pending, authorized, paid, failed, refunded, cancelled
   transactionRef: varchar('transaction_ref', { length: 255 }),

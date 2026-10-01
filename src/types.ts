@@ -307,6 +307,7 @@ export type PaymentMethodType =
   | 'credit_card'
   | 'boleto'
   | 'orange_money'
+  | 'teletaku'
   | 'mtn_money'
   | 'nusali_wallet'
   | 'stripe_paypal';
