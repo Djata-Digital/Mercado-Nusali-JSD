@@ -1629,6 +1629,49 @@ export class OrderService {
     }
 
     await db.transaction(async (tx) => {
+      // FASE D18-C7.2 — MESMA chave de lock já usada por
+      // initiatePayment/confirmOrderPayment/releaseEscrowForOrder (pedido
+      // único) e pelos locks por child order dentro de
+      // confirmPurchaseGroupPayment (hashtext(childId), onde childId É o
+      // próprio orderId) — nunca uma segunda convenção. Serializa este
+      // cancelamento contra qualquer confirmação de pagamento concorrente
+      // para o MESMO pedido, seja single-order ou child de purchase_group.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${orderId}))`);
+
+      // Revalida do zero SOB o lock — nunca confia no snapshot lido antes de
+      // adquiri-lo (o pagamento pode ter sido confirmado exatamente nesse
+      // intervalo, inclusive via confirmPurchaseGroupPayment).
+      const [freshOrd] = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+      if (!freshOrd) {
+        throw new Error('Pedido não encontrado.');
+      }
+      if (freshOrd.buyerId !== userId) {
+        throw new Error('Você não tem permissão para cancelar este pedido.');
+      }
+
+      // Idempotente: já cancelado por uma chamada anterior (retry) — nunca
+      // repete a liberação de estoque/histórico.
+      if (freshOrd.status === 'cancelled') {
+        return;
+      }
+
+      if (freshOrd.status === 'shipped' || freshOrd.status === 'delivered') {
+        throw new Error('Pedido entregue ou em transporte não pode ser cancelado.');
+      }
+
+      // FASE D18-C7.2 — BLOCKER corrigido (auditoria D18-C7.1): um pedido
+      // cujo pagamento já foi confirmado (paymentStatus/escrowStatus saíram
+      // de 'pending') nunca pode ser cancelado por este fluxo simples — o
+      // comportamento anterior marcava orders.escrowStatus='refunded' sem
+      // nenhum reembolso financeiro real (escrow_accounts permanecia
+      // intocada) e liberava de volta ao estoque disponível mercadoria já
+      // paga. Cancelamento pós-pagamento exige um fluxo formal de
+      // solicitação/reembolso — fail-closed aqui, nenhum fluxo novo
+      // inventado nesta fase.
+      if (freshOrd.paymentStatus !== 'pending' || freshOrd.escrowStatus !== 'pending') {
+        throw new Error('ORDER_ALREADY_PAID_CANNOT_SELF_CANCEL: Este pedido já teve o pagamento confirmado e não pode mais ser cancelado diretamente. Entre em contato com o suporte para solicitar um reembolso.');
+      }
+
       await tx
         .update(orders)
         .set({
@@ -1641,7 +1684,7 @@ export class OrderService {
       await tx.insert(orderStatusHistory).values({
         id: `osh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         orderId,
-        previousStatus: ord.status,
+        previousStatus: freshOrd.status,
         newStatus: 'cancelled',
         reason: reason || 'Pedido cancelado pelo comprador.',
         changedBy: userId,
