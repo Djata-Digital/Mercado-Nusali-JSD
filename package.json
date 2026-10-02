@@ -13,6 +13,7 @@
     "db:generate": "drizzle-kit generate --config=src/db/drizzle.config.ts",
     "db:push": "drizzle-kit push --config=src/db/drizzle.config.ts",
     "db:seed": "tsx src/db/seed.ts",
+    "db:migrate:production": "tsx scripts/run-production-migrations.ts",
     "admin:create-global": "tsx scripts/create-global-admin.ts",
     "jobs:escrow-auto-release": "tsx scripts/run-escrow-auto-release.ts",
     "jobs:expire-pending-payments": "tsx scripts/run-pending-payment-expiration.ts",
