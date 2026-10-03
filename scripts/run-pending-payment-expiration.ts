@@ -32,6 +32,10 @@ async function main() {
     cancelled: result.results.filter((r) => r.status === 'cancelled').length,
     skipped: result.results.filter((r) => r.status === 'skipped').length,
     failed: result.results.filter((r) => r.status === 'failed').length,
+    groupCandidateCount: result.groupCandidateCount,
+    groupsCancelled: result.groupResults.filter((r) => r.status === 'cancelled').length,
+    groupsSkipped: result.groupResults.filter((r) => r.status === 'skipped').length,
+    groupsFailed: result.groupResults.filter((r) => r.status === 'failed').length,
     durationMs,
   };
 

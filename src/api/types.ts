@@ -231,4 +231,8 @@ export interface PurchaseGroupDetail {
   createdAt: string;
   orders: PurchaseGroupDetailOrder[];
   payment: PurchaseGroupDetailPayment | null;
+  // D18-C7.3H.1 — true só quando a compra está CANCELADA e há um pagamento
+  // recebido depois do cancelamento (paid + surplus). Opcional: respostas
+  // antigas sem o campo continuam válidas (tratadas como "sem pagamento tardio").
+  lateSurplusPayment?: boolean;
 }

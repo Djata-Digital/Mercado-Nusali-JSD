@@ -1522,6 +1522,273 @@ export class PaymentService {
   }
 
   /**
+   * FASE D18-C7.3G — classificação EXPLÍCITA dos únicos erros de confirmação
+   * que podem significar "o dinheiro chegou depois de a compra expirar/ser
+   * cancelada". Só estes dois códigos habilitam a tentativa de captura tardia
+   * (recordLatePaymentAfterExpiration); qualquer outro erro continua
+   * fail-closed (não-2xx) exatamente como antes. O código é só um GATILHO —
+   * o estado é sempre re-provado dentro do método de captura, sob lock.
+   */
+  static isLatePaymentCandidateError(err: any, owner: 'group' | 'order'): boolean {
+    const code = err?.code;
+    return owner === 'group'
+      ? code === 'PURCHASE_GROUP_NOT_PAYABLE'
+      : code === 'ORDER_CANCELLED_CANNOT_CONFIRM_PAYMENT';
+  }
+
+  /**
+   * FASE D18-C7.3G — captura segura de um pagamento recebido DEPOIS de a
+   * compra já ter sido expirada/cancelada.
+   *
+   * O dinheiro é real (o PSP confirmou), mas não financia nada: o estoque já
+   * foi devolvido e o pedido/compra está cancelado. Em vez de deixar o webhook
+   * em retry permanente (confirmPurchaseGroupPayment/confirmOrderPayment
+   * rejeitam, corretamente, uma confirmação sobre pedido cancelado), o valor
+   * é persistido com os estados JÁ EXISTENTES do schema — payments.status
+   * 'paid' + settlement_role 'surplus' (dinheiro real que precisa de
+   * reconciliação/refund próprio) — para ser identificável depois.
+   *
+   * NUNCA: reabre purchase_group/order, re-reserva estoque, cria
+   * stock_reservation, cria escrow/allocation, credita wallet, dispara refund
+   * no PSP, mexe em cupom ou marca pedido como pago.
+   *
+   * Lock = o MESMO da maquinaria financeira correspondente (group:
+   * hashtext(purchaseGroupId), como confirmPurchaseGroupPayment/expiração;
+   * pedido legado: hashtext(orderId), como confirmOrderPayment/cancelamento).
+   * Tudo é relido SOB o lock; o dono do pagamento (imutável) é lido uma vez
+   * antes só para saber QUAL lock adquirir.
+   *
+   * Idempotente: um payment já 'surplus'+'paid' devolve ALREADY_RECORDED sem
+   * nenhuma escrita (webhook duplicado, retry, dois eventos concorrentes).
+   *
+   * Fail-closed: qualquer estado que não seja inequivocamente "compra
+   * cancelada, sem primary, sem allocation, sem escrow" lança
+   * LATE_PAYMENT_NOT_CAPTURABLE (err.reason diz o porquê) — o chamador então
+   * mantém a falha original (não-2xx).
+   */
+  static async recordLatePaymentAfterExpiration(input: {
+    paymentId: string;
+    provider: string;
+    transactionRef: string;
+    receivedValue: number;
+    eventId?: string | null;
+  }): Promise<{
+    outcome: 'RECORDED' | 'ALREADY_RECORDED';
+    ownerType: 'purchase_group' | 'order';
+    ownerId: string;
+    paymentId: string;
+    settlementRole: 'surplus';
+  }> {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível.');
+
+    const notCapturable = (reason: string, detail?: Record<string, unknown>) => {
+      const err: any = new Error(`LATE_PAYMENT_NOT_CAPTURABLE: ${reason}${detail ? ' ' + JSON.stringify(detail) : ''}`);
+      err.code = 'LATE_PAYMENT_NOT_CAPTURABLE';
+      err.reason = reason;
+      return err;
+    };
+    const moneyMismatch = (a: number, b: number) => !Number.isFinite(a) || !Number.isFinite(b) || Math.abs(a - b) > 0.01;
+
+    const result = await db.transaction(async (tx) => {
+      // Leitura SEM lock só para descobrir o dono (purchaseGroupId/orderId são
+      // imutáveis depois da criação) e, portanto, qual advisory lock pegar.
+      const [probe] = await tx
+        .select({ id: payments.id, orderId: payments.orderId, purchaseGroupId: payments.purchaseGroupId })
+        .from(payments)
+        .where(eq(payments.id, input.paymentId))
+        .limit(1);
+      if (!probe) throw notCapturable('PAYMENT_NOT_FOUND');
+      const lockKey = probe.purchaseGroupId ?? probe.orderId;
+      if (!lockKey) throw notCapturable('PAYMENT_WITHOUT_OWNER');
+
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`);
+
+      // Tudo daqui em diante é relido SOB o lock.
+      const [payment] = await tx.select().from(payments).where(eq(payments.id, input.paymentId)).limit(1);
+      if (!payment) throw notCapturable('PAYMENT_NOT_FOUND');
+      if ((payment.purchaseGroupId ?? payment.orderId) !== lockKey) throw notCapturable('PAYMENT_OWNER_CHANGED');
+
+      const ownerType: 'purchase_group' | 'order' = payment.purchaseGroupId ? 'purchase_group' : 'order';
+      if (payment.purchaseGroupId && payment.orderId) throw notCapturable('PAYMENT_OWNER_AMBIGUOUS');
+
+      // Vínculo com o PSP: o webhook localizou o payment por transactionRef,
+      // então tem de bater exatamente; provider idem.
+      const ref = String(input.transactionRef || '').trim();
+      if (!ref || payment.transactionRef !== ref) throw notCapturable('TRANSACTION_REF_MISMATCH');
+      if (payment.provider !== input.provider) throw notCapturable('PROVIDER_MISMATCH');
+
+      // Idempotência (webhook duplicado / retry / dois eventos concorrentes).
+      if (payment.settlementRole === 'surplus' && payment.status === 'paid') {
+        logger.info({ paymentId: payment.id, ownerType, ownerId: lockKey }, 'LATE_PAYMENT_ALREADY_RECORDED (idempotent call)');
+        return { outcome: 'ALREADY_RECORDED' as const, ownerType, ownerId: lockKey, paymentId: payment.id, settlementRole: 'surplus' as const, snapshot: null as null | Record<string, unknown> };
+      }
+
+      // Só um pagamento que NUNCA foi confirmado pode virar captura tardia.
+      // 'paid' (primary de uma compra concluída) e 'refunded' ficam de fora.
+      if (!['pending', 'authorized', 'expired', 'cancelled', 'failed'].includes(payment.status)) {
+        throw notCapturable('PAYMENT_STATUS_NOT_CAPTURABLE', { status: payment.status });
+      }
+
+      const paymentAmount = Number(payment.amount);
+      if (moneyMismatch(input.receivedValue, paymentAmount)) {
+        throw notCapturable('AMOUNT_MISMATCH', { received: input.receivedValue, expected: paymentAmount });
+      }
+
+      if (ownerType === 'purchase_group') {
+        // ------------------------------------------------------------------
+        // GRUPO — re-prova sob o lock do group.
+        // ------------------------------------------------------------------
+        if (payment.settlementRole !== 'candidate') {
+          throw notCapturable('PAYMENT_ROLE_NOT_CANDIDATE', { settlementRole: payment.settlementRole });
+        }
+        const [group] = await tx.select().from(purchaseGroups).where(eq(purchaseGroups.id, lockKey)).limit(1);
+        if (!group) throw notCapturable('PURCHASE_GROUP_NOT_FOUND');
+        if (group.status !== 'cancelled') throw notCapturable('PURCHASE_GROUP_NOT_CANCELLED', { status: group.status });
+        if (String(payment.currency).toUpperCase() !== String(group.currency).toUpperCase()) throw notCapturable('CURRENCY_MISMATCH');
+        if (moneyMismatch(paymentAmount, Number(group.totalAmount))) throw notCapturable('GROUP_AMOUNT_MISMATCH');
+
+        const children = await tx.select().from(orders).where(eq(orders.purchaseGroupId, group.id));
+        if (children.length === 0) throw notCapturable('PURCHASE_GROUP_EMPTY');
+        const liveChild = children.find((c) => c.status !== 'cancelled' || c.paymentStatus !== 'pending');
+        if (liveChild) {
+          throw notCapturable('PURCHASE_GROUP_CHILD_NOT_CANCELLED', { orderId: liveChild.id, status: liveChild.status, paymentStatus: liveChild.paymentStatus });
+        }
+
+        const [primary] = await tx
+          .select({ id: payments.id })
+          .from(payments)
+          .where(and(eq(payments.purchaseGroupId, group.id), eq(payments.settlementRole, 'primary')))
+          .limit(1);
+        if (primary) throw notCapturable('PURCHASE_GROUP_HAS_PRIMARY', { primaryPaymentId: primary.id });
+
+        const [allocation] = await tx
+          .select({ id: paymentAllocations.id })
+          .from(paymentAllocations)
+          .where(eq(paymentAllocations.purchaseGroupId, group.id))
+          .limit(1);
+        if (allocation) throw notCapturable('PURCHASE_GROUP_HAS_ALLOCATIONS');
+
+        const [escrow] = await tx
+          .select({ id: escrowAccounts.id })
+          .from(escrowAccounts)
+          .where(inArray(escrowAccounts.orderId, children.map((c) => c.id)))
+          .limit(1);
+        if (escrow) throw notCapturable('PURCHASE_GROUP_HAS_ESCROW');
+      } else {
+        // ------------------------------------------------------------------
+        // PEDIDO LEGADO — re-prova sob o lock do pedido. O payment legado
+        // nasce 'primary' (initiatePayment); 'candidate' também é aceito.
+        // ------------------------------------------------------------------
+        if (payment.settlementRole !== 'primary' && payment.settlementRole !== 'candidate') {
+          throw notCapturable('PAYMENT_ROLE_NOT_CAPTURABLE', { settlementRole: payment.settlementRole });
+        }
+        const [ord] = await tx.select().from(orders).where(eq(orders.id, lockKey)).limit(1);
+        if (!ord) throw notCapturable('ORDER_NOT_FOUND');
+        if (ord.purchaseGroupId) throw notCapturable('ORDER_BELONGS_TO_PURCHASE_GROUP');
+        if (payment.orderId !== ord.id) throw notCapturable('PAYMENT_ORDER_MISMATCH');
+        if (ord.status !== 'cancelled') throw notCapturable('ORDER_NOT_CANCELLED', { status: ord.status });
+        if (ord.paymentStatus !== 'pending') throw notCapturable('ORDER_PAYMENT_STATUS_NOT_PENDING', { paymentStatus: ord.paymentStatus });
+        if (String(payment.currency).toUpperCase() !== String(ord.currency).toUpperCase()) throw notCapturable('CURRENCY_MISMATCH');
+        if (moneyMismatch(paymentAmount, Number(ord.totalAmount))) throw notCapturable('ORDER_AMOUNT_MISMATCH');
+
+        const [escrow] = await tx
+          .select({ id: escrowAccounts.id })
+          .from(escrowAccounts)
+          .where(eq(escrowAccounts.orderId, ord.id))
+          .limit(1);
+        if (escrow) throw notCapturable('ORDER_HAS_ESCROW');
+
+        const [otherPaid] = await tx
+          .select({ id: payments.id })
+          .from(payments)
+          .where(and(eq(payments.orderId, ord.id), eq(payments.status, 'paid'), ne(payments.id, payment.id)))
+          .limit(1);
+        if (otherPaid) throw notCapturable('ORDER_HAS_OTHER_PAID_PAYMENT', { paymentId: otherPaid.id });
+      }
+
+      // ----------------------------------------------------------------------
+      // ESCRITA — só estados já existentes; nada de pedido/estoque/escrow/wallet.
+      // Compare-and-set: o UPDATE só acerta se role/status ainda são os provados.
+      // ----------------------------------------------------------------------
+      const now = new Date();
+      const updated = await tx
+        .update(payments)
+        .set({ status: 'paid', settlementRole: 'surplus', paidAt: now, updatedAt: now })
+        .where(and(eq(payments.id, payment.id), eq(payments.settlementRole, payment.settlementRole), eq(payments.status, payment.status)))
+        .returning({ id: payments.id });
+      if (updated.length !== 1) throw notCapturable('CONCURRENT_MODIFICATION');
+
+      const [lastAttempt] = await tx
+        .select({ attemptNumber: paymentAttempts.attemptNumber })
+        .from(paymentAttempts)
+        .where(eq(paymentAttempts.paymentId, payment.id))
+        .orderBy(desc(paymentAttempts.attemptNumber))
+        .limit(1);
+
+      const snapshot = {
+        kind: 'late_payment_after_expiration',
+        ownerType,
+        ownerId: lockKey,
+        provider: input.provider,
+        transactionRef: ref,
+        receivedValue: input.receivedValue,
+        eventId: input.eventId ?? null,
+        previousStatus: payment.status,
+        previousSettlementRole: payment.settlementRole,
+        capturedAt: now.toISOString(),
+      };
+
+      await tx.insert(paymentAttempts).values({
+        id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        paymentId: payment.id,
+        attemptNumber: (lastAttempt?.attemptNumber ?? 0) + 1,
+        provider: input.provider,
+        status: 'succeeded',
+        rawPayloadJson: { note: 'pagamento tardio — dinheiro recebido depois de a compra expirar/cancelar; registrado como surplus, nada financiado', ...snapshot },
+        createdAt: now,
+      });
+
+      await tx.insert(auditLogs).values({
+        id: `aud_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        actorUserId: null,
+        action: 'PAYMENT_LATE_CAPTURED_AS_SURPLUS',
+        resource: 'payments',
+        resourceId: payment.id,
+        detailsJson: snapshot,
+        createdAt: now,
+      });
+
+      logger.warn({ paymentId: payment.id, ownerType, ownerId: lockKey, transactionRef: ref }, 'LATE_PAYMENT_CAPTURED_AS_SURPLUS — dinheiro real recebido após expiração/cancelamento; nenhum pedido reaberto, nenhum estoque re-reservado, nenhum escrow/wallet criado; requer reconciliação/refund futuro');
+
+      return { outcome: 'RECORDED' as const, ownerType, ownerId: lockKey, paymentId: payment.id, settlementRole: 'surplus' as const, snapshot: snapshot as Record<string, unknown> };
+    });
+
+    if (result.outcome === 'RECORDED') {
+      // Fora da transação e nunca fatal: o commit financeiro já aconteceu.
+      try {
+        broadcastAdminEvent({
+          type: 'LATE_PAYMENT_SURPLUS',
+          paymentId: result.paymentId,
+          ownerType: result.ownerType,
+          ownerId: result.ownerId,
+          amount: input.receivedValue,
+        });
+      } catch (broadcastErr: any) {
+        logger.warn({ paymentId: result.paymentId, error: broadcastErr?.message }, 'LATE_PAYMENT_ADMIN_BROADCAST_FAILED (não bloqueia a captura já commitada)');
+      }
+    }
+
+    return {
+      outcome: result.outcome,
+      ownerType: result.ownerType,
+      ownerId: result.ownerId,
+      paymentId: result.paymentId,
+      settlementRole: result.settlementRole,
+    };
+  }
+
+  /**
    * Confirms payment via payment ID (calls confirmOrderPayment).
    */
   static async confirmPayment(paymentId: string, transactionRef?: string) {

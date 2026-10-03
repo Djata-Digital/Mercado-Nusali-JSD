@@ -1,4 +1,4 @@
-import { PaymentProvider, PaymentGatewayRequest, PaymentGatewayResponse, RefundGatewayRequest, RefundGatewayOutcome } from '../paymentProvider.js';
+import { PaymentProvider, PaymentGatewayRequest, PaymentGatewayResponse, RefundGatewayRequest, RefundGatewayOutcome, ExternalChargeCancelOutcome } from '../paymentProvider.js';
 import { AsaasClient } from '../clients/asaasClient.js';
 import { validateAsaasConfig } from '../config/asaasConfig.js';
 import { logger } from '../../../infra/logger.js';
@@ -691,6 +691,84 @@ export class AsaasPaymentProvider implements PaymentProvider {
     validateAsaasConfig();
     logger.info({ transactionRef }, '[AsaasPaymentProvider] Status check requested');
     throw new Error('NOT_IMPLEMENTED: A verificação de status Asaas será ativada nas próximas etapas.');
+  }
+
+  /**
+   * FASE D18-C7.3B — torna uma cobrança Asaas PENDENTE não pagável, com
+   * confirmação, antes de o pedido/purchase_group ser cancelado localmente.
+   *
+   * A documentação oficial (DELETE /v3/payments/{id}) só garante o corpo
+   * `{deleted, id}` e que uma cobrança removida "não deve permanecer ativa ou
+   * disponível para pagamento"; NÃO especifica quais status são removíveis, o
+   * que ocorre com uma cobrança já paga, nem a repetição do DELETE. Por isso
+   * o resultado do DELETE NUNCA é confiado: o veredito vem sempre de uma
+   * leitura (GET) — antes (nunca emite DELETE contra cobrança já paga) e
+   * depois (exige `deleted === true` E status não pago). Qualquer outra coisa
+   * (rede, 4xx/5xx, 404, status desconhecido) é UNCONFIRMED => fail-closed.
+   * Idempotente: uma cobrança já removida é confirmada pela pré-checagem, sem
+   * novo DELETE. Nenhuma transação/lock do Postgres existe aqui.
+   */
+  async cancelPendingCharge(providerPaymentId: string): Promise<ExternalChargeCancelOutcome> {
+    const PAID_OR_IN_PROGRESS = new Set([
+      'RECEIVED', 'CONFIRMED', 'RECEIVED_IN_CASH', 'REFUND_REQUESTED', 'REFUND_IN_PROGRESS', 'REFUNDED',
+      'CHARGEBACK_REQUESTED', 'CHARGEBACK_DISPUTE', 'AWAITING_CHARGEBACK_REVERSAL', 'DUNNING_RECEIVED', 'AWAITING_RISK_ANALYSIS',
+    ]);
+    const endpoint = `/payments/${encodeURIComponent(providerPaymentId)}`;
+
+    const readCharge = async (): Promise<{ ok: true; charge: any } | { ok: false; code: string; status?: number }> => {
+      try {
+        const charge = await AsaasClient.request<any>(endpoint, { method: 'GET' });
+        return { ok: true, charge };
+      } catch (err: any) {
+        return { ok: false, code: err?.code || 'UNKNOWN_ERROR', status: err?.status };
+      }
+    };
+
+    // 1. Pré-checagem — nunca emitir DELETE contra cobrança paga/em andamento.
+    const pre = await readCharge();
+    if (pre.ok === false) {
+      logger.warn({ providerPaymentId, code: pre.code, httpStatus: pre.status }, '[AsaasPaymentProvider] cancelPendingCharge: pré-checagem falhou — não confirmado');
+      return { outcome: 'UNCONFIRMED', reason: pre.status === 404 ? 'CHARGE_NOT_FOUND' : 'PRECHECK_FAILED', code: pre.code };
+    }
+    const preStatus = String(pre.charge?.status || '');
+    if (PAID_OR_IN_PROGRESS.has(preStatus)) {
+      logger.warn({ providerPaymentId, providerStatus: preStatus }, '[AsaasPaymentProvider] cancelPendingCharge: cobrança já paga/em andamento — NÃO cancelar');
+      return { outcome: 'PAID_OR_IN_PROGRESS', providerStatus: preStatus };
+    }
+    if (pre.charge?.deleted === true) {
+      return { outcome: 'CANCELLED_CONFIRMED', providerStatus: preStatus };
+    }
+    if (preStatus !== 'PENDING' && preStatus !== 'OVERDUE') {
+      logger.warn({ providerPaymentId, providerStatus: preStatus }, '[AsaasPaymentProvider] cancelPendingCharge: status do provider desconhecido para cancelamento — não confirmado');
+      return { outcome: 'UNCONFIRMED', reason: 'UNEXPECTED_PROVIDER_STATUS', code: preStatus || 'EMPTY_STATUS' };
+    }
+
+    // 2. DELETE — o resultado é descartado de propósito (só o erro é guardado
+    // para diagnóstico); quem decide é a leitura posterior.
+    let deleteError: any = null;
+    try {
+      await AsaasClient.request<any>(endpoint, { method: 'DELETE' });
+    } catch (err: any) {
+      deleteError = err;
+    }
+
+    // 3. Verificação — única fonte de verdade do cancelamento.
+    const post = await readCharge();
+    if (post.ok === false) {
+      logger.warn({ providerPaymentId, code: post.code, httpStatus: post.status }, '[AsaasPaymentProvider] cancelPendingCharge: verificação pós-DELETE falhou — não confirmado');
+      return { outcome: 'UNCONFIRMED', reason: 'VERIFY_FAILED', code: post.code };
+    }
+    const postStatus = String(post.charge?.status || '');
+    if (PAID_OR_IN_PROGRESS.has(postStatus)) {
+      logger.warn({ providerPaymentId, providerStatus: postStatus }, '[AsaasPaymentProvider] cancelPendingCharge: cobrança passou a paga durante o cancelamento — NÃO cancelar');
+      return { outcome: 'PAID_OR_IN_PROGRESS', providerStatus: postStatus };
+    }
+    if (post.charge?.deleted === true) {
+      logger.info({ providerPaymentId, providerStatus: postStatus }, '[AsaasPaymentProvider] cancelPendingCharge: remoção CONFIRMADA por leitura');
+      return { outcome: 'CANCELLED_CONFIRMED', providerStatus: postStatus };
+    }
+    logger.warn({ providerPaymentId, providerStatus: postStatus, deleteErrorCode: deleteError?.code }, '[AsaasPaymentProvider] cancelPendingCharge: cobrança continua ativa após DELETE — não confirmado');
+    return { outcome: 'UNCONFIRMED', reason: deleteError ? 'DELETE_REJECTED' : 'NOT_DELETED_AFTER_DELETE', code: deleteError?.code };
   }
 
   /**

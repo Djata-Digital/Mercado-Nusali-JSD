@@ -35,6 +35,80 @@ export function deriveGroupFulfillment(logisticsStatuses: string[]): GroupFulfil
   return { label: 'Pedidos em preparação', tone: 'preparing' };
 }
 
+/**
+ * FASE D18-C7.3H.1 — estado COMERCIAL de uma compra para apresentação.
+ *
+ * `purchase_groups.status` é a AUTORIDADE: `payment.status === 'paid'`
+ * isoladamente NUNCA significa compra confirmada. Um group 'cancelled' que
+ * depois recebeu dinheiro (captura tardia, paid + surplus) continua
+ * cancelado — o pagamento fica registrado para tratamento, nada é reaberto.
+ * Para os demais status o critério anterior é preservado byte a byte
+ * (status 'paid' OU pagamento 'paid', cobrindo p.ex. 'partially_refunded').
+ */
+export type PurchaseGroupCommercialState = 'paid' | 'pending' | 'cancelled' | 'cancelled_late_payment';
+
+export interface PurchaseGroupPresentation {
+  state: PurchaseGroupCommercialState;
+  /** Título (h1) da tela. */
+  title: string;
+  /** Rótulo da célula "Pagamento". */
+  paymentLabel: string;
+  paymentTone: 'ok' | 'warn' | 'cancelled';
+  /** O resumo de entrega só faz sentido para compra não cancelada. */
+  showFulfillment: boolean;
+  /** Aviso para compra cancelada; null nos demais estados. */
+  notice: { title: string; body: string } | null;
+}
+
+export function derivePurchaseGroupPresentation(group: {
+  status: string;
+  payment?: { status: string; processing?: boolean } | null;
+  lateSurplusPayment?: boolean;
+}): PurchaseGroupPresentation {
+  if (group.status === 'cancelled') {
+    if (group.lateSurplusPayment === true) {
+      return {
+        state: 'cancelled_late_payment',
+        title: 'Compra cancelada',
+        paymentLabel: 'Recebido após o cancelamento',
+        paymentTone: 'warn',
+        showFulfillment: false,
+        notice: {
+          title: 'Pagamento recebido após o cancelamento',
+          body:
+            'Identificamos um pagamento referente a esta compra depois do cancelamento. ' +
+            'Ele está registrado para tratamento e a compra permanece cancelada: os pedidos não foram reabertos e não serão enviados. ' +
+            'Entre em contato com o suporte para acompanhar a situação.',
+        },
+      };
+    }
+    return {
+      state: 'cancelled',
+      title: 'Compra cancelada',
+      paymentLabel: 'Não concluído',
+      paymentTone: 'cancelled',
+      showFulfillment: false,
+      notice: {
+        title: 'Esta compra foi cancelada',
+        body: 'O pagamento não foi confirmado dentro do prazo e a compra foi cancelada. Nenhum pagamento foi confirmado para ela. Se ainda quiser os produtos, faça uma nova compra.',
+      },
+    };
+  }
+
+  const isPaid = group.status === 'paid' || group.payment?.status === 'paid';
+  if (isPaid) {
+    return { state: 'paid', title: 'Compra confirmada', paymentLabel: 'Confirmado', paymentTone: 'ok', showFulfillment: true, notice: null };
+  }
+  return {
+    state: 'pending',
+    title: 'Compra confirmada',
+    paymentLabel: group.payment?.processing ? 'Processando' : 'Aguardando',
+    paymentTone: 'warn',
+    showFulfillment: true,
+    notice: null,
+  };
+}
+
 export interface PurchaseGroupIndex<T> {
   /** child orders por purchaseGroupId, na ordem em que apareceram na lista. */
   childrenByGroup: Map<string, T[]>;

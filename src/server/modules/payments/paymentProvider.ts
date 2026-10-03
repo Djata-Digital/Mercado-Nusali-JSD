@@ -106,11 +106,31 @@ export interface PayoutGatewayResponse {
   rawResponse?: any;
 }
 
+/**
+ * FASE D18-C7.3B — resultado de tornar uma cobrança externa PENDENTE não
+ * pagável. Nunca um boolean: só `CANCELLED_CONFIRMED` autoriza cancelar o
+ * pedido/liberar estoque localmente, e só é devolvido depois de o provider
+ * CONFIRMAR (leitura posterior) que a cobrança está removida e não paga —
+ * um HTTP 200 do DELETE, sozinho, nunca basta.
+ */
+export type ExternalChargeCancelOutcome =
+  | { outcome: 'CANCELLED_CONFIRMED'; providerStatus?: string }
+  /** Cobrança já paga / em processamento de pagamento, estorno ou chargeback — NUNCA cancelar o pedido. */
+  | { outcome: 'PAID_OR_IN_PROGRESS'; providerStatus: string }
+  /** Não foi possível provar o cancelamento (rede, recusa, status desconhecido, não encontrada) — fail-closed. */
+  | { outcome: 'UNCONFIRMED'; reason: string; code?: string };
+
 export interface PaymentProvider {
   readonly name: string;
   initiatePayment(req: PaymentGatewayRequest): Promise<PaymentGatewayResponse>;
   checkPaymentStatus(transactionRef: string): Promise<PaymentGatewayResponse>;
   refundPayment(req: RefundGatewayRequest): Promise<RefundGatewayOutcome>;
+  /**
+   * Opcional: só providers com cobrança externa cancelável implementam
+   * (hoje, Asaas). Orange Money/TeleTaku não têm cobrança externa criada por
+   * nós e não precisam implementar nada.
+   */
+  cancelPendingCharge?(providerPaymentId: string): Promise<ExternalChargeCancelOutcome>;
 }
 
 export interface PayoutProvider {

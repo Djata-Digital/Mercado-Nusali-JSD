@@ -20,6 +20,8 @@ import {
   coupons,
   couponUsages,
   stockReservations,
+  paymentAllocations,
+  inventory,
 } from '../../../db/schema.js';
 import { eq, and, desc, asc, inArray, sql, lte } from 'drizzle-orm';
 // FASE D18-C3.4 — reaproveita a MESMA lógica pura já usada pelo preview do
@@ -50,6 +52,7 @@ import { validateAddressSectorAssignment, countryHasActiveShippingSectors } from
 // O caminho legado (split cego + frete país/zona) permanece definido no
 // arquivo como código morto — nunca mais alcançado — removido fisicamente
 // só em D16-I5 (ver auditoria D16-I1).
+import { classifyGroupPaymentsForExpiration, type ExternalChargeRef } from '../payments/externalChargeClassification.js';
 import { resolveFulfillmentCandidates } from '../shipping/fulfillmentCandidateResolverService.js';
 import { reserveFulfillmentInventory } from '../inventory/fulfillmentReservationService.js';
 
@@ -1595,6 +1598,17 @@ export class OrderService {
         }
       : null;
 
+    // FASE D18-C7.3H.1 — leitura SEMÂNTICA para a UI: um purchase_group
+    // CANCELADO que depois recebeu dinheiro (captura tardia D18-C7.3G:
+    // payments.status='paid' + settlement_role='surplus') tem `payment.status`
+    // 'paid', mas a compra NÃO foi confirmada. `purchase_groups.status`
+    // continua sendo a autoridade comercial; este booleano só diz à tela que
+    // existe esse pagamento tardio, sem que o frontend precise conhecer
+    // settlement_role. Somente leitura de dados já carregados acima.
+    const lateSurplusPayment =
+      group.status === 'cancelled' &&
+      (paymentRows as any[]).some((p) => p.settlementRole === 'surplus' && p.status === 'paid');
+
     return {
       id: group.id,
       buyerId: group.buyerId,
@@ -1604,6 +1618,7 @@ export class OrderService {
       createdAt: group.createdAt,
       orders: ordersOut,
       payment,
+      lateSurplusPayment,
     };
   }
 
@@ -1810,6 +1825,162 @@ export class OrderService {
         .where(and(eq(payments.orderId, orderId), eq(payments.status, 'pending')));
 
       return { cancelled: true, code: 'CANCELLED' };
+    };
+
+    if (executor) return run(executor);
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível.');
+    return db.transaction(run);
+  }
+
+  /**
+   * FASE D18-C7.3 — contraparte de `cancelExpiredPendingPaymentOrder` para um
+   * purchase_group inteiro. Desde D16-I2 TODO checkout (inclusive
+   * single-seller) nasce como purchase_group + N child orders, então o job de
+   * expiração por orderId (que exclui purchaseGroupId preenchido) nunca
+   * alcançava nenhum pedido novo — reservas de estoque ficavam presas.
+   *
+   * Estratégia de lock = a MESMA de confirmPurchaseGroupPayment: o lock do
+   * GROUP primeiro (hashtext(purchaseGroupId)) e SÓ DEPOIS os locks de cada
+   * child (hashtext(orderId)) em ordem de id ascendente — nenhum outro fluxo
+   * espera o lock do group depois de segurar um de order, então não há ciclo
+   * possível. Toda decisão é tomada DEPOIS dos locks, relendo os children.
+   *
+   * ATOMICIDADE: ou TODOS os children vivos (não cancelados) são cancelados e
+   * TODAS as reservas ativas liberadas, ou NADA muda — qualquer divergência
+   * (algum child já pago/em estado inesperado, pagamento 'paid', allocation
+   * existente, reserva ainda dentro do TTL) devolve um código e não escreve.
+   * Estado final canônico (mesmo de cancelExpiredPendingPaymentOrder): child
+   * status='cancelled' + escrowStatus='refunded' (espelho do pedido nunca
+   * pago — nenhuma escrow_accounts existe), payments 'pending'→'cancelled',
+   * purchase_groups.status='cancelled'. Idempotente: um group já cancelado/
+   * pago devolve PURCHASE_GROUP_NOT_PENDING_PAYMENT sem tocar em nada.
+   *
+   * COBRANÇA EXTERNA (D18-C7.3B): esta função NUNCA faz I/O de rede (roda
+   * dentro da transação com os locks). Se o group tem cobrança externa
+   * cancelável ainda pagável (ex.: PIX Asaas), devolve
+   * PURCHASE_GROUP_EXTERNAL_CANCELLATION_REQUIRED + a lista, sem escrever; o
+   * chamador cancela/confirma fora da transação e chama de novo passando
+   * `externallyCancelledPaymentIds`. Cobrança cuja existência não pode ser
+   * provada (criação em voo / timeout ambíguo) => ..._STATE_UNRESOLVED.
+   */
+  static async cancelExpiredPendingPaymentGroup(
+    purchaseGroupId: string,
+    executor?: any,
+    options?: { externallyCancelledPaymentIds?: string[] }
+  ): Promise<{ cancelled: boolean; code: string; orderIds?: string[]; externalPaymentsToCancel?: ExternalChargeRef[] }> {
+    const run = async (tx: any): Promise<{ cancelled: boolean; code: string; orderIds?: string[]; externalPaymentsToCancel?: ExternalChargeRef[] }> => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${purchaseGroupId}))`);
+
+      const [group] = await tx.select().from(purchaseGroups).where(eq(purchaseGroups.id, purchaseGroupId)).limit(1);
+      if (!group) return { cancelled: false, code: 'PURCHASE_GROUP_NOT_FOUND' };
+      if (group.status !== 'pending_payment') return { cancelled: false, code: 'PURCHASE_GROUP_NOT_PENDING_PAYMENT' };
+
+      const childIdRows = await tx.select({ id: orders.id }).from(orders).where(eq(orders.purchaseGroupId, purchaseGroupId));
+      if (childIdRows.length === 0) return { cancelled: false, code: 'PURCHASE_GROUP_EMPTY' };
+
+      // Locks por child em ordem determinística (mesmo `.sort()` de
+      // confirmPurchaseGroupPayment), depois releitura sob todos os locks.
+      const sortedChildIds: string[] = childIdRows.map((r: any) => r.id as string).sort();
+      for (const childId of sortedChildIds) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${childId}))`);
+      }
+      const children = await tx.select().from(orders).where(inArray(orders.id, sortedChildIds));
+
+      // Um child já cancelado (ex.: cancelOrder do comprador) é legítimo e
+      // ignorado; todo child vivo precisa estar integralmente não pago.
+      const live = children
+        .filter((c: any) => c.status !== 'cancelled')
+        .sort((a: any, b: any) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (live.length === 0) return { cancelled: false, code: 'PURCHASE_GROUP_NO_LIVE_CHILDREN' };
+      const notPending = live.find(
+        (c: any) => c.purchaseGroupId !== purchaseGroupId || c.status !== 'pending_payment' || c.paymentStatus !== 'pending' || c.escrowStatus !== 'pending'
+      );
+      if (notPending) return { cancelled: false, code: 'PURCHASE_GROUP_CHILD_NOT_PENDING' };
+
+      const [paidPayment] = await tx
+        .select({ id: payments.id })
+        .from(payments)
+        .where(and(eq(payments.purchaseGroupId, purchaseGroupId), eq(payments.status, 'paid')))
+        .limit(1);
+      if (paidPayment) return { cancelled: false, code: 'PURCHASE_GROUP_HAS_PAID_PAYMENT' };
+      const [existingAllocation] = await tx
+        .select({ id: paymentAllocations.id })
+        .from(paymentAllocations)
+        .where(eq(paymentAllocations.purchaseGroupId, purchaseGroupId))
+        .limit(1);
+      if (existingAllocation) return { cancelled: false, code: 'PURCHASE_GROUP_HAS_ALLOCATIONS' };
+
+      // TTL do group = a reserva ativa MAIS NOVA — nunca expira o group
+      // enquanto qualquer reserva dele ainda estiver dentro do prazo.
+      const liveIds: string[] = live.map((c: any) => c.id as string);
+      const activeReservations = await tx
+        .select()
+        .from(stockReservations)
+        .where(and(inArray(stockReservations.orderId, liveIds), eq(stockReservations.status, 'active')));
+      if (activeReservations.length === 0) return { cancelled: false, code: 'NO_EXPIRED_ACTIVE_RESERVATION' };
+      const nowMs = Date.now();
+      if (activeReservations.some((r: any) => new Date(r.expiresAt).getTime() > nowMs)) {
+        return { cancelled: false, code: 'PURCHASE_GROUP_NOT_EXPIRED' };
+      }
+
+      // FASE D18-C7.3B — nenhuma cobrança externa potencialmente pagável pode
+      // sobreviver ao cancelamento local. Esta decisão é SEMPRE refeita aqui,
+      // sob os locks (inclusive na 2ª chamada, depois do cancelamento
+      // externo): um pagamento criado/alterado entre as duas chamadas cai
+      // neste gate e adia a expiração, nunca a executa às cegas. A chamada de
+      // rede em si acontece FORA desta transação (ver
+      // pendingPaymentExpirationService.processOneGroupCandidate).
+      const groupPayments = await tx
+        .select({ id: payments.id, provider: payments.provider, status: payments.status, transactionRef: payments.transactionRef })
+        .from(payments)
+        .where(eq(payments.purchaseGroupId, purchaseGroupId));
+      const paymentClassification = classifyGroupPaymentsForExpiration(groupPayments);
+      if (paymentClassification.unresolved.length > 0) {
+        return { cancelled: false, code: 'PURCHASE_GROUP_PAYMENT_EXTERNAL_STATE_UNRESOLVED' };
+      }
+      const confirmedExternal = new Set<string>(options?.externallyCancelledPaymentIds ?? []);
+      const stillExternal = paymentClassification.externalToCancel.filter((e) => !confirmedExternal.has(e.paymentId));
+      if (stillExternal.length > 0) {
+        return { cancelled: false, code: 'PURCHASE_GROUP_EXTERNAL_CANCELLATION_REQUIRED', externalPaymentsToCancel: stillExternal };
+      }
+
+      // Mesma ordem global de lock do checkout (inventoryId ascendente,
+      // comparação JS) antes de liberar — evita deadlock com um checkout
+      // concorrente que reserva as mesmas inventories.
+      const inventoryIds: string[] = Array.from(new Set<string>(activeReservations.map((r: any) => r.inventoryId).filter(Boolean))).sort();
+      for (const inventoryId of inventoryIds) {
+        await tx.select({ id: inventory.id }).from(inventory).where(eq(inventory.id, inventoryId)).for('update');
+      }
+
+      for (const child of live) {
+        await tx
+          .update(orders)
+          .set({ status: 'cancelled', escrowStatus: 'refunded', updatedAt: new Date() })
+          .where(eq(orders.id, child.id));
+
+        await tx.insert(orderStatusHistory).values({
+          id: `osh_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          orderId: child.id,
+          previousStatus: child.status,
+          newStatus: 'cancelled',
+          reason: 'Pagamento da compra não confirmado dentro do prazo — compra cancelada automaticamente e reservas de estoque liberadas.',
+          changedBy: null,
+          createdAt: new Date(),
+        });
+
+        // Mesma função central de cancelOrder/cancelExpiredPendingPaymentOrder.
+        await InventoryService.releaseStock(child.id, tx);
+      }
+
+      await tx
+        .update(payments)
+        .set({ status: 'cancelled', updatedAt: new Date() })
+        .where(and(eq(payments.purchaseGroupId, purchaseGroupId), eq(payments.status, 'pending')));
+
+      await tx.update(purchaseGroups).set({ status: 'cancelled', updatedAt: new Date() }).where(eq(purchaseGroups.id, purchaseGroupId));
+
+      return { cancelled: true, code: 'CANCELLED', orderIds: liveIds };
     };
 
     if (executor) return run(executor);

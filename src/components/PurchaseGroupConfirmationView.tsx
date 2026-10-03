@@ -16,7 +16,7 @@ import { BuyerService } from '../services/buyerService';
 import { PurchaseGroupDetail } from '../api/types';
 import { formatCurrency } from '../utils/currencyUtils';
 import { CurrencyCode } from '../types';
-import { deriveGroupFulfillment } from '../utils/purchaseGroupUx';
+import { deriveGroupFulfillment, derivePurchaseGroupPresentation } from '../utils/purchaseGroupUx';
 
 /**
  * Fase M1-D3 — tela COMPLETA de confirmação de uma compra multi-seller
@@ -128,9 +128,21 @@ export const PurchaseGroupConfirmationView: React.FC = () => {
     );
   }
 
+  return <PurchaseGroupConfirmationContent group={group} />;
+};
+
+/**
+ * D18-C7.3H.1 — corpo PURAMENTE apresentacional da tela (recebe o group já
+ * carregado; sem I/O), exportado para ser renderizável/testável sem rede. O
+ * estado comercial vem de derivePurchaseGroupPresentation: purchase_groups.status
+ * é a autoridade — `payment.status === 'paid'` sozinho nunca vira "Confirmado".
+ */
+export const PurchaseGroupConfirmationContent: React.FC<{ group: PurchaseGroupDetail }> = ({ group }) => {
+  const navigate = useNavigate();
   const currency = group.currency as CurrencyCode;
   const sellerCount = new Set(group.orders.map((o) => o.sellerId || o.id)).size;
-  const isPaid = group.status === 'paid' || group.payment?.status === 'paid';
+  const view = derivePurchaseGroupPresentation(group);
+  const isCancelledPurchase = view.state === 'cancelled' || view.state === 'cancelled_late_payment';
   const fulfillment = deriveGroupFulfillment(group.orders.map((o) => o.logisticsStatus));
   const fulfillmentTone =
     fulfillment.tone === 'done'
@@ -146,9 +158,13 @@ export const PurchaseGroupConfirmationView: React.FC = () => {
       {/* ===== Resumo geral da COMPRA ===== */}
       <div className="bg-white rounded-2xl border border-gray-200 shadow-xs p-6 space-y-4">
         <div className="flex items-center gap-3">
-          <CheckCircle2 className="w-9 h-9 text-emerald-600 shrink-0" />
+          {isCancelledPurchase ? (
+            <AlertCircle className="w-9 h-9 text-amber-600 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-9 h-9 text-emerald-600 shrink-0" />
+          )}
           <div>
-            <h1 className="text-lg font-black text-gray-900">Compra confirmada</h1>
+            <h1 className="text-lg font-black text-gray-900">{view.title}</h1>
             <p className="text-[11px] text-gray-500 font-mono">Compra Nº {group.id}</p>
           </div>
         </div>
@@ -166,8 +182,8 @@ export const PurchaseGroupConfirmationView: React.FC = () => {
           </div>
           <div className="bg-gray-50 rounded-xl p-3">
             <span className="block text-[10px] font-bold text-gray-400 uppercase">Pagamento</span>
-            <span className={`block text-sm font-black mt-0.5 ${isPaid ? 'text-emerald-700' : 'text-amber-700'}`}>
-              {isPaid ? 'Confirmado' : group.payment?.processing ? 'Processando' : 'Aguardando'}
+            <span className={`block text-sm font-black mt-0.5 ${view.paymentTone === 'ok' ? 'text-emerald-700' : view.paymentTone === 'cancelled' ? 'text-gray-600' : 'text-amber-700'}`}>
+              {view.paymentLabel}
             </span>
           </div>
           <div className="bg-gray-50 rounded-xl p-3">
@@ -178,16 +194,30 @@ export const PurchaseGroupConfirmationView: React.FC = () => {
           </div>
         </div>
 
-        {/* Fulfillment consolidado — SÓ apresentação, derivado dos children */}
-        <div className={`flex items-start gap-2 text-xs font-bold p-3 rounded-xl border ${fulfillmentTone}`}>
-          <Truck className="w-4 h-4 shrink-0 mt-0.5" />
-          <div>
-            <span>{fulfillment.label}</span>
-            <p className="text-[11px] font-medium opacity-80 mt-0.5">
-              Cada pedido desta compra é entregue e acompanhado separadamente pelo seu vendedor.
-            </p>
+        {/* Compra cancelada: nunca mostra resumo de entrega ("em preparação"),
+            que sugeriria pedido reaberto — só o aviso do estado real. */}
+        {view.notice && (
+          <div className="flex items-start gap-2 text-xs p-3 rounded-xl border bg-amber-50 border-amber-200 text-amber-900" role="status">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold">{view.notice.title}</span>
+              <p className="text-[11px] font-medium opacity-90 mt-0.5">{view.notice.body}</p>
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* Fulfillment consolidado — SÓ apresentação, derivado dos children */}
+        {view.showFulfillment && (
+          <div className={`flex items-start gap-2 text-xs font-bold p-3 rounded-xl border ${fulfillmentTone}`}>
+            <Truck className="w-4 h-4 shrink-0 mt-0.5" />
+            <div>
+              <span>{fulfillment.label}</span>
+              <p className="text-[11px] font-medium opacity-80 mt-0.5">
+                Cada pedido desta compra é entregue e acompanhado separadamente pelo seu vendedor.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ===== Um card por PEDIDO / VENDEDOR ===== */}
@@ -242,12 +272,23 @@ export const PurchaseGroupConfirmationView: React.FC = () => {
 
             {/* Status INDEPENDENTES deste child */}
             <div className="px-4 pb-3 flex flex-wrap items-center gap-1.5">
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full bg-blue-50 text-blue-800 border border-blue-200">
-                <Truck className="w-3 h-3" /> {logisticsLabel(order.logisticsStatus)}
-              </span>
-              <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
-                <ShieldCheck className="w-3 h-3" /> {ESCROW_LABEL[order.escrowStatus] || order.escrowStatus}
-              </span>
+              {order.status === 'cancelled' ? (
+                // Pedido cancelado: sem "Em preparação"/"Estornado" (o espelho
+                // escrowStatus='refunded' de um pedido nunca pago NÃO é um
+                // reembolso feito — não pode sugerir isso nem entrega ativa).
+                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full bg-gray-100 text-gray-700 border border-gray-200">
+                  <AlertCircle className="w-3 h-3" /> Pedido cancelado
+                </span>
+              ) : (
+                <>
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full bg-blue-50 text-blue-800 border border-blue-200">
+                    <Truck className="w-3 h-3" /> {logisticsLabel(order.logisticsStatus)}
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200">
+                    <ShieldCheck className="w-3 h-3" /> {ESCROW_LABEL[order.escrowStatus] || order.escrowStatus}
+                  </span>
+                </>
+              )}
               {order.hasActiveDispute && (
                 <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full bg-red-50 text-red-800 border border-red-200">
                   <MessageSquareWarning className="w-3 h-3" /> Disputa em andamento
@@ -265,7 +306,7 @@ export const PurchaseGroupConfirmationView: React.FC = () => {
               onClick={() => navigate(`/orders/${order.id}`)}
               className="w-full border-t border-gray-100 p-3 text-xs font-bold text-emerald-700 hover:bg-emerald-50/50 transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              Ver detalhes, rastrear ou abrir disputa deste pedido <ArrowRight className="w-3.5 h-3.5" />
+              {order.status === 'cancelled' ? 'Ver detalhes deste pedido' : 'Ver detalhes, rastrear ou abrir disputa deste pedido'} <ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
         ))}

@@ -31,7 +31,45 @@ export interface AsaasWebhookPayload {
   };
 }
 
+/**
+ * FASE D18-C7.3G.1 — únicos status LOCAIS em que PAYMENT_OVERDUE pode levar o
+ * pagamento a 'expired'. Mutável de propósito (inArray exige string[]), mas
+ * nunca alterada em runtime. 'expired' fica de fora: já é o estado-alvo
+ * (idempotente, nada a escrever). paid/refunded/cancelled/failed nunca regridem.
+ */
+const OVERDUE_COMPATIBLE_LOCAL_STATUSES: string[] = ['pending', 'authorized'];
+
 export class AsaasWebhookService {
+  /**
+   * FASE D18-C7.3G — chamado SÓ quando a confirmação normal de um
+   * PAYMENT_RECEIVED falhou com o erro explicitamente classificado como
+   * "compra já cancelada/expirada" (PaymentService.isLatePaymentCandidateError).
+   * Tenta registrar o dinheiro como pagamento surplus. Se a captura não
+   * conseguir PROVAR o estado (qualquer erro), mantém a falha ORIGINAL da
+   * confirmação — o webhook continua não-2xx (fail-closed), nunca engole.
+   */
+  private static async captureLatePaymentOrRethrow(
+    localPayment: typeof payments.$inferSelect,
+    asaasPaymentId: string,
+    receivedValue: number,
+    eventId: string,
+    originalErr: any
+  ): Promise<void> {
+    try {
+      const captured = await PaymentService.recordLatePaymentAfterExpiration({
+        paymentId: localPayment.id,
+        provider: 'asaas',
+        transactionRef: asaasPaymentId,
+        receivedValue,
+        eventId,
+      });
+      logger.warn({ eventId, asaasPaymentId, paymentId: localPayment.id, outcome: captured.outcome, ownerType: captured.ownerType, ownerId: captured.ownerId }, 'LATE_PAYMENT_HANDLED — PAYMENT_RECEIVED após expiração/cancelamento tratado como surplus (webhook responderá 2xx)');
+    } catch (lateErr: any) {
+      logger.error({ eventId, asaasPaymentId, paymentId: localPayment.id, lateCode: lateErr?.code, lateReason: lateErr?.reason, error: lateErr?.message, originalCode: originalErr?.code }, 'LATE_PAYMENT_CAPTURE_FAILED — estado não provado, mantendo falha original (fail-closed)');
+      throw originalErr;
+    }
+  }
+
   /**
    * Safe comparison helper for webhook access tokens.
    */
@@ -419,15 +457,34 @@ export class AsaasWebhookService {
             });
             logger.info({ purchaseGroupId: group.id, asaasPaymentId }, 'PAYMENT_POST_PROCESSING_COMPLETED (group)');
           } catch (postProcessingErr: any) {
-            logger.error({ purchaseGroupId: group.id, asaasPaymentId, error: postProcessingErr?.message }, 'PAYMENT_POST_PROCESSING_FAILED (group)');
-            throw postProcessingErr;
+            // FASE D18-C7.3G — fluxo normal PRIMEIRO; só o erro classificado
+            // "compra já cancelada/expirada" tenta a captura tardia (surplus).
+            if (PaymentService.isLatePaymentCandidateError(postProcessingErr, 'group')) {
+              await AsaasWebhookService.captureLatePaymentOrRethrow(localPayment, asaasPaymentId, Number(paymentData.value), eventId, postProcessingErr);
+            } else {
+              logger.error({ purchaseGroupId: group.id, asaasPaymentId, error: postProcessingErr?.message }, 'PAYMENT_POST_PROCESSING_FAILED (group)');
+              throw postProcessingErr;
+            }
           }
           break;
         }
 
         case 'PAYMENT_OVERDUE': {
-          await db.update(payments).set({ status: 'expired', updatedAt: new Date() }).where(eq(payments.id, localPayment.id));
-          logger.info({ purchaseGroupId: group.id, asaasPaymentId }, '[Asaas Webhook] Evento PAYMENT_OVERDUE (group) processado: pagamento marcado como expirado.');
+          // FASE D18-C7.3G.1 — vencimento só leva a 'expired' um pagamento
+          // ainda NÃO concluído. Um OVERDUE atrasado/fora de ordem nunca pode
+          // rebaixar paid (primary OU surplus), refunded, cancelled ou failed:
+          // o UPDATE condicional é atômico (sem janela entre ler e escrever)
+          // e nunca toca settlement_role, pai, estoque, escrow nem allocation.
+          const overdueRows = await db
+            .update(payments)
+            .set({ status: 'expired', updatedAt: new Date() })
+            .where(and(eq(payments.id, localPayment.id), inArray(payments.status, OVERDUE_COMPATIBLE_LOCAL_STATUSES)))
+            .returning({ id: payments.id });
+          if (overdueRows.length > 0) {
+            logger.info({ purchaseGroupId: group.id, asaasPaymentId }, '[Asaas Webhook] Evento PAYMENT_OVERDUE (group) processado: pagamento marcado como expirado.');
+          } else {
+            logger.warn({ purchaseGroupId: group.id, asaasPaymentId, localStatus: localPayment.status, localRole: localPayment.settlementRole }, '[Asaas Webhook] PAYMENT_OVERDUE (group) ignorado: status local não é compatível com vencimento — status PRESERVADO.');
+          }
           break;
         }
 
@@ -468,7 +525,19 @@ export class AsaasWebhookService {
         }
 
         case 'PAYMENT_DELETED': {
-          await db.update(payments).set({ status: 'cancelled', updatedAt: new Date() }).where(eq(payments.id, localPayment.id));
+          // FASE D18-C7.3C — o sandbox da Asaas aceita DELETE (2xx) em cobrança
+          // JÁ PAGA, e a remoção nunca é estorno. Logo, uma remoção NUNCA pode
+          // rebaixar um pagamento concluído: só cancela o que ainda não foi
+          // pago. (Rebaixar um 'paid' bloquearia a liberação do escrow, que
+          // exige payments.status='paid'.)
+          const deletedRows = await db
+            .update(payments)
+            .set({ status: 'cancelled', updatedAt: new Date() })
+            .where(and(eq(payments.id, localPayment.id), inArray(payments.status, ['pending', 'authorized', 'expired'])))
+            .returning({ id: payments.id });
+          if (deletedRows.length === 0) {
+            logger.warn({ purchaseGroupId: group.id, asaasPaymentId, localStatus: localPayment.status }, '[Asaas Webhook] PAYMENT_DELETED (group) para pagamento já concluído/encerrado — status local PRESERVADO (requer atenção operacional).');
+          }
           logger.info({ purchaseGroupId: group.id, asaasPaymentId }, '[Asaas Webhook] Evento PAYMENT_DELETED (group) recebido e registrado.');
           break;
         }
@@ -616,18 +685,30 @@ export class AsaasWebhookService {
           });
           logger.info({ orderId: order.id, asaasPaymentId, amount: expectedTotal }, 'PAYMENT_POST_PROCESSING_COMPLETED');
         } catch (postProcessingErr: any) {
-          logger.error({ orderId: order.id, asaasPaymentId, error: postProcessingErr?.message }, 'PAYMENT_POST_PROCESSING_FAILED');
-          throw postProcessingErr;
+          // FASE D18-C7.3G — fluxo normal PRIMEIRO; só o erro classificado
+          // "pedido já cancelado" tenta a captura tardia (surplus).
+          if (PaymentService.isLatePaymentCandidateError(postProcessingErr, 'order')) {
+            await AsaasWebhookService.captureLatePaymentOrRethrow(localPayment, asaasPaymentId, receivedValue, eventId, postProcessingErr);
+          } else {
+            logger.error({ orderId: order.id, asaasPaymentId, error: postProcessingErr?.message }, 'PAYMENT_POST_PROCESSING_FAILED');
+            throw postProcessingErr;
+          }
         }
         break;
       }
 
       case 'PAYMENT_OVERDUE': {
-        await db
+        // FASE D18-C7.3G.1 — mesma proteção do branch de group (ver acima).
+        const overdueRows = await db
           .update(payments)
           .set({ status: 'expired', updatedAt: new Date() })
-          .where(eq(payments.id, localPayment.id));
-        logger.info({ orderId: order.id, asaasPaymentId }, '[Asaas Webhook] Evento PAYMENT_OVERDUE processado: pagamento marcado como expirado.');
+          .where(and(eq(payments.id, localPayment.id), inArray(payments.status, OVERDUE_COMPATIBLE_LOCAL_STATUSES)))
+          .returning({ id: payments.id });
+        if (overdueRows.length > 0) {
+          logger.info({ orderId: order.id, asaasPaymentId }, '[Asaas Webhook] Evento PAYMENT_OVERDUE processado: pagamento marcado como expirado.');
+        } else {
+          logger.warn({ orderId: order.id, asaasPaymentId, localStatus: localPayment.status, localRole: localPayment.settlementRole }, '[Asaas Webhook] PAYMENT_OVERDUE ignorado: status local não é compatível com vencimento — status PRESERVADO.');
+        }
         break;
       }
 
@@ -685,10 +766,16 @@ export class AsaasWebhookService {
       }
 
       case 'PAYMENT_DELETED': {
-        await db
+        // FASE D18-C7.3C — mesma proteção do branch de group: remoção nunca
+        // rebaixa um pagamento concluído (ver comentário acima).
+        const deletedRows = await db
           .update(payments)
           .set({ status: 'cancelled', updatedAt: new Date() })
-          .where(eq(payments.id, localPayment.id));
+          .where(and(eq(payments.id, localPayment.id), inArray(payments.status, ['pending', 'authorized', 'expired'])))
+          .returning({ id: payments.id });
+        if (deletedRows.length === 0) {
+          logger.warn({ orderId: order.id, asaasPaymentId, localStatus: localPayment.status }, '[Asaas Webhook] PAYMENT_DELETED para pagamento já concluído/encerrado — status local PRESERVADO (requer atenção operacional).');
+        }
         logger.info({ orderId: order.id, asaasPaymentId }, '[Asaas Webhook] Evento PAYMENT_DELETED recebido e registrado.');
         break;
       }

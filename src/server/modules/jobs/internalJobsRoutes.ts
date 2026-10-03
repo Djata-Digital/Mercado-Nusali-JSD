@@ -197,6 +197,8 @@ internalJobsRouter.post('/expire-pending-payments', internalJobsLimiter, async (
         batchSize: result.batchSize,
         candidateCount: result.candidateCount,
         results: result.results,
+        groupCandidateCount: result.groupCandidateCount,
+        groupResults: result.groupResults,
       },
     });
   } catch (err: any) {
