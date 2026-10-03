@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { AuthService } from './authService.js';
+import { AuthService, PUBLIC_REGISTRATION_ROLES } from './authService.js';
 import { requireAuth, AuthRequest } from './authMiddleware.js';
 import { createRateLimiter } from '../../infra/rateLimiter.js';
 import { getDb } from '../../../db/index.js';
@@ -22,7 +22,13 @@ const registerSchema = z.object({
   fullName: z.string().min(2, 'Nome completo obrigatório'),
   phone: z.string().optional(),
   countryCode: z.string().min(2, 'País é obrigatório'),
-  role: z.enum(['BUYER', 'SELLER', 'ADMIN', 'COUNTRY_REPRESENTATIVE', 'REGIONAL_SUPERVISOR']).optional().default('BUYER'),
+  // AUDITORIA DE LANÇAMENTO (P0) — só BUYER/SELLER (antes aceitava ADMIN,
+  // COUNTRY_REPRESENTATIVE e REGIONAL_SUPERVISOR do corpo público: autoatribuição
+  // de papel interno). AuthService.register repete a regra (defesa em profundidade).
+  role: z
+    .enum(PUBLIC_REGISTRATION_ROLES, { error: 'Tipo de conta inválido. O cadastro permite apenas comprador ou vendedor.' })
+    .optional()
+    .default('BUYER'),
 });
 
 const loginSchema = z.object({

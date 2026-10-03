@@ -13,12 +13,11 @@ import { walletRouter } from './modules/wallet/walletRoutes.js';
 import { getQueuesHealth } from './infra/queues.js';
 import { getStorageHealth } from './infra/storage.js';
 import { getDb, getDbPool, checkDbConnection } from '../db/index.js';
-import { products, regions, warehouses, users, orders, orderItems } from '../db/schema.js';
+import { products, regions, warehouses, orders, orderItems } from '../db/schema.js';
 import { getCache, setCache, delCache, getRedisHealth } from '../db/redis.js';
 import { runDatabaseInitAndSeed } from '../db/seed.js';
 import { desc } from 'drizzle-orm';
 import { searchProductsIntelligent } from '../utils/searchEngine.js';
-import { ProductCreationService } from './modules/catalog/productCreationService.js';
 import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { resolveShippingPreview, resolveCartShippingPreview } from './modules/shipping/shippingPreviewService.js';
@@ -334,6 +333,22 @@ apiRouter.get('/health', async (req: Request, res: Response) => {
 
 // 2. Trigger Database Seed Endpoint
 apiRouter.post('/db/seed', async (req: Request, res: Response) => {
+  // AUDITORIA DE LANÇAMENTO — esta rota é anônima (só o botão do monitor de banco
+  // do admin a usa, e sem token). Seed de demonstração nunca deve ser acionável
+  // por HTTP em produção; fora de produção o comportamento é o de sempre (e o
+  // próprio seed ainda exige SEED_DEMO_DATA=true).
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({
+      success: false,
+      // `message` no topo: o monitor de banco do admin lê `data.message`.
+      message: 'O seed de demonstração está desabilitado em ambiente de produção.',
+      error: {
+        code: 'SEED_DISABLED_IN_PRODUCTION',
+        message: 'O seed de demonstração está desabilitado em ambiente de produção.',
+      },
+    });
+  }
+
   try {
     await runDatabaseInitAndSeed();
     await delCache('products_list_all');
@@ -556,57 +571,13 @@ apiRouter.get('/products/:id/recommendations', getProductRecommendationsHandler)
 apiRouter.get('/products/:id/questions', getProductQuestionsHandler);
 apiRouter.post('/products/:id/questions', requireAuth, createProductQuestionHandler);
 
-apiRouter.patch('/products/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const idx = inMemoryStore.products.findIndex((p) => p.id === id);
-  if (idx !== -1) {
-    inMemoryStore.products[idx] = { ...inMemoryStore.products[idx], ...req.body };
-    await delCache('products_list_all');
-    return res.json({
-      success: true,
-      message: 'Produto atualizado com sucesso!',
-      data: inMemoryStore.products[idx],
-    });
-  }
-
-  return res.status(404).json({ success: false, message: 'Produto não encontrado' });
-});
-
-apiRouter.delete('/products/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  inMemoryStore.products = inMemoryStore.products.filter((p) => p.id !== id);
-  await delCache('products_list_all');
-  return res.json({
-    success: true,
-    message: 'Produto excluído com sucesso!',
-  });
-});
-
-apiRouter.post('/products', async (req: Request, res: Response) => {
-  try {
-    const userId = (req as any).user?.id;
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: 'Usuário não autenticado.',
-        error: { code: 'UNAUTHORIZED', message: 'Usuário não autenticado.' },
-      });
-    }
-
-    const createdProduct = await ProductCreationService.createProduct(userId, req.body);
-    return res.status(201).json({
-      success: true,
-      message: `Produto "${createdProduct.title}" cadastrado com sucesso!`,
-      data: createdProduct,
-    });
-  } catch (err: any) {
-    return res.status(400).json({
-      success: false,
-      message: err.message || 'Erro ao publicar produto.',
-      error: { code: 'CREATE_PRODUCT_FAILED', message: err.message },
-    });
-  }
-});
+// AUDITORIA DE LANÇAMENTO (P0) — removidos os handlers legados anônimos
+// `PATCH /products/:id`, `DELETE /products/:id` (só mexiam num store em memória,
+// sem nenhuma autenticação) e `POST /products` (dependia de um `req.user` que
+// nenhum middleware define; se um dia um middleware global passasse a defini-lo,
+// criaria produto SEM o gate de KYC de `sellerRouter.post('/products')`). A criação
+// e a edição reais de produto vivem EXCLUSIVAMENTE em `/seller/products`
+// (autenticação + dono + KYC aprovado).
 
 // 4. Regions Endpoints
 apiRouter.get('/regions', async (req: Request, res: Response) => {
@@ -635,38 +606,9 @@ apiRouter.get('/regions', async (req: Request, res: Response) => {
   return res.json({ success: true, source: 'in_memory_fallback', data: inMemoryStore.regions });
 });
 
-apiRouter.post('/regions', async (req: Request, res: Response) => {
-  await ensureDbInitialized();
-  const { id, name, countryCode, supervisorName, supervisorEmail, deliveryCoverageDays, freightBaseRate } = req.body;
-
-  const regId = id || `REG-${countryCode || 'GW'}-${Date.now().toString().slice(-4)}`;
-  const newRegion = {
-    id: regId,
-    name,
-    countryCode: countryCode || 'GW',
-    supervisorName: supervisorName || 'A definir',
-    supervisorEmail: supervisorEmail || 'supervisor@nusali.com',
-    deliveryCoverageDays: deliveryCoverageDays || '24-48h',
-    freightBaseRate: freightBaseRate || '1.500 XOF',
-  };
-
-  try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        await db.insert(regions).values(newRegion);
-        await delCache('regions_list_all');
-        return res.json({ success: true, message: 'Região gravada no PostgreSQL com sucesso!', data: newRegion });
-      }
-    }
-  } catch {
-    // fallback
-  }
-
-  inMemoryStore.regions.unshift(newRegion);
-  return res.json({ success: true, message: 'Região cadastrada com sucesso!', data: newRegion });
-});
+// AUDITORIA DE LANÇAMENTO (P0) — removido o `POST /regions` legado: inseria em
+// `regions` no banco real SEM autenticação. Região/hub são geridos pelo painel
+// administrativo (`/admin/regions`, GLOBAL_ADMIN).
 
 // 5. Warehouses Endpoints
 apiRouter.get('/warehouses', async (req: Request, res: Response) => {
@@ -695,89 +637,14 @@ apiRouter.get('/warehouses', async (req: Request, res: Response) => {
   return res.json({ success: true, source: 'in_memory_fallback', data: inMemoryStore.warehouses });
 });
 
-apiRouter.post('/warehouses', async (req: Request, res: Response) => {
-  await ensureDbInitialized();
-  const { code, name, countryCode, city, address, managerName, staffCount } = req.body;
+// AUDITORIA DE LANÇAMENTO (P0) — removido o `POST /warehouses` legado: inseria em
+// `warehouses` no banco real SEM autenticação. Armazéns são geridos pelo painel
+// administrativo.
 
-  const whId = `wh_${Date.now()}`;
-  const newWh = {
-    id: whId,
-    code: code || `HUB-${city ? city.substring(0, 3).toUpperCase() : 'GW'}-0${Date.now().toString().slice(-2)}`,
-    name,
-    countryCode: countryCode || 'GW',
-    city: city || 'Bissau',
-    address: address || 'Endereço Principal HUB',
-    managerName: managerName || 'Gerente Operacional',
-    staffCount: Number(staffCount) || 10,
-  };
-
-  try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        await db.insert(warehouses).values(newWh);
-        await delCache('warehouses_list_all');
-        return res.json({ success: true, message: 'Armazém cadastrado no PostgreSQL!', data: newWh });
-      }
-    }
-  } catch {
-    // fallback
-  }
-
-  inMemoryStore.warehouses.unshift(newWh);
-  return res.json({ success: true, message: 'Armazém cadastrado com sucesso!', data: newWh });
-});
-
-// 6. Users Endpoints
-apiRouter.get('/users', async (req: Request, res: Response) => {
-  await ensureDbInitialized();
-  try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        const userList = await db.select().from(users).orderBy(desc(users.createdAt));
-        return res.json({ success: true, source: 'postgresql', data: userList });
-      }
-    }
-  } catch {
-    // DB offline
-  }
-
-  return res.json({ success: true, source: 'in_memory_fallback', data: inMemoryStore.users });
-});
-
-apiRouter.post('/users', async (req: Request, res: Response) => {
-  await ensureDbInitialized();
-  const { email, fullName, role, countryCode, phone } = req.body;
-
-  const id = `u_${Date.now()}`;
-  const newUser = {
-    id,
-    email,
-    fullName,
-    role: role || 'buyer',
-    countryCode: countryCode || 'GW',
-    phone: phone || '',
-  };
-
-  try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        await db.insert(users).values(newUser);
-        return res.json({ success: true, message: 'Usuário registrado no PostgreSQL!', data: newUser });
-      }
-    }
-  } catch {
-    // fallback
-  }
-
-  inMemoryStore.users.unshift(newUser);
-  return res.json({ success: true, message: 'Usuário cadastrado com sucesso!', data: newUser });
-});
-
-
-
+// AUDITORIA DE LANÇAMENTO (P0) — removidos `GET /users` e `POST /users` legados.
+// O `GET` devolvia `select * from users` (incluindo `passwordHash` e
+// `twoFactorSecret`) a QUALQUER chamador anônimo; o `POST` inseria usuários com
+// `role` arbitrário no banco real, sem autenticação. Nenhum consumidor legítimo
+// existe: a listagem administrativa é `GET /admin/users` (staff autenticado, sem
+// campos de credencial) e a criação de contas internas é `POST /admin/users`
+// (GLOBAL_ADMIN); o cadastro público é `POST /auth/register` (BUYER/SELLER).

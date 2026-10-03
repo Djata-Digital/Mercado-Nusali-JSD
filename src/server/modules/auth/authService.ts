@@ -26,8 +26,35 @@ export interface LoginDTO {
   userAgent?: string;
 }
 
+/**
+ * AUDITORIA DE LANÇAMENTO (P0) — o cadastro PÚBLICO só pode criar BUYER ou
+ * SELLER. Nenhum valor vindo do cliente pode resultar em ADMIN, GLOBAL_ADMIN,
+ * COUNTRY_REPRESENTATIVE, REGIONAL_SUPERVISOR ou qualquer outro papel interno
+ * (antes, `role` era gravado exatamente como recebido). Contas internas só
+ * nascem pelo fluxo administrativo (`POST /admin/users`, GLOBAL_ADMIN).
+ * Esta lista é usada pelo schema HTTP E por `register` (defesa em profundidade:
+ * uma chamada interna ou rota futura não consegue contornar a regra).
+ */
+export const PUBLIC_REGISTRATION_ROLES = ['BUYER', 'SELLER'] as const;
+export type PublicRegistrationRole = (typeof PUBLIC_REGISTRATION_ROLES)[number];
+
+export function resolvePublicRegistrationRole(role: unknown): PublicRegistrationRole {
+  if (role === undefined || role === null || role === '') return 'BUYER';
+  const normalized = typeof role === 'string' ? role.trim().toUpperCase() : '';
+  if ((PUBLIC_REGISTRATION_ROLES as readonly string[]).includes(normalized)) {
+    return normalized as PublicRegistrationRole;
+  }
+  const err: any = new Error('REGISTRATION_ROLE_NOT_ALLOWED: O cadastro público só permite contas de comprador ou vendedor.');
+  err.code = 'REGISTRATION_ROLE_NOT_ALLOWED';
+  throw err;
+}
+
 export class AuthService {
   static async register(data: RegisterDTO) {
+    // Papel validado ANTES de qualquer leitura/escrita: um papel não permitido
+    // nunca chega a criar usuário, perfil, carteira nem enviar e-mail.
+    const role = resolvePublicRegistrationRole(data.role);
+
     const db = getDb();
     const cleanEmail = data.email.trim().toLowerCase();
 
@@ -61,7 +88,6 @@ export class AuthService {
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(data.password, salt);
     const userId = `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const role = (data.role || 'BUYER').toUpperCase();
 
     const newUser = {
       id: userId,
