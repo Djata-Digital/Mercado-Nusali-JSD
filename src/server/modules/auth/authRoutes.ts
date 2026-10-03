@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { AuthService, PUBLIC_REGISTRATION_ROLES } from './authService.js';
+import { AuthService, PUBLIC_REGISTRATION_ROLES, PASSWORD_RESET_GENERIC_MESSAGE } from './authService.js';
 import { requireAuth, AuthRequest } from './authMiddleware.js';
 import { createRateLimiter } from '../../infra/rateLimiter.js';
 import { getDb } from '../../../db/index.js';
@@ -124,6 +124,63 @@ authRouter.post('/login', loginLimiter, async (req: Request, res: Response) => {
         message: err.message || 'Falha na autenticação.',
       },
     });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Recuperação de senha por e-mail.
+// Sem limitador por IP de propósito: o servidor não configura `trust proxy`, então atrás do
+// proxy todos os clientes compartilhariam o mesmo "IP" e um atacante travaria a recuperação de
+// todos. O freio é POR CONTA (intervalo mínimo entre e-mails, em AuthService.requestPasswordReset)
+// + token de 256 bits de uso único.
+// ---------------------------------------------------------------------------
+const forgotPasswordSchema = z.object({
+  identifier: z.string().trim().email('E-mail inválido'),
+  method: z.enum(['email', 'sms', 'whatsapp']).optional().default('email'),
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(20, 'Link de recuperação inválido ou expirado. Solicite um novo.').max(200, 'Link de recuperação inválido ou expirado. Solicite um novo.'),
+  newPassword: z.string().min(8, 'A nova senha deve ter pelo menos 8 caracteres.').max(128, 'A nova senha é longa demais.'),
+});
+
+// POST /api/v1/auth/forgot-password
+authRouter.post('/forgot-password', async (req: Request, res: Response) => {
+  try {
+    const validated = forgotPasswordSchema.parse(req.body);
+    if (validated.method !== 'email') {
+      return res.status(400).json({
+        success: false,
+        error: { code: 'PASSWORD_RESET_METHOD_UNAVAILABLE', message: 'A recuperação por SMS ainda não está disponível. Use o e-mail de cadastro.' },
+      });
+    }
+    await AuthService.requestPasswordReset(validated.identifier);
+    // Resposta SEMPRE igual: nunca revela se o e-mail existe, se foi enviado ou se houve throttle.
+    return res.json({ success: true, data: { message: PASSWORD_RESET_GENERIC_MESSAGE, methodSent: 'email' } });
+  } catch (err: any) {
+    if (err instanceof z.ZodError) {
+      const issue = (err as any).issues?.[0] || (err as any).errors?.[0];
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: issue?.message || 'Dados inválidos.' } });
+    }
+    return res.status(500).json({ success: false, error: { code: 'PASSWORD_RESET_UNAVAILABLE', message: 'Não foi possível processar a solicitação agora. Tente novamente em instantes.' } });
+  }
+});
+
+// POST /api/v1/auth/reset-password
+authRouter.post('/reset-password', async (req: Request, res: Response) => {
+  try {
+    const validated = resetPasswordSchema.parse(req.body);
+    const result = await AuthService.resetPasswordWithToken(validated.token, validated.newPassword);
+    return res.json({ success: true, data: result });
+  } catch (err: any) {
+    if (err instanceof z.ZodError) {
+      const issue = (err as any).issues?.[0] || (err as any).errors?.[0];
+      return res.status(400).json({ success: false, error: { code: 'VALIDATION_ERROR', message: issue?.message || 'Dados inválidos.' } });
+    }
+    if (err?.code === 'PASSWORD_RESET_TOKEN_INVALID' || err?.code === 'PASSWORD_RESET_WEAK_PASSWORD') {
+      return res.status(400).json({ success: false, error: { code: err.code, message: err.message } });
+    }
+    return res.status(500).json({ success: false, error: { code: 'PASSWORD_RESET_UNAVAILABLE', message: 'Não foi possível redefinir a senha agora. Tente novamente em instantes.' } });
   }
 });
 

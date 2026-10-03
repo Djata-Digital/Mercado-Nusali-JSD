@@ -1,12 +1,11 @@
 import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import {
   KeyRound,
   Mail,
   Phone,
   CheckCircle2,
   AlertCircle,
-  ArrowRight,
   ArrowLeft,
   ShieldCheck,
   Send,
@@ -15,11 +14,7 @@ import { AuthService } from '../services/authService';
 import { NusaliLogo } from '../components/NusaliLogo';
 
 export const ForgotPasswordPage: React.FC = () => {
-  const navigate = useNavigate();
-
-  const [method, setMethod] = useState<'email' | 'sms'>('email');
   const [identifier, setIdentifier] = useState<string>('');
-  const [phoneCode, setPhoneCode] = useState<string>('+245');
 
   const [loading, setLoading] = useState<boolean>(false);
   const [step, setStep] = useState<number>(1);
@@ -31,19 +26,20 @@ export const ForgotPasswordPage: React.FC = () => {
 
     const cleanId = identifier.trim();
     if (!cleanId) {
-      setErrorMessage('Por favor, informe seu e-mail ou número de telefone.');
+      setErrorMessage('Por favor, informe o e-mail de cadastro.');
       return;
     }
-
-    const fullTarget = method === 'sms' && !cleanId.startsWith('+') ? `${phoneCode} ${cleanId}` : cleanId;
 
     setLoading(true);
 
     try {
-      await AuthService.forgotPassword({ identifier: fullTarget, method });
+      // Recuperação por e-mail. A resposta do servidor é sempre a mesma, exista a conta ou não.
+      await AuthService.forgotPassword({ identifier: cleanId, method: 'email' });
       setStep(2);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Erro ao processar solicitação.');
+      setErrorMessage(
+        err?.response?.data?.error?.message || 'Não foi possível processar a solicitação agora. Tente novamente em instantes.'
+      );
     } finally {
       setLoading(false);
     }
@@ -59,7 +55,7 @@ export const ForgotPasswordPage: React.FC = () => {
           Recuperação de Senha
         </h2>
         <p className="mt-1 text-xs text-blue-200">
-          Enviaremos instruções seguras para você redefinir sua senha
+          Enviaremos um link seguro para você redefinir sua senha
         </p>
       </div>
 
@@ -75,77 +71,41 @@ export const ForgotPasswordPage: React.FC = () => {
                 </div>
               )}
 
-              {/* Method selector */}
+              {/* Método de envio: só e-mail por enquanto */}
               <div>
-                <label className="block font-bold text-gray-700 mb-2">Escolha o método de envio</label>
+                <label className="block font-bold text-gray-700 mb-2">Método de envio</label>
                 <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setMethod('email')}
-                    className={`p-3 rounded-xl border text-center transition font-bold flex items-center justify-center gap-2 cursor-pointer ${
-                      method === 'email'
-                        ? 'border-blue-900 bg-blue-50 text-blue-950 shadow-2xs'
-                        : 'border-gray-200 hover:border-gray-300 text-gray-600'
-                    }`}
-                  >
+                  <div className="p-3 rounded-xl border text-center font-bold flex items-center justify-center gap-2 border-blue-900 bg-blue-50 text-blue-950 shadow-2xs">
                     <Mail className="w-4 h-4" /> E-mail
-                  </button>
+                  </div>
                   <button
                     type="button"
-                    onClick={() => setMethod('sms')}
-                    className={`p-3 rounded-xl border text-center transition font-bold flex items-center justify-center gap-2 cursor-pointer ${
-                      method === 'sms'
-                        ? 'border-emerald-800 bg-emerald-50 text-emerald-950 shadow-2xs'
-                        : 'border-gray-200 hover:border-gray-300 text-gray-600'
-                    }`}
+                    disabled
+                    aria-disabled="true"
+                    title="Recuperação por SMS em breve"
+                    className="p-3 rounded-xl border text-center font-bold flex items-center justify-center gap-2 border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed"
                   >
-                    <Phone className="w-4 h-4" /> SMS / Celular
+                    <Phone className="w-4 h-4" /> SMS <span className="text-[10px] font-black bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded-full">Em breve</span>
                   </button>
                 </div>
               </div>
 
-              {/* Identifier input */}
+              {/* E-mail */}
               <div>
-                <label className="block font-bold text-gray-700 mb-1.5">
-                  {method === 'email' ? 'Informe seu e-mail de cadastro *' : 'Informe seu número de telefone *'}
-                </label>
-
-                {method === 'email' ? (
-                  <div className="relative rounded-xl shadow-2xs">
-                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
-                      <Mail className="w-4 h-4" />
-                    </div>
-                    <input
-                      type="email"
-                      required
-                      value={identifier}
-                      onChange={(e) => setIdentifier(e.target.value)}
-                      placeholder="ex: seu.email@exemplo.com"
-                      className="w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-xl focus:border-blue-800 focus:outline-hidden text-xs text-gray-900"
-                    />
+                <label className="block font-bold text-gray-700 mb-1.5">Informe seu e-mail de cadastro *</label>
+                <div className="relative rounded-xl shadow-2xs">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                    <Mail className="w-4 h-4" />
                   </div>
-                ) : (
-                  <div className="flex gap-2">
-                    <select
-                      value={phoneCode}
-                      onChange={(e) => setPhoneCode(e.target.value)}
-                      className="bg-gray-50 border border-gray-300 text-gray-800 text-xs font-bold rounded-xl px-2.5 py-2.5 focus:border-blue-800 focus:outline-hidden"
-                    >
-                      <option value="+245">🇬🇼 +245</option>
-                      <option value="+55">🇧🇷 +55</option>
-                      <option value="+351">🇵🇹 +351</option>
-                      <option value="+244">🇦🇴 +244</option>
-                    </select>
-                    <input
-                      type="tel"
-                      required
-                      value={identifier}
-                      onChange={(e) => setIdentifier(e.target.value)}
-                      placeholder="955 123 456"
-                      className="w-full px-3 py-2.5 border border-gray-300 rounded-xl focus:border-blue-800 focus:outline-hidden text-xs text-gray-900 font-mono"
-                    />
-                  </div>
-                )}
+                  <input
+                    type="email"
+                    required
+                    value={identifier}
+                    onChange={(e) => setIdentifier(e.target.value)}
+                    placeholder="ex: seu.email@exemplo.com"
+                    className="w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-xl focus:border-blue-800 focus:outline-hidden text-xs text-gray-900"
+                  />
+                </div>
               </div>
 
               {/* Submit Button */}
@@ -174,16 +134,16 @@ export const ForgotPasswordPage: React.FC = () => {
               </div>
             </form>
           ) : (
-            /* Step 2 Confirmation Message (Does not leak if user exists) */
+            /* Passo 2: confirmação genérica (não revela se a conta existe) */
             <div className="text-center space-y-5 animate-fadeIn">
               <div className="p-4 bg-emerald-100 text-emerald-900 rounded-full w-16 h-16 mx-auto flex items-center justify-center shadow-xs">
                 <CheckCircle2 className="w-8 h-8" />
               </div>
 
               <div>
-                <h3 className="text-lg font-black text-gray-900">Instruções Enviadas!</h3>
+                <h3 className="text-lg font-black text-gray-900">Verifique seu e-mail</h3>
                 <p className="text-xs text-gray-600 mt-2 leading-relaxed">
-                  Se os dados informados estiverem cadastrados em nossa base, enviaremos as instruções de recuperação com o código de validação para <strong>{identifier}</strong>.
+                  Se existir uma conta com o e-mail <strong>{identifier.trim()}</strong>, enviamos um link para redefinir a senha. O link vale por 30 minutos e só pode ser usado uma vez.
                 </p>
               </div>
 
@@ -192,26 +152,24 @@ export const ForgotPasswordPage: React.FC = () => {
                   <KeyRound className="w-4 h-4 text-blue-800" /> Próximo passo:
                 </div>
                 <p className="text-blue-900 leading-snug">
-                  Verifique a caixa de entrada ou mensagens SMS e clique no link de redefinição ou insira seu código na tela seguinte.
+                  Abra o e-mail e clique em "Criar nova senha". Confira também a caixa de spam. Se não chegar em 5 minutos, volte e solicite novamente.
                 </p>
               </div>
 
               <div className="space-y-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => navigate('/reset-password?code=123456')}
-                  className="w-full bg-blue-900 hover:bg-blue-950 text-white font-extrabold py-3 rounded-xl text-xs transition shadow-md flex items-center justify-center gap-2 cursor-pointer"
+                <Link
+                  to="/login"
+                  className="w-full bg-blue-900 hover:bg-blue-950 text-white font-extrabold py-3 rounded-xl text-xs transition shadow-md flex items-center justify-center gap-2"
                 >
-                  <span>Ir para Redefinição de Senha</span>
-                  <ArrowRight className="w-4 h-4" />
-                </button>
+                  <span>Voltar para o Login</span>
+                </Link>
 
                 <button
                   type="button"
                   onClick={() => setStep(1)}
                   className="w-full py-2.5 text-xs font-bold text-gray-600 hover:text-gray-900 cursor-pointer"
                 >
-                  Tentar outro e-mail ou telefone
+                  Tentar outro e-mail
                 </button>
               </div>
             </div>

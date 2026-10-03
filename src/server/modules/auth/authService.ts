@@ -1,10 +1,11 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getDb } from '../../../db/index.js';
-import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens, sessions, sellers, sellerProfiles, countries } from '../../../db/schema.js';
-import { eq, and, gt } from 'drizzle-orm';
+import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens, sessions, sellers, sellerProfiles, countries, passwordResetTokens, auditLogs } from '../../../db/schema.js';
+import { eq, and, gt, desc } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
-import { generateEmailVerificationCode, hashEmailVerificationCode, sendVerificationEmail } from './emailService.js';
+import { generateEmailVerificationCode, hashEmailVerificationCode, sendVerificationEmail, sendPasswordResetEmail } from './emailService.js';
+import crypto from 'node:crypto';
 import { getJwtAccessSecret, getJwtRefreshSecret } from './jwtConfig.js';
 
 const ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '2h';
@@ -17,6 +18,23 @@ export interface RegisterDTO {
   phone?: string;
   countryCode?: string;
   role?: string;
+}
+
+/**
+ * Recuperação de senha por e-mail. O token (32 bytes aleatórios, base64url) só existe
+ * no link enviado; o banco guarda apenas o SHA-256 dele (`password_reset_tokens.token`).
+ * Uso único, validade curta, um token ativo por conta. Respostas ao cliente são sempre
+ * genéricas (nunca revelam se o e-mail existe).
+ */
+export const PASSWORD_RESET_GENERIC_MESSAGE = 'Se existir uma conta com este e-mail, enviamos as instruções para redefinir a senha.';
+const PASSWORD_RESET_EXPIRES_MINUTES = 30;
+// Limite POR CONTA (não por IP: sem `trust proxy`, atrás do proxy todos os clientes compartilham o mesmo IP).
+const PASSWORD_RESET_MIN_INTERVAL_MS = 5 * 60_000;
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MAX_BYTES = 72; // limite real do bcrypt: além disso a senha seria truncada em silêncio
+
+export function hashPasswordResetToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 export interface LoginDTO {
@@ -460,6 +478,129 @@ export class AuthService {
 
     logger.info({ userId }, 'User password updated successfully in PostgreSQL');
     return { message: 'Senha de acesso alterada com sucesso!' };
+  }
+
+  /**
+   * Pede a redefinição de senha. NUNCA lança por motivos ligados ao estado da conta (conta
+   * inexistente, desativada, sem senha, throttle, falha de e-mail): o chamador responde sempre
+   * com a mesma mensagem genérica. Só falhas de infraestrutura (banco indisponível) propagam.
+   */
+  static async requestPasswordReset(emailInput: string): Promise<void> {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível para recuperação de senha.');
+
+    const cleanEmail = String(emailInput || '').trim().toLowerCase();
+    const [user] = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
+
+    // Só contas ATIVAS e que já têm uma senha bcrypt real podem recuperar acesso por e-mail
+    // (uma linha sem senha — ex.: criada por um fluxo legado — nunca ganha senha por aqui).
+    const eligible = !!user && user.isActive !== false && typeof user.passwordHash === 'string' && user.passwordHash.startsWith('$2');
+    if (!eligible || !user) {
+      logger.info({ eligible: false }, 'PASSWORD_RESET_REQUEST_IGNORED');
+      return;
+    }
+
+    const appUrl = String(process.env.APP_URL || '').trim().replace(/\/+$/, '');
+    if (!appUrl || (process.env.NODE_ENV === 'production' && !appUrl.startsWith('https://'))) {
+      // Fail-closed: sem uma URL pública confiável o link seria inútil/perigoso. Nunca derivar do Host da requisição.
+      logger.error({ userId: user.id }, 'PASSWORD_RESET_APP_URL_NOT_CONFIGURED — e-mail não enviado');
+      return;
+    }
+
+    const [latest] = await db
+      .select({ createdAt: passwordResetTokens.createdAt })
+      .from(passwordResetTokens)
+      .where(eq(passwordResetTokens.userId, user.id))
+      .orderBy(desc(passwordResetTokens.createdAt))
+      .limit(1);
+    if (latest && Date.now() - new Date(latest.createdAt).getTime() < PASSWORD_RESET_MIN_INTERVAL_MS) {
+      logger.info({ userId: user.id }, 'PASSWORD_RESET_REQUEST_THROTTLED');
+      return;
+    }
+
+    const rawToken = crypto.randomBytes(32).toString('base64url');
+    const tokenId = `prt_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    await db.transaction(async (tx) => {
+      await tx.delete(passwordResetTokens).where(eq(passwordResetTokens.userId, user.id)); // um token ativo por conta
+      await tx.insert(passwordResetTokens).values({
+        id: tokenId,
+        userId: user.id,
+        token: hashPasswordResetToken(rawToken),
+        expiresAt: new Date(Date.now() + PASSWORD_RESET_EXPIRES_MINUTES * 60_000),
+        createdAt: new Date(),
+      });
+    });
+
+    try {
+      await sendPasswordResetEmail({
+        to: user.email,
+        name: user.fullName,
+        link: `${appUrl}/reset-password?token=${rawToken}`,
+        expiresMinutes: PASSWORD_RESET_EXPIRES_MINUTES,
+      });
+    } catch (error: any) {
+      // Um token que nunca foi entregue não pode ficar ativo.
+      await db.delete(passwordResetTokens).where(eq(passwordResetTokens.id, tokenId));
+      logger.error({ userId: user.id, error: error?.message }, 'PASSWORD_RESET_EMAIL_FAILED');
+    }
+  }
+
+  /**
+   * Conclui a redefinição: token de uso único (consumido por DELETE ... RETURNING, seguro sob
+   * concorrência), troca o hash (bcrypt custo 12), revoga TODOS os refresh tokens da conta e apaga
+   * suas sessões, tudo numa transação. NÃO marca o e-mail como verificado. Erros do token são sempre
+   * o mesmo (inválido/expirado/já usado/conta inapta), sem distinguir o motivo.
+   */
+  static async resetPasswordWithToken(token: string, newPassword: string) {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível para recuperação de senha.');
+
+    const pw = String(newPassword || '');
+    if (pw.length < PASSWORD_MIN_LENGTH || Buffer.byteLength(pw, 'utf8') > PASSWORD_MAX_BYTES) {
+      const err: any = new Error(`A nova senha deve ter entre ${PASSWORD_MIN_LENGTH} e ${PASSWORD_MAX_BYTES} caracteres.`);
+      err.code = 'PASSWORD_RESET_WEAK_PASSWORD'; // validado ANTES de consumir o token
+      throw err;
+    }
+
+    const invalid = () => {
+      const err: any = new Error('Link de recuperação inválido ou expirado. Solicite um novo.');
+      err.code = 'PASSWORD_RESET_TOKEN_INVALID';
+      return err;
+    };
+    const rawToken = String(token || '');
+    if (rawToken.length < 20 || rawToken.length > 200) throw invalid();
+
+    const newHash = await bcrypt.hash(pw, 12);
+    const tokenHash = hashPasswordResetToken(rawToken);
+
+    await db.transaction(async (tx) => {
+      const consumed = await tx
+        .delete(passwordResetTokens)
+        .where(and(eq(passwordResetTokens.token, tokenHash), gt(passwordResetTokens.expiresAt, new Date())))
+        .returning({ userId: passwordResetTokens.userId });
+      if (consumed.length === 0) throw invalid();
+
+      const userId = consumed[0].userId;
+      const [user] = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
+      const eligible = !!user && user.isActive !== false && typeof user.passwordHash === 'string' && user.passwordHash.startsWith('$2');
+      if (!eligible) throw invalid(); // a transação inteira é desfeita
+
+      await tx.update(users).set({ passwordHash: newHash, updatedAt: new Date() }).where(eq(users.id, userId));
+      await tx.delete(passwordResetTokens).where(eq(passwordResetTokens.userId, userId));
+      await tx.update(refreshTokens).set({ isRevoked: true }).where(eq(refreshTokens.userId, userId));
+      await tx.delete(sessions).where(eq(sessions.userId, userId));
+      await tx.insert(auditLogs).values({
+        id: `aud_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+        actorUserId: userId,
+        action: 'auth.password_reset_completed',
+        resource: 'users',
+        resourceId: userId,
+        detailsJson: { via: 'email_token' },
+        createdAt: new Date(),
+      });
+    });
+
+    return { message: 'Senha redefinida com sucesso. Faça login com a nova senha.' };
   }
 
   static async logout(refreshTokenString?: string, accessToken?: string) {

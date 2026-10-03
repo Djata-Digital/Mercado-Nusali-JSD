@@ -10,6 +10,7 @@ import { apiRouter } from './src/server/api.js';
 import { setupWebSocketServer } from './src/server/infra/websocket.js';
 import { initializeQueues } from './src/server/infra/queues.js';
 import { logger } from './src/server/infra/logger.js';
+import { configureTrustProxy } from './src/server/infra/trustProxy.js';
 
 import { validateJwtConfigInProduction } from './src/server/modules/auth/jwtConfig.js';
 
@@ -18,6 +19,8 @@ validateJwtConfigInProduction();
 
 async function startServer() {
   const app = express();
+  // IP real do cliente atrás do Cloudflare + proxy do Render (limitadores de taxa, sessões). Ver trustProxy.ts.
+  configureTrustProxy(app);
   const server = http.createServer(app);
   const PORT = Number(process.env.PORT) || 3000;
 

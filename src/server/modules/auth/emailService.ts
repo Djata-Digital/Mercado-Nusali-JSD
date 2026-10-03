@@ -42,6 +42,57 @@ export async function sendVerificationEmail(params: { to: string; name: string; 
   return body;
 }
 
+/**
+ * Recuperação de senha — envia o link de redefinição. O token só existe aqui (no
+ * corpo do e-mail) e na URL; nunca é logado e o banco guarda apenas o hash dele.
+ * Não loga o destinatário nem o link.
+ */
+export async function sendPasswordResetEmail(params: { to: string; name: string; link: string; expiresMinutes: number }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.EMAIL_FROM;
+
+  if (!apiKey) throw new Error('RESEND_API_KEY não configurada.');
+  if (!from) throw new Error('EMAIL_FROM não configurado.');
+
+  const name = escapeHtml(params.name || 'cliente');
+  const link = escapeHtml(params.link);
+  const response = await fetch(RESEND_API_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from,
+      to: [params.to],
+      subject: 'Redefinição de senha do Mercado Nusali',
+      text:
+        `Olá ${params.name || 'cliente'},\n\n` +
+        `Recebemos um pedido para redefinir a senha da sua conta no Mercado Nusali.\n` +
+        `Para criar uma nova senha, abra o link abaixo (válido por ${params.expiresMinutes} minutos e de uso único):\n\n${params.link}\n\n` +
+        `Se você não fez esse pedido, ignore este e-mail: a sua senha continua a mesma.`,
+      html:
+        `<!doctype html><html><body style="font-family:Arial,sans-serif;background:#f4f7fb;padding:24px">` +
+        `<div style="max-width:560px;margin:auto;background:#fff;border-radius:12px;padding:28px">` +
+        `<h2 style="margin:0 0 12px;color:#0b1f4d">Redefinição de senha</h2>` +
+        `<p style="color:#333">Olá ${name},</p>` +
+        `<p style="color:#333">Recebemos um pedido para redefinir a senha da sua conta no Mercado Nusali.</p>` +
+        `<p style="margin:24px 0"><a href="${link}" style="background:#0b1f4d;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:bold">Criar nova senha</a></p>` +
+        `<p style="color:#555;font-size:13px">O link vale por ${params.expiresMinutes} minutos e só pode ser usado uma vez.</p>` +
+        `<p style="color:#555;font-size:13px">Se você não fez esse pedido, ignore este e-mail: a sua senha continua a mesma.</p>` +
+        `</div></body></html>`,
+    }),
+  });
+
+  const body = await response.json().catch(() => ({} as any));
+  if (!response.ok) {
+    logger.error({ status: response.status }, 'Resend failed to send password reset email');
+    throw new Error(body?.message || `Falha ao enviar e-mail de redefinição (HTTP ${response.status}).`);
+  }
+  logger.info({ resendId: body?.id }, 'Password reset email sent');
+  return body;
+}
+
 function escapeHtml(value: string) {
   return value.replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char] || char));
 }

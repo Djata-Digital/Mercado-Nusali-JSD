@@ -18,9 +18,9 @@ export const ResetPasswordPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
-  const tokenFromUrl = searchParams.get('token') || searchParams.get('code') || '';
+  // O token vem SOMENTE do link do e-mail (?token=...). Nunca há valor padrão nem campo manual.
+  const token = searchParams.get('token') || '';
 
-  const [code, setCode] = useState<string>(tokenFromUrl || '123456');
   const [newPassword, setNewPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
@@ -50,8 +50,8 @@ export const ResetPasswordPage: React.FC = () => {
     e.preventDefault();
     setErrorMessage(null);
 
-    if (!code.trim()) {
-      setErrorMessage('Informe o código de verificação recebido.');
+    if (!token) {
+      setErrorMessage('Link de recuperação inválido ou incompleto. Solicite um novo.');
       return;
     }
 
@@ -68,14 +68,16 @@ export const ResetPasswordPage: React.FC = () => {
     setLoading(true);
 
     try {
-      const res = await AuthService.resetPassword({ newPassword, code });
+      const res = await AuthService.resetPassword({ token, newPassword });
       if (!res.success) {
         throw new Error(res.error?.message || 'Falha ao redefinir senha.');
       }
 
       setIsSuccess(true);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Código inválido ou expirado.');
+      setErrorMessage(
+        err?.response?.data?.error?.message || err?.message || 'Link de recuperação inválido ou expirado. Solicite um novo.'
+      );
     } finally {
       setLoading(false);
     }
@@ -97,7 +99,27 @@ export const ResetPasswordPage: React.FC = () => {
 
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
         <div className="bg-white py-8 px-6 sm:px-10 shadow-2xl rounded-2xl border border-gray-100">
-          {!isSuccess ? (
+          {!isSuccess && !token ? (
+            /* Sem token na URL: nada a redefinir — leva a pedir um novo link */
+            <div className="text-center space-y-5 animate-fadeIn">
+              <div className="p-4 bg-amber-100 text-amber-900 rounded-full w-16 h-16 mx-auto flex items-center justify-center shadow-xs">
+                <AlertCircle className="w-8 h-8" />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-gray-900">Link inválido ou incompleto</h3>
+                <p className="text-xs text-gray-600 mt-2 leading-relaxed">
+                  Para redefinir a senha, use o link enviado ao seu e-mail. Se ele expirou ou não funciona, solicite um novo.
+                </p>
+              </div>
+              <Link
+                to="/forgot-password"
+                className="w-full bg-blue-900 hover:bg-blue-950 text-white font-extrabold py-3 rounded-xl text-xs transition shadow-md flex items-center justify-center gap-2"
+              >
+                <span>Solicitar novo link</span>
+                <ArrowRight className="w-4 h-4" />
+              </Link>
+            </div>
+          ) : !isSuccess ? (
             <form onSubmit={handleSubmit} className="space-y-5 text-xs">
               {/* Error Message */}
               {errorMessage && (
@@ -106,22 +128,6 @@ export const ResetPasswordPage: React.FC = () => {
                   <div>{errorMessage}</div>
                 </div>
               )}
-
-              {/* Code field */}
-              <div>
-                <label className="block font-bold text-gray-700 mb-1">Código de Recuperação *</label>
-                <input
-                  type="text"
-                  required
-                  value={code}
-                  onChange={(e) => setCode(e.target.value)}
-                  placeholder="ex: 123456 ou token de e-mail"
-                  className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-blue-800 focus:outline-hidden font-mono text-center tracking-widest text-sm font-bold text-blue-950"
-                />
-                <span className="text-[10px] text-gray-500 mt-1 block text-center">
-                  Código de 6 dígitos enviado por e-mail ou SMS.
-                </span>
-              </div>
 
               {/* New Password */}
               <div>
@@ -218,7 +224,7 @@ export const ResetPasswordPage: React.FC = () => {
               <div>
                 <h3 className="text-lg font-black text-gray-900">Senha Alterada com Sucesso!</h3>
                 <p className="text-xs text-gray-600 mt-2 leading-relaxed">
-                  Sua senha do Mercado Nusali foi redefinida com segurança. Por medida de proteção, todas as sessões anteriores em outros navegadores foram encerradas.
+                  Sua senha do Mercado Nusali foi redefinida com segurança. Por medida de proteção, os acessos antigos em outros navegadores deixam de renovar e se encerram em até 2 horas.
                 </p>
               </div>
 
