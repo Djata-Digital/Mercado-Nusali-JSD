@@ -1,16 +1,23 @@
 /**
- * Países cujo checkout online AINDA NÃO está liberado ao público.
+ * Países cujo checkout online está OFICIALMENTE liberado ao público. Bloqueio por padrão: qualquer país que não esteja
+ * nesta lista (inclusive país desconhecido, vazio ou novo) NÃO chega à criação de pedido/pagamento.
  *
- * Guiné-Bissau: as opções de entrega (geografia e tarifas de frete) e de pagamento (Orange Money/TeleTaku, que
- * dependem de contrato com as operadoras) ainda estão em preparação. Enquanto isso o comprador pode criar conta,
- * navegar e montar o carrinho, mas NÃO avança para a criação do pedido — o backend continua barrando por conta
- * própria (OrderService.createOrderFromCart), isto só evita que o comprador chegue a um erro técnico.
+ * Soft launch: a lista é VAZIA — nenhum mercado tem checkout. As opções de entrega (geografia e tarifas de frete) e de
+ * pagamento (Orange Money/TeleTaku dependem de contrato com as operadoras; PIX/Asaas só existe para o Brasil) ainda estão em
+ * preparação. O comprador pode criar conta, navegar e montar o carrinho, mas não avança. O backend continua barrando por
+ * conta própria (OrderService.createOrderFromCart); isto só evita que o comprador chegue a uma tela sem saída.
  *
- * Para liberar a compra em um país: remover o código daqui (nenhuma outra mudança é necessária no checkout).
+ * Para liberar um país: adicionar o código dele (ex.: 'GW') a CHECKOUT_ENABLED_COUNTRIES, depois de configurar a geografia de
+ * frete e os meios de pagamento reais desse país. Nenhuma outra mudança é necessária no checkout.
  */
-export const ONLINE_CHECKOUT_UNAVAILABLE_COUNTRIES: ReadonlySet<string> = new Set(['GW']);
+export const CHECKOUT_ENABLED_COUNTRIES: readonly string[] = [];
 
-export function isOnlineCheckoutAvailable(countryCode: string | null | undefined): boolean {
-  if (!countryCode) return true;
-  return !ONLINE_CHECKOUT_UNAVAILABLE_COUNTRIES.has(String(countryCode).trim().toUpperCase());
+export function isOnlineCheckoutAvailable(
+  countryCode: string | null | undefined,
+  enabledCountries: readonly string[] = CHECKOUT_ENABLED_COUNTRIES,
+): boolean {
+  if (!countryCode) return false;
+  const code = String(countryCode).trim().toUpperCase();
+  if (!code) return false;
+  return enabledCountries.some((c) => String(c).trim().toUpperCase() === code);
 }

@@ -55,7 +55,7 @@ export const HomePage: React.FC = () => {
                 Ofertas do Dia • {currentCountry.name} {currentCountry.flag}
               </h2>
               <span className="bg-emerald-600 text-white font-extrabold text-[10px] px-2 py-0.5 rounded-xs uppercase tracking-wider animate-pulse">
-                Até 60% OFF
+                Ofertas no Mercado Nusali
               </span>
             </div>
             <button
@@ -113,7 +113,7 @@ export const HomePage: React.FC = () => {
             <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
               <Globe className="w-5 h-5 text-emerald-600" /> Catálogo de Produtos Nacionais e Importados
             </h2>
-            <span className="text-xs text-gray-500 font-medium">Entrega Rápida via Nusali Logistics</span>
+            <span className="text-xs text-gray-500 font-medium">Compre e venda no Mercado Nusali</span>
           </div>
 
           {isLoading ? (

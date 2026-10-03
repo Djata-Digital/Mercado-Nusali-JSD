@@ -679,7 +679,7 @@ export const CheckoutView: React.FC = () => {
   // Compras online ainda não liberadas para o país de entrega (ex.: Guiné-Bissau): em vez de seguir até a
   // criação do pedido (que falharia com erro técnico), mostra o aviso. O carrinho não é tocado.
   if (!confirmedOrder && !isOnlineCheckoutAvailable(country)) {
-    return <CheckoutComingSoon onContinueShopping={() => navigate('/products')} />;
+    return <CheckoutComingSoon countryCode={country} onContinueShopping={() => navigate('/products')} />;
   }
 
   // ORDER MODE: o pedido já foi criado nesta tentativa (o carrinho real já
