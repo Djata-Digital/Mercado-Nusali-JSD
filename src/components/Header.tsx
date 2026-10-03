@@ -45,7 +45,7 @@ import { useProducts, useCategories } from '../hooks/useProducts';
 import { countriesConfig } from '../utils/currencyUtils';
 import { CountryCode } from '../types';
 import { useCountries } from '../hooks/useCountries';
-import { NusaliLogo } from './NusaliLogo';
+import { MercadoNusaliLogo } from './MercadoNusaliLogo';
 import { searchProductsIntelligent, getSynonymsForTerm } from '../utils/searchEngine';
 import { CurrencyConverterModal } from './CurrencyConverterModal';
 import { CurrencyService } from '../services/currencyService';
@@ -260,21 +260,24 @@ export const Header: React.FC = () => {
       {/* Container */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
         {/* Top Row: Logo, Country Selector, Search, Header Color Switcher, Nusali+ Promo */}
-        <div className="flex items-center justify-between gap-3">
-          {/* Logo */}
+        {/* Responsivo: no celular a linha quebra (logo + país + menu; a busca ocupa a linha de baixo) em vez de estourar a largura. */}
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 md:flex-nowrap">
+          {/* Logo oficial Mercado Nusali sobre placa branca discreta (o logo tem texto azul: sem a placa some no fundo verde) */}
           <button
             onClick={() => navigate('/')}
-            className="flex items-center gap-2 group shrink-0 focus:outline-hidden"
+            className="order-1 md:order-none flex items-center gap-2 group shrink-0 focus:outline-hidden"
             title="Mercado Nusali Início"
           >
-            <NusaliLogo size="md" variant="horizontal" animated={true} darkBg={curTheme.logoDarkBg} />
+            <span className="inline-flex items-center rounded-lg bg-white px-2.5 py-1 shadow-xs">
+              <MercadoNusaliLogo variant="horizontal" className="h-7 min-[360px]:h-8 md:h-9" />
+            </span>
           </button>
 
           {/* FASE D16-G1 — Catalog Origin Filter Dropdown (NUNCA muda destino/
               moeda/endereço — só "de qual país eu quero ver produtos", dentro
               do que já é elegível para o meu destino real). O destino real
               continua exibido separadamente em "Enviar para", mais abaixo. */}
-          <div className="relative shrink-0">
+          <div className="order-2 md:order-none relative shrink-0 ml-auto md:ml-0">
             <button
               onClick={() => setIsCountryMenuOpen(!isCountryMenuOpen)}
               className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md font-bold text-xs shadow-2xs transition ${curTheme.countryBtn}`}
@@ -335,7 +338,7 @@ export const Header: React.FC = () => {
           </div>
 
           {/* Search Bar with Intelligent Dropdown */}
-          <div ref={searchContainerRef} className="flex-1 max-w-xl relative">
+          <div ref={searchContainerRef} className="order-4 md:order-none flex-1 basis-full md:basis-0 md:min-w-0 max-w-xl relative">
             <form
               onSubmit={(e) => handleSearchSubmit(e)}
               className="relative flex items-center bg-white rounded-lg shadow-xs border border-gray-300 focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-emerald-600/30 transition overflow-hidden"
@@ -482,7 +485,7 @@ export const Header: React.FC = () => {
           </div>
 
           {/* Color Palette Badge (Tema Verde Esmeralda) */}
-          <div className="hidden sm:flex items-center gap-1.5 bg-black/20 px-2.5 py-1 rounded-full border border-white/20 shrink-0 text-[10px] font-black text-white">
+          <div className="hidden lg:flex items-center gap-1.5 bg-black/20 px-2.5 py-1 rounded-full border border-white/20 shrink-0 text-[10px] font-black text-white">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white/80 animate-pulse" />
             <span>Tema Verde Esmeralda</span>
           </div>
@@ -490,14 +493,15 @@ export const Header: React.FC = () => {
           {/* Mobile menu trigger */}
           <button
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            className={`lg:hidden p-2 rounded-md transition ${curTheme.iconHover}`}
+            className={`order-3 md:order-none lg:hidden p-2 rounded-md transition ${curTheme.iconHover}`}
+            aria-label="Abrir menu"
           >
             {isMobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
           </button>
         </div>
 
         {/* Bottom Navigation Row */}
-        <div className={`mt-2 pt-2 border-t ${curTheme.borderTopNav} flex items-center justify-between text-xs relative z-30`}>
+        <div className={`mt-1.5 pt-1.5 sm:mt-2 sm:pt-2 border-t ${curTheme.borderTopNav} flex flex-wrap items-center justify-between gap-y-1 text-xs relative z-30`}>
           {/* Left Navigation: Location + Category Mega Dropdown */}
           <div className="flex items-center gap-2 shrink-0">
             {/* Destination Country Selector ("Enviar para") — D18-C2.7:
@@ -517,7 +521,7 @@ export const Header: React.FC = () => {
               >
                 <MapPin className="w-4 h-4 text-emerald-400" />
                 <div className="flex flex-col text-left">
-                  <span className={`text-[10px] leading-3 ${curTheme.addressSubtext}`}>Enviar para</span>
+                  <span className={`hidden sm:block text-[10px] leading-3 ${curTheme.addressSubtext}`}>Enviar para</span>
                   {/* Correção crítica (bug cosmético): não existe cidade real do
                       comprador disponível aqui — "Bissau" era um valor fixo,
                       exibido mesmo quando o país selecionado era outro (ex.:
@@ -708,8 +712,8 @@ export const Header: React.FC = () => {
             </div>
           </div>
 
-          {/* Right Navigation Links (Scrollable if narrow viewport) */}
-          <div className="flex items-center gap-2 md:gap-3 overflow-x-auto no-scrollbar py-0.5">
+          {/* Right Navigation Links — só a partir de lg (abaixo disso estes links ficam no menu hambúrguer, sem faixa cortada) */}
+          <div className="hidden lg:flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
             <button
               onClick={() => navigate('/categories')}
               className={`py-1 px-2 rounded-md transition shrink-0 ${curTheme.navText}`}
@@ -779,7 +783,7 @@ export const Header: React.FC = () => {
           </div>
 
           {/* Action Menu: User, Favorites, Cart */}
-          <div className="flex items-center gap-2 shrink-0 ml-2">
+          <div className="flex items-center gap-2 shrink-0 ml-auto">
             {/* Notifications */}
             {isAuthenticated && (
               <button
@@ -968,8 +972,8 @@ export const Header: React.FC = () => {
           </div>
         </div>
 
-        {/* Mobile Color Palette Indicator */}
-        <div className="sm:hidden mt-2 pt-1 border-t border-white/10 flex items-center justify-between text-[11px] text-white/90">
+        {/* Mobile Color Palette Indicator — escondido: rótulo decorativo (não existe seletor de tema) que gastava uma linha inteira do Header no celular */}
+        <div className="hidden mt-2 pt-1 border-t border-white/10 items-center justify-between text-[11px] text-white/90">
           <span className="font-bold flex items-center gap-1">
             <Palette className="w-3.5 h-3.5 text-emerald-400" /> Tema Ativo:
           </span>
@@ -1029,6 +1033,50 @@ export const Header: React.FC = () => {
             >
               <Grid className="w-4 h-4 text-emerald-400" /> Todas as Categorias
             </button>
+
+            {/* Links que, no desktop, ficam na faixa de navegação (escondida abaixo de lg para não ficar cortada) */}
+            <button
+              onClick={() => {
+                navigate('/products');
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
+            >
+              <Zap className="w-4 h-4 text-yellow-400" /> Ofertas do Dia
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setIsCurrencyConverterOpen(true);
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
+            >
+              <Globe2 className="w-4 h-4 text-emerald-300" /> Câmbio do Dia
+            </button>
+
+            <button
+              onClick={() => {
+                navigate('/wallet');
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
+            >
+              <Wallet className="w-4 h-4 text-yellow-400" /> Nusali Pay
+            </button>
+
+            {isAuthenticated && (user?.role === 'ADMIN' || user?.role === 'GLOBAL_ADMIN') && (
+              <button
+                onClick={() => {
+                  navigate('/admin');
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
+              >
+                <LayoutDashboard className="w-4 h-4 text-emerald-300" /> Painel Admin
+              </button>
+            )}
 
             <button
               onClick={() => {
