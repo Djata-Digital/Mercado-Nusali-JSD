@@ -2,7 +2,7 @@ import React from 'react';
 import { Outlet } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { AIAssistantModal } from '../components/AIAssistantModal';
-import { NusaliLogo } from '../components/NusaliLogo';
+import { MercadoNusaliLogo } from '../components/MercadoNusaliLogo';
 import { usePreferences } from '../context/PreferencesContext';
 import { CheckCircle2, ShieldCheck, Lock, Truck } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -31,7 +31,7 @@ export const PublicLayout: React.FC = () => {
       <footer className="bg-white border-t border-gray-200 mt-auto text-xs text-gray-600">
         <div className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 md:grid-cols-4 gap-6">
           <div className="space-y-3">
-            <NusaliLogo size="md" variant="horizontal" />
+            <MercadoNusaliLogo height={128} />
             <p className="text-xs leading-relaxed text-gray-500">
               O marketplace internacional conectando Guiné-Bissau, Brasil, Portugal e África Ocidental. Produtos garantidos com Proteção Escrow e logística cross-border.
             </p>
