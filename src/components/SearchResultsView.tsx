@@ -237,45 +237,10 @@ export const SearchResultsView: React.FC = () => {
             </button>
           </div>
 
-          {/* Shipping Badges Toggles */}
-          <div className="space-y-3">
-            <h3 className="text-xs font-bold text-gray-800 uppercase tracking-wider">Envio</h3>
-
-            <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={filterState.freeShippingOnly}
-                onChange={(e) => updateFilterState({ freeShippingOnly: e.target.checked })}
-                className="w-4 h-4 text-emerald-600 rounded-xs border-gray-300 focus:ring-emerald-500"
-              />
-              <span className="font-semibold text-emerald-700">⚡ Frete Grátis</span>
-            </label>
-
-            <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={filterState.arrivesTomorrowOnly}
-                onChange={(e) => updateFilterState({ arrivesTomorrowOnly: e.target.checked })}
-                className="w-4 h-4 text-emerald-600 rounded-xs border-gray-300 focus:ring-emerald-500"
-              />
-              <span className="font-semibold text-emerald-700">⚡ Chega amanhã</span>
-            </label>
-
-            <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={filterState.fullOnly}
-                onChange={(e) => updateFilterState({ fullOnly: e.target.checked })}
-                className="w-4 h-4 text-emerald-600 rounded-xs border-gray-300 focus:ring-emerald-500"
-              />
-              <span className="font-extrabold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded-xs border border-emerald-200">
-                FULL
-              </span>
-            </label>
-          </div>
+          {/* Filtros de envio (frete grátis / chega amanhã / FULL) ocultos: o frete e a entrega ainda estão em preparação. */}
 
           {/* Condition (Novo / Usado) */}
-          <div className="space-y-2 pt-3 border-t border-gray-100">
+          <div className="space-y-2">
             <h3 className="text-xs font-bold text-gray-800 uppercase tracking-wider">Condição</h3>
             <div className="space-y-1.5 text-xs text-gray-700">
               <label className="flex items-center gap-2 cursor-pointer">

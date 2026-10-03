@@ -87,23 +87,23 @@ export const HomePage: React.FC = () => {
           <div className="space-y-2 max-w-xl">
             <div className="flex items-center gap-2">
               <span className="bg-yellow-400 text-blue-950 font-black text-xs px-2.5 py-0.5 rounded-xs uppercase">
-                NUSALI+ GLOBAL
+                PARA VENDEDORES
               </span>
-              <span className="text-xs text-yellow-300 font-bold">Proteção Escrow & Envio Directo</span>
+              <span className="text-xs text-yellow-300 font-bold">Cadastro aberto</span>
             </div>
             <h3 className="text-xl sm:text-2xl font-extrabold">
-              Frete Grátis ilimitado em produtos de Guiné-Bissau, Brasil e Europa
+              Venda seus produtos no Mercado Nusali
             </h3>
             <p className="text-xs text-gray-300">
-              Compre com Orange Money, PIX ou Cartão com retenção 100% garantida até à confirmação de entrega.
+              Crie sua conta de vendedor, configure sua operação e publique seus produtos. As compras online para a Guiné-Bissau chegam em breve.
             </p>
           </div>
 
           <button
-            onClick={() => navigate('/nusali-plus')}
+            onClick={() => navigate('/register')}
             className="bg-yellow-400 hover:bg-yellow-300 text-blue-950 font-black px-6 py-3 rounded-xl shadow-md text-sm shrink-0 transition"
           >
-            Conhecer Nusali+
+            Criar minha conta
           </button>
         </section>
 

@@ -487,19 +487,6 @@ export const Header: React.FC = () => {
             <span>Tema Verde Esmeralda</span>
           </div>
 
-          {/* Nusali+ Promo Banner */}
-          <button
-            onClick={() => navigate('/nusali-plus')}
-            className="hidden lg:flex items-center gap-2 bg-gradient-to-r from-emerald-900 to-blue-950 text-white px-3 py-1.5 rounded-md hover:opacity-95 transition text-xs shadow-xs shrink-0 border border-emerald-500/30"
-          >
-            <span className="bg-yellow-400 text-blue-950 font-black px-1.5 py-0.5 rounded-xs text-[10px] tracking-wider">
-              NUSALI+
-            </span>
-            <span className="font-medium text-gray-100">
-              Frete Grátis & Proteção Escrow
-            </span>
-          </button>
-
           {/* Mobile menu trigger */}
           <button
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}

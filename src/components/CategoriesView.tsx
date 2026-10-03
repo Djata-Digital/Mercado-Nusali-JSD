@@ -58,7 +58,7 @@ export const CategoriesView: React.FC = () => {
             Explore por Categorias
           </h1>
           <p className="text-gray-200 text-sm sm:text-base leading-relaxed mb-6">
-            Encontre milhares de produtos com garantia Nusali Proteção Escrow, frete internacional rápido e opções de pagamento locais (Orange Money, PIX, MB WAY e Cartão).
+            Navegue por departamento e encontre os produtos dos vendedores do Mercado Nusali.
           </p>
 
           {/* Internal Category Search */}

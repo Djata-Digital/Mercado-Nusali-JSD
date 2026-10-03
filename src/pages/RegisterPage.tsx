@@ -591,7 +591,7 @@ export const RegisterPage: React.FC = () => {
                     />
                   </div>
                   <span className="text-[10px] text-gray-500 mt-1 block">
-                    Utilizado para notificações de frete e saques na Carteira Orange/MTN.
+                    Utilizado para contato e notificações da sua conta.
                   </span>
                 </div>
               </div>

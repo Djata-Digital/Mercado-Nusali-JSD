@@ -382,7 +382,7 @@ export const CartView: React.FC = () => {
         </div>
         <h2 className="text-2xl font-extrabold text-gray-900">Seu carrinho está vazio</h2>
         <p className="text-sm text-gray-600 max-w-md mx-auto">
-          Explore as melhores ofertas do dia e adicione os produtos desejados com frete grátis e entrega em até 24 horas!
+          Explore os produtos do Mercado Nusali e adicione os itens desejados ao seu carrinho.
         </p>
         <button
           onClick={() => navigate('/products')}

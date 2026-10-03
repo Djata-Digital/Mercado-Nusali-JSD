@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ChevronLeft, ChevronRight, Zap, ShieldCheck, Truck, CreditCard } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Truck, UserPlus, ShoppingCart, Store } from 'lucide-react';
 import { NusaliLogo } from './NusaliLogo';
 
 export const BannerSlider: React.FC = () => {
@@ -10,36 +10,36 @@ export const BannerSlider: React.FC = () => {
   const banners = [
     {
       id: 'banner-1',
-      tag: 'OFERTAS DO DIA',
-      title: 'Descontos de até 60% OFF com Frete Grátis',
-      subtitle: 'Aproveite as maiores ofertas em Celulares, TVs e Eletrodomésticos!',
-      cta: 'Ver todas as ofertas',
+      tag: 'MERCADO NUSALI',
+      title: 'Explore os produtos do Mercado Nusali',
+      subtitle: 'Crie sua conta, navegue pelo catálogo e monte seu carrinho. As compras online chegam em breve.',
+      cta: 'Ver produtos',
       bgClass: 'from-blue-900 via-indigo-900 to-slate-900',
       tagBg: 'bg-yellow-400 text-blue-950',
       action: () => navigate('/products'),
-      badge: '⚡ CHEGA AMANHÃ',
+      badge: 'Compras online em breve',
     },
     {
       id: 'banner-2',
-      tag: 'BENEFÍCIO NUSALI+',
-      title: 'Entretenimento, Cashback e Frete Grátis em milhares de produtos',
-      subtitle: 'Assine por apenas R$ 17,90/mês e ganhe 10% de cashback no Nusali Pay',
-      cta: 'Conhecer Nusali+',
+      tag: 'PARA VENDEDORES',
+      title: 'Venda seus produtos no Mercado Nusali',
+      subtitle: 'Crie sua conta de vendedor, configure sua operação e publique seus produtos.',
+      cta: 'Criar minha conta',
       bgClass: 'from-emerald-950 via-teal-950 to-blue-950',
       tagBg: 'bg-yellow-400 text-blue-950 font-black',
-      action: () => navigate('/nusali-plus'),
-      badge: 'Benefícios Exclusivos',
+      action: () => navigate('/register'),
+      badge: 'Cadastro aberto',
     },
     {
       id: 'banner-3',
-      tag: 'TECNOLOGIA & GAMERS',
-      title: 'Consoles, Notebooks e Smartphones em até 10x sem juros',
-      subtitle: 'Compre com a Compra Garantida Nusali Escrow - Seu dinheiro seguro até receber',
-      cta: 'Conferir tecnologia',
+      tag: 'EM BREVE',
+      title: 'Entrega e pagamento para a Guiné-Bissau',
+      subtitle: 'Estamos preparando as opções de entrega e pagamento. Enquanto isso, explore o catálogo e monte seu carrinho.',
+      cta: 'Explorar o catálogo',
       bgClass: 'from-slate-900 via-blue-950 to-zinc-900',
       tagBg: 'bg-emerald-600 text-white',
-      action: () => navigate('/products?q=eletronicos'),
-      badge: '⚡ FULL Entrega Expressa',
+      action: () => navigate('/products'),
+      badge: 'Compras online em breve',
     },
   ];
 
@@ -130,38 +130,38 @@ export const BannerSlider: React.FC = () => {
         <div className="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-4 text-xs text-gray-700">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-blue-50 text-blue-600 rounded-full">
-              <CreditCard className="w-5 h-5" />
+              <UserPlus className="w-5 h-5" />
             </div>
             <div>
-              <p className="font-semibold text-gray-900">Até 10x sem juros</p>
-              <p className="text-[11px] text-gray-500">Com Nusali Pay</p>
+              <p className="font-semibold text-gray-900">Cadastro aberto</p>
+              <p className="text-[11px] text-gray-500">Compradores e vendedores</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             <div className="p-2 bg-green-50 text-green-600 rounded-full">
-              <Truck className="w-5 h-5" />
+              <ShoppingCart className="w-5 h-5" />
             </div>
             <div>
-              <p className="font-semibold text-gray-900">Frete Grátis em 24h</p>
-              <p className="text-[11px] text-gray-500">Produtos com selo FULL</p>
+              <p className="font-semibold text-gray-900">Catálogo e carrinho</p>
+              <p className="text-[11px] text-gray-500">Explore e salve seus itens</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             <div className="p-2 bg-purple-50 text-purple-600 rounded-full">
-              <ShieldCheck className="w-5 h-5" />
+              <Store className="w-5 h-5" />
             </div>
             <div>
-              <p className="font-semibold text-gray-900">Compra Garantida</p>
-              <p className="text-[11px] text-gray-500">Receba ou devolvemos dinheiro</p>
+              <p className="font-semibold text-gray-900">Venda no Mercado Nusali</p>
+              <p className="text-[11px] text-gray-500">Publique seus produtos</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             <div className="p-2 bg-yellow-50 text-yellow-700 rounded-full">
-              <Zap className="w-5 h-5" />
+              <Truck className="w-5 h-5" />
             </div>
             <div>
-              <p className="font-semibold text-gray-900">Pix com 5% de desconto</p>
-              <p className="text-[11px] text-gray-500">Aprovação instantânea</p>
+              <p className="font-semibold text-gray-900">Compras online em breve</p>
+              <p className="text-[11px] text-gray-500">Entrega e pagamento em preparação</p>
             </div>
           </div>
         </div>

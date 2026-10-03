@@ -135,22 +135,27 @@ export const WalletView: React.FC = () => {
             </div>
             <h1 className="text-2xl sm:text-3xl font-black">Minha Carteira Digital</h1>
             <p className="text-xs text-gray-200 mt-1 max-w-xl">
-              Gerencie seus saldos, recarregue via Orange Money ou PIX, pague com 1 clique e receba cashback em todas as compras.
+              Acompanhe seu saldo e o extrato da sua carteira. Recargas e pagamentos com a carteira estarão disponíveis em breve.
             </p>
           </div>
 
           <div className="flex flex-wrap gap-3">
+            {/* Recarga e transferência ainda não existem de verdade (o endpoint legado é um simulador em memória): desativadas até a integração real. */}
             <button
-              onClick={() => setIsDepositModalOpen(true)}
-              className="bg-yellow-400 hover:bg-yellow-500 text-blue-950 font-black px-5 py-3 rounded-xl text-xs transition shadow-lg flex items-center gap-2 cursor-pointer"
+              type="button"
+              disabled
+              title="Em breve"
+              className="bg-yellow-400 text-blue-950 font-black px-5 py-3 rounded-xl text-xs shadow-lg flex items-center gap-2 opacity-60 cursor-not-allowed"
             >
-              <PlusCircle className="w-4 h-4" /> Adicionar Saldo
+              <PlusCircle className="w-4 h-4" /> Adicionar Saldo (em breve)
             </button>
             <button
-              onClick={() => setIsTransferModalOpen(true)}
-              className="bg-white/10 hover:bg-white/20 text-white border border-white/30 font-bold px-5 py-3 rounded-xl text-xs transition backdrop-blur-xs flex items-center gap-2 cursor-pointer"
+              type="button"
+              disabled
+              title="Em breve"
+              className="bg-white/10 text-white border border-white/30 font-bold px-5 py-3 rounded-xl text-xs backdrop-blur-xs flex items-center gap-2 opacity-60 cursor-not-allowed"
             >
-              <ArrowUpRight className="w-4 h-4 text-yellow-300" /> Transferir Saldo
+              <ArrowUpRight className="w-4 h-4 text-yellow-300" /> Transferir Saldo (em breve)
             </button>
           </div>
         </div>

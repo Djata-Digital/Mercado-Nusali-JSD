@@ -31,7 +31,7 @@ export const HelpCenterView: React.FC = () => {
     },
     {
       q: 'Quais moedas e métodos de pagamento são aceitos no meu país?',
-      a: 'O Mercado Nusali aceita moedas locais e regionais como Francos CFA (XOF), Reais (BRL), Euros (EUR), Meticais (MZN) e Escudos (CVE). Os métodos incluem Orange Money, MTN Mobile Money, PIX, MB WAY e Cartões Visa/Mastercard.',
+      a: 'Na Guiné-Bissau, as compras online ainda não estão liberadas: estamos preparando as opções de entrega e pagamento. Você já pode criar sua conta, explorar os produtos e adicionar itens ao carrinho. Vendedores já podem se cadastrar e publicar seus produtos.',
     },
     {
       q: 'Como funciona a entrega internacional e taxas aduaneiras?',
@@ -60,7 +60,7 @@ export const HelpCenterView: React.FC = () => {
           </div>
           <h1 className="text-3xl sm:text-4xl font-black mb-3">Como podemos ajudar você hoje?</h1>
           <p className="text-gray-200 text-xs sm:text-sm mb-6">
-            Pesquise suas dúvidas sobre entregas, pagamentos Orange Money/PIX, garantia Escrow ou fale com a nossa IA.
+            Pesquise suas dúvidas sobre cadastro, produtos, entregas, pagamentos e garantia Escrow ou fale com a nossa IA.
           </p>
 
           <div className="relative max-w-lg mx-auto">
@@ -68,7 +68,7 @@ export const HelpCenterView: React.FC = () => {
               type="text"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
-              placeholder="Digite sua dúvida (ex: reembolso, rastreio, Orange Money)..."
+              placeholder="Digite sua dúvida (ex: cadastro, produtos, entrega)..."
               className="w-full pl-10 pr-4 py-3 bg-white text-gray-900 placeholder-gray-400 rounded-xl text-xs sm:text-sm font-medium focus:outline-hidden focus:ring-2 focus:ring-yellow-400 shadow-md"
             />
             <Search className="w-5 h-5 text-gray-400 absolute left-3 top-3.5" />

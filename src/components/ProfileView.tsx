@@ -521,7 +521,7 @@ export const ProfileView: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-xs font-bold text-gray-800">Nusali Pay</h3>
-                  <p className="text-[10px] text-gray-400">Saldo, recargas Orange Money/PIX e extrato</p>
+                  <p className="text-[10px] text-gray-400">Saldo e extrato</p>
                 </div>
               </div>
               <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-blue-600 transition" />

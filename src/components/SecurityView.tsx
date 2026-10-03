@@ -18,7 +18,6 @@ import { AuthSession } from '../types';
 export const SecurityView: React.FC = () => {
   const { showToast } = usePreferences();
 
-  const [is2FAEnabled, setIs2FAEnabled] = useState(true);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -178,20 +177,12 @@ export const SecurityView: React.FC = () => {
                 <Smartphone className="w-5 h-5 text-blue-700" />
                 <h3 className="font-bold text-sm text-gray-900">Autenticação de 2 Fatores (2FA)</h3>
               </div>
-              <button
-                onClick={() => {
-                  setIs2FAEnabled(!is2FAEnabled);
-                  showToast(is2FAEnabled ? '2FA desativado' : '2FA ativado com sucesso por SMS/App!');
-                }}
-                className={`w-12 h-6 flex items-center rounded-full p-1 transition duration-300 cursor-pointer ${
-                  is2FAEnabled ? 'bg-emerald-600 justify-end' : 'bg-gray-300 justify-start'
-                }`}
-              >
-                <div className="bg-white w-4 h-4 rounded-full shadow-md" />
-              </button>
+              <span className="bg-gray-100 text-gray-600 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide">
+                Em breve
+              </span>
             </div>
             <p className="text-xs text-gray-600 leading-relaxed">
-              Exige um código de verificação enviado via SMS (Orange Money / MTN) ou Google Authenticator ao realizar compras e saques na Carteira.
+              A verificação em duas etapas ainda não está disponível. Em breve você poderá ativá-la para proteger sua conta.
             </p>
           </div>
 

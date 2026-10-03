@@ -40,6 +40,8 @@ import { CreateOrderFromCartResult } from '../api/types';
 import { resolveCheckoutPaymentTarget, resolveCheckoutConfirmationUrl, initiateCheckoutPixPayment } from '../services/checkoutPaymentRouting';
 import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
 import { useCartCouponIntent } from '../context/CartCouponIntentContext';
+import { isOnlineCheckoutAvailable } from '../utils/checkoutAvailability';
+import { CheckoutComingSoon } from './CheckoutComingSoon';
 
 export const CheckoutView: React.FC = () => {
   const navigate = useNavigate();
@@ -419,6 +421,10 @@ export const CheckoutView: React.FC = () => {
     e.preventDefault?.();
     if (isProcessing) return; // Prevent double clicks
 
+    // Compras online ainda não liberadas para este país: nunca cria pedido/pagamento/reserva
+    // (a tela já mostra o aviso; este guard cobre o seletor de país mudando o destino).
+    if (!confirmedOrder && !isOnlineCheckoutAvailable(country)) return;
+
     // Melhoria pré-piloto (elegibilidade por país): checagem só de UX — evita
     // uma ida ao servidor quando já sabemos que o destino é incompatível. O
     // backend (OrderService.createOrderFromCart) sempre revalida de qualquer
@@ -668,6 +674,12 @@ export const CheckoutView: React.FC = () => {
         </button>
       </div>
     );
+  }
+
+  // Compras online ainda não liberadas para o país de entrega (ex.: Guiné-Bissau): em vez de seguir até a
+  // criação do pedido (que falharia com erro técnico), mostra o aviso. O carrinho não é tocado.
+  if (!confirmedOrder && !isOnlineCheckoutAvailable(country)) {
+    return <CheckoutComingSoon onContinueShopping={() => navigate('/products')} />;
   }
 
   // ORDER MODE: o pedido já foi criado nesta tentativa (o carrinho real já
