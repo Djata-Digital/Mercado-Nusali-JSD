@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { AuthService } from '../services/authService';
-import { NusaliLogo } from '../components/NusaliLogo';
+import { AuthLogo } from '../components/AuthLogo';
 import { PHONE_VERIFICATION_ENABLED } from '../config/constants';
 
 export const VerifyEmailPage: React.FC = () => {
@@ -181,7 +181,7 @@ export const VerifyEmailPage: React.FC = () => {
     <div className="min-h-screen bg-gradient-to-b from-blue-950 via-slate-900 to-gray-900 flex flex-col justify-center py-10 sm:py-14 px-4 sm:px-6 lg:px-8 animate-fadeIn">
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center">
         <Link to="/" className="inline-block hover:opacity-90 transition">
-          <NusaliLogo variant="full" size="lg" />
+          <AuthLogo />
         </Link>
         <h2 className="mt-6 text-2xl font-black text-white tracking-tight">
           Verificação de E-mail
@@ -258,7 +258,7 @@ export const VerifyEmailPage: React.FC = () => {
                 <label className="block text-center text-xs font-bold text-gray-700 mb-3">
                   Digite o código de 6 dígitos
                 </label>
-                <div className="flex justify-between gap-2">
+                <div className="flex justify-between gap-1.5 sm:gap-2">
                   {digits.map((digit, idx) => (
                     <input
                       key={idx}
@@ -269,7 +269,7 @@ export const VerifyEmailPage: React.FC = () => {
                       onChange={(e) => handleChangeDigit(idx, e.target.value)}
                       onKeyDown={(e) => handleKeyDown(idx, e)}
                       onPaste={handlePaste}
-                      className="w-11 h-12 text-center text-lg font-black font-mono border-2 border-gray-200 rounded-xl focus:border-blue-900 focus:ring-1 focus:ring-blue-900 focus:outline-hidden transition shadow-2xs"
+                      className="min-w-0 flex-1 max-w-11 h-12 text-center text-lg font-black font-mono border-2 border-gray-200 rounded-xl focus:border-blue-900 focus:ring-1 focus:ring-blue-900 focus:outline-hidden transition shadow-2xs"
                     />
                   ))}
                 </div>

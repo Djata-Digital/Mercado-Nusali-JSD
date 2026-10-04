@@ -25,7 +25,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { NusaliLogo } from '../components/NusaliLogo';
+import { AuthLogo } from '../components/AuthLogo';
 import { UserRole } from '../types';
 import { CountriesApi } from '../api/clients/CountriesApi';
 
@@ -222,7 +222,7 @@ export const RegisterPage: React.FC = () => {
     <div className="min-h-screen bg-gradient-to-b from-blue-950 via-slate-900 to-gray-900 flex flex-col justify-center py-8 sm:py-12 px-4 sm:px-6 lg:px-8 animate-fadeIn">
       <div className="sm:mx-auto sm:w-full sm:max-w-lg text-center">
         <Link to="/" className="inline-block hover:opacity-90 transition">
-          <NusaliLogo variant="full" size="lg" />
+          <AuthLogo />
         </Link>
         <h2 className="mt-4 text-2xl font-black text-white tracking-tight">
           Crie sua conta no Mercado Nusali

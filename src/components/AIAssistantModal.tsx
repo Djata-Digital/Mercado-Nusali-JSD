@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Sparkles, X, Send, Bot, User } from 'lucide-react';
 import { useProducts } from '../hooks/useProducts';
 import { usePreferences } from '../context/PreferencesContext';
-import { NusaliLogo } from './NusaliLogo';
+import { MercadoNusaliLogo } from './MercadoNusaliLogo';
 
 interface Message {
   id: string;
@@ -41,7 +41,9 @@ export const AIAssistantModal: React.FC = () => {
         className="fixed bottom-5 right-5 z-40 bg-gradient-to-r from-blue-900 via-indigo-900 to-emerald-900 text-white font-bold px-4 py-2.5 rounded-full shadow-2xl hover:scale-105 transition flex items-center gap-2 text-xs border border-blue-400 animate-bounce cursor-pointer"
         title="Nusali AI Assistant"
       >
-        <NusaliLogo variant="emblem" size={20} />
+        <span className="inline-flex shrink-0 items-center justify-center rounded-full bg-white p-px" aria-hidden="true">
+          <MercadoNusaliLogo variant="symbol" height={20} />
+        </span>
         <span>Nusali AI</span>
       </button>
     );
@@ -112,8 +114,8 @@ export const AIAssistantModal: React.FC = () => {
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-900 via-indigo-900 to-emerald-900 text-white p-4 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="p-1 bg-white rounded-full shadow-xs">
-              <NusaliLogo variant="emblem" size={28} />
+            <div className="p-1 bg-white rounded-full shadow-xs shrink-0">
+              <MercadoNusaliLogo variant="symbol" height={28} />
             </div>
             <div>
               <h3 className="font-extrabold text-base tracking-tight leading-none">Nusali Assistente</h3>

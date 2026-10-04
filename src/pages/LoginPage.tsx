@@ -13,7 +13,7 @@ import {
   Globe,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { NusaliLogo } from '../components/NusaliLogo';
+import { AuthLogo } from '../components/AuthLogo';
 import { UserRole } from '../types';
 
 const COUNTRY_CODES = [
@@ -142,7 +142,7 @@ export const LoginPage: React.FC = () => {
     <div className="min-h-screen bg-gradient-to-b from-blue-950 via-slate-900 to-gray-900 flex flex-col justify-center py-10 sm:py-14 px-4 sm:px-6 lg:px-8 animate-fadeIn">
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center">
         <Link to="/" className="inline-block hover:opacity-90 transition">
-          <NusaliLogo variant="full" size="lg" />
+          <AuthLogo />
         </Link>
         <h2 className="mt-6 text-2xl font-black text-white tracking-tight">
           Entre na sua conta
