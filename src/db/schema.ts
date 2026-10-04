@@ -1868,6 +1868,57 @@ export const campaigns = pgTable('campaigns', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+// Banners da home administrados pelo GLOBAL_ADMIN (Marketing & Banners). Tabela própria: a
+// `campaigns` acima é legada (0 linhas, mistura desconto com banner) e NÃO é reaproveitada.
+// - countryCode NULL = banner global; preenchido = só para esse país (RESTRICT: apagar um país
+//   nunca transforma silenciosamente um banner local em global).
+// - Imagem: URL pública + chave do objeto no R2 (pasta `banners/`), ambas opcionais; sem imagem
+//   o banner usa só layout/cores (bgStyle) e texto. O CTA é opcional, mas sempre completo
+//   (rótulo + tipo + destino) ou ausente por inteiro.
+// - Exclusão lógica (deletedAt); objetos no R2 NÃO são apagados automaticamente.
+// - createdBy/updatedBy só rastreiam autoria (SET NULL); nunca são usados para autorização.
+export const banners = pgTable('banners', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  title: varchar('title', { length: 120 }).notNull(),
+  subtitle: varchar('subtitle', { length: 300 }),
+  tagText: varchar('tag_text', { length: 40 }),
+  badgeText: varchar('badge_text', { length: 60 }),
+  ctaLabel: varchar('cta_label', { length: 40 }),
+  ctaType: varchar('cta_type', { length: 20 }),
+  ctaTarget: varchar('cta_target', { length: 500 }),
+  desktopImageUrl: text('desktop_image_url'),
+  desktopImageKey: varchar('desktop_image_key', { length: 500 }),
+  mobileImageUrl: text('mobile_image_url'),
+  mobileImageKey: varchar('mobile_image_key', { length: 500 }),
+  bgStyle: varchar('bg_style', { length: 20 }).notNull().default('blue'),
+  sortOrder: integer('sort_order').notNull().default(0),
+  status: varchar('status', { length: 20 }).notNull().default('draft'),
+  startsAt: timestamp('starts_at'),
+  endsAt: timestamp('ends_at'),
+  countryCode: varchar('country_code', { length: 10 }).references(() => countries.code, { onDelete: 'restrict' }),
+  createdBy: varchar('created_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  updatedBy: varchar('updated_by', { length: 255 }).references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  deletedAt: timestamp('deleted_at'),
+}, (table) => ({
+  banners_status_order_idx: index('banners_status_order_idx').on(table.status, table.sortOrder),
+  banners_period_idx: index('banners_period_idx').on(table.startsAt, table.endsAt),
+  banners_country_idx: index('banners_country_idx').on(table.countryCode),
+  banners_status_check: check('banners_status_check', sql`${table.status} IN ('draft','active','inactive')`),
+  banners_cta_type_check: check('banners_cta_type_check', sql`${table.ctaType} IS NULL OR ${table.ctaType} IN ('internal','external')`),
+  banners_cta_complete_check: check(
+    'banners_cta_complete_check',
+    sql`(${table.ctaLabel} IS NULL AND ${table.ctaType} IS NULL AND ${table.ctaTarget} IS NULL) OR (${table.ctaLabel} IS NOT NULL AND ${table.ctaType} IS NOT NULL AND ${table.ctaTarget} IS NOT NULL)`
+  ),
+  banners_bg_style_check: check('banners_bg_style_check', sql`${table.bgStyle} IN ('blue','emerald','slate')`),
+  banners_dates_check: check('banners_dates_check', sql`${table.startsAt} IS NULL OR ${table.endsAt} IS NULL OR ${table.startsAt} < ${table.endsAt}`),
+  banners_image_pair_check: check(
+    'banners_image_pair_check',
+    sql`((${table.desktopImageUrl} IS NULL) = (${table.desktopImageKey} IS NULL)) AND ((${table.mobileImageUrl} IS NULL) = (${table.mobileImageKey} IS NULL))`
+  ),
+}));
+
 // ============================================================================
 // 11. AVALIAÇÕES, PERGUNTAS E FAVORITOS
 // ============================================================================

@@ -34,7 +34,7 @@ import { AdminCustomsManager } from './admin/AdminCustomsManager';
 import { AdminSupportTickets } from './admin/AdminSupportTickets';
 import { AdminReportsModeration } from './admin/AdminReportsModeration';
 import { AdminRiskCenter } from './admin/AdminRiskCenter';
-import { AdminMarketingManager } from './admin/AdminMarketingManager';
+import { AdminBannersManager } from './admin/AdminBannersManager';
 import { AdminNotificationsManager } from './admin/AdminNotificationsManager';
 import { AdminReportsDashboard } from './admin/AdminReportsDashboard';
 import { AdminAuditLogs } from './admin/AdminAuditLogs';
@@ -414,7 +414,7 @@ export const AdminDashboardView: React.FC = () => {
             {activeTab === 'support' && <AdminSupportTickets showToast={showToast} />}
             {activeTab === 'reports_mod' && <AdminReportsModeration showToast={showToast} />}
             {activeTab === 'risk' && <AdminRiskCenter showToast={showToast} />}
-            {activeTab === 'marketing' && <AdminMarketingManager showToast={showToast} />}
+            {activeTab === 'marketing' && <AdminBannersManager showToast={showToast} />}
             {activeTab === 'notifications' && <AdminNotificationsManager showToast={showToast} />}
             {activeTab === 'reports_bi' && <AdminReportsDashboard showToast={showToast} />}
             {activeTab === 'audit' && <AdminAuditLogs showToast={showToast} />}

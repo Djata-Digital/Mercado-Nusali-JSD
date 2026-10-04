@@ -21,3 +21,4 @@ export * from './clients/SupportApi';
 export * from './clients/UsersApi';
 export * from './clients/ShippingApi';
 export * from './clients/WarehouseApi';
+export * from './clients/BannersApi';

@@ -91,6 +91,8 @@ import { ensureWarehouseFulfillmentLocation } from './modules/logistics/fulfillm
 import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
 import { validateShippingCampaignDefinition } from './modules/shipping/shippingCampaignService.js';
 
+import { bannersAdminRouter } from './modules/banners/bannersRoutes.js';
+
 export const adminRouter = Router();
 
 
@@ -237,8 +239,28 @@ export function requireGlobalAdmin(req: AuthRequest, res: Response, next: NextFu
   return next();
 }
 
+// Mesma regra de requireGlobalAdmin (role EXATAMENTE GLOBAL_ADMIN, lida do JWT verificado), com a
+// mensagem correta para banners — a de requireGlobalAdmin fala de usuários internos. Exportada para teste.
+export function requireGlobalAdminForBanners(req: AuthRequest, res: Response, next: NextFunction) {
+  if ((req.user?.role || '').toUpperCase() !== 'GLOBAL_ADMIN') {
+    return res.status(403).json({
+      success: false,
+      error: {
+        code: 'GLOBAL_ADMIN_REQUIRED',
+        message: 'Somente o Administrador Geral pode gerenciar os banners da home.',
+      },
+    });
+  }
+  return next();
+}
+
 // Todas as rotas administrativas exigem sessão autenticada e um perfil interno.
 adminRouter.use(requireAuth, requireInternalStaff);
+
+// Marketing & Banners — SOMENTE GLOBAL_ADMIN em todas as operações (listar, criar, editar,
+// ativar/desativar, ordenar, duplicar, upload, excluir). A autorização é decidida aqui, no
+// mount; o router do módulo nunca decide sozinho.
+adminRouter.use('/banners', requireGlobalAdminForBanners, bannersAdminRouter);
 
 // GET /admin/products — FASE D16-G1.1 (Admin Global Catalog Isolation).
 // Visão administrativa do catálogo completo, para as roles que a regra de

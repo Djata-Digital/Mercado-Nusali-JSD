@@ -61,6 +61,9 @@ const PUBLIC_FOLDERS = new Set([
   'stores',
   'profiles',
   'reviews',
+  // Banners da home: só o upload administrativo dedicado (modules/banners) escreve aqui;
+  // a rota genérica POST /upload/:folder NÃO aceita esta pasta.
+  'banners',
 ]);
 
 const PRIVATE_FOLDERS = new Set([

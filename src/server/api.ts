@@ -25,6 +25,7 @@ import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 import { internalJobsRouter } from './modules/jobs/internalJobsRoutes.js';
 import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
 import { storesPublicRouter } from './modules/stores/storesRoutes.js';
+import { bannersPublicRouter } from './modules/banners/bannersRoutes.js';
 
 export const apiRouter = Router();
 
@@ -57,6 +58,8 @@ apiRouter.use('/upload', uploadRouter);
 apiRouter.use('/countries', countriesPublicRouter);
 // Public read-only stores catalog (source of truth: `stores` table, real eligibility filter)
 apiRouter.use('/stores', storesPublicRouter);
+// Public read-only active home banners (admin CRUD lives under /admin/banners, GLOBAL_ADMIN only)
+apiRouter.use('/banners', bannersPublicRouter);
 
 // FASE D16-I4 — POST /shipping/calculate (motor legado país/zona,
 // ShippingCalculatorService.calculateFreight) REMOVIDO daqui: auditoria
