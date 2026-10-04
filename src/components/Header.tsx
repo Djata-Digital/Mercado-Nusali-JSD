@@ -47,6 +47,7 @@ import { useCountries } from '../hooks/useCountries';
 import { MercadoNusaliLogo } from './MercadoNusaliLogo';
 import { searchProductsIntelligent, getSynonymsForTerm } from '../utils/searchEngine';
 import { CurrencyConverterModal } from './CurrencyConverterModal';
+import { SHOW_CAMBIO_DO_DIA } from '../config/features';
 import { CurrencyService } from '../services/currencyService';
 import { Globe2 } from 'lucide-react';
 
@@ -729,19 +730,21 @@ export const Header: React.FC = () => {
               Lojas Oficiais
             </button>
 
-            {/* Câmbio Oficial do Dia */}
-            <button
-              type="button"
-              onClick={() => setIsCurrencyConverterOpen(true)}
-              className="py-1 px-2.5 rounded-md transition shrink-0 flex items-center gap-1.5 text-emerald-100 hover:text-white bg-emerald-800/80 hover:bg-emerald-800 border border-emerald-700/80 text-xs font-extrabold cursor-pointer"
-              title="Ver Cotação e Câmbio Oficial Internacional do Dia"
-            >
-              <Globe2 className="w-3.5 h-3.5 text-emerald-300" />
-              <span>Câmbio do Dia</span>
-              <span className="bg-emerald-500/30 text-emerald-200 text-[9px] px-1 py-0.2 rounded font-black">
-                Hoje
-              </span>
-            </button>
+            {/* Câmbio Oficial do Dia (oculto enquanto SHOW_CAMBIO_DO_DIA = false, ver src/config/features.ts) */}
+            {SHOW_CAMBIO_DO_DIA && (
+              <button
+                type="button"
+                onClick={() => setIsCurrencyConverterOpen(true)}
+                className="py-1 px-2.5 rounded-md transition shrink-0 flex items-center gap-1.5 text-emerald-100 hover:text-white bg-emerald-800/80 hover:bg-emerald-800 border border-emerald-700/80 text-xs font-extrabold cursor-pointer"
+                title="Ver Cotação e Câmbio Oficial Internacional do Dia"
+              >
+                <Globe2 className="w-3.5 h-3.5 text-emerald-300" />
+                <span>Câmbio do Dia</span>
+                <span className="bg-emerald-500/30 text-emerald-200 text-[9px] px-1 py-0.2 rounded font-black">
+                  Hoje
+                </span>
+              </button>
+            )}
 
             <button
               onClick={() => navigate('/wallet')}
@@ -1028,16 +1031,18 @@ export const Header: React.FC = () => {
               <Zap className="w-4 h-4 text-yellow-400" /> Ofertas do Dia
             </button>
 
-            <button
-              type="button"
-              onClick={() => {
-                setIsCurrencyConverterOpen(true);
-                setIsMobileMenuOpen(false);
-              }}
-              className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
-            >
-              <Globe2 className="w-4 h-4 text-emerald-300" /> Câmbio do Dia
-            </button>
+            {SHOW_CAMBIO_DO_DIA && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsCurrencyConverterOpen(true);
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
+              >
+                <Globe2 className="w-4 h-4 text-emerald-300" /> Câmbio do Dia
+              </button>
+            )}
 
             <button
               onClick={() => {
