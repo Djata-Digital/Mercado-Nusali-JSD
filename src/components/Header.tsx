@@ -262,13 +262,13 @@ export const Header: React.FC = () => {
         {/* Top Row: Logo, Country Selector, Search, Header Color Switcher, Nusali+ Promo */}
         {/* Responsivo: no celular a linha quebra (logo + país + menu; a busca ocupa a linha de baixo) em vez de estourar a largura. */}
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 md:flex-nowrap">
-          {/* Logo oficial Mercado Nusali sobre placa branca discreta (o logo tem texto azul: sem a placa some no fundo verde) */}
+          {/* Logo oficial Mercado Nusali sobre uma pílula branca rente ao logo (o texto azul some no fundo verde sem ela) */}
           <button
             onClick={() => navigate('/')}
             className="order-1 md:order-none flex items-center gap-2 group shrink-0 focus:outline-hidden"
             title="Mercado Nusali Início"
           >
-            <span className="inline-flex items-center rounded-lg bg-white px-2.5 py-1 shadow-xs">
+            <span className="inline-flex items-center rounded-full bg-white py-px pl-1 pr-2.5">
               <MercadoNusaliLogo variant="horizontal" className="h-7 min-[360px]:h-8 md:h-9" />
             </span>
           </button>
