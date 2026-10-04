@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronLeft, ChevronRight, Truck, UserPlus, ShoppingCart, Store } from 'lucide-react';
-import { NusaliLogo } from './NusaliLogo';
+import { MercadoNusaliLogo } from './MercadoNusaliLogo';
 
 export const BannerSlider: React.FC = () => {
   const navigate = useNavigate();
@@ -88,9 +88,9 @@ export const BannerSlider: React.FC = () => {
               </div>
             </div>
 
-            {/* Decorative background visual shape with brand emblem */}
-            <div className="hidden md:flex items-center justify-center opacity-30 pointer-events-none pr-6">
-              <NusaliLogo variant="emblem" size={200} />
+            {/* Decorative background visual shape with the official brand symbol */}
+            <div className="hidden md:flex shrink-0 items-center justify-center opacity-30 pointer-events-none pr-6" aria-hidden="true">
+              <MercadoNusaliLogo variant="symbol" height={200} />
             </div>
           </div>
         ))}
