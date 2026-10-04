@@ -33,7 +33,6 @@ import {
   ShoppingBag,
   ArrowRight,
   Grid,
-  Palette,
   Layers,
 } from 'lucide-react';
 import { usePreferences, HeaderThemeColor } from '../context/PreferencesContext';
@@ -338,7 +337,7 @@ export const Header: React.FC = () => {
           </div>
 
           {/* Search Bar with Intelligent Dropdown */}
-          <div ref={searchContainerRef} className="order-4 md:order-none flex-1 basis-full md:basis-0 md:min-w-0 max-w-xl relative">
+          <div ref={searchContainerRef} className="order-4 md:order-none flex-1 basis-full md:basis-0 md:min-w-0 max-w-xl lg:max-w-3xl relative">
             <form
               onSubmit={(e) => handleSearchSubmit(e)}
               className="relative flex items-center bg-white rounded-lg shadow-xs border border-gray-300 focus-within:border-emerald-600 focus-within:ring-2 focus-within:ring-emerald-600/30 transition overflow-hidden"
@@ -482,12 +481,6 @@ export const Header: React.FC = () => {
                 </div>
               </div>
             )}
-          </div>
-
-          {/* Color Palette Badge (Tema Verde Esmeralda) */}
-          <div className="hidden lg:flex items-center gap-1.5 bg-black/20 px-2.5 py-1 rounded-full border border-white/20 shrink-0 text-[10px] font-black text-white">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 border border-white/80 animate-pulse" />
-            <span>Tema Verde Esmeralda</span>
           </div>
 
           {/* Mobile menu trigger */}
@@ -970,16 +963,6 @@ export const Header: React.FC = () => {
               )}
             </button>
           </div>
-        </div>
-
-        {/* Mobile Color Palette Indicator — escondido: rótulo decorativo (não existe seletor de tema) que gastava uma linha inteira do Header no celular */}
-        <div className="hidden mt-2 pt-1 border-t border-white/10 items-center justify-between text-[11px] text-white/90">
-          <span className="font-bold flex items-center gap-1">
-            <Palette className="w-3.5 h-3.5 text-emerald-400" /> Tema Ativo:
-          </span>
-          <span className="bg-emerald-500 text-white px-2 py-0.5 rounded-full font-extrabold text-[10px]">
-            Verde Esmeralda
-          </span>
         </div>
 
         {/* Mobile Dropdown Menu */}

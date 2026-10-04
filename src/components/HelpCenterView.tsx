@@ -15,6 +15,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { usePreferences } from '../context/PreferencesContext';
+import { SHOW_NUSALI_AI } from '../config/features';
 import { BuyerNavHeader } from './BuyerNavHeader';
 
 export const HelpCenterView: React.FC = () => {
@@ -60,7 +61,7 @@ export const HelpCenterView: React.FC = () => {
           </div>
           <h1 className="text-3xl sm:text-4xl font-black mb-3">Como podemos ajudar você hoje?</h1>
           <p className="text-gray-200 text-xs sm:text-sm mb-6">
-            Pesquise suas dúvidas sobre cadastro, produtos, entregas, pagamentos e garantia Escrow ou fale com a nossa IA.
+            Pesquise suas dúvidas sobre cadastro, produtos, entregas, pagamentos e garantia Escrow{SHOW_NUSALI_AI ? ' ou fale com a nossa IA' : ''}.
           </p>
 
           <div className="relative max-w-lg mx-auto">
@@ -77,17 +78,19 @@ export const HelpCenterView: React.FC = () => {
       </div>
 
       {/* Topic Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-        <div
-          onClick={() => setIsAiAssistantOpen(true)}
-          className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs hover:border-emerald-500 transition cursor-pointer group text-center"
-        >
-          <div className="w-12 h-12 bg-purple-100 text-purple-900 rounded-2xl flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition">
-            <Sparkles className="w-6 h-6 text-purple-700" />
+      <div className={`grid grid-cols-2 ${SHOW_NUSALI_AI ? 'md:grid-cols-4' : 'md:grid-cols-3'} gap-4 mb-8`}>
+        {SHOW_NUSALI_AI && (
+          <div
+            onClick={() => setIsAiAssistantOpen(true)}
+            className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs hover:border-emerald-500 transition cursor-pointer group text-center"
+          >
+            <div className="w-12 h-12 bg-purple-100 text-purple-900 rounded-2xl flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition">
+              <Sparkles className="w-6 h-6 text-purple-700" />
+            </div>
+            <h3 className="font-bold text-xs text-gray-900 mb-1">Nusali AI Assistant</h3>
+            <p className="text-[10px] text-gray-500">Respostas instantâneas por IA</p>
           </div>
-          <h3 className="font-bold text-xs text-gray-900 mb-1">Nusali AI Assistant</h3>
-          <p className="text-[10px] text-gray-500">Respostas instantâneas por IA</p>
-        </div>
+        )}
 
         <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs hover:border-emerald-500 transition cursor-pointer group text-center">
           <div className="w-12 h-12 bg-emerald-100 text-emerald-800 rounded-2xl flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition">

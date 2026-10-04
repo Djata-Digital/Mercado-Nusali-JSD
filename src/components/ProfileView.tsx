@@ -577,7 +577,7 @@ export const ProfileView: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-xs font-bold text-gray-800">Mensagens & Vendedores</h3>
-                  <p className="text-[10px] text-gray-400">Conversas diretas e assistente virtual</p>
+                  <p className="text-[10px] text-gray-400">Conversas diretas</p>
                 </div>
               </div>
               <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-teal-600 transition" />
