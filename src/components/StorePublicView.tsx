@@ -150,11 +150,14 @@ export const StorePublicView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3 w-full md:w-auto">
+            {/* Mensagens com vendedores ainda não existem: o botão antes levava a uma tela vazia. */}
             <button
-              onClick={() => navigate('/messages')}
-              className="flex-1 md:flex-none bg-blue-950 hover:bg-blue-900 text-white font-bold px-5 py-2.5 rounded-xl text-xs transition shadow-sm flex items-center justify-center gap-2"
+              type="button"
+              disabled
+              title="Em breve"
+              className="flex-1 md:flex-none bg-blue-950 text-white font-bold px-5 py-2.5 rounded-xl text-xs shadow-sm flex items-center justify-center gap-2 opacity-60 cursor-not-allowed"
             >
-              <MessageSquare className="w-4 h-4 text-yellow-400" /> Falar com Vendedor
+              <MessageSquare className="w-4 h-4 text-yellow-400" /> Falar com Vendedor (em breve)
             </button>
           </div>
         </div>

@@ -392,6 +392,28 @@ buyerRouter.get('/overview', requireAuth, async (req: AuthRequest, res: Response
     return res.status(404).json({ success: false, error: { code: 'PROFILE_NOT_FOUND', message: 'Usuário não encontrado.' } });
   }
 
+  // Carteira REAL do próprio usuário (mesma fonte de GET /buyer/wallet). Antes vinha do estado em memória
+  // compartilhado por todos os usuários.
+  const walletOverview = { balance: 0, cashbackBalance: 0, pendingEscrowBalance: 0, recentTransactions: [] as any[] };
+  if (db) {
+    const [w] = await db.select().from(wallets).where(eq(wallets.userId, userId)).limit(1);
+    if (w) {
+      walletOverview.balance = Number(w.balance);
+      walletOverview.cashbackBalance = Number(w.cashbackBalance);
+      walletOverview.pendingEscrowBalance = Number(w.pendingBalance);
+      const txs = await db.select().from(walletTransactions).where(eq(walletTransactions.walletId, w.id)).orderBy(desc(walletTransactions.createdAt)).limit(3);
+      walletOverview.recentTransactions = txs.map(t => ({
+        id: t.id,
+        type: t.type,
+        title: t.title,
+        amount: Number(t.amount),
+        currency: t.currency,
+        date: t.createdAt,
+        status: t.status,
+      }));
+    }
+  }
+
   return res.json({
     success: true,
     data: {
@@ -399,9 +421,9 @@ buyerRouter.get('/overview', requireAuth, async (req: AuthRequest, res: Response
       metrics: {
         activeOrdersCount,
         totalOrdersCount,
-        walletBalance: buyerDataStore.wallet.balance,
-        cashbackBalance: buyerDataStore.wallet.cashbackBalance,
-        pendingEscrowBalance: buyerDataStore.wallet.pendingEscrowBalance,
+        walletBalance: walletOverview.balance,
+        cashbackBalance: walletOverview.cashbackBalance,
+        pendingEscrowBalance: walletOverview.pendingEscrowBalance,
         favoritesCount: buyerDataStore.favorites.length,
         claimedCouponsCount,
         totalCouponsCount: buyerDataStore.coupons.length,
@@ -410,7 +432,7 @@ buyerRouter.get('/overview', requireAuth, async (req: AuthRequest, res: Response
         unreadNotificationsCount,
       },
       recentOrders: userOrders.slice(0, 3),
-      recentTransactions: buyerDataStore.wallet.transactions.slice(0, 3),
+      recentTransactions: walletOverview.recentTransactions,
     },
   });
 });
@@ -1993,79 +2015,21 @@ buyerRouter.get('/wallet', async (req: AuthRequest, res: Response) => {
   }
 });
 
-buyerRouter.post('/wallet/deposit', (req: Request, res: Response) => {
-  const { amount, method, currency } = req.body;
-  const val = Number(amount);
-  if (!val || val <= 0) {
-    return res.status(400).json({ success: false, message: 'Valor de depósito inválido.' });
-  }
+// Recarga e transferência ainda não existem de verdade. Antes eram simuladores em memória (estado único
+// compartilhado por todos os usuários, respondendo "creditado com sucesso" sem pagamento nenhum): agora
+// recusam de forma explícita e NÃO alteram nenhum estado. O saldo real só muda por pagamento/escrow.
+const WALLET_FEATURE_UNAVAILABLE = {
+  success: false,
+  message: 'Esta função da carteira ainda não está disponível.',
+  error: { code: 'FEATURE_NOT_AVAILABLE', message: 'Esta função da carteira ainda não está disponível.' },
+};
 
-  buyerDataStore.wallet.balance += val;
-
-  const newTx: BuyerWalletTransaction = {
-    id: `tx-${Date.now()}`,
-    type: 'deposit',
-    title: `Recarga de Saldo Nusali Pay (${(method || 'Depósito Local').toUpperCase()})`,
-    amount: val,
-    currency: currency || buyerDataStore.wallet.currency,
-    date: 'Agora mesmo',
-    status: 'Concluído',
-    method: (method || 'orange_money').toUpperCase(),
-  };
-
-  buyerDataStore.wallet.transactions.unshift(newTx);
-
-  buyerDataStore.notifications.unshift({
-    id: `notif-${Date.now()}`,
-    type: 'escrow',
-    title: 'Recarga Nusali Pay Confirmada!',
-    message: `Seu saldo foi recarregado em +${val.toLocaleString()} ${currency || 'XOF'}.`,
-    time: 'Agora mesmo',
-    isRead: false,
-    targetView: 'wallet',
-  });
-
-  return res.json({
-    success: true,
-    message: `Depósito de ${val.toLocaleString()} ${currency || 'XOF'} creditado com sucesso na sua carteira!`,
-    data: {
-      balance: buyerDataStore.wallet.balance,
-      cashbackBalance: buyerDataStore.wallet.cashbackBalance,
-      transaction: newTx,
-    },
-  });
+buyerRouter.post('/wallet/deposit', (_req: Request, res: Response) => {
+  return res.status(501).json(WALLET_FEATURE_UNAVAILABLE);
 });
 
-buyerRouter.post('/wallet/transfer', (req: Request, res: Response) => {
-  const { recipientEmailOrPhone, amount } = req.body;
-  const val = Number(amount);
-  if (!val || val <= 0 || val > buyerDataStore.wallet.balance) {
-    return res.status(400).json({ success: false, message: 'Saldo insuficiente para realizar a transferência.' });
-  }
-
-  buyerDataStore.wallet.balance -= val;
-
-  const newTx: BuyerWalletTransaction = {
-    id: `tx-${Date.now()}`,
-    type: 'transfer',
-    title: `Transferência enviada para ${recipientEmailOrPhone}`,
-    amount: -val,
-    currency: buyerDataStore.wallet.currency,
-    date: 'Agora mesmo',
-    status: 'Concluído',
-    method: 'Nusali Pay Transfer',
-  };
-
-  buyerDataStore.wallet.transactions.unshift(newTx);
-
-  return res.json({
-    success: true,
-    message: `Transferência de ${val.toLocaleString()} ${buyerDataStore.wallet.currency} enviada com sucesso!`,
-    data: {
-      balance: buyerDataStore.wallet.balance,
-      transaction: newTx,
-    },
-  });
+buyerRouter.post('/wallet/transfer', (_req: Request, res: Response) => {
+  return res.status(501).json(WALLET_FEATURE_UNAVAILABLE);
 });
 
 // ==========================================
@@ -2669,67 +2633,21 @@ buyerRouter.delete('/notifications', requireAuth, async (req: AuthRequest, res: 
 // 11. MESSAGES & LIVE CHAT
 // ==========================================
 
-buyerRouter.get('/messages', (req: Request, res: Response) => {
-  return res.json({
-    success: true,
-    data: buyerDataStore.chats,
-  });
+// Mensagens/chat com vendedores ainda não existem. Antes: estado em memória compartilhado (e uma "resposta
+// automática" fixa do Nusali Assistente). Agora: lista vazia fixa; enviar recusa de forma explícita.
+buyerRouter.get('/messages', (_req: Request, res: Response) => {
+  return res.json({ success: true, data: [] });
 });
 
-buyerRouter.get('/messages/:chatId', (req: Request, res: Response) => {
-  const { chatId } = req.params;
-  const chat = buyerDataStore.chats.find(c => c.id === chatId);
-  if (!chat) {
-    return res.status(404).json({ success: false, message: 'Conversa não encontrada.' });
-  }
-
-  return res.json({
-    success: true,
-    data: chat,
-  });
+buyerRouter.get('/messages/:chatId', (_req: Request, res: Response) => {
+  return res.status(404).json({ success: false, message: 'Conversa não encontrada.' });
 });
 
-buyerRouter.post('/messages/:chatId', async (req: Request, res: Response) => {
-  const { chatId } = req.params;
-  const { text } = req.body;
-
-  if (!text || !text.trim()) {
-    return res.status(400).json({ success: false, message: 'Texto da mensagem é obrigatório.' });
-  }
-
-  const chat = buyerDataStore.chats.find(c => c.id === chatId);
-  if (!chat) {
-    return res.status(404).json({ success: false, message: 'Conversa não encontrada.' });
-  }
-
-  const userMsg: BuyerChatMessage = {
-    id: `m-${Date.now()}`,
-    sender: 'buyer',
-    text: text.trim(),
-    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-  };
-
-  chat.messages.push(userMsg);
-  chat.lastMessage = userMsg.text;
-  chat.lastTime = userMsg.time;
-
-  // If chat is with AI, generate automatic assistant answer
-  if (chat.isAi) {
-    const aiReply: BuyerChatMessage = {
-      id: `m-${Date.now() + 1}`,
-      sender: 'ai',
-      text: `Nusali Assistente: Compreendido! Sobre "${text.trim().substring(0, 30)}...", posso te confirmar que nossas entregas são garantidas por proteção Escrow e você pode acompanhar o status pelo painel em Minhas Compras.`,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-    chat.messages.push(aiReply);
-    chat.lastMessage = aiReply.text;
-    chat.lastTime = aiReply.time;
-  }
-
-  return res.json({
-    success: true,
-    message: 'Mensagem enviada!',
-    data: chat,
+buyerRouter.post('/messages/:chatId', (_req: Request, res: Response) => {
+  return res.status(501).json({
+    success: false,
+    message: 'As mensagens com vendedores ainda não estão disponíveis.',
+    error: { code: 'FEATURE_NOT_AVAILABLE', message: 'As mensagens com vendedores ainda não estão disponíveis.' },
   });
 });
 
@@ -2959,42 +2877,16 @@ buyerRouter.post('/reviews', async (req: AuthRequest, res: Response) => {
 // 13. SUPPORT TICKETS & HELP
 // ==========================================
 
-buyerRouter.get('/tickets', (req: Request, res: Response) => {
-  return res.json({
-    success: true,
-    data: buyerDataStore.tickets,
-  });
+// Chamados de suporte ainda não existem. Antes: lista em memória compartilhada por TODOS os usuários (um
+// comprador via o assunto e a mensagem de outro). Agora: lista vazia fixa; abrir chamado recusa explicitamente.
+buyerRouter.get('/tickets', (_req: Request, res: Response) => {
+  return res.json({ success: true, data: [] });
 });
 
-buyerRouter.post('/tickets', (req: Request, res: Response) => {
-  const { subject, category, message, priority } = req.body;
-
-  if (!subject || !message) {
-    return res.status(400).json({ success: false, message: 'Assunto e mensagem são obrigatórios.' });
-  }
-
-  const newTicket: BuyerSupportTicket = {
-    id: `tkt-${Math.floor(100 + Math.random() * 900)}`,
-    subject,
-    category: category || 'Geral',
-    status: 'open',
-    priority: priority || 'normal',
-    createdAt: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    lastUpdate: 'Agora mesmo',
-    messages: [
-      {
-        sender: (req as any).user?.fullName || 'Comprador',
-        text: message,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      },
-    ],
-  };
-
-  buyerDataStore.tickets.unshift(newTicket);
-
-  return res.json({
-    success: true,
-    message: 'Chamado de suporte aberto com sucesso! Nosso time responderá em até 2 horas úteis.',
-    data: newTicket,
+buyerRouter.post('/tickets', (_req: Request, res: Response) => {
+  return res.status(501).json({
+    success: false,
+    message: 'O atendimento por chamados ainda não está disponível.',
+    error: { code: 'FEATURE_NOT_AVAILABLE', message: 'O atendimento por chamados ainda não está disponível.' },
   });
 });

@@ -77,7 +77,7 @@ export const AuthService = {
     return AuthApi.resetPassword(data);
   },
 
-  async verifyEmail(data: VerifyEmailRequest): Promise<ApiResponse<{ user: User; token?: string; refreshToken?: string; message: string }>> {
+  async verifyEmail(data: VerifyEmailRequest): Promise<ApiResponse<{ user?: User; token?: string; refreshToken?: string; message: string; alreadyVerified?: boolean }>> {
     const res = await AuthApi.verifyEmail(data);
 
     if (res.success && res.data?.user) {
@@ -85,6 +85,11 @@ export const AuthService = {
       const token = (res.data as any)?.token;
       if (token) {
         storageService.setToken(token);
+        // Sem o refresh token a sessão recém-aberta morreria quando o access token (2 h) expirasse.
+        const refreshToken = (res.data as any)?.refreshToken;
+        if (refreshToken) {
+          storageService.setRefreshToken(refreshToken);
+        }
       }
     }
     return res;

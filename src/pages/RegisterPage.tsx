@@ -27,6 +27,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { AuthLogo } from '../components/AuthLogo';
 import { UserRole } from '../types';
+import { storageService } from '../services/storage/storageService';
 import { CountriesApi } from '../api/clients/CountriesApi';
 
 interface OperationalCountry {
@@ -209,10 +210,13 @@ export const RegisterPage: React.FC = () => {
         marketingConsent,
       });
 
+      // Guarda (só nesta aba) o e-mail que acabou de receber o código: a tela de verificação usa SOMENTE ele e ele
+      // sobrevive a reload. O código acabou de ser enviado pelo cadastro.
+      storageService.setPendingEmailVerification(email, Date.now());
       // Redirect user to email or phone verification
       navigate('/verify-email');
     } catch (err: any) {
-      setErrorMessage(err.message || 'Erro ao criar conta. Tente novamente.');
+      setErrorMessage(err?.response?.data?.error?.message || err.message || 'Erro ao criar conta. Tente novamente.');
     } finally {
       setLoading(false);
     }

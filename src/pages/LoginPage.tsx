@@ -15,6 +15,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { AuthLogo } from '../components/AuthLogo';
 import { UserRole } from '../types';
+import { storageService } from '../services/storage/storageService';
 
 const COUNTRY_CODES = [
   { code: '+245', country: 'GW', flag: '🇬🇼', label: 'Guiné-Bissau (+245)' },
@@ -78,6 +79,7 @@ export const LoginPage: React.FC = () => {
       });
 
       if (!loggedUser.isEmailVerified) {
+        storageService.setPendingEmailVerification(loggedUser.email || cleanId, null);
         setSuccessMessage('Redirecionando para confirmação de e-mail...');
         setTimeout(() => navigate('/verify-email'), 1200);
         return;
@@ -103,7 +105,12 @@ export const LoginPage: React.FC = () => {
       }, 400);
     } catch (err: any) {
       const msg = err.message || 'Erro ao realizar login. Tente novamente.';
-      if (msg.includes('EMAIL_VERIFICATION_REQUIRED') || msg.includes('E-mail não verificado')) {
+      // O servidor só responde 403 EMAIL_VERIFICATION_REQUIRED depois de conferir a senha: quem chega aqui provou ser o
+      // dono da conta. O e-mail pendente segue para a tela de verificação (sem código nem senha).
+      const verificationRequired =
+        err?.response?.status === 403 && err?.response?.data?.error?.code === 'EMAIL_VERIFICATION_REQUIRED';
+      if (verificationRequired || msg.includes('EMAIL_VERIFICATION_REQUIRED') || msg.includes('E-mail não verificado')) {
+        storageService.setPendingEmailVerification(String(err?.response?.data?.email || cleanId), null);
         setErrorMessage('Confirmação de e-mail pendente. Redirecionando...');
         setTimeout(() => navigate('/verify-email'), 1200);
         return;

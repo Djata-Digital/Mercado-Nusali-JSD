@@ -4,6 +4,17 @@ const USER_KEY = 'nusali_user_session';
 const CART_KEY = 'nusali_cart_items';
 const FAVORITES_KEY = 'nusali_favorites';
 const COUNTRY_KEY = 'nusali_selected_country';
+// Verificação de e-mail em andamento (só o e-mail e o instante do último envio do código). sessionStorage: sobrevive a
+// reload e a voltar/avançar na MESMA aba e some ao fechar a aba. Nunca guarda senha nem código.
+const PENDING_EMAIL_KEY = 'nusali_pending_email_verification';
+const PENDING_EMAIL_TTL_MS = 6 * 60 * 60 * 1000;
+const PENDING_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export interface PendingEmailVerification {
+  email: string;
+  /** Instante (ms) em que o último código foi enviado; null = nenhum envio conhecido (ex.: chegou pelo login). */
+  codeSentAt: number | null;
+}
 
 export interface StorageUser {
   id: string;
@@ -146,8 +157,45 @@ export const storageService = {
     }
   },
 
+  getPendingEmailVerification(): PendingEmailVerification | null {
+    try {
+      const raw = sessionStorage.getItem(PENDING_EMAIL_KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      const email = typeof data?.email === 'string' ? data.email.trim().toLowerCase() : '';
+      const savedAt = Number(data?.savedAt);
+      if (!PENDING_EMAIL_PATTERN.test(email) || !Number.isFinite(savedAt) || Date.now() - savedAt > PENDING_EMAIL_TTL_MS) {
+        sessionStorage.removeItem(PENDING_EMAIL_KEY);
+        return null;
+      }
+      const sent = Number(data?.codeSentAt);
+      return { email, codeSentAt: data?.codeSentAt != null && Number.isFinite(sent) ? sent : null };
+    } catch {
+      return null;
+    }
+  },
+
+  setPendingEmailVerification(email: string, codeSentAt: number | null): void {
+    try {
+      const clean = String(email || '').trim().toLowerCase();
+      if (!PENDING_EMAIL_PATTERN.test(clean)) return;
+      sessionStorage.setItem(PENDING_EMAIL_KEY, JSON.stringify({ email: clean, codeSentAt, savedAt: Date.now() }));
+    } catch (e) {
+      console.error('Failed to set pending email verification', e);
+    }
+  },
+
+  clearPendingEmailVerification(): void {
+    try {
+      sessionStorage.removeItem(PENDING_EMAIL_KEY);
+    } catch (e) {
+      console.error('Failed to clear pending email verification', e);
+    }
+  },
+
   clearAll(): void {
     try {
+      sessionStorage.removeItem(PENDING_EMAIL_KEY);
       localStorage.removeItem(TOKEN_KEY);
       localStorage.removeItem(REFRESH_TOKEN_KEY);
       localStorage.removeItem(USER_KEY);

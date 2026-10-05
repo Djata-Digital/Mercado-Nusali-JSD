@@ -197,8 +197,12 @@ class ApiClient {
               (originalRequest.headers as any)['Authorization'] = `Bearer ${newToken}`;
             }
             return this.instance(originalRequest);
-          } catch (refreshErr) {
-            if (storageService.getToken() || storageService.getRefreshToken()) {
+          } catch (refreshErr: any) {
+            // Só um 400/401 do refresh prova sessão inválida. Limite de taxa (429), erro do servidor ou rede
+            // fora do ar NÃO devem derrubar a sessão do usuário.
+            const refreshStatus = refreshErr?.response?.status;
+            const sessionInvalid = refreshStatus === undefined ? !refreshErr?.isAxiosError : refreshStatus === 400 || refreshStatus === 401;
+            if (sessionInvalid && (storageService.getToken() || storageService.getRefreshToken())) {
               if (process.env.NODE_ENV !== 'production') {
                 console.warn('[Auth] Auth expired: purging session');
               }

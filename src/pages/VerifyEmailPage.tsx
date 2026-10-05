@@ -5,12 +5,12 @@ import {
   CheckCircle2,
   AlertCircle,
   RefreshCw,
-  Edit2,
   ArrowRight,
   ShieldCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { AuthService } from '../services/authService';
+import { storageService } from '../services/storage/storageService';
 import { AuthLogo } from '../components/AuthLogo';
 import { PHONE_VERIFICATION_ENABLED } from '../config/constants';
 
@@ -18,7 +18,10 @@ export const VerifyEmailPage: React.FC = () => {
   const navigate = useNavigate();
   const { user, updateUser } = useAuth();
 
-  const targetEmail = user?.email || 'bacai.sanha@nusali.cplp';
+  // E-mail da verificação em andamento: vem SOMENTE do cadastro ou do login de conta pendente (sessionStorage da aba,
+  // ver storageService). Nunca há e-mail "padrão": sem contexto a página não tenta verificar conta nenhuma.
+  const [pending] = useState(() => storageService.getPendingEmailVerification());
+  const targetEmail = pending?.email ?? null;
 
   // Mask email for privacy
   const maskEmail = (emailStr: string) => {
@@ -35,16 +38,19 @@ export const VerifyEmailPage: React.FC = () => {
   const [digits, setDigits] = useState<string[]>(['', '', '', '', '', '']);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
-  const [timer, setTimer] = useState<number>(60);
-  const [canResend, setCanResend] = useState<boolean>(false);
-  const [isEditingEmail, setIsEditingEmail] = useState<boolean>(false);
-  const [newEmail, setNewEmail] = useState<string>(targetEmail);
+  // Intervalo de reenvio de 60 s contado a partir do último envio conhecido (sobrevive ao reload). Sem envio conhecido
+  // (chegou pelo login) o reenvio já fica liberado: o código antigo pode ter expirado.
+  const remainingResendSeconds = (sentAt: number | null) => (sentAt ? Math.max(0, Math.ceil((60_000 - (Date.now() - sentAt)) / 1000)) : 0);
+  const [timer, setTimer] = useState<number>(() => remainingResendSeconds(pending?.codeSentAt ?? null));
+  const [canResend, setCanResend] = useState<boolean>(() => remainingResendSeconds(pending?.codeSentAt ?? null) === 0);
 
   const [loading, setLoading] = useState<boolean>(false);
   const [resending, setResending] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [isVerified, setIsVerified] = useState<boolean>(user?.isEmailVerified || false);
+  const [isVerified, setIsVerified] = useState<boolean>(false);
+  // Usuário já logado e verificado que abre a página: mostra a tela de confirmado (user chega do /auth/me depois do 1º render).
+  const showConfirmed = isVerified || user?.isEmailVerified === true;
 
   // Countdown timer effect
   useEffect(() => {
@@ -97,12 +103,19 @@ export const VerifyEmailPage: React.FC = () => {
     }
   };
 
+  // Depois da verificação o servidor abriu a sessão (token + refresh em storage): navegação COMPLETA para o app
+  // reinicializar o contexto de autenticação a partir do storage (uma navegação do router deixaria o cabeçalho
+  // "deslogado" até o próximo reload).
+  const goToApp = (path: string) => window.location.assign(path);
+
   const handleVerifyCode = async (codeToVerify?: string) => {
     const code = codeToVerify || digits.join('');
     if (code.length < 6) {
       setErrorMessage('Por favor, informe os 6 dígitos completos do código.');
       return;
     }
+
+    if (!targetEmail) return;
 
     setLoading(true);
     setErrorMessage(null);
@@ -113,6 +126,15 @@ export const VerifyEmailPage: React.FC = () => {
         throw new Error(res.error?.message || 'Código de e-mail inválido.');
       }
 
+      // Conta que já estava verificada: o servidor não abre sessão (só um código válido faz isso).
+      if ((res.data as any)?.alreadyVerified) {
+        storageService.clearPendingEmailVerification();
+        setSuccessMessage('Este e-mail já está verificado. Faça login para continuar.');
+        setTimeout(() => navigate('/login'), 1500);
+        return;
+      }
+
+      storageService.clearPendingEmailVerification();
       setIsVerified(true);
       const verifiedUser = res.data?.user || user;
       if (verifiedUser) {
@@ -122,28 +144,28 @@ export const VerifyEmailPage: React.FC = () => {
 
       setTimeout(() => {
         if (PHONE_VERIFICATION_ENABLED) {
-          navigate('/verify-phone');
+          goToApp('/verify-phone');
           return;
         }
 
         const userRole = (verifiedUser?.role || user?.role || 'BUYER').toUpperCase();
         if (userRole === 'SELLER') {
-          navigate('/seller/dashboard');
+          goToApp('/seller/dashboard');
         } else if (userRole === 'ADMIN' || userRole === 'GLOBAL_ADMIN') {
-          navigate('/admin/dashboard');
+          goToApp('/admin/dashboard');
         } else {
-          navigate('/');
+          goToApp('/');
         }
       }, 1200);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Código inválido ou expirado.');
+      setErrorMessage(err?.response?.data?.error?.message || err.message || 'Código inválido ou expirado.');
     } finally {
       setLoading(false);
     }
   };
 
   const handleResendCode = async () => {
-    if (!canResend) return;
+    if (!canResend || !targetEmail) return;
     setResending(true);
     setErrorMessage(null);
     setSuccessMessage(null);
@@ -151,30 +173,16 @@ export const VerifyEmailPage: React.FC = () => {
     try {
       const res = await AuthService.resendVerification('email', targetEmail);
       setSuccessMessage(res.data?.message || 'Novo código enviado com sucesso!');
+      storageService.setPendingEmailVerification(targetEmail, Date.now());
       setTimer(60);
       setCanResend(false);
       setDigits(['', '', '', '', '', '']);
       inputRefs.current[0]?.focus();
     } catch (err: any) {
-      setErrorMessage(err.message || 'Erro ao reenviar código.');
+      setErrorMessage(err?.response?.data?.error?.message || err.message || 'Erro ao reenviar código.');
     } finally {
       setResending(false);
     }
-  };
-
-  const handleSaveNewEmail = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newEmail.includes('@')) {
-      setErrorMessage('Informe um e-mail válido.');
-      return;
-    }
-    if (user) {
-      updateUser({ email: newEmail });
-    }
-    setIsEditingEmail(false);
-    setSuccessMessage('Endereço de e-mail atualizado. Um novo código foi enviado.');
-    setTimer(60);
-    setCanResend(false);
   };
 
   return (
@@ -186,55 +194,25 @@ export const VerifyEmailPage: React.FC = () => {
         <h2 className="mt-6 text-2xl font-black text-white tracking-tight">
           Verificação de E-mail
         </h2>
-        <p className="mt-1 text-xs text-blue-200">
-          Enviamos um código de 6 dígitos para o e-mail cadastrado
-        </p>
+        {targetEmail && !showConfirmed && (
+          <p className="mt-1 text-xs text-blue-200">
+            Enviamos um código de 6 dígitos para o e-mail cadastrado
+          </p>
+        )}
       </div>
 
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
         <div className="bg-white py-8 px-6 sm:px-10 shadow-2xl rounded-2xl border border-gray-100">
           {/* Target Email Banner */}
+          {targetEmail && !showConfirmed && (
           <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl mb-6 text-center">
             <Mail className="w-6 h-6 text-blue-900 mx-auto mb-1" />
             <div className="text-xs text-gray-600 font-medium">Código enviado para:</div>
             <div className="font-mono font-bold text-sm text-blue-950 mt-0.5">
-              {maskEmail(targetEmail)}
+              {maskEmail(targetEmail ?? '')}
             </div>
-
-            {!isEditingEmail ? (
-              <button
-                type="button"
-                onClick={() => setIsEditingEmail(true)}
-                className="mt-2 text-[11px] font-bold text-blue-800 hover:text-blue-950 flex items-center justify-center gap-1 mx-auto underline cursor-pointer"
-              >
-                <Edit2 className="w-3 h-3" /> Alterar e-mail
-              </button>
-            ) : (
-              <form onSubmit={handleSaveNewEmail} className="mt-3 space-y-2">
-                <input
-                  type="email"
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  className="w-full text-xs p-2 border border-gray-300 rounded-lg text-center"
-                />
-                <div className="flex gap-2 justify-center">
-                  <button
-                    type="submit"
-                    className="px-3 py-1 bg-blue-900 text-white font-bold text-[11px] rounded-md cursor-pointer"
-                  >
-                    Salvar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsEditingEmail(false)}
-                    className="px-3 py-1 bg-gray-200 text-gray-800 font-bold text-[11px] rounded-md cursor-pointer"
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
-            )}
           </div>
+          )}
 
           {/* Messages */}
           {successMessage && (
@@ -251,8 +229,58 @@ export const VerifyEmailPage: React.FC = () => {
             </div>
           )}
 
-          {/* Verification Code Digits */}
-          {!isVerified ? (
+          {/* Estado: confirmado, sem verificação em andamento, ou digitação do código */}
+          {showConfirmed ? (
+            <div className="text-center space-y-4">
+              <div className="p-4 bg-emerald-100 text-emerald-900 rounded-full w-16 h-16 mx-auto flex items-center justify-center">
+                <CheckCircle2 className="w-8 h-8" />
+              </div>
+              <h3 className="text-lg font-black text-gray-900">E-mail Confirmado!</h3>
+              <p className="text-xs text-gray-600">
+                Seu e-mail foi autenticado com sucesso na sua conta Mercado Nusali.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (PHONE_VERIFICATION_ENABLED) {
+                    goToApp('/verify-phone');
+                  } else {
+                    const userRole = (user?.role || 'BUYER').toUpperCase();
+                    if (userRole === 'SELLER') {
+                      goToApp('/seller/dashboard');
+                    } else if (userRole === 'ADMIN' || userRole === 'GLOBAL_ADMIN') {
+                      goToApp('/admin/dashboard');
+                    } else {
+                      goToApp('/');
+                    }
+                  }
+                }}
+                className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-3 rounded-xl text-xs transition cursor-pointer"
+              >
+                {PHONE_VERIFICATION_ENABLED ? 'Avançar para Verificação de Telefone' : 'Continuar para o Mercado Nusali'}
+              </button>
+            </div>
+          ) : !targetEmail ? (
+            <div className="text-center space-y-4" role="alert">
+              <div className="p-4 bg-amber-100 text-amber-900 rounded-full w-16 h-16 mx-auto flex items-center justify-center">
+                <AlertCircle className="w-8 h-8" />
+              </div>
+              <h3 className="text-lg font-black text-gray-900">Nenhuma verificação em andamento</h3>
+              <p className="text-xs text-gray-600">
+                Não encontramos um cadastro aguardando confirmação neste navegador. Entre com seu e-mail e senha para
+                continuar a verificação, ou crie uma conta.
+              </p>
+              <Link
+                to="/login"
+                className="block w-full bg-blue-900 hover:bg-blue-950 text-white font-extrabold py-3 px-4 rounded-xl shadow-md transition text-xs"
+              >
+                Ir para o login
+              </Link>
+              <Link to="/register" className="block text-xs font-bold text-blue-900 hover:text-blue-950 underline">
+                Criar conta
+              </Link>
+            </div>
+          ) : (
             <div className="space-y-6">
               <div>
                 <label className="block text-center text-xs font-bold text-gray-700 mb-3">
@@ -311,42 +339,14 @@ export const VerifyEmailPage: React.FC = () => {
                 )}
               </div>
             </div>
-          ) : (
-            <div className="text-center space-y-4">
-              <div className="p-4 bg-emerald-100 text-emerald-900 rounded-full w-16 h-16 mx-auto flex items-center justify-center">
-                <CheckCircle2 className="w-8 h-8" />
-              </div>
-              <h3 className="text-lg font-black text-gray-900">E-mail Confirmado!</h3>
-              <p className="text-xs text-gray-600">
-                Seu e-mail foi autenticado com sucesso na sua conta Mercado Nusali.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  if (PHONE_VERIFICATION_ENABLED) {
-                    navigate('/verify-phone');
-                  } else {
-                    const userRole = (user?.role || 'BUYER').toUpperCase();
-                    if (userRole === 'SELLER') {
-                      navigate('/seller/dashboard');
-                    } else if (userRole === 'ADMIN' || userRole === 'GLOBAL_ADMIN') {
-                      navigate('/admin/dashboard');
-                    } else {
-                      navigate('/');
-                    }
-                  }
-                }}
-                className="w-full bg-emerald-700 hover:bg-emerald-800 text-white font-bold py-3 rounded-xl text-xs transition cursor-pointer"
-              >
-                {PHONE_VERIFICATION_ENABLED ? 'Avançar para Verificação de Telefone' : 'Continuar para o Mercado Nusali'}
-              </button>
-            </div>
           )}
 
           {/* Support helper info */}
-          <div className="mt-8 pt-4 border-t border-gray-100 text-center text-xs text-gray-500">
-            Não recebeu o código? Verifique a caixa de spam ou lixo eletrônico.
-          </div>
+          {targetEmail && !showConfirmed && (
+            <div className="mt-8 pt-4 border-t border-gray-100 text-center text-xs text-gray-500">
+              Não recebeu o código? Verifique a caixa de spam ou lixo eletrônico.
+            </div>
+          )}
         </div>
       </div>
     </div>

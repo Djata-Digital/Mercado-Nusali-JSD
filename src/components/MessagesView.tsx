@@ -108,9 +108,9 @@ export const MessagesView: React.FC = () => {
             ) : chats.length === 0 ? (
               <div className="p-8 text-center text-gray-400 space-y-2">
                 <MessageSquare className="w-8 h-8 mx-auto text-gray-300 stroke-1" />
-                <p className="text-xs font-bold text-gray-600">Nenhuma conversa encontrada</p>
+                <p className="text-xs font-bold text-gray-600">Mensagens em breve</p>
                 <p className="text-[11px] text-gray-400 max-w-xs mx-auto">
-                  Suas mensagens com vendedores e atendimento aparecerão aqui quando você iniciar um chat.
+                  A troca de mensagens com vendedores ainda não está disponível. Em breve você poderá conversar por aqui.
                 </p>
               </div>
             ) : (
@@ -244,7 +244,7 @@ export const MessagesView: React.FC = () => {
           </div>
         ) : (
           <div className="lg:col-span-2 flex items-center justify-center text-gray-400 p-8">
-            <p className="text-xs">Selecione uma conversa para visualizar o histórico de mensagens.</p>
+            <p className="text-xs">{chats.length === 0 ? 'As mensagens com vendedores estarão disponíveis em breve.' : 'Selecione uma conversa para visualizar o histórico de mensagens.'}</p>
           </div>
         )}
       </div>

@@ -7,6 +7,7 @@ import { logger } from '../../infra/logger.js';
 import { generateEmailVerificationCode, hashEmailVerificationCode, sendVerificationEmail, sendPasswordResetEmail } from './emailService.js';
 import crypto from 'node:crypto';
 import { getJwtAccessSecret, getJwtRefreshSecret } from './jwtConfig.js';
+import { consumeRateLimit, resetRateLimitCounter, rateLimitAccountKey } from '../../infra/rateLimiter.js';
 
 const ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '2h';
 const REFRESH_EXPIRES_IN_DAYS = 30;
@@ -32,6 +33,23 @@ const PASSWORD_RESET_EXPIRES_MINUTES = 30;
 const PASSWORD_RESET_MIN_INTERVAL_MS = 5 * 60_000;
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_MAX_BYTES = 72; // limite real do bcrypt: além disso a senha seria truncada em silêncio
+
+/**
+ * Verificação de e-mail: freios POR CONTA (independem do IP, que pode ser compartilhado por muitos usuários).
+ * Contadores no Redis (ou na memória do processo quando o Redis está indisponível); sem coluna nova.
+ */
+export const EMAIL_VERIFICATION_MAX_FAILURES = 5;
+export const EMAIL_RESEND_COOLDOWN_MS = 60_000;
+export const EMAIL_RESEND_MAX_PER_HOUR = 5;
+export const EMAIL_RESEND_GENERIC_MESSAGE = 'Se existir uma conta pendente de verificação para este e-mail, enviamos um novo código.';
+const emailVerificationFailureKey = (userId: string) => `rl:auth:verify:fail:${userId}`;
+// Um pouco maior que a vida do código: o contador nunca expira antes do código.
+const emailVerificationFailureWindowMs = () => (Math.max(1, Number(process.env.EMAIL_VERIFICATION_EXPIRES_MINUTES || 10)) + 5) * 60_000;
+
+/** 32 bytes aleatórios (CSPRNG) em base64url → `rt_` + 43 caracteres. */
+export function generateRefreshTokenValue(): string {
+  return `rt_${crypto.randomBytes(32).toString('base64url')}`;
+}
 
 export function hashPasswordResetToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -213,8 +231,9 @@ export class AuthService {
     const expiresMinutes = Math.max(1, Number(process.env.EMAIL_VERIFICATION_EXPIRES_MINUTES || 10));
     const expiresAt = new Date(Date.now() + expiresMinutes * 60_000);
 
-    // Apenas um código ativo por usuário.
+    // Apenas um código ativo por usuário (e a contagem de erros recomeça para o código novo).
     await db.delete(emailVerificationTokens).where(eq(emailVerificationTokens.userId, user.id));
+    await resetRateLimitCounter(emailVerificationFailureKey(user.id));
     await db.insert(emailVerificationTokens).values({
       id: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       userId: user.id,
@@ -234,6 +253,13 @@ export class AuthService {
     return { expiresAt };
   }
 
+  /**
+   * Verificação do e-mail. Uma sessão só nasce de um código correto e vigente da própria conta:
+   *  - conta já verificada → resposta idempotente SEM sessão (`alreadyVerified`), qualquer que seja o código;
+   *  - código errado/expirado/ausente ou conta inexistente → falha, sem sessão;
+   *  - EMAIL_VERIFICATION_MAX_FAILURES erros seguidos invalidam o código ativo (exige reenvio): limita os
+   *    palpites sobre um código de 6 dígitos mesmo com IPs diferentes.
+   */
   static async verifyEmail(email: string, code: string) {
     const db = getDb();
     if (!db) throw new Error('Banco de dados indisponível para verificação de e-mail.');
@@ -244,12 +270,9 @@ export class AuthService {
 
     const user = found[0];
     if (user.isEmailVerified) {
-      const sessionTokens = await this.generateTokens(user);
       return {
-        user: this.toPublicUser(user),
-        token: sessionTokens.token,
-        refreshToken: sessionTokens.refreshToken,
-        message: 'E-mail já estava verificado.',
+        alreadyVerified: true,
+        message: 'Este e-mail já está verificado. Faça login para continuar.',
       };
     }
 
@@ -260,10 +283,21 @@ export class AuthService {
       gt(emailVerificationTokens.expiresAt, new Date()),
     )).limit(1);
 
-    if (!tokens.length) throw new Error('Código inválido ou expirado. Solicite um novo código.');
+    if (!tokens.length) {
+      const failKey = emailVerificationFailureKey(user.id);
+      const { count } = await consumeRateLimit(failKey, emailVerificationFailureWindowMs(), EMAIL_VERIFICATION_MAX_FAILURES);
+      if (count >= EMAIL_VERIFICATION_MAX_FAILURES) {
+        await db.delete(emailVerificationTokens).where(eq(emailVerificationTokens.userId, user.id));
+        await resetRateLimitCounter(failKey);
+        logger.warn({ userId: user.id }, 'EMAIL_VERIFICATION_CODE_INVALIDATED_TOO_MANY_FAILURES');
+        throw new Error('Muitas tentativas incorretas. Solicite um novo código.');
+      }
+      throw new Error('Código inválido ou expirado. Solicite um novo código.');
+    }
 
     const updated = await db.update(users).set({ isEmailVerified: true, updatedAt: new Date() }).where(eq(users.id, user.id)).returning();
     await db.delete(emailVerificationTokens).where(eq(emailVerificationTokens.userId, user.id));
+    await resetRateLimitCounter(emailVerificationFailureKey(user.id));
 
     const verifiedUser = updated[0] || { ...user, isEmailVerified: true };
     const sessionTokens = await this.generateTokens(verifiedUser);
@@ -277,16 +311,37 @@ export class AuthService {
     };
   }
 
+  /**
+   * Reenvio do código. A resposta é SEMPRE a mesma (nunca revela se o e-mail existe nem se já foi
+   * verificado) e o envio tem limite POR CONTA: 1 a cada 60 s e 5 por hora; acima disso responde igual,
+   * sem enviar (nem emite código novo, o que também impede quem conhece o e-mail de "queimar" o código
+   * vigente em loop).
+   */
   static async resendEmailVerification(email: string) {
     const db = getDb();
     if (!db) throw new Error('Banco de dados indisponível para verificação de e-mail.');
     const cleanEmail = email.trim().toLowerCase();
+    const accountKey = rateLimitAccountKey(cleanEmail);
+
+    if (accountKey) {
+      const cooldown = await consumeRateLimit(`rl:auth:resend:cd:${accountKey}`, EMAIL_RESEND_COOLDOWN_MS, 1);
+      if (!cooldown.allowed) return { message: EMAIL_RESEND_GENERIC_MESSAGE };
+      const hourly = await consumeRateLimit(`rl:auth:resend:hr:${accountKey}`, 60 * 60_000, EMAIL_RESEND_MAX_PER_HOUR);
+      if (!hourly.allowed) return { message: EMAIL_RESEND_GENERIC_MESSAGE };
+    }
+
     const found = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
-    if (!found.length) throw new Error('Usuário não encontrado.');
     const user = found[0];
-    if (user.isEmailVerified) return { message: 'Este e-mail já está verificado.' };
-    await this.issueEmailVerificationCode({ id: user.id, email: user.email, fullName: user.fullName });
-    return { message: 'Novo código enviado para seu e-mail.' };
+    if (!user || user.isEmailVerified) return { message: EMAIL_RESEND_GENERIC_MESSAGE };
+
+    try {
+      await this.issueEmailVerificationCode({ id: user.id, email: user.email, fullName: user.fullName });
+    } catch (error: any) {
+      logger.error({ userId: user.id, error: error?.message }, 'Verification e-mail resend failed');
+      // Mensagem fixa: o erro do provedor de e-mail nunca chega ao cliente.
+      throw new Error('Não foi possível reenviar o código agora. Tente novamente em instantes.');
+    }
+    return { message: EMAIL_RESEND_GENERIC_MESSAGE };
   }
 
   static toPublicUser(user: any) {
@@ -372,7 +427,10 @@ export class AuthService {
       { expiresIn: 7200 }
     );
 
-    const refreshTokenRaw = `rt_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+    // Refresh token opaco com 256 bits de entropia (CSPRNG). Antes: Date.now() + Math.random(), previsível.
+    // Contrato inalterado: string opaca com prefixo `rt_`, guardada/consultada por igualdade em refresh_tokens.
+    // Só vale para tokens NOVOS; os já emitidos continuam válidos até expirar ou serem revogados.
+    const refreshTokenRaw = generateRefreshTokenValue();
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + REFRESH_EXPIRES_IN_DAYS);
 

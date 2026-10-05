@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { AuthService, PUBLIC_REGISTRATION_ROLES, PASSWORD_RESET_GENERIC_MESSAGE } from './authService.js';
 import { requireAuth, AuthRequest } from './authMiddleware.js';
-import { createRateLimiter } from '../../infra/rateLimiter.js';
+import { createRateLimiter, consumeRateLimit, rateLimitAccountKey } from '../../infra/rateLimiter.js';
 import { getDb } from '../../../db/index.js';
 import { users, userProfiles, addresses, wallets, sessions } from '../../../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
@@ -15,6 +15,58 @@ const loginLimiter = createRateLimiter({
   message: 'Muitas tentativas de login. Por favor, aguarde 1 minuto.',
   keyPrefix: 'rl:auth:login:',
 });
+
+// ---------------------------------------------------------------------------
+// Limites das rotas sensíveis de autenticação (P1-1 da auditoria de lançamento).
+// Por IP (req.ip já é o cliente real: `configureTrustProxy` em server.ts) e, onde faz sentido, POR CONTA
+// (hash do e-mail — independe do IP). Os valores de IP são folgados de propósito: operadoras móveis
+// costumam compartilhar um IP entre muitos clientes, então o freio forte é o POR CONTA.
+// ---------------------------------------------------------------------------
+const registerIpLimiter = createRateLimiter({
+  windowMs: 60 * 60_000,
+  maxRequests: 20,
+  message: 'Muitos cadastros a partir desta rede. Tente novamente mais tarde.',
+  keyPrefix: 'rl:auth:register:ip:',
+});
+const registerEmailLimiter = createRateLimiter({
+  windowMs: 60 * 60_000,
+  maxRequests: 5,
+  message: 'Muitas tentativas de cadastro com este e-mail. Tente novamente mais tarde.',
+  keyPrefix: 'rl:auth:register:em:',
+  keyGenerator: (req) => rateLimitAccountKey(req.body?.email),
+});
+const verifyEmailIpLimiter = createRateLimiter({
+  windowMs: 10 * 60_000,
+  maxRequests: 30,
+  message: 'Muitas tentativas de verificação. Aguarde alguns minutos e tente novamente.',
+  keyPrefix: 'rl:auth:verify:ip:',
+});
+const resendVerificationIpLimiter = createRateLimiter({
+  windowMs: 60 * 60_000,
+  maxRequests: 15,
+  message: 'Muitos pedidos de código a partir desta rede. Tente novamente mais tarde.',
+  keyPrefix: 'rl:auth:resend:ip:',
+});
+const forgotPasswordIpLimiter = createRateLimiter({
+  windowMs: 60 * 60_000,
+  maxRequests: 15,
+  message: 'Muitos pedidos de recuperação a partir desta rede. Tente novamente mais tarde.',
+  keyPrefix: 'rl:auth:forgot:ip:',
+});
+const resetPasswordIpLimiter = createRateLimiter({
+  windowMs: 15 * 60_000,
+  maxRequests: 20,
+  message: 'Muitas tentativas de redefinição. Aguarde alguns minutos e tente novamente.',
+  keyPrefix: 'rl:auth:reset:ip:',
+});
+// Folgado: o front renova a sessão sozinho (single-flight) e vários usuários podem dividir o mesmo IP.
+const refreshIpLimiter = createRateLimiter({
+  windowMs: 10 * 60_000,
+  maxRequests: 120,
+  message: 'Muitas renovações de sessão. Aguarde alguns minutos.',
+  keyPrefix: 'rl:auth:refresh:ip:',
+});
+const FORGOT_PASSWORD_MAX_PER_ACCOUNT_PER_HOUR = 3;
 
 const registerSchema = z.object({
   email: z.string().email('E-mail inválido'),
@@ -47,7 +99,7 @@ const resendEmailSchema = z.object({
 
 
 // POST /api/v1/auth/register
-authRouter.post('/register', async (req: Request, res: Response) => {
+authRouter.post('/register', registerIpLimiter, registerEmailLimiter, async (req: Request, res: Response) => {
   try {
     const validated = registerSchema.parse(req.body);
     const result = await AuthService.register(validated);
@@ -129,10 +181,8 @@ authRouter.post('/login', loginLimiter, async (req: Request, res: Response) => {
 
 // ---------------------------------------------------------------------------
 // Recuperação de senha por e-mail.
-// Sem limitador por IP de propósito: o servidor não configura `trust proxy`, então atrás do
-// proxy todos os clientes compartilhariam o mesmo "IP" e um atacante travaria a recuperação de
-// todos. O freio é POR CONTA (intervalo mínimo entre e-mails, em AuthService.requestPasswordReset)
-// + token de 256 bits de uso único.
+// Freios: limite por IP (folgado, acima) + POR CONTA (intervalo mínimo entre e-mails em
+// AuthService.requestPasswordReset e teto por hora, silencioso, abaixo) + token de 256 bits de uso único.
 // ---------------------------------------------------------------------------
 const forgotPasswordSchema = z.object({
   identifier: z.string().trim().email('E-mail inválido'),
@@ -145,7 +195,7 @@ const resetPasswordSchema = z.object({
 });
 
 // POST /api/v1/auth/forgot-password
-authRouter.post('/forgot-password', async (req: Request, res: Response) => {
+authRouter.post('/forgot-password', forgotPasswordIpLimiter, async (req: Request, res: Response) => {
   try {
     const validated = forgotPasswordSchema.parse(req.body);
     if (validated.method !== 'email') {
@@ -154,7 +204,14 @@ authRouter.post('/forgot-password', async (req: Request, res: Response) => {
         error: { code: 'PASSWORD_RESET_METHOD_UNAVAILABLE', message: 'A recuperação por SMS ainda não está disponível. Use o e-mail de cadastro.' },
       });
     }
-    await AuthService.requestPasswordReset(validated.identifier);
+    // Teto por conta/hora: acima dele responde IGUAL (200 genérico), sem processar — não revela nada.
+    const accountKey = rateLimitAccountKey(validated.identifier);
+    const accountBudget = accountKey
+      ? await consumeRateLimit(`rl:auth:forgot:em:${accountKey}`, 60 * 60_000, FORGOT_PASSWORD_MAX_PER_ACCOUNT_PER_HOUR)
+      : { allowed: true };
+    if (accountBudget.allowed) {
+      await AuthService.requestPasswordReset(validated.identifier);
+    }
     // Resposta SEMPRE igual: nunca revela se o e-mail existe, se foi enviado ou se houve throttle.
     return res.json({ success: true, data: { message: PASSWORD_RESET_GENERIC_MESSAGE, methodSent: 'email' } });
   } catch (err: any) {
@@ -167,7 +224,7 @@ authRouter.post('/forgot-password', async (req: Request, res: Response) => {
 });
 
 // POST /api/v1/auth/reset-password
-authRouter.post('/reset-password', async (req: Request, res: Response) => {
+authRouter.post('/reset-password', resetPasswordIpLimiter, async (req: Request, res: Response) => {
   try {
     const validated = resetPasswordSchema.parse(req.body);
     const result = await AuthService.resetPasswordWithToken(validated.token, validated.newPassword);
@@ -185,7 +242,7 @@ authRouter.post('/reset-password', async (req: Request, res: Response) => {
 });
 
 // POST /api/v1/auth/verify-email
-authRouter.post('/verify-email', async (req: Request, res: Response) => {
+authRouter.post('/verify-email', verifyEmailIpLimiter, async (req: Request, res: Response) => {
   try {
     const validated = verifyEmailSchema.parse(req.body);
     const result = await AuthService.verifyEmail(validated.email, validated.code);
@@ -199,7 +256,7 @@ authRouter.post('/verify-email', async (req: Request, res: Response) => {
 });
 
 // POST /api/v1/auth/resend-verification
-authRouter.post('/resend-verification', async (req: Request, res: Response) => {
+authRouter.post('/resend-verification', resendVerificationIpLimiter, async (req: Request, res: Response) => {
   try {
     const validated = resendEmailSchema.parse(req.body);
     const result = await AuthService.resendEmailVerification(validated.email);
@@ -213,7 +270,7 @@ authRouter.post('/resend-verification', async (req: Request, res: Response) => {
 });
 
 // POST /api/v1/auth/refresh
-authRouter.post('/refresh', async (req: Request, res: Response) => {
+authRouter.post('/refresh', refreshIpLimiter, async (req: Request, res: Response) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken) {
