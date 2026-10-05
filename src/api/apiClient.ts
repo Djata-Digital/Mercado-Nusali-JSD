@@ -34,11 +34,13 @@ let refreshPromise: Promise<string> | null = null;
 async function executeSingleFlightRefresh(): Promise<string> {
   if (!refreshPromise) {
     refreshPromise = (async () => {
+      let usedRefreshToken: string | null = null;
       try {
         const refreshToken = storageService.getRefreshToken();
         if (!refreshToken) {
           throw new Error('NO_REFRESH_TOKEN');
         }
+        usedRefreshToken = refreshToken;
 
         if (process.env.NODE_ENV !== 'production') {
           console.log('[Auth] Starting token refresh single-flight');
@@ -66,7 +68,17 @@ async function executeSingleFlightRefresh(): Promise<string> {
         }
 
         return newToken;
-      } catch (err) {
+      } catch (err: any) {
+        // O servidor só aceita cada refresh token UMA vez (rotação atômica). Se outra aba do mesmo navegador girou o
+        // token primeiro (o storage é compartilhado), a nossa tentativa é recusada: usa a sessão que ela gravou.
+        const status = err?.response?.status;
+        if (status === 400 || status === 401) {
+          const currentRefresh = storageService.getRefreshToken();
+          const currentAccess = storageService.getToken();
+          if (usedRefreshToken && currentRefresh && currentRefresh !== usedRefreshToken && currentAccess) {
+            return currentAccess;
+          }
+        }
         if (process.env.NODE_ENV !== 'production') {
           console.warn('[Auth] Refresh token failed or expired');
         }

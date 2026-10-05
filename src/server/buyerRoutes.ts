@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth, AuthRequest } from './modules/auth/authMiddleware.js';
-import { AuthService } from './modules/auth/authService.js';
+import { AuthService, AuthFlowError } from './modules/auth/authService.js';
 import { OrderService } from './modules/orders/orderService.js';
 import { getDb, checkDbConnection } from '../db/index.js';
 import {
@@ -486,17 +486,24 @@ buyerRouter.get('/security', requireAuth, async (req: AuthRequest, res: Response
 
 buyerRouter.post('/security/password', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { currentPassword, newPassword } = req.body;
-    const result = await AuthService.changePassword(req.user!.id, { currentPassword, newPassword });
+    const { currentPassword, newPassword } = req.body ?? {};
+    const authHeader = req.headers.authorization;
+    const accessToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+    const result = await AuthService.changePassword(
+      req.user!.id,
+      { currentPassword, newPassword },
+      { sessionId: req.user?.sessionId, accessToken }
+    );
     return res.json({
       success: true,
       message: result.message,
     });
   } catch (err: any) {
-    return res.status(400).json({
+    const known = err instanceof AuthFlowError;
+    return res.status(known ? err.httpStatus : 400).json({
       success: false,
       error: {
-        code: 'PASSWORD_CHANGE_FAILED',
+        code: known ? err.code : 'PASSWORD_CHANGE_FAILED',
         message: err.message || 'Erro ao alterar senha.',
       },
     });
@@ -574,7 +581,8 @@ buyerRouter.delete('/security/sessions/:id', requireAuth, async (req: AuthReques
     const authHeader = req.headers.authorization;
     const currentToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
 
-    await db.delete(sessions).where(and(eq(sessions.id, id), eq(sessions.userId, userId)));
+    // Encerra de verdade: apaga a linha da sessão E revoga o refresh token dela.
+    await AuthService.revokeSession(userId, id);
 
     const activeSessions = await db.select().from(sessions).where(eq(sessions.userId, userId)).orderBy(desc(sessions.createdAt));
 

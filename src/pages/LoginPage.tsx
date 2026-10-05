@@ -104,7 +104,7 @@ export const LoginPage: React.FC = () => {
         }
       }, 400);
     } catch (err: any) {
-      const msg = err.message || 'Erro ao realizar login. Tente novamente.';
+      const msg = err?.response?.data?.error?.message || err.message || 'Erro ao realizar login. Tente novamente.';
       // O servidor só responde 403 EMAIL_VERIFICATION_REQUIRED depois de conferir a senha: quem chega aqui provou ser o
       // dono da conta. O e-mail pendente segue para a tela de verificação (sem código nem senha).
       const verificationRequired =

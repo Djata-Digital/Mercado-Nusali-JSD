@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { AuthService, PUBLIC_REGISTRATION_ROLES, PASSWORD_RESET_GENERIC_MESSAGE } from './authService.js';
+import { AuthService, AuthFlowError, PUBLIC_REGISTRATION_ROLES, PASSWORD_RESET_GENERIC_MESSAGE, PASSWORD_MIN_LENGTH } from './authService.js';
 import { requireAuth, AuthRequest } from './authMiddleware.js';
 import { createRateLimiter, consumeRateLimit, rateLimitAccountKey } from '../../infra/rateLimiter.js';
 import { getDb } from '../../../db/index.js';
@@ -70,7 +70,7 @@ const FORGOT_PASSWORD_MAX_PER_ACCOUNT_PER_HOUR = 3;
 
 const registerSchema = z.object({
   email: z.string().email('E-mail inválido'),
-  password: z.string().min(6, 'A senha deve ter no mínimo 6 caracteres'),
+  password: z.string().min(PASSWORD_MIN_LENGTH, `A senha deve ter no mínimo ${PASSWORD_MIN_LENGTH} caracteres`),
   fullName: z.string().min(2, 'Nome completo obrigatório'),
   phone: z.string().optional(),
   countryCode: z.string().min(2, 'País é obrigatório'),
@@ -167,6 +167,13 @@ authRouter.post('/login', loginLimiter, async (req: Request, res: Response) => {
         requiresEmailVerification: true,
         email: req.body.email,
       });
+    }
+
+    if (err instanceof AuthFlowError && err.code === 'LOGIN_LOCKED') {
+      return res.status(429).json({ success: false, error: { code: 'LOGIN_LOCKED', message: err.message } });
+    }
+    if (err instanceof AuthFlowError && err.code === 'SESSION_PERSIST_FAILED') {
+      return res.status(503).json({ success: false, error: { code: 'SESSION_UNAVAILABLE', message: err.message } });
     }
 
     return res.status(401).json({
@@ -272,7 +279,7 @@ authRouter.post('/resend-verification', resendVerificationIpLimiter, async (req:
 // POST /api/v1/auth/refresh
 authRouter.post('/refresh', refreshIpLimiter, async (req: Request, res: Response) => {
   try {
-    const { refreshToken } = req.body;
+    const { refreshToken } = req.body ?? {};
     if (!refreshToken) {
       return res.status(400).json({
         success: false,
@@ -286,23 +293,28 @@ authRouter.post('/refresh', refreshIpLimiter, async (req: Request, res: Response
       data: result,
     });
   } catch (err: any) {
-    return res.status(401).json({
+    // Recusa esperada (token inválido/revogado/expirado, conta inativa) = 401: o cliente encerra a sessão local.
+    if (err instanceof AuthFlowError && err.httpStatus === 401) {
+      return res.status(401).json({
+        success: false,
+        error: { code: 'REFRESH_FAILED', message: err.message || 'Erro ao renovar token de acesso.' },
+      });
+    }
+    // Qualquer outra falha (banco indisponível, erro interno) é transitória: 503, NUNCA 401 — assim o cliente não apaga a sessão.
+    return res.status(503).json({
       success: false,
-      error: {
-        code: 'REFRESH_FAILED',
-        message: err.message || 'Erro ao renovar token de acesso.',
-      },
+      error: { code: 'REFRESH_UNAVAILABLE', message: 'Não foi possível renovar a sessão agora. Tente novamente em instantes.' },
     });
   }
 });
 
 // POST /api/v1/auth/logout
 authRouter.post('/logout', requireAuth, async (req: AuthRequest, res: Response) => {
-  const { refreshToken } = req.body;
+  const { refreshToken } = req.body ?? {};
   const authHeader = req.headers.authorization;
   const accessToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
 
-  await AuthService.logout(refreshToken, accessToken);
+  await AuthService.logout(refreshToken, accessToken, req.user?.sessionId);
   return res.json({
     success: true,
     data: { message: 'Desconectado com sucesso.' },
@@ -310,19 +322,27 @@ authRouter.post('/logout', requireAuth, async (req: AuthRequest, res: Response) 
 });
 
 // POST /api/v1/auth/change-password
+// A senha ATUAL é obrigatória (um access token sozinho não basta para trocar a senha) e a troca encerra as outras sessões.
 authRouter.post('/change-password', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { currentPassword, newPassword } = req.body;
-    const result = await AuthService.changePassword(req.user!.id, { currentPassword, newPassword });
+    const { currentPassword, newPassword } = req.body ?? {};
+    const authHeader = req.headers.authorization;
+    const accessToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+    const result = await AuthService.changePassword(
+      req.user!.id,
+      { currentPassword, newPassword },
+      { sessionId: req.user?.sessionId, accessToken }
+    );
     return res.json({
       success: true,
       message: result.message,
     });
   } catch (err: any) {
-    return res.status(400).json({
+    const known = err instanceof AuthFlowError;
+    return res.status(known ? err.httpStatus : 400).json({
       success: false,
       error: {
-        code: 'PASSWORD_CHANGE_FAILED',
+        code: known ? err.code : 'PASSWORD_CHANGE_FAILED',
         message: err.message || 'Erro ao alterar senha.',
       },
     });
@@ -361,41 +381,27 @@ authRouter.get('/sessions', requireAuth, async (req: AuthRequest, res: Response)
   }
 });
 
-// DELETE /api/v1/auth/sessions/:id
-authRouter.delete('/sessions/:id', requireAuth, async (req: AuthRequest, res: Response) => {
-  try {
-    const db = getDb();
-    if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco indisponível.' } });
-
-    const userId = req.user!.id;
-    const { id } = req.params;
-
-    await db.delete(sessions).where(and(eq(sessions.id, id), eq(sessions.userId, userId)));
-    return res.json({ success: true, message: 'Sessão encerrada com sucesso.' });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: { code: 'SESSION_REVOKE_FAILED', message: err.message } });
-  }
-});
-
 // DELETE /api/v1/auth/sessions/revoke-others
+// (declarada ANTES de /sessions/:id: senão o Express a captura como id="revoke-others" e nada é revogado)
 authRouter.delete('/sessions/revoke-others', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const db = getDb();
-    if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Banco indisponível.' } });
-
-    const userId = req.user!.id;
     const authHeader = req.headers.authorization;
     const currentToken = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
 
-    if (currentToken) {
-      await db.delete(sessions).where(and(eq(sessions.userId, userId), eq(sessions.token, currentToken)));
-    } else {
-      await db.delete(sessions).where(eq(sessions.userId, userId));
-    }
-
+    await AuthService.revokeOtherSessions(req.user!.id, { sessionId: req.user?.sessionId, accessToken: currentToken });
     return res.json({ success: true, message: 'Outras sessões encerradas com sucesso.' });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: { code: 'REVOKE_OTHERS_FAILED', message: err.message } });
+    return res.status(500).json({ success: false, error: { code: 'REVOKE_OTHERS_FAILED', message: 'Não foi possível encerrar as outras sessões agora.' } });
+  }
+});
+
+// DELETE /api/v1/auth/sessions/:id
+authRouter.delete('/sessions/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    await AuthService.revokeSession(req.user!.id, req.params.id);
+    return res.json({ success: true, message: 'Sessão encerrada com sucesso.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: { code: 'SESSION_REVOKE_FAILED', message: 'Não foi possível encerrar a sessão agora.' } });
   }
 });
 

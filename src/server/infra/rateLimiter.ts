@@ -76,6 +76,22 @@ export async function consumeRateLimit(key: string, windowMs: number, max: numbe
   return { allowed: count <= max, count };
 }
 
+/** Lê o contador atual de `key` SEM incrementar (0 se não existe/expirou). */
+export async function getRateLimitCount(key: string): Promise<number> {
+  const client = getRedisClient();
+  if (client && client.status === 'ready') {
+    try {
+      const raw = await client.get(key);
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    } catch (err) {
+      // cai para a memória
+    }
+  }
+  const record = memoryRateLimit.get(key);
+  return record && Date.now() <= record.resetAt ? record.count : 0;
+}
+
 /** Zera um contador (ex.: depois de um acerto, ou quando um novo código é emitido). */
 export async function resetRateLimitCounter(key: string): Promise<void> {
   memoryRateLimit.delete(key);

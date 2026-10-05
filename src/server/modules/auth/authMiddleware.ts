@@ -15,6 +15,8 @@ export interface AuthRequest extends Request {
     countryCode: string;
     kycStatus: string;
     isEmailVerified?: boolean;
+    /** Sessão (claim `sid` do JWT): liga o access token à sessão e ao refresh token dela. Ausente em tokens emitidos antes do deploy. */
+    sessionId?: string;
   };
 }
 
@@ -47,6 +49,7 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
       countryCode: string;
       kycStatus: string;
       isEmailVerified?: boolean;
+      sid?: string;
     };
 
     req.user = {
@@ -57,6 +60,7 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
       countryCode: decoded.countryCode,
       kycStatus: decoded.kycStatus,
       isEmailVerified: decoded.isEmailVerified !== false,
+      sessionId: typeof decoded.sid === 'string' ? decoded.sid : undefined,
     };
 
     if (process.env.NODE_ENV !== 'production') {

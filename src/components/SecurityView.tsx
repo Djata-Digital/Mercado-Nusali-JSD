@@ -63,12 +63,13 @@ export const SecurityView: React.FC = () => {
         setCurrentPassword('');
         setNewPassword('');
         setConfirmPassword('');
-        showToast('Senha alterada com sucesso!');
+        showToast('Senha alterada com sucesso! As outras sessões foram encerradas.');
+        loadSessions();
       } else {
         showToast(res.error?.message || 'Erro ao alterar senha.');
       }
     } catch (err: any) {
-      showToast(err.message || 'Falha ao alterar senha.');
+      showToast(err?.response?.data?.error?.message || err.message || 'Falha ao alterar senha.');
     } finally {
       setIsSubmittingPassword(false);
     }

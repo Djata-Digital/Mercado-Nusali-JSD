@@ -2,12 +2,12 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getDb } from '../../../db/index.js';
 import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens, sessions, sellers, sellerProfiles, countries, passwordResetTokens, auditLogs } from '../../../db/schema.js';
-import { eq, and, gt, desc } from 'drizzle-orm';
+import { eq, and, gt, gte, lte, ne, desc } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { generateEmailVerificationCode, hashEmailVerificationCode, sendVerificationEmail, sendPasswordResetEmail } from './emailService.js';
 import crypto from 'node:crypto';
 import { getJwtAccessSecret, getJwtRefreshSecret } from './jwtConfig.js';
-import { consumeRateLimit, resetRateLimitCounter, rateLimitAccountKey } from '../../infra/rateLimiter.js';
+import { consumeRateLimit, resetRateLimitCounter, rateLimitAccountKey, getRateLimitCount } from '../../infra/rateLimiter.js';
 
 const ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '2h';
 const REFRESH_EXPIRES_IN_DAYS = 30;
@@ -31,7 +31,7 @@ export const PASSWORD_RESET_GENERIC_MESSAGE = 'Se existir uma conta com este e-m
 const PASSWORD_RESET_EXPIRES_MINUTES = 30;
 // Limite POR CONTA (não por IP: sem `trust proxy`, atrás do proxy todos os clientes compartilham o mesmo IP).
 const PASSWORD_RESET_MIN_INTERVAL_MS = 5 * 60_000;
-const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_MAX_BYTES = 72; // limite real do bcrypt: além disso a senha seria truncada em silêncio
 
 /**
@@ -54,6 +54,57 @@ export function generateRefreshTokenValue(): string {
 export function hashPasswordResetToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
+
+/**
+ * Erro de fluxo de autenticação com `code` estável e status HTTP sugerido: as rotas mapeiam por `code`
+ * (um erro SEM `code` é falha inesperada e nunca deve ser tratado como "sessão inválida" pelo cliente).
+ */
+export class AuthFlowError extends Error {
+  code: string;
+  httpStatus: number;
+  constructor(code: string, message: string, httpStatus = 401) {
+    super(message);
+    this.code = code;
+    this.httpStatus = httpStatus;
+  }
+}
+
+/**
+ * Sessão <-> refresh token SEM coluna nova: os dois IDs saem do MESMO UUID (`sess_<uuid>` / `rt_<uuid>`) e o access
+ * token carrega o `sid`. Assim "encerrar sessão" sabe qual refresh token revogar. IDs antigos (`rt_<ms>`,
+ * `sess_<ms>_<rand>`) não têm esse vínculo: ver `legacyRefreshIdForSession`.
+ */
+const UUID_PATTERN = '([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})';
+const SESSION_ID_PATTERN = new RegExp('^sess_' + UUID_PATTERN + '$');
+const REFRESH_ID_PATTERN = new RegExp('^rt_' + UUID_PATTERN + '$');
+export function newSessionIdentity() {
+  const uuid = crypto.randomUUID();
+  return { refreshId: `rt_${uuid}`, sessionId: `sess_${uuid}` };
+}
+export function refreshIdForSessionId(sessionId: string | null | undefined): string | null {
+  const m = SESSION_ID_PATTERN.exec(String(sessionId || ''));
+  return m ? `rt_${m[1]}` : null;
+}
+export function sessionIdForRefreshId(refreshId: string | null | undefined): string | null {
+  const m = REFRESH_ID_PATTERN.exec(String(refreshId || ''));
+  return m ? `sess_${m[1]}` : null;
+}
+// Sessões/tokens emitidos antes do vínculo por UUID: o refresh token foi criado no mesmo instante da linha de sessão.
+const LEGACY_SESSION_MATCH_MS = 5_000;
+// Reuso de um refresh token recém-girado dentro desta janela = corrida benigna (duas abas): só recusa. Depois dela
+// é tratado como reuso suspeito e a cadeia de sucessores é revogada. (Lido a cada chamada: os testes alteram.)
+const refreshReuseGraceMs = () => {
+  const v = Number(process.env.REFRESH_REUSE_GRACE_MS);
+  return process.env.REFRESH_REUSE_GRACE_MS !== undefined && Number.isFinite(v) && v >= 0 ? v : 10_000;
+};
+
+/** Login: freio POR CONTA (independe do IP). Conta só falhas; um acerto ou a redefinição de senha zeram. */
+export const LOGIN_MAX_FAILURES_PER_ACCOUNT = 10;
+const LOGIN_FAILURE_WINDOW_MS = 15 * 60_000;
+const loginFailureKey = (accountKey: string) => `rl:auth:login:fail:${accountKey}`;
+/** Troca de senha: tentativas ERRADAS da senha atual (quem tem só um token não pode adivinhar a senha). */
+export const CHANGE_PASSWORD_MAX_FAILURES = 5;
+const CHANGE_PASSWORD_FAILURE_WINDOW_MS = 15 * 60_000;
 
 export interface LoginDTO {
   email: string;
@@ -371,22 +422,36 @@ export class AuthService {
     }
 
     const cleanEmail = data.email.trim().toLowerCase();
+
+    // Freio por conta: 10 falhas em 15 min bloqueiam novas tentativas dessa conta (mesmo com a senha certa) até a
+    // janela passar ou a senha ser redefinida. Vale igual para e-mail existente ou não: não revela nada.
+    const accountKey = rateLimitAccountKey(cleanEmail);
+    const failKey = accountKey ? loginFailureKey(accountKey) : null;
+    if (failKey && (await getRateLimitCount(failKey)) >= LOGIN_MAX_FAILURES_PER_ACCOUNT) {
+      throw new AuthFlowError('LOGIN_LOCKED', 'Muitas tentativas de login para esta conta. Aguarde alguns minutos ou use "Esqueci minha senha".', 429);
+    }
+    const rejectCredentials = async (): Promise<never> => {
+      if (failKey) await consumeRateLimit(failKey, LOGIN_FAILURE_WINDOW_MS, LOGIN_MAX_FAILURES_PER_ACCOUNT);
+      throw new Error('E-mail ou senha incorretos.');
+    };
+
     const found = await db.select().from(users).where(eq(users.email, cleanEmail)).limit(1);
 
     if (found.length === 0) {
-      throw new Error('E-mail ou senha incorretos.');
+      return rejectCredentials();
     }
 
     const userRecord = found[0];
 
     if (!userRecord.passwordHash) {
-      throw new Error('E-mail ou senha incorretos.');
+      return rejectCredentials();
     }
 
     const isMatch = await bcrypt.compare(data.password, userRecord.passwordHash);
     if (!isMatch) {
-      throw new Error('E-mail ou senha incorretos.');
+      return rejectCredentials();
     }
+    if (failKey) await resetRateLimitCounter(failKey);
 
     if (userRecord.isActive === false) {
       throw new Error('Esta conta está desativada ou suspensa. Contate o suporte.');
@@ -413,6 +478,20 @@ export class AuthService {
     user: { id: string; email: string; role: string; fullName: string; countryCode: string; kycStatus: string; isEmailVerified?: boolean },
     meta?: { ipAddress?: string; userAgent?: string }
   ) {
+    const issued = await this.issueSessionTokens(user, meta);
+    return issued.tokens;
+  }
+
+  /**
+   * Emite access + refresh token e grava refresh token + sessão (juntos, numa transação — ou dentro de `tx`, quando
+   * o chamador já tem uma). Falha ao gravar FALHA a operação: nunca devolve um token que não existe no banco.
+   */
+  static async issueSessionTokens(
+    user: { id: string; email: string; role: string; fullName: string; countryCode: string; kycStatus: string; isEmailVerified?: boolean },
+    meta?: { ipAddress?: string; userAgent?: string },
+    tx?: any,
+    identity: { refreshId: string; sessionId: string } = newSessionIdentity()
+  ) {
     const accessToken = jwt.sign(
       {
         userId: user.id,
@@ -422,94 +501,244 @@ export class AuthService {
         countryCode: user.countryCode,
         kycStatus: user.kycStatus,
         isEmailVerified: user.isEmailVerified === true,
+        sid: identity.sessionId,
       },
       getJwtAccessSecret(),
       { expiresIn: 7200 }
     );
 
-    // Refresh token opaco com 256 bits de entropia (CSPRNG). Antes: Date.now() + Math.random(), previsível.
-    // Contrato inalterado: string opaca com prefixo `rt_`, guardada/consultada por igualdade em refresh_tokens.
-    // Só vale para tokens NOVOS; os já emitidos continuam válidos até expirar ou serem revogados.
+    // Refresh token opaco com 256 bits de entropia (CSPRNG). Contrato inalterado: string opaca com prefixo `rt_`,
+    // guardada/consultada por igualdade em refresh_tokens. Tokens já emitidos continuam válidos.
     const refreshTokenRaw = generateRefreshTokenValue();
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + REFRESH_EXPIRES_IN_DAYS);
 
     const db = getDb();
     if (db) {
-      try {
-        await db.insert(refreshTokens).values({
-          id: `rt_${Date.now()}`,
+      const persist = async (executor: any) => {
+        await executor.insert(refreshTokens).values({
+          id: identity.refreshId,
           userId: user.id,
           tokenHash: refreshTokenRaw,
           expiresAt,
           isRevoked: false,
           createdAt: new Date(),
         });
-
-        // Create real active session row in PostgreSQL sessions table
-        const sessionExpires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
-        await db.insert(sessions).values({
-          id: `sess_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+        // Linha de sessão (7 dias) ligada ao refresh token pelo mesmo UUID.
+        await executor.insert(sessions).values({
+          id: identity.sessionId,
           userId: user.id,
           token: accessToken,
           ipAddress: meta?.ipAddress || null,
           userAgent: meta?.userAgent || null,
-          expiresAt: sessionExpires,
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
           createdAt: new Date(),
         });
+      };
+      try {
+        if (tx) await persist(tx);
+        else await db.transaction(async (t) => persist(t));
       } catch (err: any) {
         logger.error({ userId: user.id, error: err?.message }, 'Failed to persist refresh token or session');
+        throw new AuthFlowError('SESSION_PERSIST_FAILED', 'Não foi possível iniciar a sessão agora. Tente novamente em instantes.', 503);
       }
     }
 
     return {
-      token: accessToken,
-      accessToken,
-      refreshToken: refreshTokenRaw,
-      expiresIn: 7200, // 2 hours in seconds
+      tokens: {
+        token: accessToken,
+        accessToken,
+        refreshToken: refreshTokenRaw,
+        expiresIn: 7200, // 2 hours in seconds
+      },
+      refreshTokenId: identity.refreshId,
+      sessionId: identity.sessionId,
     };
   }
 
+  /**
+   * Renovação com rotação ATÔMICA: o token só é consumido por `UPDATE ... WHERE is_revoked=false RETURNING`, então de
+   * duas renovações paralelas com o mesmo token só uma emite um token novo (a outra é recusada). Conta inativa nunca
+   * renova (e perde seus tokens). Reuso de token já girado: ver `handleRevokedRefreshReuse`.
+   * Erros esperados são `AuthFlowError` (a rota responde 401); qualquer outro erro é falha transitória (a rota responde 503
+   * e o cliente NÃO apaga a sessão).
+   */
   static async refreshToken(refreshTokenString: string) {
     const db = getDb();
     if (!db) {
       throw new Error('Banco de dados indisponível para renovação de sessão.');
     }
 
-    const found = await db
-      .select()
-      .from(refreshTokens)
-      .where(and(eq(refreshTokens.tokenHash, refreshTokenString), eq(refreshTokens.isRevoked, false)))
-      .limit(1);
+    const invalid = () => new AuthFlowError('REFRESH_INVALID', 'Refresh token inválido ou já revogado.');
+    const raw = typeof refreshTokenString === 'string' ? refreshTokenString : '';
+    if (!raw || raw.length > 200) throw invalid();
 
-    if (found.length === 0) {
-      throw new Error('Refresh token inválido ou já revogado.');
+    const [tokenRecord] = await db.select().from(refreshTokens).where(eq(refreshTokens.tokenHash, raw)).limit(1);
+    if (!tokenRecord) throw invalid();
+
+    if (tokenRecord.isRevoked) {
+      await this.handleRevokedRefreshReuse(db, tokenRecord);
+      throw invalid();
     }
-
-    const tokenRecord = found[0];
     if (new Date() > new Date(tokenRecord.expiresAt)) {
-      throw new Error('Refresh token expirado. Por favor, faça login novamente.');
+      throw new AuthFlowError('REFRESH_EXPIRED', 'Refresh token expirado. Por favor, faça login novamente.');
     }
 
-    // Revoke old token and rotate
-    await db.update(refreshTokens).set({ isRevoked: true }).where(eq(refreshTokens.id, tokenRecord.id));
-
-    // Get user
-    const userRes = await db.select().from(users).where(eq(users.id, tokenRecord.userId)).limit(1);
-    if (userRes.length === 0) {
-      throw new Error('Usuário associado ao token não encontrado.');
+    const [user] = await db.select().from(users).where(eq(users.id, tokenRecord.userId)).limit(1);
+    if (!user) {
+      throw new AuthFlowError('REFRESH_INVALID', 'Usuário associado ao token não encontrado.');
+    }
+    if (user.isActive === false) {
+      // Conta suspensa/desativada: nenhuma sessão dela pode continuar.
+      await db.transaction(async (tx) => {
+        await tx.update(refreshTokens).set({ isRevoked: true }).where(eq(refreshTokens.userId, user.id));
+        await tx.delete(sessions).where(eq(sessions.userId, user.id));
+      });
+      throw new AuthFlowError('ACCOUNT_INACTIVE', 'Esta conta está desativada ou suspensa. Contate o suporte.');
     }
 
-    const user = userRes[0];
-    return await this.generateTokens(user);
+    const identity = newSessionIdentity();
+    const issued = await db.transaction(async (tx) => {
+      // Consome o token de forma atômica; `replaced_by_token` aponta para o ID (nunca o segredo) do sucessor.
+      const claimed = await tx
+        .update(refreshTokens)
+        .set({ isRevoked: true, replacedByToken: identity.refreshId })
+        .where(and(eq(refreshTokens.id, tokenRecord.id), eq(refreshTokens.isRevoked, false)))
+        .returning({ id: refreshTokens.id });
+      if (claimed.length === 0) return null;
+
+      // A linha de sessão do token antigo dá lugar à nova (uma linha por dispositivo); IP/dispositivo são herdados.
+      const oldSessionId = sessionIdForRefreshId(tokenRecord.id);
+      let meta: { ipAddress?: string; userAgent?: string } | undefined;
+      if (oldSessionId) {
+        const [oldSession] = await tx.select().from(sessions).where(and(eq(sessions.id, oldSessionId), eq(sessions.userId, user.id))).limit(1);
+        if (oldSession) meta = { ipAddress: oldSession.ipAddress || undefined, userAgent: oldSession.userAgent || undefined };
+        await tx.delete(sessions).where(and(eq(sessions.id, oldSessionId), eq(sessions.userId, user.id)));
+      }
+      return this.issueSessionTokens(user, meta, tx, identity);
+    });
+
+    if (!issued) {
+      // Outra renovação consumiu o token primeiro (corrida): recusa, sem emitir um segundo token.
+      const [latest] = await db.select().from(refreshTokens).where(eq(refreshTokens.id, tokenRecord.id)).limit(1);
+      if (latest) await this.handleRevokedRefreshReuse(db, latest);
+      throw invalid();
+    }
+    return issued.tokens;
   }
 
-  static async changePassword(userId: string, data: { currentPassword?: string; newPassword: string }) {
+  /**
+   * Token já revogado foi apresentado. Se ele foi GIRADO (tem sucessor): dentro da janela de graça é só uma corrida entre
+   * abas (nada além da recusa); depois dela é reuso suspeito, e a cadeia de sucessores (as sessões derivadas dele) é
+   * revogada. Revogado por logout/redefinição/troca de senha/suspensão (sem sucessor): apenas recusa.
+   */
+  private static async handleRevokedRefreshReuse(db: any, record: { id: string; userId: string; replacedByToken: string | null }) {
+    const successorId = record.replacedByToken;
+    if (!successorId) return;
+    const [successor] = await db.select().from(refreshTokens).where(eq(refreshTokens.id, successorId)).limit(1);
+    if (successor && Date.now() - new Date(successor.createdAt).getTime() <= refreshReuseGraceMs()) return;
+
+    let currentId: string | null = successorId;
+    for (let depth = 0; currentId && depth < 50; depth++) {
+      const rows: Array<{ replacedByToken: string | null }> = await db
+        .update(refreshTokens)
+        .set({ isRevoked: true })
+        .where(and(eq(refreshTokens.id, currentId), eq(refreshTokens.userId, record.userId)))
+        .returning({ replacedByToken: refreshTokens.replacedByToken });
+      const linkedSession = sessionIdForRefreshId(currentId);
+      if (linkedSession) await db.delete(sessions).where(and(eq(sessions.id, linkedSession), eq(sessions.userId, record.userId)));
+      currentId = rows[0]?.replacedByToken ?? null;
+    }
+    logger.warn({ userId: record.userId }, 'REFRESH_TOKEN_REUSE_DETECTED_CHAIN_REVOKED');
+  }
+
+  /** Sessão legada (sem UUID): o refresh token dela é o criado no mesmo instante que a linha de sessão. */
+  private static async legacyRefreshIdForSession(db: any, userId: string, sessionCreatedAt: Date | string): Promise<string | null> {
+    const at = new Date(sessionCreatedAt).getTime();
+    const candidates = await db
+      .select({ id: refreshTokens.id, createdAt: refreshTokens.createdAt })
+      .from(refreshTokens)
+      .where(and(
+        eq(refreshTokens.userId, userId),
+        gte(refreshTokens.createdAt, new Date(at - LEGACY_SESSION_MATCH_MS)),
+        lte(refreshTokens.createdAt, new Date(at + LEGACY_SESSION_MATCH_MS)),
+      ));
+    let best: { id: string; diff: number } | null = null;
+    for (const c of candidates as Array<{ id: string; createdAt: Date }>) {
+      const diff = Math.abs(new Date(c.createdAt).getTime() - at);
+      if (!best || diff < best.diff) best = { id: c.id, diff };
+    }
+    return best ? best.id : null;
+  }
+
+  /** Descobre a sessão e o refresh token do request atual: claim `sid`; senão a linha com o access token exato. */
+  private static async resolveCurrentSession(db: any, userId: string, current?: { sessionId?: string; accessToken?: string }) {
+    const bySid = refreshIdForSessionId(current?.sessionId);
+    if (current?.sessionId && bySid) return { sessionId: current.sessionId as string | null, refreshId: bySid as string | null };
+    if (current?.accessToken) {
+      const [row] = await db.select().from(sessions).where(and(eq(sessions.userId, userId), eq(sessions.token, current.accessToken))).limit(1);
+      if (row) {
+        const linked = refreshIdForSessionId(row.id) ?? (await this.legacyRefreshIdForSession(db, userId, row.createdAt));
+        return { sessionId: row.id as string | null, refreshId: linked as string | null };
+      }
+    }
+    return { sessionId: null as string | null, refreshId: null as string | null };
+  }
+
+  /** Revoga o refresh token e apaga a linha de sessão de UMA sessão do usuário. */
+  static async revokeSession(userId: string, sessionId: string) {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível para encerrar sessão.');
+    const [row] = await db.select().from(sessions).where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId))).limit(1);
+    if (!row) return { revoked: false };
+    const refreshId = refreshIdForSessionId(row.id) ?? (await this.legacyRefreshIdForSession(db, userId, row.createdAt));
+    await db.transaction(async (tx) => {
+      await tx.delete(sessions).where(and(eq(sessions.id, row.id), eq(sessions.userId, userId)));
+      if (refreshId) await tx.update(refreshTokens).set({ isRevoked: true }).where(and(eq(refreshTokens.id, refreshId), eq(refreshTokens.userId, userId)));
+    });
+    return { revoked: true };
+  }
+
+  /** "Encerrar as outras sessões": mantém a sessão atual e revoga os refresh tokens e as linhas de todas as demais. */
+  static async revokeOtherSessions(userId: string, current?: { sessionId?: string; accessToken?: string }) {
+    const db = getDb();
+    if (!db) throw new Error('Banco de dados indisponível para encerrar sessões.');
+    const keep = await this.resolveCurrentSession(db, userId, current);
+    await db.transaction(async (tx) => {
+      await this.revokeAllExcept(tx, userId, keep);
+    });
+    return { keptSessionId: keep.sessionId };
+  }
+
+  private static async revokeAllExcept(executor: any, userId: string, keep: { sessionId: string | null; refreshId: string | null }) {
+    await executor
+      .update(refreshTokens)
+      .set({ isRevoked: true })
+      .where(keep.refreshId
+        ? and(eq(refreshTokens.userId, userId), eq(refreshTokens.isRevoked, false), ne(refreshTokens.id, keep.refreshId))
+        : and(eq(refreshTokens.userId, userId), eq(refreshTokens.isRevoked, false)));
+    await executor
+      .delete(sessions)
+      .where(keep.sessionId
+        ? and(eq(sessions.userId, userId), ne(sessions.id, keep.sessionId))
+        : eq(sessions.userId, userId));
+  }
+
+  /**
+   * Troca de senha: exige a senha ATUAL (sempre), a nova com no mínimo PASSWORD_MIN_LENGTH caracteres, e encerra as OUTRAS
+   * sessões da conta (a atual continua). Tentativas erradas da senha atual têm freio por conta.
+   */
+  static async changePassword(
+    userId: string,
+    data: { currentPassword?: string; newPassword: string },
+    current?: { sessionId?: string; accessToken?: string }
+  ) {
     const db = getDb();
     if (!db) throw new Error('Banco de dados indisponível para alteração de senha.');
 
-    if (!data.newPassword || data.newPassword.length < 6) {
-      throw new Error('A nova senha deve ter no mínimo 6 caracteres.');
+    const newPassword = typeof data.newPassword === 'string' ? data.newPassword : '';
+    if (newPassword.length < PASSWORD_MIN_LENGTH || Buffer.byteLength(newPassword, 'utf8') > PASSWORD_MAX_BYTES) {
+      throw new AuthFlowError('PASSWORD_WEAK', `A nova senha deve ter entre ${PASSWORD_MIN_LENGTH} e ${PASSWORD_MAX_BYTES} caracteres.`, 400);
     }
 
     const found = await db.select().from(users).where(eq(users.id, userId)).limit(1);
@@ -519,20 +748,35 @@ export class AuthService {
 
     const user = found[0];
 
-    if (data.currentPassword && user.passwordHash) {
-      const isMatch = await bcrypt.compare(data.currentPassword, user.passwordHash);
-      if (!isMatch) {
-        throw new Error('A senha atual informada está incorreta.');
-      }
+    if (typeof user.passwordHash !== 'string' || !user.passwordHash) {
+      throw new AuthFlowError('PASSWORD_NOT_SET', 'Esta conta ainda não tem uma senha definida. Use "Esqueci minha senha".', 400);
+    }
+    const currentPassword = typeof data.currentPassword === 'string' ? data.currentPassword : '';
+    if (!currentPassword) {
+      throw new AuthFlowError('CURRENT_PASSWORD_REQUIRED', 'Informe a senha atual para alterar a senha.', 400);
     }
 
-    const salt = await bcrypt.genSalt(10);
-    const newPasswordHash = await bcrypt.hash(data.newPassword, salt);
+    const failKey = `rl:auth:chpw:fail:${userId}`;
+    if ((await getRateLimitCount(failKey)) >= CHANGE_PASSWORD_MAX_FAILURES) {
+      throw new AuthFlowError('TOO_MANY_ATTEMPTS', 'Muitas tentativas incorretas. Aguarde alguns minutos e tente novamente.', 429);
+    }
+    const isMatch = await bcrypt.compare(currentPassword, user.passwordHash);
+    if (!isMatch) {
+      await consumeRateLimit(failKey, CHANGE_PASSWORD_FAILURE_WINDOW_MS, CHANGE_PASSWORD_MAX_FAILURES);
+      throw new AuthFlowError('CURRENT_PASSWORD_INVALID', 'A senha atual informada está incorreta.', 400);
+    }
 
-    await db.update(users).set({
-      passwordHash: newPasswordHash,
-      updatedAt: new Date(),
-    }).where(eq(users.id, userId));
+    const newPasswordHash = await bcrypt.hash(newPassword, 12);
+    const keep = await this.resolveCurrentSession(db, userId, current);
+
+    await db.transaction(async (tx) => {
+      await tx.update(users).set({
+        passwordHash: newPasswordHash,
+        updatedAt: new Date(),
+      }).where(eq(users.id, userId));
+      await this.revokeAllExcept(tx, userId, keep);
+    });
+    await resetRateLimitCounter(failKey);
 
     logger.info({ userId }, 'User password updated successfully in PostgreSQL');
     return { message: 'Senha de acesso alterada com sucesso!' };
@@ -631,6 +875,7 @@ export class AuthService {
     const newHash = await bcrypt.hash(pw, 12);
     const tokenHash = hashPasswordResetToken(rawToken);
 
+    let resetEmail: string | null = null;
     await db.transaction(async (tx) => {
       const consumed = await tx
         .delete(passwordResetTokens)
@@ -642,6 +887,7 @@ export class AuthService {
       const [user] = await tx.select().from(users).where(eq(users.id, userId)).limit(1);
       const eligible = !!user && user.isActive !== false && typeof user.passwordHash === 'string' && user.passwordHash.startsWith('$2');
       if (!eligible) throw invalid(); // a transação inteira é desfeita
+      resetEmail = user.email;
 
       await tx.update(users).set({ passwordHash: newHash, updatedAt: new Date() }).where(eq(users.id, userId));
       await tx.delete(passwordResetTokens).where(eq(passwordResetTokens.userId, userId));
@@ -658,10 +904,14 @@ export class AuthService {
       });
     });
 
+    // Quem provou ser o dono do e-mail volta a poder entrar: zera o bloqueio de login por tentativas erradas.
+    const resetAccountKey = rateLimitAccountKey(resetEmail);
+    if (resetAccountKey) await resetRateLimitCounter(loginFailureKey(resetAccountKey));
+
     return { message: 'Senha redefinida com sucesso. Faça login com a nova senha.' };
   }
 
-  static async logout(refreshTokenString?: string, accessToken?: string) {
+  static async logout(refreshTokenString?: string, accessToken?: string, sessionId?: string) {
     const db = getDb();
     if (db) {
       if (refreshTokenString) {
@@ -669,6 +919,12 @@ export class AuthService {
       }
       if (accessToken) {
         await db.delete(sessions).where(eq(sessions.token, accessToken));
+      }
+      // Sessão identificada pelo `sid`: encerra também o refresh token ligado a ela (mesmo sem o corpo da requisição).
+      const linkedRefreshId = refreshIdForSessionId(sessionId);
+      if (sessionId && linkedRefreshId) {
+        await db.update(refreshTokens).set({ isRevoked: true }).where(eq(refreshTokens.id, linkedRefreshId));
+        await db.delete(sessions).where(eq(sessions.id, sessionId));
       }
     }
     return { success: true };

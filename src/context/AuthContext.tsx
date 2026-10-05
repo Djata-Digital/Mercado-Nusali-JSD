@@ -108,77 +108,73 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     role?: UserRole,
     password?: string
   ): Promise<User> => {
-    setIsLoading(true);
-    try {
-      let req: LoginRequest;
-      if (typeof credentialsOrIdentifier === 'string') {
-        if (!password) {
-          throw new Error('Senha não fornecida para autenticação.');
-        }
-        req = {
-          identifier: credentialsOrIdentifier,
-          role: role || 'BUYER',
-          password,
-        };
-      } else {
-        req = credentialsOrIdentifier;
+    // `isLoading` é SÓ da restauração inicial da sessão. Ligá-lo aqui fazia o GuestRoute trocar /login e /register por um
+    // spinner (desmontando a tela): uma falha de login/cadastro perdia a mensagem de erro e apagava o formulário.
+    // Quem chama (LoginPage/RegisterPage) já controla o próprio estado de carregamento.
+    let req: LoginRequest;
+    if (typeof credentialsOrIdentifier === 'string') {
+      if (!password) {
+        throw new Error('Senha não fornecida para autenticação.');
       }
-
-      const res = await AuthService.login(req);
-
-      if (!res.success || !res.data) {
-        throw new Error(res.error?.message || 'Falha na autenticação');
-      }
-
-      const loggedUser = res.data.user;
-      setUser(loggedUser);
-      setToken(res.data.token);
-      setActiveRole(loggedUser.role || 'BUYER');
-      return loggedUser;
-    } finally {
-      setIsLoading(false);
+      req = {
+        identifier: credentialsOrIdentifier,
+        role: role || 'BUYER',
+        password,
+      };
+    } else {
+      req = credentialsOrIdentifier;
     }
+
+    const res = await AuthService.login(req);
+
+    if (!res.success || !res.data) {
+      throw new Error(res.error?.message || 'Falha na autenticação');
+    }
+
+    const loggedUser = res.data.user;
+    setUser(loggedUser);
+    setToken(res.data.token);
+    setActiveRole(loggedUser.role || 'BUYER');
+    return loggedUser;
   }, []);
 
   const register = useCallback(async (data: RegisterRequest | Partial<User>): Promise<User> => {
-    setIsLoading(true);
-    try {
-      let req: RegisterRequest;
-      if ('firstName' in data && 'phoneCode' in data) {
-        req = data as RegisterRequest;
-      } else {
-        req = {
-          country: data.country || 'GW',
-          role: (data.role as UserRole) || 'BUYER',
-          firstName: data.name?.split(' ')[0] || 'Usuário',
-          lastName: data.name?.split(' ').slice(1).join(' ') || 'Nusali',
-          email: data.email || '',
-          phone: data.phone || '955000000',
-          phoneCode: '+245',
-          password: 'Password123!',
-          termsAccepted: true,
-          privacyAccepted: true,
-        };
-      }
-
-      const res = await AuthService.register(req);
-
-      if (!res.success || !res.data) {
-        throw new Error(res.error?.message || 'Falha ao registrar conta');
-      }
-
-      const registeredUser = res.data.user;
-      setUser(registeredUser);
-      if (res.data.token) {
-        setToken(res.data.token);
-      } else {
-        setToken(null);
-      }
-      setActiveRole(registeredUser?.role || 'BUYER');
-      return registeredUser;
-    } finally {
-      setIsLoading(false);
+    // `isLoading` é SÓ da restauração inicial da sessão. Ligá-lo aqui fazia o GuestRoute trocar /login e /register por um
+    // spinner (desmontando a tela): uma falha de login/cadastro perdia a mensagem de erro e apagava o formulário.
+    // Quem chama (LoginPage/RegisterPage) já controla o próprio estado de carregamento.
+    let req: RegisterRequest;
+    if ('firstName' in data && 'phoneCode' in data) {
+      req = data as RegisterRequest;
+    } else {
+      req = {
+        country: data.country || 'GW',
+        role: (data.role as UserRole) || 'BUYER',
+        firstName: data.name?.split(' ')[0] || 'Usuário',
+        lastName: data.name?.split(' ').slice(1).join(' ') || 'Nusali',
+        email: data.email || '',
+        phone: data.phone || '955000000',
+        phoneCode: '+245',
+        password: 'Password123!',
+        termsAccepted: true,
+        privacyAccepted: true,
+      };
     }
+
+    const res = await AuthService.register(req);
+
+    if (!res.success || !res.data) {
+      throw new Error(res.error?.message || 'Falha ao registrar conta');
+    }
+
+    const registeredUser = res.data.user;
+    setUser(registeredUser);
+    if (res.data.token) {
+      setToken(res.data.token);
+    } else {
+      setToken(null);
+    }
+    setActiveRole(registeredUser?.role || 'BUYER');
+    return registeredUser;
   }, []);
 
   const logout = useCallback(async () => {
