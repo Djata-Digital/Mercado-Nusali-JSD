@@ -58,6 +58,7 @@ import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, or, inArray } from 'drizzle-orm';
 import { AuthRequest, requireAuth } from './modules/auth/authMiddleware.js';
 import { CatalogService } from './modules/catalog/catalogService.js';
+import { parseOptionalBooleanQuery } from './modules/catalog/catalogRoutes.js';
 import { isGlobalCatalogAdmin, canCreateRole, canAdministrativelyResetPassword } from './modules/auth/scopeService.js';
 import {
   resolveAdministrativeScope,
@@ -254,6 +255,21 @@ export function requireGlobalAdminForBanners(req: AuthRequest, res: Response, ne
   return next();
 }
 
+// C2.2 — mesma regra de requireGlobalAdmin (role EXATAMENTE GLOBAL_ADMIN, lida do JWT verificado), com a mensagem certa
+// para a moderação mínima de catálogo (retirar/devolver produto e pausar/reativar loja).
+export function requireGlobalAdminForCatalogModeration(req: AuthRequest, res: Response, next: NextFunction) {
+  if ((req.user?.role || '').toUpperCase() !== 'GLOBAL_ADMIN') {
+    return res.status(403).json({
+      success: false,
+      error: {
+        code: 'GLOBAL_ADMIN_REQUIRED',
+        message: 'Somente o Administrador Geral pode retirar ou devolver produtos e pausar ou reativar lojas.',
+      },
+    });
+  }
+  return next();
+}
+
 // Todas as rotas administrativas exigem sessão autenticada e um perfil interno.
 adminRouter.use(requireAuth, requireInternalStaff);
 
@@ -307,7 +323,7 @@ adminRouter.get('/products', (req: AuthRequest, res: Response, next: NextFunctio
   return next();
 }, async (req: AuthRequest, res: Response) => {
   try {
-    const { q, category, originCountryFilter, storeId, brand, minPrice, maxPrice, freeShipping, full, sort, page, limit } = req.query;
+    const { q, category, originCountryFilter, storeId, brand, minPrice, maxPrice, freeShipping, full, sort, page, limit, visibility } = req.query;
 
     const result = await CatalogService.getProducts({
       q: q as string,
@@ -321,11 +337,16 @@ adminRouter.get('/products', (req: AuthRequest, res: Response, next: NextFunctio
       brand: brand as string,
       minPrice: minPrice ? Number(minPrice) : undefined,
       maxPrice: maxPrice ? Number(maxPrice) : undefined,
-      freeShipping: freeShipping === 'true',
-      full: full === 'true',
+      // C2.2 — parâmetro ausente NÃO vira filtro "false" (antes `=== 'true'` escondia produtos com frete grátis/FULL).
+      freeShipping: parseOptionalBooleanQuery(freeShipping),
+      full: parseOptionalBooleanQuery(full),
       sort: sort as any,
       page: page ? Number(page) : 1,
       limit: limit ? Number(limit) : 24,
+      // C2.2 — visão administrativa: lista ativos E pausados (sem o filtro de visibilidade pública); `visibility` opcional
+      // (published|paused) só restringe. Definido aqui, nunca pelo cliente público.
+      adminView: true,
+      visibility: visibility === 'published' || visibility === 'paused' ? visibility : undefined,
     });
 
     return res.json({
@@ -338,6 +359,83 @@ adminRouter.get('/products', (req: AuthRequest, res: Response, next: NextFunctio
       success: false,
       error: { code: 'ADMIN_CATALOG_ERROR', message: err.message },
     });
+  }
+});
+
+// C2.2 — moderação MÍNIMA: retirar produto do ar / devolver. Sem coluna nova, sem fila de aprovação.
+// `is_active` é a fonte da visibilidade; `status` é mantido em sincronia (active|paused). O motivo (opcional) vai só
+// para a auditoria existente. Só os campos `status` e `reason` do corpo são lidos (sem mass assignment).
+adminRouter.patch('/products/:id/visibility', requireGlobalAdminForCatalogModeration, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const requested = typeof req.body?.status === 'string' ? req.body.status : '';
+    if (requested !== 'active' && requested !== 'paused') {
+      throw new AdminRequestError(400, 'Status inválido. Use "active" (publicado) ou "paused" (retirado do catálogo).');
+    }
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : '';
+
+    const [product] = await db.select().from(products).where(eq(products.id, req.params.id)).limit(1);
+    if (!product) throw new AdminRequestError(404, 'Produto não encontrado.');
+
+    const publish = requested === 'active';
+    await db.update(products).set({ isActive: publish, status: requested, updatedAt: new Date() }).where(eq(products.id, product.id));
+    await CatalogService.invalidateCatalogCaches([product.id]);
+    await writeRealAudit(req, publish ? 'admin.product.republished' : 'admin.product.unpublished', 'products', product.id, {
+      previousIsActive: product.isActive,
+      previousStatus: product.status,
+      isActive: publish,
+      status: requested,
+      sellerId: product.sellerId,
+      storeId: product.storeId,
+      reason: reason || null,
+    });
+
+    return res.json({
+      success: true,
+      message: publish ? 'Produto devolvido ao catálogo.' : 'Produto retirado do catálogo.',
+      data: { id: product.id, isActive: publish, status: requested },
+    });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// C2.2 — moderação MÍNIMA de loja: pausar / reativar (active|paused). Pausar a loja NÃO altera products.is_active: a
+// visibilidade pública é produto ativo + loja ativa + vendedor ativo (CatalogService.publicProductCondition), então
+// reativar a loja devolve exatamente os produtos que continuam ativos. Loja 'closed' não é reaberta por esta rota.
+adminRouter.patch('/stores/:id/status', requireGlobalAdminForCatalogModeration, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+
+    const requested = typeof req.body?.status === 'string' ? req.body.status : '';
+    if (requested !== 'active' && requested !== 'paused') {
+      throw new AdminRequestError(400, 'Status inválido. Use "active" (loja ativa) ou "paused" (loja pausada).');
+    }
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : '';
+
+    const [store] = await db.select().from(stores).where(eq(stores.id, req.params.id)).limit(1);
+    if (!store) throw new AdminRequestError(404, 'Loja não encontrada.');
+    if (store.status === 'closed') throw new AdminRequestError(409, 'Esta loja está encerrada e não pode ser alterada por esta ação.');
+
+    await db.update(stores).set({ status: requested, updatedAt: new Date() }).where(eq(stores.id, store.id));
+    await CatalogService.invalidateStoreCatalogCaches(store.id);
+    await writeRealAudit(req, requested === 'paused' ? 'admin.store.paused' : 'admin.store.reactivated', 'stores', store.id, {
+      previousStatus: store.status,
+      status: requested,
+      sellerId: store.sellerId,
+      reason: reason || null,
+    });
+
+    return res.json({
+      success: true,
+      message: requested === 'paused' ? 'Loja pausada: seus produtos saíram do catálogo.' : 'Loja reativada.',
+      data: { id: store.id, status: requested },
+    });
+  } catch (error) {
+    return sendAdminError(res, error);
   }
 });
 

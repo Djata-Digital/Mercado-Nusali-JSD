@@ -69,7 +69,7 @@ import {
 // FASE D16-H2 — computeLiveStockAndSales reaproveitada para o mesmo cálculo
 // (onHand-reserved) do lado de produto SIMPLES (sem variante), mesma fonte
 // única de verdade do catálogo — nunca uma segunda fórmula divergente.
-import { computeLiveVariantStock, computeLiveStockAndSales, recomputeProductReviewAggregates, lockProductRowForReviewMutation } from './modules/catalog/catalogService.js';
+import { computeLiveVariantStock, computeLiveStockAndSales, recomputeProductReviewAggregates, lockProductRowForReviewMutation, isProductPubliclyVisible } from './modules/catalog/catalogService.js';
 import { isOwnedPublicObjectUrl } from './infra/storage.js';
 import { normalizeCouponCode, evaluateCouponForCartPreview } from './modules/coupons/couponService.js';
 
@@ -1359,6 +1359,10 @@ export async function addItemToCartForUser(
     if (prodRows.length === 0) {
       throw new CartOperationError(404, 'PRODUCT_NOT_FOUND', 'Produto não encontrado no catálogo.');
     }
+    // C2.2 — produto não público (pausado, de loja pausada ou de vendedor não ativo) não entra no carrinho.
+    if (!(await isProductPubliclyVisible(productId, db))) {
+      throw new CartOperationError(404, 'PRODUCT_NOT_FOUND', 'Produto não encontrado no catálogo.');
+    }
 
     const prod = prodRows[0];
     if (!prod.currency || !prod.countryCode) {
@@ -1458,6 +1462,10 @@ export async function addItemsBatchForUser(
       for (const it of items) {
         const prodRows = await tx.select().from(products).where(eq(products.id, it.productId)).limit(1);
         if (prodRows.length === 0) {
+          throw new CartOperationError(404, 'PRODUCT_NOT_FOUND', `Produto "${it.productId}" não encontrado no catálogo.`);
+        }
+        // C2.2 — mesma regra do item único: produto não público não entra no carrinho (tudo ou nada no batch).
+        if (!(await isProductPubliclyVisible(it.productId, tx))) {
           throw new CartOperationError(404, 'PRODUCT_NOT_FOUND', `Produto "${it.productId}" não encontrado no catálogo.`);
         }
         const prod = prodRows[0];

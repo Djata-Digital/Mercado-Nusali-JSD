@@ -11,8 +11,17 @@ export class AdminApi {
   // targetCountriesJson) — NUNCA o catálogo público (/products). O único
   // filtro aceito aqui é `originCountryFilter`, um conceito administrativo
   // por país de ORIGEM, sem nenhuma relação com destino de comprador.
-  static async getProducts(params?: { originCountryFilter?: string }): Promise<ApiResponse<any[]>> {
+  static async getProducts(params?: { originCountryFilter?: string; visibility?: 'published' | 'paused'; limit?: number }): Promise<ApiResponse<any[]>> {
     return apiClient.get('/admin/products', { params });
+  }
+
+  // C2.2 — moderação mínima (só Administrador Geral, auditada): retirar/devolver produto e pausar/reativar loja.
+  static async setProductStatus(id: string, status: 'active' | 'paused', reason?: string): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/products/${encodeURIComponent(id)}/visibility`, { status, reason });
+  }
+
+  static async setStoreStatus(id: string, status: 'active' | 'paused', reason?: string): Promise<ApiResponse<any>> {
+    return apiClient.patch(`/admin/stores/${encodeURIComponent(id)}/status`, { status, reason });
   }
 
   static async getStats(): Promise<ApiResponse<any>> {

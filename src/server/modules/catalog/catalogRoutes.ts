@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { CatalogService } from './catalogService.js';
+import { CatalogService, isProductPubliclyVisible } from './catalogService.js';
 import { requireAuth, requireRole, AuthRequest, getOptionalAuthUser } from '../auth/authMiddleware.js';
 import { isGlobalCatalogAdmin } from '../auth/scopeService.js';
 import { getDb } from '../../../db/index.js';
@@ -40,6 +40,14 @@ export function resolveDestinationCountryFromRequest(req: Request, explicit?: st
 // nomeadas para serem registrados diretamente em apiRouter (api.ts), na
 // raiz de /api/v1, sem o prefixo /catalog. Não ficam mais registrados em
 // catalogRouter — um recurso público, um único caminho reachable.
+// C2.2 — query booleana opcional: 'true' => true, 'false' => false, AUSENTE/qualquer outra coisa => undefined (sem filtro).
+// Antes, `x === 'true'` transformava a ausência do parâmetro em um filtro `= false` que escondia produtos com frete grátis/FULL.
+export function parseOptionalBooleanQuery(v: unknown): boolean | undefined {
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  return undefined;
+}
+
 export async function getProductsHandler(req: Request, res: Response) {
   try {
     const {
@@ -90,8 +98,8 @@ export async function getProductsHandler(req: Request, res: Response) {
       brand: brand as string,
       minPrice: minPrice ? Number(minPrice) : undefined,
       maxPrice: maxPrice ? Number(maxPrice) : undefined,
-      freeShipping: freeShipping === 'true',
-      full: full === 'true',
+      freeShipping: parseOptionalBooleanQuery(freeShipping),
+      full: parseOptionalBooleanQuery(full),
       sort: sort as any,
       page: page ? Number(page) : 1,
       limit: limit ? Number(limit) : 24,
@@ -114,7 +122,8 @@ export async function getProductByIdHandler(req: Request, res: Response) {
   try {
     const explicitDestination = typeof req.query.destinationCountry === 'string' ? req.query.destinationCountry : undefined;
     const destinationCountry = resolveDestinationCountryFromRequest(req, explicitDestination);
-    const product = await CatalogService.getProductById(req.params.id, destinationCountry);
+    // C2.2 — publicOnly: produto pausado / de loja pausada / de vendedor não ativo => 404 PRODUCT_NOT_FOUND.
+    const product = await CatalogService.getProductById(req.params.id, destinationCountry, undefined, { publicOnly: true });
     if (!product) {
       return res.status(404).json({
         success: false,
@@ -268,8 +277,8 @@ export async function getProductQuestionsHandler(req: Request, res: Response) {
     if (!db) return res.status(503).json({ success: false, error: { code: 'SERVER_ERROR', message: 'Banco de dados indisponível.' } });
 
     const { id } = req.params;
-    const [product] = await db.select({ id: products.id }).from(products).where(eq(products.id, id)).limit(1);
-    if (!product) {
+    // C2.2 — só produto PÚBLICO expõe/recebe perguntas (pausado, de loja pausada ou de vendedor não ativo => 404).
+    if (!(await isProductPubliclyVisible(id))) {
       return res.status(404).json({ success: false, error: { code: 'PRODUCT_NOT_FOUND', message: 'Produto não encontrado.' } });
     }
 
@@ -335,8 +344,8 @@ export async function createProductQuestionHandler(req: AuthRequest, res: Respon
     if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
 
     const { id } = req.params;
-    const [product] = await db.select({ id: products.id }).from(products).where(eq(products.id, id)).limit(1);
-    if (!product) {
+    // C2.2 — só produto PÚBLICO expõe/recebe perguntas (pausado, de loja pausada ou de vendedor não ativo => 404).
+    if (!(await isProductPubliclyVisible(id))) {
       return res.status(404).json({ success: false, error: { code: 'PRODUCT_NOT_FOUND', message: 'Produto não encontrado.' } });
     }
 

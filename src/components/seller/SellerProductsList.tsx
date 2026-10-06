@@ -33,8 +33,13 @@ interface SellerProductsListProps {
   onUpdateProduct: (product: Product) => void;
   onEditProduct?: (product: Product) => void;
   onDeleteProduct?: (id: string) => void;
+  // C2.2 — publicar/pausar de verdade (PATCH /seller/products/:id/status). Devolve quantos foram alterados.
+  onSetProductsPublished: (ids: string[], published: boolean) => Promise<number>;
   showToast: (msg: string) => void;
 }
+
+// C2.2 — "publicado" = products.is_active (fonte da visibilidade pública). Linhas legadas sem o campo contam como publicadas.
+const isPublished = (p: Product) => p.isActive !== false;
 
 export const SellerProductsList: React.FC<SellerProductsListProps> = ({
   products,
@@ -44,11 +49,13 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
   onUpdateProduct,
   onEditProduct,
   onDeleteProduct,
+  onSetProductsPublished,
   showToast,
 }) => {
   const [activeTab, setActiveTab] = useState<
-    'todos' | 'aprovados' | 'pendentes' | 'pausados' | 'sem_estoque' | 'rascunhos'
+    'todos' | 'publicados' | 'pausados' | 'sem_estoque'
   >('todos');
+  const [busyIds, setBusyIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -81,7 +88,8 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
     }
 
     if (activeTab === 'sem_estoque') return p.stock === 0;
-    if (activeTab === 'pausados') return p.stock > 0 && p.stock < 3; // simulated paused state
+    if (activeTab === 'publicados') return isPublished(p);
+    if (activeTab === 'pausados') return !isPublished(p);
     return true;
   });
 
@@ -101,6 +109,37 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
     } else {
       setSelectedIds([...selectedIds, id]);
     }
+  };
+
+  // C2.2 — pausar/republicar (individual e em lote) chamam o servidor; o toast só afirma o que realmente aconteceu.
+  const handleSetPublished = async (ids: string[], published: boolean) => {
+    if (ids.length === 0 || busyIds.length > 0) return;
+    setBusyIds(ids);
+    try {
+      const changed = await onSetProductsPublished(ids, published);
+      if (changed === ids.length) {
+        showToast(
+          published
+            ? ids.length === 1 ? 'Anúncio publicado: já aparece na loja.' : `${ids.length} anúncios publicados.`
+            : ids.length === 1 ? 'Anúncio pausado: não aparece mais na loja.' : `${ids.length} anúncios pausados.`
+        );
+      } else if (changed === 0) {
+        showToast(published ? 'Não foi possível publicar o anúncio.' : 'Não foi possível pausar o anúncio.');
+      } else {
+        showToast(`${changed} de ${ids.length} anúncios foram alterados; os demais falharam. Tente novamente.`);
+      }
+    } finally {
+      setBusyIds([]);
+      setSelectedIds([]);
+    }
+  };
+
+  const openInStore = (p: Product) => {
+    if (!isPublished(p)) {
+      showToast('Anúncio pausado: publique-o novamente para visualizá-lo na loja.');
+      return;
+    }
+    onOpenProductDetail(p.id);
   };
 
   const handleQuickStockUpdate = (p: Product, delta: number) => {
@@ -135,9 +174,8 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
         <div className="flex items-center gap-2 text-xs font-bold">
           {[
             { id: 'todos', label: 'Todos os Anúncios', count: products.length },
-            { id: 'aprovados', label: 'Ativos / Aprovados', count: products.length },
-            { id: 'pendentes', label: 'Em Análise (0)' },
-            { id: 'pausados', label: 'Pausados' },
+            { id: 'publicados', label: 'Publicados', count: products.filter(isPublished).length },
+            { id: 'pausados', label: 'Pausados', count: products.filter((p) => !isPublished(p)).length },
             { id: 'sem_estoque', label: 'Sem Estoque', count: products.filter((p) => p.stock === 0).length },
           ].map((t) => (
             <button
@@ -197,13 +235,18 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
       {selectedIds.length > 0 && (
         <div className="bg-slate-900 text-white p-3 rounded-2xl flex items-center justify-between text-xs animate-fadeIn">
           <span className="font-bold">{selectedIds.length} produtos selecionados</span>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap justify-end">
             <button
-              onClick={() => {
-                showToast(`${selectedIds.length} anúncios pausados.`);
-                setSelectedIds([]);
-              }}
-              className="bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-xl font-bold flex items-center gap-1"
+              onClick={() => handleSetPublished(selectedIds, true)}
+              disabled={busyIds.length > 0}
+              className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 px-3 py-1.5 rounded-xl font-bold flex items-center gap-1"
+            >
+              <PlayCircle className="w-3.5 h-3.5" /> Republicar Selecionados
+            </button>
+            <button
+              onClick={() => handleSetPublished(selectedIds, false)}
+              disabled={busyIds.length > 0}
+              className="bg-slate-800 hover:bg-slate-700 disabled:opacity-50 px-3 py-1.5 rounded-xl font-bold flex items-center gap-1"
             >
               <PauseCircle className="w-3.5 h-3.5" /> Pausar Selecionados
             </button>
@@ -265,7 +308,7 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
                         </div>
                         <div className="truncate">
                           <button
-                            onClick={() => onOpenProductDetail(p.id)}
+                            onClick={() => openInStore(p)}
                             className="font-bold text-gray-900 hover:text-emerald-700 text-left line-clamp-1 hover:underline"
                           >
                             {p.title}
@@ -337,15 +380,22 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
                     </td>
 
                     <td className="p-3 text-center">
-                      {p.stock > 0 ? (
-                        <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Ativo
-                        </span>
-                      ) : (
-                        <span className="bg-red-100 text-red-800 text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
-                          <AlertTriangle className="w-3 h-3 text-red-600" /> Esgotado
-                        </span>
-                      )}
+                      <div className="flex flex-col items-center gap-1">
+                        {isPublished(p) ? (
+                          <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Publicado
+                          </span>
+                        ) : (
+                          <span className="bg-gray-200 text-gray-700 text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                            <PauseCircle className="w-3 h-3 text-gray-500" /> Pausado
+                          </span>
+                        )}
+                        {p.stock === 0 && (
+                          <span className="bg-red-100 text-red-800 text-[10px] font-bold px-2 py-0.5 rounded-full inline-flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3 text-red-600" /> Esgotado
+                          </span>
+                        )}
+                      </div>
                     </td>
 
                     <td className="p-3 text-right">
@@ -367,11 +417,20 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
                         </button>
 
                         <button
-                          onClick={() => onOpenProductDetail(p.id)}
-                          className="p-1.5 hover:bg-gray-100 text-gray-600 hover:text-gray-900 rounded-lg transition cursor-pointer"
-                          title="Visualizar na Loja"
+                          onClick={() => openInStore(p)}
+                          className={`p-1.5 rounded-lg transition cursor-pointer ${isPublished(p) ? 'hover:bg-gray-100 text-gray-600 hover:text-gray-900' : 'text-gray-300'}`}
+                          title={isPublished(p) ? 'Visualizar na Loja' : 'Anúncio pausado: não aparece na loja'}
                         >
                           <Eye className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          onClick={() => handleSetPublished([p.id], !isPublished(p))}
+                          disabled={busyIds.length > 0}
+                          className={`p-1.5 rounded-lg transition cursor-pointer disabled:opacity-50 ${isPublished(p) ? 'hover:bg-amber-50 text-gray-600 hover:text-amber-700' : 'hover:bg-emerald-50 text-gray-600 hover:text-emerald-700'}`}
+                          title={isPublished(p) ? 'Pausar anúncio (sai da loja, continua no painel)' : 'Republicar anúncio'}
+                        >
+                          {isPublished(p) ? <PauseCircle className="w-4 h-4" /> : <PlayCircle className="w-4 h-4" />}
                         </button>
 
                         {onEditProduct && (
@@ -413,7 +472,7 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
               </div>
               <div>
                 <h3 className="font-black text-gray-900 text-base">Excluir Produto</h3>
-                <p className="text-xs text-gray-500">Esta ação removerá o produto do catálogo da loja.</p>
+                <p className="text-xs text-gray-500">Esta ação removerá o produto do catálogo da loja. Para só tirá-lo da loja sem apagar, use Pausar.</p>
               </div>
             </div>
 

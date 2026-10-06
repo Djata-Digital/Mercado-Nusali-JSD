@@ -12,8 +12,17 @@ export const AdminService = {
   },
 
   // FASE D16-G1.1 — Admin Global Catalog Isolation. Ver AdminApi.getProducts.
-  async getProducts(params?: { originCountryFilter?: string }): Promise<ApiResponse<any[]>> {
+  async getProducts(params?: { originCountryFilter?: string; visibility?: 'published' | 'paused'; limit?: number }): Promise<ApiResponse<any[]>> {
     return AdminApi.getProducts(params);
+  },
+
+  // C2.2 — moderação mínima de catálogo (ver AdminApi).
+  async setProductStatus(id: string, status: 'active' | 'paused', reason?: string): Promise<ApiResponse<any>> {
+    return AdminApi.setProductStatus(id, status, reason);
+  },
+
+  async setStoreStatus(id: string, status: 'active' | 'paused', reason?: string): Promise<ApiResponse<any>> {
+    return AdminApi.setStoreStatus(id, status, reason);
   },
 
   // Users & Staff

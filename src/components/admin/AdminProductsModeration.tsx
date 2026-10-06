@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Package, Loader2, AlertCircle, ImageOff } from 'lucide-react';
+import { Package, Loader2, AlertCircle, ImageOff, PauseCircle, PlayCircle, X } from 'lucide-react';
 import { AdminService } from '../../services/adminService';
 import { useCountries } from '../../hooks/useCountries';
 
@@ -27,14 +27,22 @@ export const AdminProductsModeration: React.FC<AdminProductsModerationProps> = (
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [originFilter, setOriginFilter] = useState<string>('ALL');
+  // C2.2 — a lista administrativa mostra publicados E pausados; o filtro só restringe a visão.
+  const [visibilityFilter, setVisibilityFilter] = useState<'all' | 'published' | 'paused'>('all');
+  const [pending, setPending] = useState<{ product: any; next: 'active' | 'paused' } | null>(null);
+  const [reason, setReason] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   const { data: operationalCountries } = useCountries();
 
-  const fetchProducts = async (origin: string) => {
+  const fetchProducts = async (origin: string, visibility: 'all' | 'published' | 'paused' = visibilityFilter) => {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await AdminService.getProducts(origin === 'ALL' ? undefined : { originCountryFilter: origin });
+      const params: { originCountryFilter?: string; visibility?: 'published' | 'paused'; limit?: number } = { limit: 100 };
+      if (origin !== 'ALL') params.originCountryFilter = origin;
+      if (visibility !== 'all') params.visibility = visibility;
+      const res = await AdminService.getProducts(params);
       if (res.success && Array.isArray(res.data)) {
         setProducts(res.data);
       } else {
@@ -57,9 +65,29 @@ export const AdminProductsModeration: React.FC<AdminProductsModerationProps> = (
   };
 
   useEffect(() => {
-    fetchProducts(originFilter);
+    fetchProducts(originFilter, visibilityFilter);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [originFilter]);
+  }, [originFilter, visibilityFilter]);
+
+  const confirmChange = async () => {
+    if (!pending || isSaving) return;
+    setIsSaving(true);
+    try {
+      const res = await AdminService.setProductStatus(pending.product.id, pending.next, reason.trim() || undefined);
+      if (res.success) {
+        showToast(res.message || (pending.next === 'paused' ? 'Produto retirado do catálogo.' : 'Produto devolvido ao catálogo.'));
+        setPending(null);
+        setReason('');
+        await fetchProducts(originFilter, visibilityFilter);
+      } else {
+        showToast(res.message || 'Não foi possível alterar o produto.');
+      }
+    } catch (err: any) {
+      showToast(err?.response?.data?.error?.message || err?.message || 'Não foi possível alterar o produto.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const originOptions = useMemo(() => operationalCountries || [], [operationalCountries]);
 
@@ -72,11 +100,24 @@ export const AdminProductsModeration: React.FC<AdminProductsModerationProps> = (
             Catálogo Administrativo Global
           </h1>
           <p className="text-xs text-gray-500 mt-1">
-            Todos os produtos da plataforma, de qualquer origem e escopo de venda — independente do país de destino ou do filtro comercial do catálogo público.
+            Todos os produtos da plataforma (publicados e pausados), de qualquer origem e escopo de venda — independente do país de destino ou do filtro comercial do catálogo público. Retirar um produto do catálogo não o apaga.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <label htmlFor="admin-visibility-filter" className="text-[11px] font-bold text-gray-500 uppercase">
+            Situação
+          </label>
+          <select
+            id="admin-visibility-filter"
+            value={visibilityFilter}
+            onChange={(e) => setVisibilityFilter(e.target.value as 'all' | 'published' | 'paused')}
+            className="text-xs font-bold border border-gray-200 rounded-lg px-3 py-2 bg-white text-gray-800"
+          >
+            <option value="all">Todos</option>
+            <option value="published">Publicados</option>
+            <option value="paused">Pausados</option>
+          </select>
           <label htmlFor="admin-origin-filter" className="text-[11px] font-bold text-gray-500 uppercase">
             País de origem
           </label>
@@ -123,6 +164,7 @@ export const AdminProductsModeration: React.FC<AdminProductsModerationProps> = (
                   <th className="p-3">Preço</th>
                   <th className="p-3">Escopo</th>
                   <th className="p-3">Status</th>
+                  <th className="p-3 text-right">Ação</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -157,8 +199,25 @@ export const AdminProductsModeration: React.FC<AdminProductsModerationProps> = (
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${
                         p.isActive === false ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'
                       }`}>
-                        {String(p.status || (p.isActive === false ? 'inactive' : 'active')).toUpperCase()}
+                        {p.isActive === false ? 'PAUSADO' : 'PUBLICADO'}
                       </span>
+                    </td>
+                    <td className="p-3 text-right">
+                      {p.isActive === false ? (
+                        <button
+                          onClick={() => { setPending({ product: p, next: 'active' }); setReason(''); }}
+                          className="inline-flex items-center gap-1 font-bold text-emerald-700 hover:text-emerald-900 cursor-pointer whitespace-nowrap"
+                        >
+                          <PlayCircle className="w-3.5 h-3.5" /> Devolver ao catálogo
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => { setPending({ product: p, next: 'paused' }); setReason(''); }}
+                          className="inline-flex items-center gap-1 font-bold text-amber-700 hover:text-amber-900 cursor-pointer whitespace-nowrap"
+                        >
+                          <PauseCircle className="w-3.5 h-3.5" /> Retirar do catálogo
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -167,6 +226,60 @@ export const AdminProductsModeration: React.FC<AdminProductsModerationProps> = (
           </div>
         )}
       </div>
+
+      {pending && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-gray-100 space-y-4">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+              <h3 className="font-black text-base text-gray-900 flex items-center gap-2">
+                {pending.next === 'paused' ? <PauseCircle className="w-5 h-5 text-amber-600" /> : <PlayCircle className="w-5 h-5 text-emerald-600" />}
+                {pending.next === 'paused' ? 'Retirar do catálogo' : 'Devolver ao catálogo'}
+              </h3>
+              <button onClick={() => setPending(null)} className="p-1 text-gray-400 hover:text-gray-600 rounded-lg" aria-label="Fechar">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-600">
+              {pending.next === 'paused'
+                ? <>O produto <strong>{pending.product.title}</strong> deixa de aparecer para os compradores e continua no painel do vendedor. Nada é apagado.</>
+                : <>O produto <strong>{pending.product.title}</strong> volta a aparecer no catálogo (se a loja e o vendedor estiverem ativos).</>}
+            </p>
+
+            <div className="text-xs">
+              <label htmlFor="product-status-reason" className="block font-bold text-gray-700 mb-1">Motivo (opcional, fica só na auditoria):</label>
+              <textarea
+                id="product-status-reason"
+                rows={3}
+                maxLength={500}
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full p-2.5 border border-gray-300 rounded-xl font-bold"
+              />
+            </div>
+
+            <div className="pt-3 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPending(null)}
+                className="px-4 py-2 border border-gray-300 font-bold text-gray-700 rounded-xl hover:bg-gray-50 text-xs"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={confirmChange}
+                disabled={isSaving}
+                className={`px-5 py-2 text-white font-extrabold rounded-xl shadow-md text-xs disabled:opacity-60 ${
+                  pending.next === 'paused' ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-600 hover:bg-emerald-700'
+                }`}
+              >
+                {isSaving ? 'Salvando…' : pending.next === 'paused' ? 'Retirar do catálogo' : 'Devolver ao catálogo'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

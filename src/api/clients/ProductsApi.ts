@@ -46,10 +46,6 @@ export class ProductsApi {
     return apiClient.delete(`/products/${id}`);
   }
 
-  static async search(query: string, filters?: ProductFilters): Promise<ApiResponse<PaginatedResponse<any>>> {
-    return apiClient.get('/products/search', { params: { q: query, ...filters } });
-  }
-
   static async filters(): Promise<ApiResponse<any>> {
     return apiClient.get('/products/filters');
   }

@@ -214,6 +214,10 @@ export interface Product {
   sellerId?: string | null;
   countryCode?: string;
   categoryId?: string | null;
+  // C2.2 — publicação do anúncio no painel do vendedor (GET /seller/products devolve a linha crua):
+  // isActive = visível no catálogo público; status = 'active' | 'paused' (mantido em sincronia).
+  isActive?: boolean;
+  status?: string;
   attributesJson?: Record<string, string>;
   storeName?: string;
   isDigitalProduct?: boolean;

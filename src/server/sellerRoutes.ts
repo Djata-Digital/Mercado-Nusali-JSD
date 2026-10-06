@@ -71,7 +71,7 @@ import { resolveCarrierNames, pickCarrierName } from './modules/logistics/carrie
 import { storageService } from './infra/storage.js';
 import { requestSellerPayout, PayoutValidationError } from './modules/wallet/payoutService.js';
 import { postSellerDisputeMessage, DisputeMessageValidationError } from './modules/disputes/disputeMessageService.js';
-import { computeLiveStockAndSales } from './modules/catalog/catalogService.js';
+import { computeLiveStockAndSales, CatalogService } from './modules/catalog/catalogService.js';
 import {
   getSellerOrderRows,
   mapOperationalStatus,
@@ -2024,12 +2024,18 @@ sellerRouter.get('/products', async (req: AuthRequest, res: Response) => {
   }
 });
 
-sellerRouter.get('/products/:id', async (req: Request, res: Response) => {
+sellerRouter.get('/products/:id', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     const { id } = req.params;
     if (db) {
-      const rows = await db.select().from(products).where(eq(products.id, id)).limit(1);
+      // C2.2 — só o DONO lê o detalhe completo (inclusive produto pausado/privado). Antes, qualquer usuário logado
+      // (comprador incluso) lia a linha crua de qualquer produto. Não-dono recebe 404 (não confirma que o id existe).
+      const seller = await resolveSeller(req);
+      if (!seller) {
+        return res.status(403).json({ success: false, error: { code: 'SELLER_PROFILE_NOT_FOUND', message: 'Perfil de vendedor não encontrado para este usuário.' } });
+      }
+      const rows = await db.select().from(products).where(and(eq(products.id, id), eq(products.sellerId, seller.id))).limit(1);
       if (rows.length > 0) {
         const p = rows[0];
         const variants = await db.select().from(productVariants).where(eq(productVariants.productId, id));
@@ -2132,7 +2138,8 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     const fieldsToUpdate: any = { updatedAt: new Date() };
     if (updates.title !== undefined) fieldsToUpdate.title = updates.title;
     if (updates.price !== undefined) fieldsToUpdate.price = String(updates.price);
-    if (updates.status !== undefined) fieldsToUpdate.status = updates.status;
+    // C2.2 — `status`/`isActive` NÃO são editáveis por esta rota (antes `status` aceitava qualquer texto e divergia de
+    // `is_active`): publicação/pausa só por PATCH /products/:id/status (lista fechada active|paused, grava os dois campos).
     if (updates.description !== undefined) fieldsToUpdate.description = updates.description;
     if (updates.image !== undefined) fieldsToUpdate.image = updates.image;
     if (updates.brand !== undefined) fieldsToUpdate.brand = updates.brand;
@@ -2350,7 +2357,8 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     // Sem isso, GET /products/:id (CatalogService.getProductById) continuava
     // servindo o cache antigo por até 120s depois do vendedor mudar o
     // escopo/países de destino — a mudança "não respeitava imediatamente".
-    await delCache(`product:${id}`);
+    // C2.2 — também as listagens (`catalog:products:*`, 60 s), que nunca eram invalidadas.
+    await CatalogService.invalidateCatalogCaches([id]);
     return res.json({ success: true, message: 'Produto atualizado com sucesso!' });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
@@ -2369,6 +2377,7 @@ sellerRouter.delete('/products/:id', async (req: AuthRequest, res: Response) => 
 
     await db.delete(products).where(eq(products.id, req.params.id));
     await delCache('products_list_all');
+    await CatalogService.invalidateCatalogCaches([req.params.id]);
     return res.json({ success: true, message: 'Produto excluído do catálogo.' });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
@@ -2403,9 +2412,20 @@ sellerRouter.patch('/products/:id/status', async (req: AuthRequest, res: Respons
       return res.status(check.status).json({ success: false, error: { code: check.code, message: check.error } });
     }
 
-    const { status } = req.body;
-    await db.update(products).set({ status, updatedAt: new Date() }).where(eq(products.id, req.params.id));
-    return res.json({ success: true, message: `Status do anúncio alterado para: ${status}` });
+    // C2.2 — publicar/pausar DE VERDADE. Lista fechada (active|paused); `is_active` é a fonte da visibilidade pública e
+    // `status` é mantido em sincronia. Qualquer outro valor => 400. Corpo extra é ignorado (nada além destes 2 campos é gravado).
+    const requested = typeof req.body?.status === 'string' ? req.body.status : '';
+    if (requested !== 'active' && requested !== 'paused') {
+      return res.status(400).json({ success: false, error: { code: 'PRODUCT_STATUS_INVALID', message: 'Status inválido. Use "active" (publicado) ou "paused" (pausado).' } });
+    }
+    const publish = requested === 'active';
+    await db.update(products).set({ isActive: publish, status: requested, updatedAt: new Date() }).where(eq(products.id, req.params.id));
+    await CatalogService.invalidateCatalogCaches([req.params.id]);
+    return res.json({
+      success: true,
+      message: publish ? 'Produto publicado no catálogo.' : 'Produto pausado: não aparece mais para os compradores.',
+      data: { id: req.params.id, isActive: publish, status: requested },
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message });
   }

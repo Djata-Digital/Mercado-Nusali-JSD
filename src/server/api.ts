@@ -17,7 +17,6 @@ import { products, regions, warehouses, orders, orderItems } from '../db/schema.
 import { getCache, setCache, delCache, getRedisHealth } from '../db/redis.js';
 import { runDatabaseInitAndSeed } from '../db/seed.js';
 import { desc } from 'drizzle-orm';
-import { searchProductsIntelligent } from '../utils/searchEngine.js';
 import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { resolveShippingPreview, resolveCartShippingPreview } from './modules/shipping/shippingPreviewService.js';
@@ -528,35 +527,9 @@ export const inMemoryStore = {
 // duplicada, uma única fonte autoritativa (CatalogService).
 apiRouter.get('/products', getProductsHandler);
 
-apiRouter.get('/products/search', async (req: Request, res: Response) => {
-  await ensureDbInitialized();
-  const query = (req.query.q as string) || '';
-
-  let allProductsList: any[] = inMemoryStore.products;
-
-  try {
-    const isConnected = await checkDbConnection();
-    if (isConnected) {
-      const db = getDb();
-      if (db) {
-        allProductsList = await db.select().from(products).orderBy(desc(products.createdAt));
-      }
-    }
-  } catch {
-    // DB fallback
-  }
-
-  const searchResult = searchProductsIntelligent(allProductsList, query);
-
-  return res.json({
-    success: true,
-    query,
-    total: searchResult.results.length,
-    suggestedCorrection: searchResult.suggestedCorrection,
-    synonymApplied: searchResult.synonymApplied,
-    data: searchResult.results,
-  });
-});
+// C2.2 — REMOVIDO o handler legado GET /products/search: lia toda a tabela `products` sem nenhum filtro de visibilidade
+// (expunha produto pausado/de loja pausada) e não tinha consumidor (a busca real é GET /products?q= via CatalogService).
+// Um GET /products/search agora cai em /products/:id e responde 404 PRODUCT_NOT_FOUND.
 
 // Correção crítica (rota duplicada de produtos): mesmo motivo do GET
 // /products acima — handler cru removido, substituído pela MESMA

@@ -1,6 +1,6 @@
 import { getDb } from '../../../db/index.js';
 import { products, categories, brands, productVariants, productImages, productAttributes, reviews, reviewImages, sellers, stores, inventory, orderItems, orders, countries } from '../../../db/schema.js';
-import { getCache, setCache, delCache } from '../../../db/redis.js';
+import { getCache, setCache, delCache, delCacheByPattern } from '../../../db/redis.js';
 import { eq, ne, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { isProductAvailableForCountry, eligibilityReason } from './productEligibilityService.js';
@@ -187,6 +187,28 @@ export async function recomputeProductReviewAggregates(
   return { rating, reviewsCount };
 }
 
+/**
+ * Condição ÚNICA de visibilidade pública de produto (C2.2): produto ativo + loja ativa + vendedor ativo.
+ * `products.is_active` é o interruptor de publicação (vendedor/admin); pausar a LOJA ou suspender o VENDEDOR esconde os
+ * produtos sem alterar `products.is_active` — reativar a loja devolve só os que continuam ativos. Produto sem loja/vendedor
+ * (legado) não é público. A elegibilidade por país continua sendo um filtro à parte.
+ */
+export function publicProductCondition() {
+  return and(
+    eq(products.isActive, true),
+    // loja ativa E o vendedor DONO DA LOJA ativo (a loja é a autoridade do vendedor do produto; PATCH já exige store.sellerId = seller)
+    sql`EXISTS (SELECT 1 FROM ${stores} INNER JOIN ${sellers} ON ${sellers.id} = ${stores.sellerId} WHERE ${stores.id} = ${products.storeId} AND ${stores.status} = 'active' AND ${sellers.status} = 'active')`,
+  )!;
+}
+
+/** true se o produto existe E é público (mesma condição do catálogo). Sempre lê o banco (nunca o cache). */
+export async function isProductPubliclyVisible(productId: string, executor?: any): Promise<boolean> {
+  const db = executor ?? getDb();
+  if (!db || !productId) return false;
+  const rows = await db.select({ id: products.id }).from(products).where(and(eq(products.id, productId), publicProductCondition())).limit(1);
+  return rows.length > 0;
+}
+
 export interface ProductQueryFilters {
   q?: string;
   category?: string;
@@ -213,6 +235,11 @@ export interface ProductQueryFilters {
   sort?: 'price_asc' | 'price_desc' | 'rating_desc' | 'sales_desc' | 'newest';
   page?: number;
   limit?: number;
+  // C2.2 — SOMENTE para a rota administrativa (GET /admin/products, global admin): lista ativos E pausados, sem o filtro
+  // de visibilidade pública. NUNCA é lido de querystring pública (os handlers públicos não o repassam).
+  adminView?: boolean;
+  // Só vale com adminView: restringe a 'published' (is_active=true) ou 'paused' (is_active=false); ausente = todos.
+  visibility?: 'published' | 'paused';
 }
 
 export class CatalogService {
@@ -242,7 +269,15 @@ export class CatalogService {
       };
     }
 
-    const conditions = [eq(products.isActive, true)];
+    // Catálogo público: produto ativo + loja ativa + vendedor ativo (publicProductCondition). Visão administrativa
+    // (adminView) não passa pelo filtro público e pode restringir por visibility.
+    const conditions: any[] = [];
+    if (filters.adminView) {
+      if (filters.visibility === 'published') conditions.push(eq(products.isActive, true));
+      else if (filters.visibility === 'paused') conditions.push(eq(products.isActive, false));
+    } else {
+      conditions.push(publicProductCondition());
+    }
 
     if (filters.q) {
       const searchTerm = `%${filters.q.trim()}%`;
@@ -326,7 +361,7 @@ export class CatalogService {
       orderByClause = desc(products.rating);
     }
 
-    const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];
+    const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];  // vazio (admin, sem filtros) => sem WHERE
 
     const [items, totalResult] = await Promise.all([
       db.select().from(products).where(whereClause).orderBy(orderByClause).limit(limit).offset(offset),
@@ -403,13 +438,17 @@ export class CatalogService {
     const rows = await db
       .select({ id: products.id, categoryId: products.categoryId, storeId: products.storeId })
       .from(products)
-      .where(eq(products.id, id))
+      // C2.2 — só produto PÚBLICO tem recomendações (produto pausado/de loja pausada => null => 404 no handler).
+      .where(and(eq(products.id, id), publicProductCondition()))
       .limit(1);
 
     return rows[0] ?? null;
   }
 
-  static async getProductById(id: string, destinationCountry?: string, executor?: any) {
+  static async getProductById(id: string, destinationCountry?: string, executor?: any, opts?: { publicOnly?: boolean }) {
+    // C2.2 — rota pública: produto pausado, de loja pausada ou de vendedor não ativo responde "não encontrado".
+    // A checagem lê o banco (nunca o cache), então um cache ainda quente nunca mantém um produto não público visível.
+    if (opts?.publicOnly && !(await isProductPubliclyVisible(id, executor))) return null;
     const cacheKey = `product:${id}`;
     const cached = executor ? null : await getCache<any>(cacheKey);
     if (cached) {
@@ -590,6 +629,22 @@ export class CatalogService {
       availableForCountry: available,
       unavailabilityReason: available ? undefined : eligibilityReason(product, destinationCountry),
     };
+  }
+
+  /**
+   * C2.2 — invalida listagens públicas/admin (`catalog:products:*`, TTL 60 s) e o detalhe (`product:{id}`, TTL 120 s) dos
+   * produtos informados. Chamar após pausar/republicar/editar/excluir produto e após pausar/reativar loja.
+   */
+  static async invalidateCatalogCaches(productIds: string[] = []) {
+    await delCacheByPattern('catalog:products:*');
+    for (const pid of new Set(productIds.filter(Boolean))) await delCache(`product:${pid}`);
+  }
+
+  /** C2.2 — mudança de status de loja: invalida listagens e o detalhe de cada produto da loja. */
+  static async invalidateStoreCatalogCaches(storeId: string, executor?: any) {
+    const db = executor ?? getDb();
+    const rows = db ? await db.select({ id: products.id }).from(products).where(eq(products.storeId, storeId)) : [];
+    await this.invalidateCatalogCaches(rows.map((r: any) => r.id));
   }
 
   static async invalidateProductCache(id?: string) {

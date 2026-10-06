@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Lock, ShieldCheck, Loader2 } from 'lucide-react';
@@ -48,6 +49,7 @@ import {
 
 export const SellerHubView: React.FC = () => {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { data: products = [], refetch } = useProducts();
   const { selectedCurrency } = usePreferences();
 
@@ -325,6 +327,19 @@ export const SellerHubView: React.FC = () => {
     }
   };
 
+  // C2.2 — publicar/pausar DE VERDADE (PATCH /seller/products/:id/status). Devolve quantos produtos foram realmente
+  // alterados; a lista do painel é relida da API (nunca otimista) e os caches de catálogo do navegador são invalidados.
+  const handleSetProductsPublished = async (ids: string[], published: boolean): Promise<number> => {
+    const status = published ? 'active' : 'paused';
+    const results = await Promise.allSettled(ids.map((id) => SellerService.updateProductStatus(id, status)));
+    const changed = results.filter((r) => r.status === 'fulfilled' && (r.value as any)?.success).length;
+    await fetchSellerProducts();
+    if (refetch) refetch();
+    queryClient.invalidateQueries({ queryKey: ['products'] });
+    queryClient.invalidateQueries({ queryKey: ['product'] });
+    return changed;
+  };
+
   const handleDeleteProduct = async (pId: string) => {
     try {
       await SellerService.deleteProduct(pId);
@@ -513,6 +528,7 @@ export const SellerHubView: React.FC = () => {
               setActiveSection('product_create');
             }}
             onDeleteProduct={handleDeleteProduct}
+            onSetProductsPublished={handleSetProductsPublished}
             showToast={showToast}
           />
         )}
