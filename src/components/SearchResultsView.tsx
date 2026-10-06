@@ -1,9 +1,12 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { useSearchParams, useNavigate } from 'react-router-dom';
-import { useProducts } from '../hooks/useProducts';
+import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
+import { useQueries } from '@tanstack/react-query';
+import { useProducts, useCategories } from '../hooks/useProducts';
+import { ProductService } from '../services/productService';
+import { getDescendantIds } from '../utils/categoryUtils';
 import { ProductCard } from './ProductCard';
-import { SlidersHorizontal, ArrowUpDown, X, Check, Sparkles, HelpCircle, AlertCircle, ArrowRight } from 'lucide-react';
-import { ProductCondition, FilterState } from '../types';
+import { SlidersHorizontal, ArrowUpDown, X, Check, Sparkles, HelpCircle, AlertCircle, ArrowRight, Loader2 } from 'lucide-react';
+import { ProductCondition, FilterState, Product } from '../types';
 import { searchProductsIntelligent, getSynonymsForTerm } from '../utils/searchEngine';
 import { usePreferences } from '../context/PreferencesContext';
 
@@ -18,7 +21,36 @@ export const SearchResultsView: React.FC = () => {
   // padrão já usado em HomePage.tsx. `/categories/:slug` reaproveita este
   // MESMO componente (ver App.tsx) — corrige os dois de uma vez.
   const { selectedCountry, catalogOriginFilter } = usePreferences();
-  const { data: products = [] } = useProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter });
+  const { data: allProducts = [] } = useProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter });
+
+  // `/categories/:slug`: o slug (ou o id — Header/CategoryCarousel navegam com `cat.slug || cat.id`) define o ESCOPO do
+  // catálogo. A categoria vem da tabela real (GET /categories, só ativas) e inclui as subcategorias (parentId), pois os
+  // produtos ficam nas folhas (ex.: Banana/Manga dentro de Frutas). Os produtos vêm do filtro EXISTENTE do backend
+  // (GET /products?category=<id>, igualdade exata em products.categoryId, elegibilidade por país mantida), uma consulta por
+  // categoria do escopo. Slug desconhecido ou falha de carregamento NUNCA caem no catálogo completo.
+  const { slug: categoryRouteSlug } = useParams<{ slug: string }>();
+  const categoryMode = !!categoryRouteSlug;
+  const { data: rawCategories = [], isPending: categoriesPending, isError: categoriesError } = useCategories();
+  const categoryScope = useMemo(() => {
+    if (!categoryRouteSlug) return null;
+    const list = (rawCategories as any[]).filter((c) => c && c.isActive !== false);
+    const category = list.find((c) => c.slug === categoryRouteSlug || c.id === categoryRouteSlug);
+    if (!category) return null;
+    return { category, ids: [category.id, ...getDescendantIds(category.id, list)] as string[] };
+  }, [categoryRouteSlug, rawCategories]);
+  const categoryProducts = useQueries({
+    queries: (categoryScope?.ids || []).map((categoryId) => ({
+      queryKey: ['products', { country: selectedCountry, originCountryFilter: catalogOriginFilter, category: categoryId }],
+      queryFn: async () => (await ProductService.getProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter, category: categoryId })).data,
+      staleTime: 1000 * 60 * 5,
+    })),
+    combine: (results) => {
+      const byId = new Map<string, Product>();
+      results.forEach((r) => (r.data || []).forEach((p: Product) => byId.set(p.id, p)));
+      return { items: Array.from(byId.values()), pending: results.some((r) => r.isPending), error: results.some((r) => r.isError) };
+    },
+  });
+  const products: Product[] = categoryMode ? categoryProducts.items : allProducts;
 
   // Fase M1-D2.6 — removidos `brand: ''` e `officialStoresOnly: false`: não
   // existem em FilterState (src/types.ts) e este componente nunca os LÊ em
@@ -137,6 +169,40 @@ export const SearchResultsView: React.FC = () => {
     updateFilterState({ query: correction });
   };
 
+  // Estados da página de categoria (nunca mostram o catálogo completo no lugar da categoria pedida).
+  if (categoryMode && (categoriesPending || (categoryScope && categoryProducts.pending))) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-16 flex items-center justify-center gap-2 text-sm text-gray-500" role="status">
+        <Loader2 className="w-5 h-5 animate-spin text-emerald-600" /> Carregando categoria…
+      </div>
+    );
+  }
+  if (categoryMode && (categoriesError || !categoryScope || categoryProducts.error)) {
+    const loadFailed = categoriesError || categoryProducts.error;
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-6">
+        <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 space-y-4 shadow-xs">
+          <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 mx-auto flex items-center justify-center">
+            <AlertCircle className="w-6 h-6" />
+          </div>
+          <h1 className="text-base font-bold text-gray-800">
+            {loadFailed ? 'Não foi possível carregar esta categoria agora' : 'Categoria não encontrada'}
+          </h1>
+          <p className="text-gray-500 text-xs max-w-md mx-auto">
+            {loadFailed ? 'Tente novamente em instantes ou navegue pelas outras categorias.' : 'Esta categoria não existe ou não está mais disponível.'}
+          </p>
+          <button
+            onClick={() => navigate('/categories')}
+            className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
+          >
+            Ver todas as categorias
+          </button>
+        </div>
+      </div>
+    );
+  }
+  const categoryName: string | null = categoryScope?.category?.name || null;
+
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
       {/* Search Header */}
@@ -144,7 +210,9 @@ export const SearchResultsView: React.FC = () => {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-lg font-bold text-gray-900">
-              {filterState.query ? `Resultados para "${filterState.query}"` : 'Todos os Produtos e Ofertas'}
+              {filterState.query
+                ? `Resultados para "${filterState.query}"${categoryName ? ` em ${categoryName}` : ''}`
+                : (categoryName || 'Todos os Produtos e Ofertas')}
             </h1>
             {filterState.query && (
               <span className="hidden sm:inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 text-[11px] font-bold px-2 py-0.5 rounded-full border border-emerald-200">
@@ -299,13 +367,19 @@ export const SearchResultsView: React.FC = () => {
                 <AlertCircle className="w-6 h-6" />
               </div>
               <h3 className="text-base font-bold text-gray-800">
-                Nenhum produto correspondente encontrado para "{filterState.query}"
+                {categoryMode && products.length === 0
+                  ? `Ainda não há produtos em ${categoryName}`
+                  : categoryMode && !filterState.query
+                    ? 'Nenhum produto corresponde aos filtros selecionados'
+                    : `Nenhum produto correspondente encontrado para "${filterState.query}"`}
               </h3>
               <p className="text-gray-500 text-xs max-w-md mx-auto">
-                Tente buscar por termos genéricos como <strong>celular</strong>, <strong>smartphone</strong>, <strong>computador</strong>, <strong>televisão</strong> ou <strong>fones de ouvido</strong>.
+                {categoryMode && !filterState.query
+                  ? 'Volte em breve ou explore os outros produtos do catálogo.'
+                  : <>Tente buscar por termos genéricos como <strong>celular</strong>, <strong>smartphone</strong>, <strong>computador</strong>, <strong>televisão</strong> ou <strong>fones de ouvido</strong>.</>}
               </p>
               <button
-                onClick={resetFilters}
+                onClick={categoryMode ? () => navigate('/products') : resetFilters}
                 className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
               >
                 Ver todos os produtos do catálogo
