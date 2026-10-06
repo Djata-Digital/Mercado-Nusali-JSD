@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { BannerSlider } from '../components/BannerSlider';
 import { CategoryCarousel } from '../components/CategoryCarousel';
 import { ProductCard } from '../components/ProductCard';
@@ -9,7 +9,6 @@ import { countriesConfig } from '../utils/currencyUtils';
 import { ChevronRight, Globe } from 'lucide-react';
 
 export const HomePage: React.FC = () => {
-  const navigate = useNavigate();
   const { selectedCountry, catalogOriginFilter } = usePreferences();
   // Correção crítica (produtos somem do catálogo/home): useProducts() era
   // chamado SEM nenhum filtro, então a queryKey do React Query nunca incluía
@@ -58,12 +57,12 @@ export const HomePage: React.FC = () => {
                 Ofertas no Mercado Nusali
               </span>
             </div>
-            <button
-              onClick={() => navigate('/products')}
+            <Link
+              to="/products"
               className="text-xs text-blue-800 font-bold hover:underline flex items-center gap-1"
             >
               Ver todas as ofertas <ChevronRight className="w-4 h-4" />
-            </button>
+            </Link>
           </div>
 
           {/* Products Grid */}
@@ -99,12 +98,12 @@ export const HomePage: React.FC = () => {
             </p>
           </div>
 
-          <button
-            onClick={() => navigate('/register')}
-            className="bg-yellow-400 hover:bg-yellow-300 text-blue-950 font-black px-6 py-3 rounded-xl shadow-md text-sm shrink-0 transition"
+          <Link
+            to="/register"
+            className="inline-block bg-yellow-400 hover:bg-yellow-300 text-blue-950 font-black px-6 py-3 rounded-xl shadow-md text-sm shrink-0 transition"
           >
             Criar minha conta
-          </button>
+          </Link>
         </section>
 
         {/* Todos os Produtos Catalog */}

@@ -263,15 +263,15 @@ export const Header: React.FC = () => {
         {/* Responsivo: no celular a linha quebra (logo + país + menu; a busca ocupa a linha de baixo) em vez de estourar a largura. */}
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 md:flex-nowrap">
           {/* Logo oficial Mercado Nusali sobre uma pílula branca rente ao logo (o texto azul some no fundo verde sem ela) */}
-          <button
-            onClick={() => navigate('/')}
+          <Link
+            to="/"
             className="order-1 md:order-none flex items-center gap-2 group shrink-0 focus:outline-hidden"
             title="Mercado Nusali Início"
           >
             <span className="inline-flex items-center rounded-full bg-white py-px pl-1 pr-2.5">
               <MercadoNusaliLogo variant="horizontal" className="h-7 min-[360px]:h-8 md:h-9" />
             </span>
-          </button>
+          </Link>
 
           {/* FASE D16-G1 — Catalog Origin Filter Dropdown (NUNCA muda destino/
               moeda/endereço — só "de qual país eu quero ver produtos", dentro
@@ -600,13 +600,11 @@ export const Header: React.FC = () => {
                         {rootCategories.map((cat: any) => {
                           const isActive = activeCategory?.id === cat.id || activeCategory?.slug === cat.slug;
                           return (
-                            <button
+                            <Link
                               key={cat.id}
+                              to={`/categories/${cat.slug || cat.id}`}
                               onMouseEnter={() => setActiveCategorySlug(cat.slug || cat.id)}
-                              onClick={() => {
-                                navigate(`/categories/${cat.slug || cat.id}`);
-                                setIsCategoryMenuOpen(false);
-                              }}
+                              onClick={() => setIsCategoryMenuOpen(false)}
                               className={`w-full text-left px-3 py-2.5 rounded-xl text-xs flex items-center justify-between font-semibold transition cursor-pointer ${
                                 isActive
                                   ? 'bg-white text-emerald-950 font-extrabold shadow-xs border-l-4 border-emerald-600 translate-x-0.5'
@@ -618,7 +616,7 @@ export const Header: React.FC = () => {
                                 <span className="truncate">{cat.name}</span>
                               </div>
                               <ChevronRight className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-emerald-600' : 'text-gray-400'}`} />
-                            </button>
+                            </Link>
                           );
                         })}
                       </div>
@@ -642,34 +640,30 @@ export const Header: React.FC = () => {
                               </h3>
                             </div>
 
-                            <button
-                              onClick={() => {
-                                navigate(`/categories/${activeCategory?.slug || activeCategory?.id}`);
-                                setIsCategoryMenuOpen(false);
-                              }}
+                            <Link
+                              to={`/categories/${activeCategory?.slug || activeCategory?.id}`}
+                              onClick={() => setIsCategoryMenuOpen(false)}
                               className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-lg text-xs font-extrabold flex items-center gap-1 transition cursor-pointer"
                             >
                               Ver todos em {activeCategory?.name} <ArrowRight className="w-3.5 h-3.5" />
-                            </button>
+                            </Link>
                           </div>
 
                           {/* Subcategory Grid */}
                           {activeSubcategories.length > 0 ? (
                             <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
                               {activeSubcategories.map((subCat: any) => (
-                                <button
+                                <Link
                                   key={subCat.id}
-                                  onClick={() => {
-                                    navigate(`/categories/${subCat.slug || subCat.id}`);
-                                    setIsCategoryMenuOpen(false);
-                                  }}
+                                  to={`/categories/${subCat.slug || subCat.id}`}
+                                  onClick={() => setIsCategoryMenuOpen(false)}
                                   className="p-3 bg-gray-50 hover:bg-emerald-50 rounded-xl border border-gray-200/80 text-left transition flex items-center justify-between group cursor-pointer"
                                 >
                                   <span className="font-extrabold text-xs text-gray-900 group-hover:text-emerald-800">
                                     {subCat.name}
                                   </span>
                                   <ChevronRight className="w-3.5 h-3.5 text-gray-400 group-hover:text-emerald-600" />
-                                </button>
+                                </Link>
                               ))}
                             </div>
                           ) : (
@@ -682,21 +676,15 @@ export const Header: React.FC = () => {
 
                         {/* Footer info in Mega Menu */}
                         <div className="mt-6 pt-4 border-t border-gray-100 flex items-center justify-between text-xs bg-gray-50 -mx-6 -mb-6 p-4 rounded-b-2xl">
-                          <button
-                            onClick={() => {
-                              navigate('/categories');
-                              setIsCategoryMenuOpen(false);
-                            }}
+                          <Link
+                            to="/categories"
+                            onClick={() => setIsCategoryMenuOpen(false)}
                             className="font-extrabold text-blue-900 hover:text-blue-950 flex items-center gap-1.5 hover:underline"
                           >
                             <Grid className="w-4 h-4 text-emerald-700" />
                             Ver Mapa Geral do Catálogo de Categorias
-                          </button>
+                          </Link>
 
-                          <div className="flex items-center gap-1.5 text-gray-500 text-[11px] font-medium">
-                            <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                            Proteção de compra Escrow Mercado Nusali
-                          </div>
                         </div>
                       </div>
                     </div>
@@ -708,27 +696,27 @@ export const Header: React.FC = () => {
 
           {/* Right Navigation Links — só a partir de lg (abaixo disso estes links ficam no menu hambúrguer, sem faixa cortada) */}
           <div className="hidden lg:flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
-            <button
-              onClick={() => navigate('/categories')}
-              className={`py-1 px-2 rounded-md transition shrink-0 ${curTheme.navText}`}
+            <Link
+              to="/categories"
+              className={`block py-1 px-2 rounded-md transition shrink-0 ${curTheme.navText}`}
             >
               Explorar Catálogo
-            </button>
+            </Link>
 
-            <button
-              onClick={() => navigate('/products')}
-              className={`py-1 px-2 rounded-md transition shrink-0 ${curTheme.navText}`}
+            <Link
+              to="/products"
+              className={`block py-1 px-2 rounded-md transition shrink-0 ${curTheme.navText}`}
             >
               Ofertas do Dia
-            </button>
+            </Link>
 
-            <button
-              onClick={() => navigate('/stores')}
+            <Link
+              to="/stores"
               className={`py-1 px-2 rounded-md transition shrink-0 flex items-center gap-1 ${curTheme.navText}`}
             >
               <Building2 className="w-3.5 h-3.5 text-emerald-400" />
               Lojas Oficiais
-            </button>
+            </Link>
 
             {/* Câmbio Oficial do Dia (oculto enquanto SHOW_CAMBIO_DO_DIA = false, ver src/config/features.ts) */}
             {SHOW_CAMBIO_DO_DIA && (
@@ -1000,36 +988,30 @@ export const Header: React.FC = () => {
               </div>
             )}
 
-            <button
-              onClick={() => {
-                navigate('/');
-                setIsMobileMenuOpen(false);
-              }}
-              className="w-full text-left font-medium py-1.5 border-b border-white/10"
+            <Link
+              to="/"
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="block w-full text-left font-medium py-1.5 border-b border-white/10"
             >
               Início
-            </button>
+            </Link>
 
-            <button
-              onClick={() => {
-                navigate('/categories');
-                setIsMobileMenuOpen(false);
-              }}
+            <Link
+              to="/categories"
+              onClick={() => setIsMobileMenuOpen(false)}
               className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
             >
               <Grid className="w-4 h-4 text-emerald-400" /> Todas as Categorias
-            </button>
+            </Link>
 
             {/* Links que, no desktop, ficam na faixa de navegação (escondida abaixo de lg para não ficar cortada) */}
-            <button
-              onClick={() => {
-                navigate('/products');
-                setIsMobileMenuOpen(false);
-              }}
+            <Link
+              to="/products"
+              onClick={() => setIsMobileMenuOpen(false)}
               className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
             >
               <Zap className="w-4 h-4 text-yellow-400" /> Ofertas do Dia
-            </button>
+            </Link>
 
             {SHOW_CAMBIO_DO_DIA && (
               <button
@@ -1066,15 +1048,13 @@ export const Header: React.FC = () => {
               </button>
             )}
 
-            <button
-              onClick={() => {
-                navigate('/stores');
-                setIsMobileMenuOpen(false);
-              }}
+            <Link
+              to="/stores"
+              onClick={() => setIsMobileMenuOpen(false)}
               className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
             >
               <Building2 className="w-4 h-4 text-emerald-400" /> Lojas Oficiais Nusali
-            </button>
+            </Link>
             <button
               onClick={() => {
                 navigate('/seller/kyc');
@@ -1091,7 +1071,7 @@ export const Header: React.FC = () => {
               }}
               className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
             >
-              <AlertCircle className="w-4 h-4 text-red-400" /> Disputas & Escrow
+              <AlertCircle className="w-4 h-4 text-red-400" /> Disputas
             </button>
           </div>
         )}

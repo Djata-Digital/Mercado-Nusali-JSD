@@ -1,16 +1,14 @@
 import React from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, Link } from 'react-router-dom';
 import { Header } from '../components/Header';
 import { AIAssistantModal } from '../components/AIAssistantModal';
 import { MercadoNusaliLogo } from '../components/MercadoNusaliLogo';
 import { usePreferences } from '../context/PreferencesContext';
 import { SHOW_NUSALI_AI } from '../config/features';
 import { CheckCircle2, ShieldCheck, Lock, Truck } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 
 export const PublicLayout: React.FC = () => {
   const { toastMessage } = usePreferences();
-  const navigate = useNavigate();
 
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col font-sans text-gray-900 antialiased selection:bg-yellow-300">
@@ -34,7 +32,7 @@ export const PublicLayout: React.FC = () => {
           <div className="space-y-3">
             <MercadoNusaliLogo height={128} />
             <p className="text-xs leading-relaxed text-gray-500">
-              O marketplace internacional conectando Guiné-Bissau, Brasil, Portugal e África Ocidental. Produtos garantidos com Proteção Escrow e logística cross-border.
+              Marketplace de compra e venda online que conecta vendedores e compradores. Conheça as lojas e os produtos anunciados.
             </p>
           </div>
 
@@ -42,36 +40,33 @@ export const PublicLayout: React.FC = () => {
             <h4 className="font-bold text-gray-900 text-sm">Plataforma Internacional</h4>
             <ul className="space-y-1">
               <li>
-                <button onClick={() => navigate('/stores')} className="hover:text-emerald-700 font-medium">
+                <Link to="/stores" className="hover:text-emerald-700 font-medium">
                   Lojas Oficiais
-                </button>
+                </Link>
               </li>
               <li>
-                <button onClick={() => navigate('/seller/kyc')} className="hover:text-emerald-700 font-medium">
-                  Verificação de Vendedores (KYC)
-                </button>
+                <Link to="/categories" className="hover:text-emerald-700 font-medium">
+                  Categorias
+                </Link>
               </li>
               <li>
-                <button onClick={() => navigate('/disputes')} className="hover:text-emerald-700 font-medium">
-                  Disputas & Proteção Escrow
-                </button>
+                <Link to="/products" className="hover:text-emerald-700 font-medium">
+                  Todos os produtos
+                </Link>
               </li>
               <li>
-                <button onClick={() => navigate('/admin')} className="hover:text-emerald-700 font-medium">
-                  Painel Administrativo
-                </button>
+                <Link to="/help-center" className="hover:text-emerald-700 font-medium">
+                  Central de Ajuda
+                </Link>
               </li>
             </ul>
           </div>
 
           <div className="space-y-2">
-            <h4 className="font-bold text-gray-900 text-sm">Segurança e Pagamentos</h4>
+            <h4 className="font-bold text-gray-900 text-sm">Vendedores e Logística</h4>
             <ul className="space-y-1">
               <li className="flex items-center gap-1.5 text-gray-700 font-medium">
                 <ShieldCheck className="w-4 h-4 text-emerald-600" /> Selo Vendedor Verificado
-              </li>
-              <li className="flex items-center gap-1.5 text-gray-700 font-medium">
-                <Lock className="w-4 h-4 text-emerald-600" /> Retenção de Custódia Escrow
               </li>
               <li className="flex items-center gap-1.5 text-gray-700 font-medium">
                 <Truck className="w-4 h-4 text-emerald-600" /> Logistics HUB Bissau / Lisboa / SP

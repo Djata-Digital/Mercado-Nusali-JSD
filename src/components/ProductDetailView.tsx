@@ -1,6 +1,8 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useParams, useNavigate } from 'react-router-dom';
+import { usePageSeo } from '../hooks/usePageSeo';
+import { pageTitle, toMetaDescription, SEO_SITE_NAME, ROBOTS_NOINDEX } from '../utils/seoRoutes';
 import {
   Heart,
   Star,
@@ -89,6 +91,20 @@ export const ProductDetailView: React.FC = () => {
   const rawProduct = isValidId ? (fetchedProduct || allProducts.find((p) => p.id === id)) : null;
   const product = rawProduct ? normalizeProduct(rawProduct) : null;
   const isUnavailableForDestination = product?.availableForCountry === false;
+
+  // C3.2 — título/meta reais com o produto carregado; erro/inexistente/não público => noindex e sem canonical.
+  usePageSeo(
+    !isValidId || isError
+      ? { title: pageTitle('Produto não encontrado'), canonicalPath: null, robots: ROBOTS_NOINDEX }
+      : product
+        ? {
+            title: pageTitle(product.title),
+            description: toMetaDescription(product.description, `Veja ${product.title} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`),
+            canonicalPath: `/products/${encodeURIComponent(product.id)}`,
+            image: product.image,
+          }
+        : null
+  );
 
   const { addItem, addItemsBatch } = useCart();
   const { toggleFavorite, isFavorite } = useFavorites();

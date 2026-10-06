@@ -1,10 +1,9 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { useCategories } from '../hooks/useProducts';
 import { Smartphone, Tv, Laptop, Zap, Activity, Wrench, Home, ShoppingBag, ChevronRight } from 'lucide-react';
 
 export const CategoriesPage: React.FC = () => {
-  const navigate = useNavigate();
   const { data: rawCategories = [] } = useCategories();
   const categories = (rawCategories || []).filter((c: any) => c.isActive !== false);
 
@@ -30,9 +29,9 @@ export const CategoriesPage: React.FC = () => {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
         {categories.map((cat: any) => (
-          <div
+          <Link
             key={cat.id}
-            onClick={() => navigate(`/categories/${cat.slug || cat.id}`)}
+            to={`/categories/${cat.slug || cat.id}`}
             className="bg-white p-6 rounded-xl border border-gray-200 hover:border-emerald-500 hover:shadow-lg transition cursor-pointer flex flex-col justify-between group"
           >
             <div className="flex items-center gap-4">
@@ -53,7 +52,7 @@ export const CategoriesPage: React.FC = () => {
               <span>Explorar catálogo</span>
               <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
             </div>
-          </div>
+          </Link>
         ))}
       </div>
     </div>

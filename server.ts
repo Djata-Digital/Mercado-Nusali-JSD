@@ -11,6 +11,8 @@ import { setupWebSocketServer } from './src/server/infra/websocket.js';
 import { initializeQueues } from './src/server/infra/queues.js';
 import { logger } from './src/server/infra/logger.js';
 import { configureTrustProxy } from './src/server/infra/trustProxy.js';
+import { createCanonicalHostMiddleware } from './src/server/modules/seo/hostPolicy.js';
+import { registerSeoRoutes, createSpaHandler } from './src/server/modules/seo/seoRouter.js';
 
 import { validateJwtConfigInProduction } from './src/server/modules/auth/jwtConfig.js';
 
@@ -38,6 +40,8 @@ async function startServer() {
     })
   );
   app.use(cors());
+  // C3.2 — política de host canônico (X-Robots-Tag em host não canônico; redirect 301 só com a flag). Inerte sem PUBLIC_APP_URL.
+  app.use(createCanonicalHostMiddleware());
   app.use(express.json({ limit: '10mb' }));
 
   // Structured request logger
@@ -226,6 +230,9 @@ Reforce a entrega rápida (Nusali Logística / Nusali Fulfillment) ou garantia d
     }
   });
 
+  // C3.2 — robots.txt, sitemap.xml e JSON 404 para /api/* desconhecido (depois de TODAS as rotas /api acima).
+  registerSeoRoutes(app);
+
   // Vite Middleware in Development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -235,10 +242,10 @@ Reforce a entrega rápida (Nusali Logística / Nusali Fulfillment) ou garantia d
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    // index:false — o HTML (inclusive "/") passa SEMPRE pelo handler que injeta os metadados da rota (C3.2).
+    app.get('/index.html', (_req, res) => res.redirect(301, '/'));
+    app.use(express.static(distPath, { index: false }));
+    app.get('*', createSpaHandler(distPath));
   }
 
   server.listen(PORT, '0.0.0.0', () => {

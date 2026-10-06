@@ -1,3 +1,4 @@
+import { SeoManager } from './components/SeoManager';
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -70,6 +71,8 @@ export default function App() {
           <CartCouponIntentProvider>
           <MarketplaceProvider>
             <BrowserRouter>
+              {/* C3.2 — título/meta/robots por rota (antes do <Routes>: ver SeoManager) */}
+              <SeoManager />
               <Routes>
                 {/* Guest Auth Routes */}
                 <Route

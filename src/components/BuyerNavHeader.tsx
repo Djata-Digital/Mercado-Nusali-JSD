@@ -35,7 +35,7 @@ export const BuyerNavHeader: React.FC = () => {
     { path: '/addresses', label: 'Endereços', icon: <MapPin className="w-4 h-4" /> },
     { path: '/security', label: 'Segurança', icon: <ShieldCheck className="w-4 h-4" /> },
     { path: '/returns-refunds', label: 'Devoluções', icon: <RotateCcw className="w-4 h-4" /> },
-    { path: '/disputes', label: 'Disputas & Escrow', icon: <AlertCircle className="w-4 h-4" />, badge: pendingDisputesCount },
+    { path: '/disputes', label: 'Disputas', icon: <AlertCircle className="w-4 h-4" />, badge: pendingDisputesCount },
     { path: '/help-center', label: 'Central de Ajuda', icon: <HelpCircle className="w-4 h-4" /> },
   ];
 

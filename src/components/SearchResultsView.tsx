@@ -1,9 +1,11 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { useSearchParams, useNavigate, useParams } from 'react-router-dom';
+import { useSearchParams, useNavigate, useParams, Link } from 'react-router-dom';
 import { useQueries } from '@tanstack/react-query';
 import { useProducts, useCategories } from '../hooks/useProducts';
 import { ProductService } from '../services/productService';
 import { getDescendantIds } from '../utils/categoryUtils';
+import { usePageSeo } from '../hooks/usePageSeo';
+import { pageTitle, toMetaDescription, SEO_SITE_NAME, ROBOTS_NOINDEX } from '../utils/seoRoutes';
 import { ProductCard } from './ProductCard';
 import { SlidersHorizontal, ArrowUpDown, X, Check, Sparkles, HelpCircle, AlertCircle, ArrowRight, Loader2 } from 'lucide-react';
 import { ProductCondition, FilterState, Product } from '../types';
@@ -51,6 +53,21 @@ export const SearchResultsView: React.FC = () => {
     },
   });
   const products: Product[] = categoryMode ? categoryProducts.items : allProducts;
+
+  // C3.2 — metadados reais da categoria; slug inexistente/inativo => noindex e sem canonical (enquanto carrega: estado pendente).
+  usePageSeo(
+    !categoryMode
+      ? null
+      : categoryScope?.category
+        ? {
+            title: pageTitle(categoryScope.category.name),
+            description: `Veja os produtos de ${categoryScope.category.name} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`,
+            canonicalPath: `/categories/${encodeURIComponent(categoryScope.category.slug || categoryScope.category.id)}`,
+          }
+        : categoriesPending
+          ? null
+          : { title: pageTitle('Categoria não encontrada'), canonicalPath: null, robots: ROBOTS_NOINDEX }
+  );
 
   // Fase M1-D2.6 — removidos `brand: ''` e `officialStoresOnly: false`: não
   // existem em FilterState (src/types.ts) e este componente nunca os LÊ em
@@ -191,12 +208,12 @@ export const SearchResultsView: React.FC = () => {
           <p className="text-gray-500 text-xs max-w-md mx-auto">
             {loadFailed ? 'Tente novamente em instantes ou navegue pelas outras categorias.' : 'Esta categoria não existe ou não está mais disponível.'}
           </p>
-          <button
-            onClick={() => navigate('/categories')}
-            className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
+          <Link
+            to="/categories"
+            className="inline-block bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
           >
             Ver todas as categorias
-          </button>
+          </Link>
         </div>
       </div>
     );

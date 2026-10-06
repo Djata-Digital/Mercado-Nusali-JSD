@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { Heart, Star, ShoppingCart, ShieldCheck, Film, Image as ImageIcon, ZoomIn, Share2, Globe, Layers, Palette } from 'lucide-react';
 import { Product } from '../types';
 import { useCart } from '../hooks/useCart';
@@ -118,12 +118,17 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             </div>
           </div>
 
-          <h3
-            onClick={() => openProductDetail(product.id)}
-            className="text-xs sm:text-sm font-normal text-gray-800 hover:text-blue-600 line-clamp-2 cursor-pointer mb-2 leading-snug"
-            title={product.title}
-          >
-            {product.title}
+          <h3 className="text-xs sm:text-sm font-normal text-gray-800 hover:text-blue-600 line-clamp-2 cursor-pointer mb-2 leading-snug">
+            {/* C3.2 — link HTML real (rastreável). O clique no restante do cartão continua abrindo o produto via onClick do contêiner;
+                stopPropagation evita navegar duas vezes quando o clique é no próprio link. */}
+            <Link
+              to={`/products/${encodeURIComponent(product.id)}`}
+              title={product.title}
+              onClick={(e) => e.stopPropagation()}
+              className="block"
+            >
+              {product.title}
+            </Link>
           </h3>
 
           {/* Price Block */}

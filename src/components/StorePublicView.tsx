@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import { usePageSeo } from '../hooks/usePageSeo';
+import { pageTitle, toMetaDescription, SEO_SITE_NAME, ROBOTS_NOINDEX } from '../utils/seoRoutes';
 import {
   Building2,
   ShieldCheck,
@@ -40,6 +42,20 @@ export const StorePublicView: React.FC = () => {
     store ? { storeId: store.id, country: selectedCountry, originCountryFilter: catalogOriginFilter } : undefined
   );
 
+  // C3.2 — título/meta reais da loja; loja inexistente/pausada => noindex e sem canonical.
+  usePageSeo(
+    storeError || (!storeLoading && !store)
+      ? { title: pageTitle('Loja não encontrada'), canonicalPath: null, robots: ROBOTS_NOINDEX }
+      : store
+        ? {
+            title: pageTitle(store.name),
+            description: toMetaDescription((store as any).description, `Conheça a loja ${store.name} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`),
+            canonicalPath: `/stores/${encodeURIComponent((store as any).slug || store.id)}`,
+            image: (store as any).logoUrl,
+          }
+        : null
+  );
+
   if (storeLoading) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-24 flex flex-col items-center justify-center gap-3 text-gray-500">
@@ -57,12 +73,12 @@ export const StorePublicView: React.FC = () => {
         <p className="text-sm text-gray-500">
           Esta loja não existe, foi removida, ou não está disponível publicamente no momento.
         </p>
-        <button
-          onClick={() => navigate('/stores')}
-          className="mt-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-sm transition"
+        <Link
+          to="/stores"
+          className="mt-2 inline-block px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-sm transition"
         >
           Ver todas as lojas
-        </button>
+        </Link>
       </div>
     );
   }
@@ -137,7 +153,7 @@ export const StorePublicView: React.FC = () => {
               </div>
 
               <p className="text-xs text-gray-600 mt-1 max-w-xl">
-                {store.description || 'Loja parceira do Mercado Nusali com suporte Escrow.'}
+                {store.description || 'Loja do Mercado Nusali.'}
               </p>
 
               <div className="flex items-center gap-4 mt-3 text-xs text-gray-600 flex-wrap">
@@ -243,20 +259,10 @@ export const StorePublicView: React.FC = () => {
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-gray-100">
-            <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-100">
-              <ShieldCheck className="w-6 h-6 text-emerald-700 mb-2" />
-              <h4 className="font-bold text-sm text-gray-900">Proteção Escrow Ativa</h4>
-              <p className="text-xs text-gray-600 mt-1">Seu pagamento fica retido até você receber e aprovar o pedido em mãos.</p>
-            </div>
             <div className="p-4 bg-blue-50 rounded-xl border border-blue-100">
               <Globe className="w-6 h-6 text-blue-700 mb-2" />
               <h4 className="font-bold text-sm text-gray-900">Envios com Rastreio</h4>
               <p className="text-xs text-gray-600 mt-1">Parceria direta com operadores logísticos regionais.</p>
-            </div>
-            <div className="p-4 bg-purple-50 rounded-xl border border-purple-100">
-              <CheckCircle2 className="w-6 h-6 text-purple-700 mb-2" />
-              <h4 className="font-bold text-sm text-gray-900">Compra Protegida</h4>
-              <p className="text-xs text-gray-600 mt-1">Disputas mediadas pelo Mercado Nusali em caso de problema com o pedido.</p>
             </div>
           </div>
         </div>

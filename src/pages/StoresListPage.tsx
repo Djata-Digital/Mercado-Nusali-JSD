@@ -1,11 +1,10 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { Building2, ShieldCheck, ChevronRight, MapPin, Loader2, AlertCircle, Store as StoreIcon } from 'lucide-react';
 import { useStores } from '../hooks/useStores';
 import { useCountries } from '../hooks/useCountries';
 
 export const StoresListPage: React.FC = () => {
-  const navigate = useNavigate();
   const { data: storesList, isLoading, isError } = useStores();
   const { data: operationalCountries } = useCountries();
 
@@ -49,9 +48,9 @@ export const StoresListPage: React.FC = () => {
           {storesList.map((store) => {
             const country = countryFor(store.countryCode);
             return (
-              <div
+              <Link
                 key={store.id}
-                onClick={() => navigate(`/stores/${store.slug || store.id}`)}
+                to={`/stores/${store.slug || store.id}`}
                 className="bg-white p-6 rounded-xl border border-gray-200 hover:border-emerald-500 hover:shadow-lg transition cursor-pointer flex flex-col justify-between group"
               >
                 <div className="space-y-4">
@@ -91,7 +90,7 @@ export const StoresListPage: React.FC = () => {
                   <span>Visitar Loja</span>
                   <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
                 </div>
-              </div>
+              </Link>
             );
           })}
         </div>

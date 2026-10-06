@@ -407,7 +407,7 @@ export const LoginPage: React.FC = () => {
         {/* Security assurance footer */}
         <div className="mt-6 flex items-center justify-center gap-2 text-xs text-blue-200/80">
           <ShieldCheck className="w-4 h-4 text-emerald-400" />
-          <span>Sessão segura com criptografia SSL e custódia Nusali Escrow</span>
+          <span>Acesso seguro à sua conta, com conexão criptografada</span>
         </div>
       </div>
     </div>

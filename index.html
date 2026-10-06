@@ -4,11 +4,30 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="/mercado-nusali-favicon.png?v=1" />
-    <title>Mercado Nusali</title>
+    <!--
+      SEO base (C3.2). Tudo com data-seo é SUBSTITUÍDO pelo servidor (src/server/modules/seo) com os metadados reais de cada
+      rota e atualizado no cliente durante a navegação (src/utils/pageSeo.ts). Estes valores são o padrão da home.
+      og:image/twitter:image abaixo = logo oficial existente, fallback PROVISÓRIO até existir uma arte social 1200x630.
+    -->
+    <title data-seo>Mercado Nusali | Marketplace de compra e venda online</title>
+    <meta name="description" content="O Mercado Nusali é um marketplace de compra e venda online que conecta vendedores e compradores. Conheça as lojas e os produtos anunciados." data-seo />
+    <link rel="canonical" href="https://mercado.nusali.com/" data-seo />
+    <meta name="robots" content="index, follow" data-seo />
+    <meta name="theme-color" content="#065f46" data-seo />
+    <meta property="og:type" content="website" data-seo />
+    <meta property="og:site_name" content="Mercado Nusali" data-seo />
+    <meta property="og:title" content="Mercado Nusali | Marketplace de compra e venda online" data-seo />
+    <meta property="og:description" content="O Mercado Nusali é um marketplace de compra e venda online que conecta vendedores e compradores. Conheça as lojas e os produtos anunciados." data-seo />
+    <meta property="og:url" content="https://mercado.nusali.com/" data-seo />
+    <meta property="og:image" content="https://mercado.nusali.com/mercado-nusali-logo.png" data-seo />
+    <meta property="og:image:alt" content="Mercado Nusali" data-seo />
+    <meta name="twitter:card" content="summary" data-seo />
+    <meta name="twitter:title" content="Mercado Nusali | Marketplace de compra e venda online" data-seo />
+    <meta name="twitter:description" content="O Mercado Nusali é um marketplace de compra e venda online que conecta vendedores e compradores. Conheça as lojas e os produtos anunciados." data-seo />
+    <meta name="twitter:image" content="https://mercado.nusali.com/mercado-nusali-logo.png" data-seo />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

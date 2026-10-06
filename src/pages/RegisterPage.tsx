@@ -363,7 +363,7 @@ export const RegisterPage: React.FC = () => {
                     <div>
                       <div className="font-bold text-xs text-gray-900">Conta Comprador</div>
                       <div className="text-[11px] text-gray-500 mt-1 leading-snug">
-                        Para comprar produtos nacionais e importados com segurança Nusali Escrow.
+                        Para explorar os produtos e as lojas do Mercado Nusali.
                       </div>
                     </div>
                   </button>

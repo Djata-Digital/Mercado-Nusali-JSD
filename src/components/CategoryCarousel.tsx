@@ -1,10 +1,9 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { useCategories } from '../hooks/useProducts';
 import { Smartphone, Tv, Laptop, Zap, Activity, Wrench, Home, ShoppingBag } from 'lucide-react';
 
 export const CategoryCarousel: React.FC = () => {
-  const navigate = useNavigate();
   const { data: realCategories = [] } = useCategories();
   const activeCategories = (realCategories || []).filter((c: any) => c.isActive !== false);
 
@@ -34,9 +33,9 @@ export const CategoryCarousel: React.FC = () => {
 
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
         {activeCategories.map((cat: any) => (
-          <button
+          <Link
             key={cat.id}
-            onClick={() => navigate(`/categories/${cat.slug || cat.id}`)}
+            to={`/categories/${cat.slug || cat.id}`}
             className="flex flex-col items-center justify-center p-3 bg-white rounded-lg border border-gray-200 hover:border-blue-500 hover:shadow-md transition text-center group cursor-pointer"
           >
             <div className="w-12 h-12 rounded-full bg-blue-50 flex items-center justify-center mb-2 group-hover:scale-110 group-hover:bg-blue-100 transition">
@@ -45,7 +44,7 @@ export const CategoryCarousel: React.FC = () => {
             <span className="text-xs font-semibold text-gray-800 group-hover:text-blue-600 line-clamp-2 leading-tight">
               {cat.name}
             </span>
-          </button>
+          </Link>
         ))}
       </div>
     </div>

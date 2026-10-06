@@ -754,10 +754,6 @@ export const CartView: React.FC = () => {
               <ArrowRight className="w-4 h-4" />
             </button>
 
-            <div className="flex items-center gap-2 text-[11px] text-gray-500 pt-2 border-t border-gray-100">
-              <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span>Compra 100% Protegida com Nusali Pay Escrow</span>
-            </div>
           </div>
         </div>
       </div>

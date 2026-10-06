@@ -25,7 +25,7 @@ import { eq, and, or } from 'drizzle-orm';
  */
 export const storesPublicRouter = Router();
 
-function eligibleStoreConditions() {
+export function eligibleStoreConditions() {
   return and(eq(stores.status, 'active'), eq(sellers.status, 'active'));
 }
 
