@@ -15,11 +15,13 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { usePreferences } from '../context/PreferencesContext';
+import { useAuth } from '../context/AuthContext';
 import { SHOW_NUSALI_AI } from '../config/features';
 import { BuyerNavHeader } from './BuyerNavHeader';
 
 export const HelpCenterView: React.FC = () => {
   const { showToast } = usePreferences();
+  const { isAuthenticated } = useAuth();
   const setIsAiAssistantOpen = (open: boolean) => {};
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -31,8 +33,8 @@ export const HelpCenterView: React.FC = () => {
       a: 'Na Guiné-Bissau, as compras online ainda não estão liberadas: estamos preparando as opções de entrega e pagamento. Você já pode criar sua conta, explorar os produtos e adicionar itens ao carrinho. Vendedores já podem se cadastrar e publicar seus produtos.',
     },
     {
-      q: 'Como funciona a entrega internacional e taxas aduaneiras?',
-      a: 'Nossos vendedores cadastram produtos com cálculo automático de impostos de importação quando aplicável. Todos os envios acompanham código de rastreamento internacional pela rede Nusali Express e parceiros locais.',
+      q: 'Como vai funcionar a entrega dos produtos?',
+      a: 'As opções de entrega ainda estão em preparação, assim como os prazos, as taxas e o rastreamento. Quando as compras online forem liberadas, essas informações serão divulgadas aqui e nos anúncios dos produtos.',
     },
   ];
 
@@ -43,13 +45,14 @@ export const HelpCenterView: React.FC = () => {
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 animate-fadeIn">
-      <BuyerNavHeader />
+      {/* Menu da conta (Minhas Compras, Cupons, Devoluções, Disputas…) só para quem está autenticado. */}
+      {isAuthenticated && <BuyerNavHeader />}
 
       {/* Hero Header */}
       <div className="bg-gradient-to-r from-blue-950 via-emerald-900 to-teal-900 text-white rounded-2xl p-8 sm:p-12 shadow-xl mb-8 text-center relative overflow-hidden">
         <div className="relative z-10 max-w-2xl mx-auto">
           <div className="inline-flex items-center gap-2 bg-yellow-400 text-blue-950 px-3 py-1 rounded-full text-xs font-black uppercase mb-3">
-            <HelpCircle className="w-3.5 h-3.5" /> Suporte & Atendimento Nusali 24/7
+            <HelpCircle className="w-3.5 h-3.5" /> Central de Ajuda
           </div>
           <h1 className="text-3xl sm:text-4xl font-black mb-3">Como podemos ajudar você hoje?</h1>
           <p className="text-gray-200 text-xs sm:text-sm mb-6">
@@ -96,8 +99,8 @@ export const HelpCenterView: React.FC = () => {
           <div className="w-12 h-12 bg-blue-100 text-blue-900 rounded-2xl flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition">
             <Truck className="w-6 h-6" />
           </div>
-          <h3 className="font-bold text-xs text-gray-900 mb-1">Envios & Rastreio</h3>
-          <p className="text-[10px] text-gray-500">Prazo e frete Nusali Express</p>
+          <h3 className="font-bold text-xs text-gray-900 mb-1">Entrega</h3>
+          <p className="text-[10px] text-gray-500">Opções de entrega em preparação</p>
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-2xs hover:border-emerald-500 transition cursor-pointer group text-center">

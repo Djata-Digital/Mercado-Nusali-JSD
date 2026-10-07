@@ -12,3 +12,11 @@ export const SHOW_NUSALI_AI = false;
  * Para reativar, troque para true.
  */
 export const SHOW_CAMBIO_DO_DIA = false;
+
+/**
+ * Interruptor do atalho "Nusali Pay" no menu PÚBLICO do Header (desktop e mobile). Fica DESLIGADO enquanto pagamentos e carteira
+ * não estão liberados: o atalho passava a imagem de um serviço financeiro já disponível. Só oculta a entrada do Header: as páginas
+ * da carteira e o menu da conta seguem intactos. "Disputas" não tem interruptor: aparece só para quem está autenticado.
+ * Para reativar, troque para true.
+ */
+export const SHOW_NUSALI_PAY_NAV = false;

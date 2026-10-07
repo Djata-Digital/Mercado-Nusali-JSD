@@ -47,7 +47,7 @@ import { useCountries } from '../hooks/useCountries';
 import { MercadoNusaliLogo } from './MercadoNusaliLogo';
 import { searchProductsIntelligent, getSynonymsForTerm } from '../utils/searchEngine';
 import { CurrencyConverterModal } from './CurrencyConverterModal';
-import { SHOW_CAMBIO_DO_DIA } from '../config/features';
+import { SHOW_CAMBIO_DO_DIA, SHOW_NUSALI_PAY_NAV } from '../config/features';
 import { CurrencyService } from '../services/currencyService';
 import { Globe2 } from 'lucide-react';
 
@@ -351,7 +351,8 @@ export const Header: React.FC = () => {
                   setSearchInput(e.target.value);
                   setIsSearchFocused(true);
                 }}
-                placeholder="Buscar produtos, marcas, celulares, notebooks..."
+                placeholder="Buscar produtos no Mercado Nusali"
+                aria-label="Buscar produtos no Mercado Nusali"
                 className="w-full px-4 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-hidden bg-transparent"
               />
               {searchInput && (
@@ -734,26 +735,31 @@ export const Header: React.FC = () => {
               </button>
             )}
 
-            <button
-              onClick={() => navigate('/wallet')}
-              className={`py-1 px-2 rounded-md transition shrink-0 flex items-center gap-1 ${curTheme.badgeNusaliPay}`}
-            >
-              <Wallet className="w-3.5 h-3.5" />
-              Nusali Pay
-            </button>
+            {/* Nusali Pay oculto enquanto SHOW_NUSALI_PAY_NAV = false; Disputas só para quem tem conta (ver src/config/features.ts) */}
+            {SHOW_NUSALI_PAY_NAV && (
+              <button
+                onClick={() => navigate('/wallet')}
+                className={`py-1 px-2 rounded-md transition shrink-0 flex items-center gap-1 ${curTheme.badgeNusaliPay}`}
+              >
+                <Wallet className="w-3.5 h-3.5" />
+                Nusali Pay
+              </button>
+            )}
 
-            <button
-              onClick={() => navigate('/disputes')}
-              className={`py-1 px-2 rounded-md transition shrink-0 relative flex items-center gap-1 ${curTheme.navText}`}
-            >
-              <AlertCircle className="w-3.5 h-3.5 text-red-400" />
-              Disputas
-              {pendingDisputesCount > 0 && (
-                <span className="bg-red-600 text-white text-[9px] font-black px-1 rounded-full">
-                  {pendingDisputesCount}
-                </span>
-              )}
-            </button>
+            {isAuthenticated && (
+              <button
+                onClick={() => navigate('/disputes')}
+                className={`py-1 px-2 rounded-md transition shrink-0 relative flex items-center gap-1 ${curTheme.navText}`}
+              >
+                <AlertCircle className="w-3.5 h-3.5 text-red-400" />
+                Disputas
+                {pendingDisputesCount > 0 && (
+                  <span className="bg-red-600 text-white text-[9px] font-black px-1 rounded-full">
+                    {pendingDisputesCount}
+                  </span>
+                )}
+              </button>
+            )}
 
             {isAuthenticated && (user?.role === 'ADMIN' || user?.role === 'GLOBAL_ADMIN') && (
               <button
@@ -1026,15 +1032,17 @@ export const Header: React.FC = () => {
               </button>
             )}
 
-            <button
-              onClick={() => {
-                navigate('/wallet');
-                setIsMobileMenuOpen(false);
-              }}
-              className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
-            >
-              <Wallet className="w-4 h-4 text-yellow-400" /> Nusali Pay
-            </button>
+            {SHOW_NUSALI_PAY_NAV && (
+              <button
+                onClick={() => {
+                  navigate('/wallet');
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
+              >
+                <Wallet className="w-4 h-4 text-yellow-400" /> Nusali Pay
+              </button>
+            )}
 
             {isAuthenticated && (user?.role === 'ADMIN' || user?.role === 'GLOBAL_ADMIN') && (
               <button
@@ -1064,15 +1072,17 @@ export const Header: React.FC = () => {
             >
               <ShieldCheck className="w-4 h-4 text-blue-400" /> Verificação Vendedor (KYC)
             </button>
-            <button
-              onClick={() => {
-                navigate('/disputes');
-                setIsMobileMenuOpen(false);
-              }}
-              className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
-            >
-              <AlertCircle className="w-4 h-4 text-red-400" /> Disputas
-            </button>
+            {isAuthenticated && (
+              <button
+                onClick={() => {
+                  navigate('/disputes');
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full text-left font-semibold py-1.5 border-b border-white/10 flex items-center gap-2"
+              >
+                <AlertCircle className="w-4 h-4 text-red-400" /> Disputas
+              </button>
+            )}
           </div>
         )}
       </div>

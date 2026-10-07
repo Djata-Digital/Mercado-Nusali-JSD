@@ -5,7 +5,7 @@ import { AIAssistantModal } from '../components/AIAssistantModal';
 import { MercadoNusaliLogo } from '../components/MercadoNusaliLogo';
 import { usePreferences } from '../context/PreferencesContext';
 import { SHOW_NUSALI_AI } from '../config/features';
-import { CheckCircle2, ShieldCheck, Lock, Truck } from 'lucide-react';
+import { CheckCircle2, ShieldCheck, Lock } from 'lucide-react';
 
 export const PublicLayout: React.FC = () => {
   const { toastMessage } = usePreferences();
@@ -63,13 +63,15 @@ export const PublicLayout: React.FC = () => {
           </div>
 
           <div className="space-y-2">
-            <h4 className="font-bold text-gray-900 text-sm">Vendedores e Logística</h4>
+            <h4 className="font-bold text-gray-900 text-sm">Vendedores</h4>
             <ul className="space-y-1">
               <li className="flex items-center gap-1.5 text-gray-700 font-medium">
-                <ShieldCheck className="w-4 h-4 text-emerald-600" /> Selo Vendedor Verificado
+                <ShieldCheck className="w-4 h-4 text-emerald-600" /> Verificação de vendedores
               </li>
-              <li className="flex items-center gap-1.5 text-gray-700 font-medium">
-                <Truck className="w-4 h-4 text-emerald-600" /> Logistics HUB Bissau / Lisboa / SP
+              <li>
+                <Link to="/register" className="hover:text-emerald-700 font-medium">
+                  Venda no Mercado Nusali
+                </Link>
               </li>
             </ul>
           </div>

@@ -361,19 +361,7 @@ export const SearchResultsView: React.FC = () => {
             </div>
           </div>
 
-          {/* Seller Reputation */}
-          <div className="space-y-2 pt-3 border-t border-gray-100">
-            <h3 className="text-xs font-bold text-gray-800 uppercase tracking-wider">Vendedor</h3>
-            <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={filterState.sellerPlatinumOnly}
-                onChange={(e) => updateFilterState({ sellerPlatinumOnly: e.target.checked })}
-                className="w-4 h-4 text-emerald-600 rounded-xs border-gray-300 focus:ring-emerald-500"
-              />
-              <span className="font-semibold text-emerald-700">MercadoLíder Platinum</span>
-            </label>
-          </div>
+          {/* Filtro por nível de vendedor removido: a Nusali ainda não tem níveis de vendedor (sellerPlatinumOnly fica sempre false). */}
         </div>
 
         {/* Product Results Grid (9 cols) */}
@@ -386,21 +374,34 @@ export const SearchResultsView: React.FC = () => {
               <h3 className="text-base font-bold text-gray-800">
                 {categoryMode && products.length === 0
                   ? `Ainda não há produtos em ${categoryName}`
-                  : categoryMode && !filterState.query
-                    ? 'Nenhum produto corresponde aos filtros selecionados'
-                    : `Nenhum produto correspondente encontrado para "${filterState.query}"`}
+                  : !categoryMode && products.length === 0 && !filterState.query
+                    ? 'Ainda não há produtos publicados'
+                    : filterState.query
+                      ? `Nenhum produto encontrado para "${filterState.query}"`
+                      : 'Nenhum produto corresponde aos filtros selecionados'}
               </h3>
               <p className="text-gray-500 text-xs max-w-md mx-auto">
                 {categoryMode && !filterState.query
                   ? 'Volte em breve ou explore os outros produtos do catálogo.'
-                  : <>Tente buscar por termos genéricos como <strong>celular</strong>, <strong>smartphone</strong>, <strong>computador</strong>, <strong>televisão</strong> ou <strong>fones de ouvido</strong>.</>}
+                  : !categoryMode && products.length === 0 && !filterState.query
+                    ? 'Os primeiros produtos do Mercado Nusali serão publicados em breve.'
+                    : 'Tente buscar por outro produto, categoria ou palavra-chave.'}
               </p>
-              <button
-                onClick={categoryMode ? () => navigate('/products') : resetFilters}
-                className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
-              >
-                Ver todos os produtos do catálogo
-              </button>
+              {!categoryMode && products.length === 0 && !filterState.query ? (
+                <button
+                  onClick={() => navigate('/')}
+                  className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
+                >
+                  Voltar para o início
+                </button>
+              ) : (
+                <button
+                  onClick={categoryMode ? () => navigate('/products') : resetFilters}
+                  className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
+                >
+                  Ver todos os produtos do catálogo
+                </button>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
