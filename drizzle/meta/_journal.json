@@ -253,6 +253,13 @@
       "when": 1791083846760,
       "tag": "0035_fuzzy_aaron_stack",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1791399107755,
+      "tag": "0036_user_legal_consents",
+      "breakpoints": true
     }
   ]
 }

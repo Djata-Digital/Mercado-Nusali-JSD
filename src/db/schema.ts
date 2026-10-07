@@ -55,6 +55,23 @@ export const userProfiles = pgTable('user_profiles', {
   user_profiles_user_idx: index('user_profiles_user_idx').on(table.userId),
 }));
 
+// LEGAL-2 — histórico de aceites legais (Termos de Uso + Política de Privacidade) e da escolha opcional de comunicações.
+// APPEND-ONLY por contrato do código: um novo aceite (ex.: Termos 1.1) é uma NOVA linha; nada é sobrescrito. Sem IP/user-agent de
+// propósito (minimização: sessões e auditoria já registram esses dados técnicos). Usuários anteriores a esta tabela (ex.: o
+// GLOBAL_ADMIN oficial) NÃO têm linha e continuam válidos: nenhum aceite retroativo é inventado.
+export const userLegalConsents = pgTable('user_legal_consents', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),
+  termsVersion: varchar('terms_version', { length: 20 }).notNull(),
+  privacyVersion: varchar('privacy_version', { length: 20 }).notNull(),
+  acceptedAt: timestamp('accepted_at').defaultNow().notNull(),
+  marketingOptIn: boolean('marketing_opt_in').notNull().default(false),
+  source: varchar('source', { length: 30 }).notNull().default('register'), // register | (futuro) reacceptance
+}, (table) => ({
+  user_legal_consents_user_accepted_idx: index('user_legal_consents_user_accepted_idx').on(table.userId, table.acceptedAt),
+  user_legal_consents_versions_check: check('user_legal_consents_versions_check', sql`length(${table.termsVersion}) > 0 AND length(${table.privacyVersion}) > 0`),
+}));
+
 export const addresses = pgTable('addresses', {
   id: varchar('id', { length: 255 }).primaryKey(),
   userId: varchar('user_id', { length: 255 }).notNull().references(() => users.id, { onDelete: 'cascade' }),

@@ -81,6 +81,11 @@ const registerSchema = z.object({
     .enum(PUBLIC_REGISTRATION_ROLES, { error: 'Tipo de conta inválido. O cadastro permite apenas comprador ou vendedor.' })
     .optional()
     .default('BUYER'),
+  // LEGAL-2 — aceite OBRIGATÓRIO no servidor (o checkbox do navegador não é a única proteção). Só `true` exato passa.
+  termsAccepted: z.literal(true, { error: 'Para criar a conta, aceite os Termos de Uso.' }),
+  privacyAccepted: z.literal(true, { error: 'Para criar a conta, aceite a Política de Privacidade.' }),
+  // Opcional e FALSE por padrão; não condiciona o cadastro. Versões enviadas pelo cliente são descartadas (z.object ignora chaves extras).
+  marketingOptIn: z.boolean({ error: 'Preferência de comunicações inválida.' }).optional().default(false),
 });
 
 const loginSchema = z.object({

@@ -49,6 +49,11 @@ export const AuthService = {
       phone,
       countryCode: data.country || 'GW',
       role: data.role || 'BUYER',
+      // LEGAL-2: aceite obrigatório (validado pelo servidor) e opt-in de comunicações opcional. A VERSÃO dos documentos NÃO é enviada:
+      // o servidor grava a vigente.
+      termsAccepted: data.termsAccepted === true,
+      privacyAccepted: data.privacyAccepted === true,
+      marketingOptIn: data.marketingConsent === true,
     };
 
     const res = await AuthApi.register(payload as any);

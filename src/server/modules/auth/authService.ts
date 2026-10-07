@@ -1,12 +1,13 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getDb } from '../../../db/index.js';
-import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens, sessions, sellers, sellerProfiles, countries, passwordResetTokens, auditLogs } from '../../../db/schema.js';
+import { users, userProfiles, refreshTokens, wallets, emailVerificationTokens, sessions, sellers, sellerProfiles, countries, passwordResetTokens, auditLogs, userLegalConsents } from '../../../db/schema.js';
 import { eq, and, gt, gte, lte, ne, desc } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { generateEmailVerificationCode, hashEmailVerificationCode, sendVerificationEmail, sendPasswordResetEmail } from './emailService.js';
 import crypto from 'node:crypto';
 import { getJwtAccessSecret, getJwtRefreshSecret } from './jwtConfig.js';
+import { LEGAL_TERMS_VERSION, LEGAL_PRIVACY_VERSION } from '../../../content/legal/legalTypes.js';
 import { consumeRateLimit, resetRateLimitCounter, rateLimitAccountKey, getRateLimitCount } from '../../infra/rateLimiter.js';
 
 const ACCESS_EXPIRES_IN = process.env.JWT_ACCESS_EXPIRES_IN || '2h';
@@ -19,6 +20,11 @@ export interface RegisterDTO {
   phone?: string;
   countryCode?: string;
   role?: string;
+  /** LEGAL-2: aceite OBRIGATÓRIO (só `true` exato vale). A VERSÃO aceita nunca vem do cliente: o servidor grava a vigente. */
+  termsAccepted?: boolean;
+  privacyAccepted?: boolean;
+  /** Escolha OPCIONAL de comunicações; só `true` exato conta como opt-in. Ausente = false. */
+  marketingOptIn?: boolean;
 }
 
 /**
@@ -142,6 +148,14 @@ export class AuthService {
     // nunca chega a criar usuário, perfil, carteira nem enviar e-mail.
     const role = resolvePublicRegistrationRole(data.role);
 
+    // LEGAL-2 — o aceite é exigido AQUI (defesa em profundidade; o schema HTTP também exige), antes de qualquer leitura/escrita.
+    if (data.termsAccepted !== true || data.privacyAccepted !== true) {
+      const err: any = new Error('LEGAL_ACCEPTANCE_REQUIRED: É necessário aceitar os Termos de Uso e a Política de Privacidade para criar a conta.');
+      err.code = 'LEGAL_ACCEPTANCE_REQUIRED';
+      throw err;
+    }
+    const marketingOptIn = data.marketingOptIn === true;
+
     const db = getDb();
     const cleanEmail = data.email.trim().toLowerCase();
 
@@ -194,62 +208,76 @@ export class AuthService {
     };
 
     if (db) {
-      await db.insert(users).values(newUser);
+      // LEGAL-2 — usuário, perfil, carteira, vendedor (se houver) e CONSENTIMENTO numa ÚNICA transação: ou tudo nasce, ou nada.
+      await db.transaction(async (tx: any) => {
+        await tx.insert(users).values(newUser);
 
-      // Create initial user profile
-      await db.insert(userProfiles).values({
-        id: `prof_${userId}`,
-        userId,
-        preferredCurrency: countryCurrency,
-        preferredLanguage: 'pt',
-        membershipLevel: 'standard',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-
-      // Create initial wallet
-      await db.insert(wallets).values({
-        id: `wal_${userId}`,
-        userId,
-        balance: '0.00',
-        cashbackBalance: '0.00',
-        pendingBalance: '0.00',
-        currency: countryCurrency,
-        status: 'active',
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-
-      // If user is registering as a SELLER, create seller & sellerProfiles records
-      if (role === 'SELLER') {
-        const sellerId = `sel_${userId}`;
-        await db.insert(sellers).values({
-          id: sellerId,
+        // Create initial user profile
+        await tx.insert(userProfiles).values({
+          id: `prof_${userId}`,
           userId,
-          companyName: data.fullName.trim(),
-          tradingName: data.fullName.trim(),
-          taxId: '', // Never use phone as fallback for taxId!
-          phone: data.phone || '',
-          countryCode,
-          status: 'pending',
-          // NULL = nenhuma comissão específica negociada ainda; a comissão real
-          // vem de category.commissionRate ou platformSettings.defaultSellerCommissionPercent
-          // (ver orderService.ts). NUNCA gravar aqui um percentual técnico "de fábrica".
-          commissionRate: null,
-          rating: '5.00',
-          totalSales: '0.00',
-          totalOrders: 0,
+          preferredCurrency: countryCurrency,
+          preferredLanguage: 'pt',
+          membershipLevel: 'standard',
           createdAt: new Date(),
           updatedAt: new Date(),
         });
 
-        await db.insert(sellerProfiles).values({
-          id: `sp_${userId}`,
-          sellerId,
+        // Create initial wallet
+        await tx.insert(wallets).values({
+          id: `wal_${userId}`,
+          userId,
+          balance: '0.00',
+          cashbackBalance: '0.00',
+          pendingBalance: '0.00',
+          currency: countryCurrency,
+          status: 'active',
           createdAt: new Date(),
           updatedAt: new Date(),
         });
-      }
+
+        // If user is registering as a SELLER, create seller & sellerProfiles records
+        if (role === 'SELLER') {
+          const sellerId = `sel_${userId}`;
+          await tx.insert(sellers).values({
+            id: sellerId,
+            userId,
+            companyName: data.fullName.trim(),
+            tradingName: data.fullName.trim(),
+            taxId: '', // Never use phone as fallback for taxId!
+            phone: data.phone || '',
+            countryCode,
+            status: 'pending',
+            // NULL = nenhuma comissão específica negociada ainda; a comissão real
+            // vem de category.commissionRate ou platformSettings.defaultSellerCommissionPercent
+            // (ver orderService.ts). NUNCA gravar aqui um percentual técnico "de fábrica".
+            commissionRate: null,
+            rating: '5.00',
+            totalSales: '0.00',
+            totalOrders: 0,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+
+          await tx.insert(sellerProfiles).values({
+            id: `sp_${userId}`,
+            sellerId,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+        }
+
+        // Aceite legal inicial: versões VIGENTES definidas pelo servidor (fonte única: content/legal/legalTypes.ts).
+        await tx.insert(userLegalConsents).values({
+          id: `ulc_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+          userId,
+          termsVersion: LEGAL_TERMS_VERSION,
+          privacyVersion: LEGAL_PRIVACY_VERSION,
+          acceptedAt: new Date(),
+          marketingOptIn,
+          source: 'register',
+        });
+      });
     }
 
     // O cadastro só é concluído para o cliente depois que o código foi realmente enviado.

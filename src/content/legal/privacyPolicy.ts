@@ -32,6 +32,7 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
           'Vendedores: nome ou razão social, nome comercial, identificação fiscal quando informada, telefone, país, dados da loja (nome, descrição, imagens, categoria, informações de contato e horários), produtos e estoque e, se você os cadastrar, dados de recebimento como conta bancária.',
           'Verificação de vendedores (KYC): tipo e número do documento, nome legal, imagem do documento de identidade, comprovante de residência, selfie de validação e, para empresas, documento de registro empresarial, além do resultado da análise e do motivo de eventual rejeição.',
           'Dados técnicos e de segurança: endereço IP, tipo de navegador e dispositivo (user agent), data e hora de acesso, sessões de login e registros de segurança e de auditoria de ações administrativas.',
+          'Registro de aceite: as versões dos Termos de Uso e da Política de Privacidade que você aceitou, a data e a hora do aceite e a sua escolha, opcional, sobre receber novidades e comunicações do Mercado Nusali.',
           'Comunicações do serviço: e-mails enviados pela plataforma, como o código de verificação de e-mail e o link de redefinição de senha.',
           'Conteúdo que você envia: anúncios, textos e imagens de lojas e produtos e, quando esses recursos estiverem disponíveis, perguntas, respostas e avaliações.',
         ],
@@ -64,7 +65,7 @@ export const PRIVACY_SECTIONS: LegalSection[] = [
       },
       {
         type: 'p',
-        text: 'Comunicações promocionais, quando existirem, dependerão do seu consentimento e poderão ser canceladas. Não comercializamos dados pessoais.',
+        text: 'No cadastro, você pode indicar, de forma opcional, que deseja receber novidades e comunicações do Mercado Nusali. Essa escolha não é necessária para criar a conta nem para usar a plataforma, vem desmarcada por padrão e comunicações promocionais, quando existirem, dependerão dela. Não comercializamos dados pessoais.',
       },
       {
         type: 'p',

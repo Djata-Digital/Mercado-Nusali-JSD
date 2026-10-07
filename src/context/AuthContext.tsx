@@ -155,8 +155,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         phone: data.phone || '955000000',
         phoneCode: '+245',
         password: 'Password123!',
-        termsAccepted: true,
-        privacyAccepted: true,
+        // Caminho legado (Partial<User>, sem chamadores): NUNCA fabricar aceite legal. O servidor rejeita o cadastro sem aceite real.
+        termsAccepted: false,
+        privacyAccepted: false,
       };
     }
 

@@ -104,7 +104,7 @@ export const RegisterPage: React.FC = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [privacyAccepted, setPrivacyAccepted] = useState(false);
-  const [marketingConsent, setMarketingConsent] = useState(true);
+  const [marketingConsent, setMarketingConsent] = useState(false); // opt-in: desmarcado por padrão
 
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -728,7 +728,7 @@ export const RegisterPage: React.FC = () => {
                       className="w-4 h-4 text-blue-900 rounded border-gray-300 focus:ring-blue-800 cursor-pointer mt-0.5 shrink-0"
                     />
                     <span className="text-gray-700 leading-snug">
-                      (Opcional) Desejo receber ofertas exclusivas, cupons e atualizações de rastreamento de frete por e-mail e SMS.
+                      Quero receber novidades e comunicações do Mercado Nusali. (Opcional: não é necessário para criar a conta.)
                     </span>
                   </label>
                 </div>
