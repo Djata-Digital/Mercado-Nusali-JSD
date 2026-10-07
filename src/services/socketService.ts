@@ -33,12 +33,14 @@ export class SocketService {
       return;
     }
 
-    const wsUrl = `${API_CONFIG.WS_URL}?token=${token || ''}`;
+    // WS-SEC: o token NÃO vai na URL (ficaria em logs de proxy/CDN). A conexão nasce anônima e o servidor só
+    // estabelece a identidade depois desta mensagem AUTH (JWT verificado no servidor; salas privadas só após isso).
     try {
-      this.socket = new WebSocket(wsUrl);
+      this.socket = new WebSocket(API_CONFIG.WS_URL);
 
       this.socket.onopen = () => {
         this.isConnected = true;
+        if (token) this.socket?.send(JSON.stringify({ type: 'AUTH', token }));
         console.log('[SocketService] WebSocket Connected to NestJS Gateway');
       };
 
