@@ -45,6 +45,14 @@ export function parsePublicOrigin(raw: string | undefined | null, nodeEnv: strin
   return url.origin.toLowerCase();
 }
 
+/**
+ * Modo sombra da política de host (C3.7A): só 'true' liga; ausente/false/inválido = DESLIGADO (default).
+ * Só emite o header de diagnóstico X-Host-Policy-Diagnostic (classificações, nunca os hosts); não altera nenhuma decisão.
+ */
+export function isHostShadowModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return String(env.HOST_POLICY_SHADOW_MODE ?? '').trim().toLowerCase() === 'true';
+}
+
 export function getSeoConfig(env: NodeJS.ProcessEnv = process.env): SeoConfig {
   const parsed = parsePublicOrigin(env.PUBLIC_APP_URL, env.NODE_ENV);
   const origin = parsed || SEO_DEFAULT_ORIGIN;
