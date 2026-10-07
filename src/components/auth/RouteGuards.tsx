@@ -2,6 +2,7 @@ import React from 'react';
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { UserRole, Permission } from '../../types';
+import { PHONE_VERIFICATION_ENABLED } from '../../config/constants';
 
 export const ProtectedRoute: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
   const { isAuthenticated, isLoading } = useAuth();
@@ -48,6 +49,16 @@ export const GuestRoute: React.FC<{ children?: React.ReactNode }> = ({ children 
   }
 
   return children ? <>{children}</> : <Outlet />;
+};
+
+/**
+ * PHONE-1 — enquanto PHONE_VERIFICATION_ENABLED for false (canal de código por SMS/WhatsApp ainda NÃO integrado), a tela de
+ * verificação de telefone não faz parte do fluxo: quem abrir /verify-phone é levado ao início. A página e a API de cliente
+ * ficam preservadas; reativar = mudar a constante em src/config/constants.ts.
+ */
+export const PhoneVerificationGate: React.FC<{ enabled?: boolean; children: React.ReactNode }> = ({ enabled = PHONE_VERIFICATION_ENABLED, children }) => {
+  if (!enabled) return <Navigate to="/" replace />;
+  return <>{children}</>;
 };
 
 export const RoleRoute: React.FC<{ allowedRoles: UserRole[]; children?: React.ReactNode }> = ({ allowedRoles, children }) => {

@@ -213,7 +213,7 @@ export const RegisterPage: React.FC = () => {
       // Guarda (só nesta aba) o e-mail que acabou de receber o código: a tela de verificação usa SOMENTE ele e ele
       // sobrevive a reload. O código acabou de ser enviado pelo cadastro.
       storageService.setPendingEmailVerification(email, Date.now());
-      // Redirect user to email or phone verification
+      // Redirect: verificação de E-MAIL (telefone desativado no soft launch).
       navigate('/verify-email');
     } catch (err: any) {
       setErrorMessage(err?.response?.data?.error?.message || err.message || 'Erro ao criar conta. Tente novamente.');
@@ -572,7 +572,7 @@ export const RegisterPage: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block font-bold text-gray-700 mb-1">Telefone / WhatsApp *</label>
+                  <label className="block font-bold text-gray-700 mb-1">Telefone *</label>
                   <div className="flex gap-2">
                     <select
                       value={phoneCode}
@@ -595,7 +595,7 @@ export const RegisterPage: React.FC = () => {
                     />
                   </div>
                   <span className="text-[10px] text-gray-500 mt-1 block">
-                    Utilizado para contato e notificações da sua conta.
+                    Utilizado para contato sobre a sua conta.
                   </span>
                 </div>
               </div>

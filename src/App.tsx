@@ -14,7 +14,7 @@ import { SellerLayout } from './layouts/SellerLayout';
 import { AdminLayout } from './layouts/AdminLayout';
 
 // Auth Guards
-import { ProtectedRoute, GuestRoute, RoleRoute } from './components/auth/RouteGuards';
+import { ProtectedRoute, GuestRoute, RoleRoute, PhoneVerificationGate } from './components/auth/RouteGuards';
 
 // Auth Pages
 import { LoginPage } from './pages/LoginPage';
@@ -110,7 +110,7 @@ export default function App() {
                   }
                 />
                 <Route path="/verify-email" element={<VerifyEmailPage />} />
-                <Route path="/verify-phone" element={<VerifyPhonePage />} />
+                <Route path="/verify-phone" element={<PhoneVerificationGate><VerifyPhonePage /></PhoneVerificationGate>} />
 
                 {/* Public & Buyer Routes */}
                 <Route element={<PublicLayout />}>

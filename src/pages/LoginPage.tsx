@@ -16,6 +16,7 @@ import { useAuth } from '../context/AuthContext';
 import { AuthLogo } from '../components/AuthLogo';
 import { UserRole } from '../types';
 import { storageService } from '../services/storage/storageService';
+import { PHONE_LOGIN_ENABLED } from '../config/constants';
 
 const COUNTRY_CODES = [
   { code: '+245', country: 'GW', flag: '🇬🇼', label: 'Guiné-Bissau (+245)' },
@@ -55,7 +56,7 @@ export const LoginPage: React.FC = () => {
 
     const cleanId = identifier.trim();
     if (!cleanId) {
-      setErrorMessage('Por favor, informe seu e-mail ou número de telefone.');
+      setErrorMessage(PHONE_LOGIN_ENABLED ? 'Por favor, informe seu e-mail ou número de telefone.' : 'Por favor, informe seu e-mail.');
       return;
     }
     if (!password) {
@@ -195,7 +196,8 @@ export const LoginPage: React.FC = () => {
             </div>
           )}
 
-          {/* Input Mode Selector */}
+          {/* Input Mode Selector — PHONE-1: só com PHONE_LOGIN_ENABLED (o backend ainda não aceita login por telefone) */}
+          {PHONE_LOGIN_ENABLED && (
           <div className="flex bg-gray-100 p-1 rounded-xl mb-6">
             <button
               type="button"
@@ -228,6 +230,7 @@ export const LoginPage: React.FC = () => {
               Telefone Internacional
             </button>
           </div>
+          )}
 
           <form onSubmit={handleSubmit} className="space-y-5 text-xs">
             {/* Email or Phone Input */}
