@@ -695,7 +695,11 @@ export const RegisterPage: React.FC = () => {
                       className="w-4 h-4 text-blue-900 rounded border-gray-300 focus:ring-blue-800 cursor-pointer mt-0.5 shrink-0"
                     />
                     <span className="text-gray-700 leading-snug">
-                      Eu li e concordo com os <strong>Termos de Uso do Mercado Nusali</strong> para operações no mercado Guiné-Bissau e CPLP.
+                      Eu li e concordo com os{' '}
+                      <Link to="/termos-de-uso" target="_blank" rel="noopener noreferrer" className="font-bold text-blue-800 underline hover:text-blue-950">
+                        Termos de Uso
+                      </Link>{' '}
+                      do Mercado Nusali.<span className="sr-only"> (abre em nova aba)</span>
                     </span>
                   </label>
 
@@ -708,7 +712,11 @@ export const RegisterPage: React.FC = () => {
                       className="w-4 h-4 text-blue-900 rounded border-gray-300 focus:ring-blue-800 cursor-pointer mt-0.5 shrink-0"
                     />
                     <span className="text-gray-700 leading-snug">
-                      Concordo com a <strong>Política de Privacidade</strong> e o tratamento seguro dos meus dados pessoais.
+                      Li e concordo com a{' '}
+                      <Link to="/politica-de-privacidade" target="_blank" rel="noopener noreferrer" className="font-bold text-blue-800 underline hover:text-blue-950">
+                        Política de Privacidade
+                      </Link>{' '}
+                      e com o tratamento dos meus dados pessoais nela descrito.<span className="sr-only"> (abre em nova aba)</span>
                     </span>
                   </label>
 

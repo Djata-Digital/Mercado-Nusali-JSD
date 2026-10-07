@@ -49,6 +49,8 @@ import { MessagesPage } from './pages/MessagesPage';
 import { ReturnsRefundsPage } from './pages/ReturnsRefundsPage';
 import { DisputesPage } from './pages/DisputesPage';
 import { HelpCenterPage } from './pages/HelpCenterPage';
+import { TermsOfUsePage } from './pages/TermsOfUsePage';
+import { PrivacyPolicyPage } from './pages/PrivacyPolicyPage';
 import { SellerDashboardPage } from './pages/SellerDashboardPage';
 import { AdminDashboardPage } from './pages/AdminDashboardPage';
 
@@ -123,6 +125,8 @@ export default function App() {
                   <Route path="/cart" element={<CartPage />} />
                   <Route path="/tracking/:id" element={<TrackingPage />} />
                   <Route path="/help-center" element={<HelpCenterPage />} />
+                  <Route path="/termos-de-uso" element={<TermsOfUsePage />} />
+                  <Route path="/politica-de-privacidade" element={<PrivacyPolicyPage />} />
 
                   {/* Protected Buyer Routes */}
                   <Route element={<ProtectedRoute />}>

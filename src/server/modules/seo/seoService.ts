@@ -330,6 +330,8 @@ export async function buildSitemapXml(cfg: SeoConfig, opts: { useCache?: boolean
     { path: '/categories', changefreq: 'weekly', priority: '0.8' },
     { path: '/stores', changefreq: 'weekly', priority: '0.8' },
     { path: '/help-center', changefreq: 'monthly', priority: '0.3' },
+    { path: '/termos-de-uso', changefreq: 'yearly', priority: '0.2' },
+    { path: '/politica-de-privacidade', changefreq: 'yearly', priority: '0.2' },
   ];
 
   const db = getDb();

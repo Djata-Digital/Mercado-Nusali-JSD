@@ -84,7 +84,16 @@ export const PublicLayout: React.FC = () => {
           )}
         </div>
 
-        <div className="bg-gray-100 py-4 text-center border-t border-gray-200 text-[11px] text-gray-500">
+        <div className="bg-gray-100 py-4 px-4 text-center border-t border-gray-200 text-[11px] text-gray-500 space-y-2">
+          <nav aria-label="Documentos legais" className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 font-semibold text-gray-700">
+            <Link to="/termos-de-uso" className="inline-block py-2 px-1 hover:text-emerald-700 hover:underline">
+              Termos de Uso
+            </Link>
+            <span aria-hidden="true" className="text-gray-300">|</span>
+            <Link to="/politica-de-privacidade" className="inline-block py-2 px-1 hover:text-emerald-700 hover:underline">
+              Política de Privacidade
+            </Link>
+          </nav>
           <p>© 2026 Mercado Nusali - Plataforma de Marketplace Internacional. Todos os direitos reservados.</p>
         </div>
       </footer>

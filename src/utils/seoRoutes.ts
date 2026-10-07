@@ -32,6 +32,8 @@ export type SeoRouteKind =
   | 'store'
   | 'product'
   | 'help'
+  | 'terms' // páginas legais institucionais (públicas, indexáveis)
+  | 'privacy'
   | 'private' // área logada / transacional / auth: nunca indexar
   | 'unknown'; // rota que o React Router não conhece (cai no catch-all)
 
@@ -115,6 +117,8 @@ export function classifyPath(pathname: string): SeoRouteInfo {
     return { kind: 'unknown' };
   }
   if (first === 'help-center') return segs.length === 1 ? { kind: 'help' } : { kind: 'unknown' };
+  if (first === 'termos-de-uso') return segs.length === 1 ? { kind: 'terms' } : { kind: 'unknown' };
+  if (first === 'politica-de-privacidade') return segs.length === 1 ? { kind: 'privacy' } : { kind: 'unknown' };
 
   if (Object.prototype.hasOwnProperty.call(PRIVATE_LABELS, first)) {
     const max = PRIVATE_MAX_SEGMENTS[first] ?? 1;
@@ -176,6 +180,10 @@ export function staticSeoFor(info: SeoRouteInfo, pathname: string): StaticSeo {
       return { title: pageTitle('Lojas'), description: 'Conheça as lojas e os vendedores do Mercado Nusali.', canonicalPath: '/stores', robots: ROBOTS_INDEX };
     case 'help':
       return { title: pageTitle('Central de Ajuda'), description: 'Encontre respostas sobre o Mercado Nusali: cadastro, produtos e atendimento.', canonicalPath: '/help-center', robots: ROBOTS_INDEX };
+    case 'terms':
+      return { title: pageTitle('Termos de Uso'), description: 'Leia os Termos de Uso do Mercado Nusali: regras de cadastro, uso da plataforma por compradores e vendedores, lojas, produtos e responsabilidades.', canonicalPath: '/termos-de-uso', robots: ROBOTS_INDEX };
+    case 'privacy':
+      return { title: pageTitle('Política de Privacidade'), description: 'Entenda como o Mercado Nusali trata dados pessoais: quais dados são coletados, para quê, com quem são compartilhados e quais são os seus direitos.', canonicalPath: '/politica-de-privacidade', robots: ROBOTS_INDEX };
     case 'product':
     case 'category':
     case 'store':
