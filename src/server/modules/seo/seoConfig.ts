@@ -1,9 +1,10 @@
 /**
- * Configuração do domínio público (C3.2). Duas variáveis, separadas de APP_URL de propósito (APP_URL = links de e-mail/reset;
+ * Configuração do domínio público (C3.2). Variáveis separadas de APP_URL de propósito (APP_URL = links de e-mail/reset;
  * estas controlam a política de host/SEO):
  *
  *   PUBLIC_APP_URL                      origem pública canônica, ex.: https://mercado.nusali.com (só origem; sem caminho)
- *   CANONICAL_HOST_REDIRECT_ENABLED     'true' liga o 301 de páginas em host não canônico. Qualquer outro valor = DESLIGADO.
+ *   CANONICAL_HOST_REDIRECT_ENABLED     'true' liga o redirect de páginas em host não canônico. Qualquer outro valor = DESLIGADO.
+ *   CANONICAL_HOST_REDIRECT_STATUS      status do redirect (C3.7C): 302 (default), 301, 307 ou 308; inválido/ausente = 302.
  *
  * Sem PUBLIC_APP_URL: nenhum redirect e nenhum X-Robots-Tag por host (comportamento anterior), e os canonicals/sitemap usam
  * a origem padrão https://mercado.nusali.com. O redirect só liga com PUBLIC_APP_URL válida E a flag explícita.
@@ -19,6 +20,22 @@ export interface SeoConfig {
   explicit: boolean;
   /** Redirect de páginas em host não canônico ligado. */
   redirectEnabled: boolean;
+  /** Status HTTP do redirect canônico (C3.7C). Lista fechada; default e fallback = 302 (reversível, não fica em cache de navegador). */
+  redirectStatus: RedirectStatus;
+}
+
+export type RedirectStatus = 301 | 302 | 307 | 308;
+export const DEFAULT_REDIRECT_STATUS: RedirectStatus = 302;
+const ALLOWED_REDIRECT_STATUS: readonly string[] = ['301', '302', '307', '308'];
+
+/**
+ * CANONICAL_HOST_REDIRECT_STATUS: só 301, 302, 307 ou 308 (texto exato, com espaços nas pontas aparados). Ausente, vazio ou
+ * qualquer outro valor => 302. Nunca aceita status arbitrário. Como só GET/HEAD são redirecionados, 307≈302 e 308≈301;
+ * 301/308 são permanentes e ficam em cache de navegadores: só usar depois de validar o canário com 302.
+ */
+export function parseRedirectStatus(raw: string | undefined | null): RedirectStatus {
+  const v = String(raw ?? '').trim();
+  return ALLOWED_REDIRECT_STATUS.includes(v) ? (Number(v) as RedirectStatus) : DEFAULT_REDIRECT_STATUS;
 }
 
 /** Valida PUBLIC_APP_URL: https (http só para localhost fora de produção), sem credenciais/caminho/query/hash. Devolve a origem normalizada. */
@@ -59,5 +76,5 @@ export function getSeoConfig(env: NodeJS.ProcessEnv = process.env): SeoConfig {
   const host = new URL(origin).hostname.toLowerCase();
   const explicit = parsed !== null;
   const redirectEnabled = explicit && String(env.CANONICAL_HOST_REDIRECT_ENABLED ?? '').trim().toLowerCase() === 'true';
-  return { origin, host, explicit, redirectEnabled };
+  return { origin, host, explicit, redirectEnabled, redirectStatus: parseRedirectStatus(env.CANONICAL_HOST_REDIRECT_STATUS) };
 }

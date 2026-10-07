@@ -1,22 +1,28 @@
 /**
- * Política de host canônico (C3.2) — middleware de Express.
+ * Política de host canônico (C3.2, endurecida na C3.7C) — middleware de Express.
+ *
+ * FONTE DA DECISÃO (C3.7C): o Host BRUTO (`req.headers.host`) validado e normalizado por `normalizeRawHost`. Provado em
+ * produção (C3.7B) que ele representa o host realmente solicitado e que `X-Forwarded-Host` NÃO o altera. `req.hostname` do
+ * Express NÃO participa da decisão: ele prefere o X-Forwarded-Host enviado pelo cliente (Cloudflare e Render não o
+ * sobrescrevem) e por isso é forjável. `X-Forwarded-Host` é irrelevante para canonical/noindex/redirect.
  *
  * - Só atua quando PUBLIC_APP_URL está configurada e válida (seoConfig.ts). Sem ela: NADA muda (nem redirect, nem header).
- * - Em host NÃO canônico, respostas de PÁGINA (HTML/estáticos de página) recebem `X-Robots-Tag: noindex, nofollow`. A API
- *   (/api, /ws, health) e os assets técnicos (/assets/) nunca são tratados como página.
- * - Com CANONICAL_HOST_REDIRECT_ENABLED=true: GET/HEAD de PÁGINA em host não canônico => 301 para a origem canônica,
- *   preservando caminho e query. A API em api.mercado.nusali.com continua servida normalmente (webhooks do Asaas, /ws).
- * - O host da DECISÃO vem de `req.hostname` do Express (configureTrustProxy: Render privado + Cloudflare). ATENÇÃO (C3.7): o
- *   Express prefere X-Forwarded-Host enviado pelo cliente e nem a Cloudflare nem o Render o sobrescrevem; logo `req.hostname`
- *   é forjável. O destino do redirect é SEMPRE a origem canônica configurada + req.originalUrl: não existe open redirect
- *   (o host destino nunca vem da requisição).
- * - MODO SOMBRA (C3.7A, HOST_POLICY_SHADOW_MODE=true, default desligado): só OBSERVA. Classifica o Host bruto
- *   (`req.headers.host`) e o hostname resolvido e devolve `X-Host-Policy-Diagnostic: raw=<..>;resolved=<..>` (apenas
- *   classificações; nunca o valor dos hosts, X-Forwarded-Host ou IP). O Host bruto NUNCA entra em decisão, redirect,
- *   canonical, autenticação ou autorização nesta etapa: serve apenas para provar em produção se ele é uma fonte confiável.
+ * - Host bruto canônico: nada a fazer (nunca redireciona, nunca recebe noindex de host => sem loop, mesmo com
+ *   X-Forwarded-Host forjado).
+ * - Host bruto NÃO canônico (`other`) ou INVÁLIDO/ausente (`invalid`): respostas de PÁGINA recebem
+ *   `X-Robots-Tag: noindex, nofollow`. A API (/api, /ws, health) e os assets técnicos (/assets/) nunca são tratados como
+ *   página, em qualquer combinação de maiúsculas/minúsculas.
+ * - Redirect canônico (CANONICAL_HOST_REDIRECT_ENABLED=true): só GET/HEAD, só página, só host bruto VÁLIDO e não canônico.
+ *   Status = CANONICAL_HOST_REDIRECT_STATUS (default 302; 301/307/308 permitidos), SEMPRE com `Cache-Control: no-store`.
+ *   Destino = origem canônica configurada (PUBLIC_APP_URL) + req.originalUrl, nunca derivado de Host nem de
+ *   X-Forwarded-Host: não existe open redirect.
+ * - Host INVÁLIDO (fail-safe): sem redirect (não se adivinha o host a partir de X-Forwarded-Host nem de req.hostname),
+ *   mas a página recebe noindex para impedir indexação acidental; a requisição segue o fluxo normal.
+ * - MODO SOMBRA (HOST_POLICY_SHADOW_MODE=true, default desligado): só emite `X-Host-Policy-Diagnostic:
+ *   raw=<..>;resolved=<..>` (apenas classificações, nunca os hosts). `resolved` (req.hostname) é SOMENTE diagnóstico.
  */
 import type { Request, Response, NextFunction } from 'express';
-import { getSeoConfig, isHostShadowModeEnabled, type SeoConfig } from './seoConfig.js';
+import { getSeoConfig, isHostShadowModeEnabled, DEFAULT_REDIRECT_STATUS, type SeoConfig } from './seoConfig.js';
 
 export type RequestPathKind = 'api' | 'asset' | 'page';
 export type HostClass = 'canonical' | 'other';
@@ -24,12 +30,27 @@ export type RawHostClass = HostClass | 'invalid';
 
 export const HOST_DIAGNOSTIC_HEADER = 'X-Host-Policy-Diagnostic';
 
+/** Classificação usada pelo handler SPA (seoRouter.ts): sensível a maiúsculas, como sempre foi. NÃO usar na política de host. */
 export function classifyRequestPath(pathname: string): RequestPathKind {
   const p = String(pathname || '/');
   if (p === '/api' || p.startsWith('/api/')) return 'api';
   if (p === '/ws' || p.startsWith('/ws/')) return 'api';
   if (p === '/health' || p === '/healthz' || p.startsWith('/health/')) return 'api';
   if (p.startsWith('/assets/')) return 'asset';
+  return 'page';
+}
+
+/**
+ * Classificação da POLÍTICA DE HOST (C3.7C): mesma regra, porém insensível a maiúsculas — o Express roteia /API, /Ws,
+ * /HEALTH sem diferenciar caixa, então a política também não pode. Só decide se o host-policy redireciona/marca; não toca
+ * no roteamento. `/assets` sem barra final e `/assets/*` contam como asset.
+ */
+export function classifyPathForHostPolicy(pathname: string): RequestPathKind {
+  const p = String(pathname || '/').toLowerCase();
+  if (p === '/api' || p.startsWith('/api/')) return 'api';
+  if (p === '/ws' || p.startsWith('/ws/')) return 'api';
+  if (p === '/health' || p === '/healthz' || p.startsWith('/health/')) return 'api';
+  if (p === '/assets' || p.startsWith('/assets/')) return 'asset';
   return 'page';
 }
 
@@ -71,7 +92,7 @@ export function classifyRawHost(rawHeader: unknown, canonicalHost: string): RawH
   return normalized === canonicalHost ? 'canonical' : 'other';
 }
 
-/** Mesma comparação da decisão real (hostname resolvido pelo Express), apenas classificada. */
+/** Hostname resolvido pelo Express (forjável via X-Forwarded-Host). SOMENTE DIAGNÓSTICO: nunca entra em decisão. */
 export function classifyResolvedHost(hostname: unknown, canonicalHost: string): HostClass {
   return String(hostname || '').toLowerCase() === canonicalHost ? 'canonical' : 'other';
 }
@@ -81,6 +102,11 @@ export function buildHostDiagnostic(rawHeader: unknown, hostname: unknown, canon
   return `raw=${classifyRawHost(rawHeader, canonicalHost)};resolved=${classifyResolvedHost(hostname, canonicalHost)}`;
 }
 
+/** Caminho+query seguro para anexar à origem canônica: tem de começar por "/" (forma origin; rejeita forma absoluta). */
+function safeRedirectPath(originalUrl: string): string {
+  return typeof originalUrl === 'string' && originalUrl.startsWith('/') ? originalUrl : '/';
+}
+
 export function createCanonicalHostMiddleware(
   getConfig: () => SeoConfig = () => getSeoConfig(),
   isShadowEnabled: () => boolean = () => isHostShadowModeEnabled(),
@@ -88,7 +114,7 @@ export function createCanonicalHostMiddleware(
   return function canonicalHost(req: Request, res: Response, next: NextFunction) {
     const cfg = getConfig();
 
-    // Modo sombra (C3.7A): apenas observa; não participa de nenhuma decisão abaixo e nunca pode derrubar a requisição.
+    // Modo sombra: apenas observa; não participa de nenhuma decisão abaixo e nunca pode derrubar a requisição.
     try {
       if (isShadowEnabled()) res.setHeader(HOST_DIAGNOSTIC_HEADER, buildHostDiagnostic(req.headers.host, req.hostname, cfg.host));
     } catch {
@@ -97,15 +123,17 @@ export function createCanonicalHostMiddleware(
 
     if (!cfg.explicit) return next();
 
-    const requestHost = String(req.hostname || '').toLowerCase();
-    if (requestHost === cfg.host) return next(); // host canônico: nada a fazer
+    // DECISÃO: só o Host bruto validado. req.hostname e X-Forwarded-Host não são lidos aqui.
+    const rawClass = classifyRawHost(req.headers.host, cfg.host);
+    if (rawClass === 'canonical') return next(); // host canônico: nada a fazer
 
-    if (classifyRequestPath(req.path) !== 'page') return next(); // API / assets técnicos: intocados
+    if (classifyPathForHostPolicy(req.path) !== 'page') return next(); // API / WS / health / assets técnicos: intocados
 
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
-    if (cfg.redirectEnabled && (req.method === 'GET' || req.method === 'HEAD')) {
-      return res.redirect(301, `${cfg.origin}${req.originalUrl}`);
+    if (rawClass === 'other' && cfg.redirectEnabled && (req.method === 'GET' || req.method === 'HEAD')) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.redirect(cfg.redirectStatus ?? DEFAULT_REDIRECT_STATUS, `${cfg.origin}${safeRedirectPath(req.originalUrl)}`);
     }
-    return next();
+    return next(); // host inválido (fail-safe), método de escrita ou redirect desligado
   };
 }
