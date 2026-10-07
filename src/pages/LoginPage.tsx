@@ -14,7 +14,6 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { AuthLogo } from '../components/AuthLogo';
-import { UserRole } from '../types';
 import { storageService } from '../services/storage/storageService';
 import { PHONE_LOGIN_ENABLED } from '../config/constants';
 
@@ -39,7 +38,6 @@ export const LoginPage: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
-  const [role, setRole] = useState<UserRole>('BUYER');
 
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -75,7 +73,6 @@ export const LoginPage: React.FC = () => {
       const loggedUser = await login({
         identifier: fullIdentifier,
         password,
-        role,
         rememberMe,
       });
 
@@ -134,15 +131,12 @@ export const LoginPage: React.FC = () => {
     if (type === 'buyer' || type === 'user') {
       setInputMode('email');
       setIdentifier('djatadigital7@gmail.com');
-      setRole('BUYER');
     } else if (type === 'seller') {
       setInputMode('email');
       setIdentifier('vendedor@nusali.com');
-      setRole('SELLER');
     } else if (type === 'admin') {
       setInputMode('email');
       setIdentifier('admin@nusali.com');
-      setRole('ADMIN');
     }
   };
 
@@ -313,8 +307,8 @@ export const LoginPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Remember Me & Role */}
-            <div className="flex items-center justify-between pt-1">
+            {/* Lembrar de mim. O perfil/papel NÃO é escolhido aqui: vem da conta autenticada (resposta do servidor). */}
+            <div className="flex items-center pt-1">
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
@@ -324,16 +318,6 @@ export const LoginPage: React.FC = () => {
                 />
                 <span className="text-gray-700 font-medium">Lembrar de mim</span>
               </label>
-
-              <select
-                value={role}
-                onChange={(e) => setRole(e.target.value as UserRole)}
-                className="text-[11px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 focus:outline-hidden"
-              >
-                <option value="BUYER">Perfil Comprador</option>
-                <option value="SELLER">Perfil Vendedor</option>
-                <option value="ADMIN">Perfil Admin</option>
-              </select>
             </div>
 
             {/* Submit Button */}
