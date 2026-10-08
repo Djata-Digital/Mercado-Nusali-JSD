@@ -41,6 +41,18 @@ import {
 import { useCategories } from '../../hooks/useProducts';
 import { getCategoryPath, isLeafCategory, getDirectChildren, getDescendantIds } from '../../utils/categoryUtils';
 import { CategoriesApi } from '../../api/clients/CategoriesApi';
+import { ProductAttributeFields } from './ProductAttributeFields';
+import {
+  selectFormAttributes,
+  validateFormFields,
+  buildAttributeSpecs,
+  reconcileValues,
+  initialValuesFromProduct,
+  extractSubmitError,
+  type FormAttribute,
+  type FormValue,
+  type FormValues,
+} from '../../utils/attributeFormModel';
 import { uploadService } from '../../services/uploadService';
 import {
   Product,
@@ -152,12 +164,27 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
 
   const [dbAttributes, setDbAttributes] = useState<any[]>([]);
   const [isLoadingDbAttributes, setIsLoadingDbAttributes] = useState(false);
-  const [categorySpecs, setCategorySpecs] = useState<Record<string, string>>(
+  // Legado: mapa de textos do produto em EDIÇÃO (rótulos gerais, chaves antigas). A criação usa os valores tipados abaixo.
+  const [categorySpecs] = useState<Record<string, string>>(
     (initialProduct?.specs as Record<string, string>) || (initialProduct?.attributesJson as any) || {}
   );
 
+  // Fase 5: atributos efetivos da subcategoria (herança, substituições e desativações já resolvidas pelo backend). Só especificações
+  // (eixos de variante ficam nas etapas de variações) e sem campos que repetem Marca/Modelo/Condição/Garantia/Peso/Dimensões.
+  const formFields: FormAttribute[] = React.useMemo(() => selectFormAttributes(dbAttributes).fields, [dbAttributes]);
+  const [attrValues, setAttrValues] = useState<FormValues>({});
+  const [attrErrors, setAttrErrors] = useState<Record<string, string>>({});
+  const [droppedLabels, setDroppedLabels] = useState<string[]>([]);
+  const attrValuesRef = useRef<FormValues>({});
+  attrValuesRef.current = attrValues;
+  const previousFieldsRef = useRef<FormAttribute[]>([]);
+  const editValuesLoadedRef = useRef(false);
+
   useEffect(() => {
-    if (!category) return;
+    if (!category) {
+      setDbAttributes([]);
+      return;
+    }
     let isSubscribed = true;
     setIsLoadingDbAttributes(true);
 
@@ -182,13 +209,42 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     };
   }, [category]);
 
-  const handleCategorySpecChange = (keyOrCode: string, val: string) => {
-    setCategorySpecs((prev) => ({
-      ...prev,
-      [keyOrCode]: val,
-    }));
-    if (keyOrCode.toLowerCase() === 'marca' || keyOrCode.toLowerCase() === 'brand') setBrand(val);
-    if (keyOrCode.toLowerCase() === 'modelo' || keyOrCode.toLowerCase() === 'model') setModel(val);
+  // Quando os atributos efetivos mudam (primeira carga ou troca de subcategoria): mantém o que continua válido (ex.: Cor herdada),
+  // descarta o resto e avisa. Na edição, os valores atuais do produto entram uma única vez.
+  useEffect(() => {
+    let base = attrValuesRef.current;
+    if (isEditing && !editValuesLoadedRef.current && formFields.length > 0) {
+      editValuesLoadedRef.current = true;
+      base = { ...initialValuesFromProduct(formFields, initialProduct), ...base };
+    }
+    const { values, dropped } = reconcileValues(formFields, base);
+    const names = dropped.map((code) => previousFieldsRef.current.find((f) => f.code === code)?.name || code);
+    setAttrValues(values);
+    setDroppedLabels(names);
+    setAttrErrors((prev) => Object.fromEntries(Object.entries(prev).filter(([code]) => formFields.some((f) => f.code === code))));
+    previousFieldsRef.current = formFields;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formFields]);
+
+  const handleAttrChange = (code: string, value: FormValue) => {
+    setAttrValues((prev) => ({ ...prev, [code]: value }));
+    setAttrErrors((prev) => {
+      if (!(code in prev)) return prev;
+      const { [code]: _removed, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  /** Leva o vendedor ao primeiro campo com erro (etapa 1) e foca nele. */
+  const focusFirstAttrError = (codes: string[]) => {
+    setWizardStep(1);
+    const target = codes[0];
+    if (!target) return;
+    setTimeout(() => {
+      const el = document.getElementById(`attr-field-${target}`) as HTMLElement | null;
+      el?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      el?.focus?.();
+    }, 60);
   };
 
   // Sem categoria pré-selecionada: com a taxonomia de ~320 categorias, a primeira da lista seria um departamento (não folha) e
@@ -948,16 +1004,16 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
-    // Validate mandatory category attributes from DB
-    if (dbAttributes && dbAttributes.length > 0) {
-      for (const attr of dbAttributes) {
-        if (attr.isRequired) {
-          const val = categorySpecs[attr.name] || categorySpecs[attr.code];
-          if (!val || !String(val).trim()) {
-            showToast(`O atributo "${attr.name}" é de preenchimento obrigatório para esta categoria.`);
-            return;
-          }
-        }
+    // Fase 5: valida TODOS os atributos efetivos com as mesmas regras do servidor (obrigatório, tipo, limites, opções). 0 e "Não" valem.
+    // Na edição os atributos são só leitura (o backend ainda não grava alterações deles), então não bloqueiam a publicação.
+    if (!isEditing && formFields.length > 0) {
+      const found = validateFormFields(formFields, attrValues);
+      if (Object.keys(found).length > 0) {
+        setAttrErrors(found);
+        const firstCode = formFields.find((f) => found[f.code])?.code;
+        showToast(Object.values(found)[0]);
+        focusFirstAttrError(firstCode ? [firstCode] : []);
+        return;
       }
     }
 
@@ -1091,7 +1147,9 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
-    const cleanCreateSpecs: Record<string, any> = { ...categorySpecs };
+    // Valores tipados dos atributos (0 e false preservados) + rótulos gerais legados (Marca, Modelo, Condição, Peso, Dimensões,
+    // Garantia, Armazém), que o backend reconhece como campos gerais e nunca como atributo — compatível com PRODUCT_ATTRIBUTES_STRICT=1.
+    const cleanCreateSpecs: Record<string, any> = { ...buildAttributeSpecs(formFields, attrValues) };
     if (brand && brand.trim()) cleanCreateSpecs['Marca'] = brand.trim();
     if (model && model.trim()) cleanCreateSpecs['Modelo'] = model.trim();
     if (conditionLabel(condition)) cleanCreateSpecs['Condição'] = conditionLabel(condition);
@@ -1100,7 +1158,9 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     if (warrantyMonths && warrantyMonths.trim()) cleanCreateSpecs['Garantia'] = `${warrantyMonths.trim()} Meses`;
     if (warehouseHub && warehouseHub.trim()) cleanCreateSpecs['Armazém'] = warehouseHub.trim();
 
-    const created = await onAddProduct({
+    let created: any;
+    try {
+      created = await onAddProduct({
       title,
       price: priceNum,
       currency,
@@ -1149,7 +1209,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       stock: parsedStock,
       description: description ? description.trim() : '',
       specs: cleanCreateSpecs,
-    });
+      });
+    } catch (err: any) {
+      // O painel já mostrou o aviso do erro; aqui o servidor aponta o campo exato (PRODUCT_ATTRIBUTES_INVALID.details).
+      const parsed = extractSubmitError(err);
+      const known = Object.fromEntries(Object.entries(parsed.fieldErrors).filter(([code]) => formFields.some((f) => f.code === code)));
+      if (Object.keys(known).length > 0) {
+        setAttrErrors(known);
+        focusFirstAttrError(formFields.filter((f) => known[f.code]).map((f) => f.code));
+      }
+      return;
+    }
 
     const createdProductId = created?.id || created?.data?.id;
 
@@ -1401,125 +1471,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
               </div>
             </div>
 
-            {/* Characteristics & Real Category Attributes from Supabase */}
-            <div className="p-5 bg-white border border-gray-200 rounded-2xl space-y-4 shadow-2xs">
-              <div className="flex items-center justify-between border-b border-gray-100 pb-3">
-                <div>
-                  <h4 className="font-extrabold text-sm text-gray-900 flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-purple-600" />
-                    Características do produto
-                  </h4>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    Preencha as especificações configuradas no catálogo para aumentar a relevância do seu anúncio nas buscas.
-                  </p>
-                </div>
-                {isLoadingDbAttributes && (
-                  <Loader2 className="w-4 h-4 animate-spin text-purple-600" />
-                )}
-              </div>
-
-              {isLoadingDbAttributes ? (
-                <div className="p-4 text-center text-xs text-gray-400 font-medium">
-                  Carregando características da categoria...
-                </div>
-              ) : dbAttributes.length === 0 ? (
-                <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 text-xs text-gray-500 font-medium text-center">
-                  Esta categoria não possui características específicas cadastradas no catálogo.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {/* Sort: Mandatory attributes first, Optional after */}
-                  {[...dbAttributes]
-                    .sort((a, b) => (a.isRequired === b.isRequired ? (a.sortOrder - b.sortOrder) : a.isRequired ? -1 : 1))
-                    .map((attr) => {
-                      const valKey = attr.code || attr.name;
-                      const currentValue = categorySpecs[attr.name] ?? categorySpecs[attr.code] ?? '';
-                      const optionsList: string[] = Array.isArray(attr.optionsJson) ? attr.optionsJson : [];
-
-                      return (
-                        <div key={attr.id || attr.code} className="space-y-1">
-                          <label className="block text-gray-900 font-extrabold text-xs flex items-center justify-between">
-                            <span>
-                              {attr.name}
-                              {attr.isRequired && <span className="text-red-500 font-black ml-0.5">*</span>}
-                            </span>
-                            {attr.unit && (
-                              <span className="text-[10px] bg-purple-50 text-purple-700 font-bold px-1.5 py-0.2 rounded-md">
-                                {attr.unit}
-                              </span>
-                            )}
-                          </label>
-
-                          {attr.type === 'select' ? (
-                            <select
-                              value={currentValue}
-                              onChange={(e) => handleCategorySpecChange(valKey, e.target.value)}
-                              className="w-full p-2.5 border border-gray-300 rounded-xl bg-white text-xs font-bold text-gray-900 focus:ring-2 focus:ring-purple-500"
-                            >
-                              <option value="">Selecione {attr.name}...</option>
-                              {optionsList.map((opt) => (
-                                <option key={opt} value={opt}>
-                                  {opt}
-                                </option>
-                              ))}
-                            </select>
-                          ) : attr.type === 'boolean' ? (
-                            <select
-                              value={currentValue}
-                              onChange={(e) => handleCategorySpecChange(valKey, e.target.value)}
-                              className="w-full p-2.5 border border-gray-300 rounded-xl bg-white text-xs font-bold text-gray-900 focus:ring-2 focus:ring-purple-500"
-                            >
-                              <option value="">Selecione...</option>
-                              <option value="Sim">Sim</option>
-                              <option value="Não">Não</option>
-                            </select>
-                          ) : attr.type === 'multiselect' ? (
-                            <div className="flex flex-wrap gap-1.5 pt-1">
-                              {optionsList.map((opt) => {
-                                const selectedArr = currentValue ? currentValue.split(', ') : [];
-                                const isSelected = selectedArr.includes(opt);
-                                return (
-                                  <button
-                                    key={opt}
-                                    type="button"
-                                    onClick={() => {
-                                      const next = isSelected
-                                        ? selectedArr.filter((s) => s !== opt)
-                                        : [...selectedArr, opt];
-                                      handleCategorySpecChange(valKey, next.join(', '));
-                                    }}
-                                    className={`px-2.5 py-1 text-xs rounded-lg border font-bold transition cursor-pointer ${
-                                      isSelected
-                                        ? 'bg-purple-600 text-white border-purple-600 shadow-2xs'
-                                        : 'bg-white text-gray-700 border-gray-300 hover:border-purple-400'
-                                    }`}
-                                  >
-                                    {opt}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          ) : (
-                            <div className="relative">
-                              <input
-                                type={attr.type === 'number' ? 'number' : 'text'}
-                                value={currentValue}
-                                onChange={(e) => handleCategorySpecChange(valKey, e.target.value)}
-                                placeholder={attr.placeholder || `Digite ${attr.name}`}
-                                className="w-full p-2.5 border border-gray-300 rounded-xl text-xs font-medium focus:ring-2 focus:ring-purple-500 bg-white"
-                              />
-                            </div>
-                          )}
-
-                          {attr.helpText && (
-                            <p className="text-[10px] text-gray-400 font-medium">{attr.helpText}</p>
-                          )}
-                        </div>
-                      );
-                    })}
-                </div>
-              )}
-            </div>
+            {/* Características da categoria (Fase 5): campos dinâmicos por tipo, agrupados, com unidade, limites e erros por campo */}
+            <ProductAttributeFields
+              fields={formFields}
+              values={attrValues}
+              errors={attrErrors}
+              onChange={handleAttrChange}
+              isLoading={isLoadingDbAttributes}
+              readOnly={isEditing}
+              needsLeafCategory={Boolean(category) && !isLeafCategory(category, activeCategories)}
+              droppedLabels={droppedLabels}
+            />
           </div>
         )}
 

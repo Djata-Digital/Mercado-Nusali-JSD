@@ -1,4 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
+import { extractSubmitError } from '../utils/attributeFormModel';
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Lock, ShieldCheck, Loader2 } from 'lucide-react';
@@ -306,9 +307,13 @@ export const SellerHubView: React.FC = () => {
       return res.data;
     } catch (err: any) {
       console.error('Error creating product:', err);
-      const errMsg = err?.message || 'Falha ao cadastrar produto no catálogo.';
+      // O axios lança "Request failed with status code 400"; a mensagem útil (e os erros por campo de atributos) vem no corpo da resposta.
+      const parsed = extractSubmitError(err);
+      const errMsg = parsed.message || 'Falha ao cadastrar produto no catálogo.';
       showToast(errMsg);
-      throw new Error(errMsg);
+      const surfaced: any = new Error(errMsg);
+      surfaced.data = err?.response?.data;
+      throw surfaced;
     }
   };
 
