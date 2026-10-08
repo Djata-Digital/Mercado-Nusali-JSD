@@ -1,4 +1,5 @@
 import { getDb } from '../../../db/index.js';
+import { loadProductAttributeValues, composeProductSpecs } from './attributeValueService.js';
 import { products, categories, brands, productVariants, productImages, productAttributes, reviews, reviewImages, sellers, stores, inventory, orderItems, orders, countries } from '../../../db/schema.js';
 import { getCache, setCache, delCache, delCacheByPattern } from '../../../db/redis.js';
 import { eq, ne, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
@@ -495,15 +496,9 @@ export class CatalogService {
     if (productRes.length === 0) return null;
 
     const p = productRes[0];
-    const dbSpecsMap: Record<string, string> = {};
-    attrRes.forEach((a) => {
-      dbSpecsMap[a.name] = a.value;
-    });
-
-    const combinedSpecs = {
-      ...dbSpecsMap,
-      ...(p.attributesJson as Record<string, string>),
-    };
+    // Fase 3: valores tipados (product_attribute_values) vencem a visão legada para o mesmo código; o restante segue como antes.
+    const attributeValues = (await loadProductAttributeValues(db, [id])).get(id) ?? [];
+    const combinedSpecs = composeProductSpecs(attrRes, p.attributesJson, attributeValues);
 
     // FASE D17-C7 — fotos reais da review, buscadas em uma única query
     // separada (evita N+1: 1 query para todas as reviews desta página, nunca
@@ -565,6 +560,7 @@ export class CatalogService {
       stock: Number(p.stock),
       specs: combinedSpecs,
       attributesJson: combinedSpecs,
+      attributeValues,
       // FASE D16-C2.1 — mesmo sinal leve da listagem, calculado aqui sem
       // query extra (variantsRes já foi buscado acima).
       hasVariants: variantsRes.some((v) => v.isActive !== false),

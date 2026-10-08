@@ -2,8 +2,6 @@ import { getDb } from '../../../db/index.js';
 import {
   products,
   categories,
-  categoryAttributes,
-  productAttributes,
   productImages,
   sellers,
   stores,
@@ -15,6 +13,7 @@ import { eq, inArray, asc, or, and } from 'drizzle-orm';
 import { delCache } from '../../../db/redis.js';
 import { syncVariantsForProduct, type VariantSyncInput } from './variantService.js';
 import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
+import { prepareProductAttributes, replaceProductAttributeValues, writeLegacyAttributeRows } from './attributeValueService.js';
 // FASE D16-E2 — mesma função já usada por GET /seller/fulfillment-locations
 // (D15-C3) e agora por variantService.ts, para vincular o inventory NOVO do
 // produto simples à origem física real da store — nunca uma store adivinhada.
@@ -171,38 +170,13 @@ export class ProductCreationService {
       throw new Error(`A categoria "${foundCat.name}" possui subcategorias. Selecione uma subcategoria mais específica para publicar o produto.`);
     }
 
-    // 4. Fetch category attributes with inheritance & validate mandatory attributes
+    // 4. Atributos EFETIVOS da categoria (herança + substituição explícita) e validação tipada dos valores (Fase 3): texto, número,
+    // seleção, múltipla seleção e Sim/Não; "false" e "0" são valores válidos. Lança ProductAttributeValidationError (400,
+    // PRODUCT_ATTRIBUTES_INVALID) com todos os problemas. Nada é gravado aqui.
     const effectiveAttributes = await getCategoryAttributesWithInheritance(db, foundCat.id);
-    const specsMap = input.specs || input.attributesJson || {};
-
-    for (const attr of effectiveAttributes) {
-      if (attr.isRequired && attr.isActive !== false) {
-        const val = specsMap[attr.name] ?? specsMap[attr.code];
-        if (!val || !String(val).trim()) {
-          throw new Error(`O atributo "${attr.name}" é de preenchimento obrigatório para a categoria "${foundCat.name}".`);
-        }
-      }
-
-      // Validate select / multiselect options if options defined
-      if (attr.optionsJson && Array.isArray(attr.optionsJson) && attr.optionsJson.length > 0) {
-        const val = specsMap[attr.name] ?? specsMap[attr.code];
-        if (val && String(val).trim()) {
-          const selectedVals = String(val).split(',').map((s) => s.trim());
-          const invalid = selectedVals.filter((v) => !attr.optionsJson.includes(v));
-          if (invalid.length > 0) {
-            throw new Error(`Valor inválido "${invalid.join(', ')}" para o atributo "${attr.name}". Opções permitidas: ${attr.optionsJson.join(', ')}.`);
-          }
-        }
-      }
-
-      // Validate number type
-      if (attr.type === 'number') {
-        const val = specsMap[attr.name] ?? specsMap[attr.code];
-        if (val && String(val).trim() && isNaN(Number(val))) {
-          throw new Error(`O atributo "${attr.name}" deve conter apenas números válidos.`);
-        }
-      }
-    }
+    const prepared = await prepareProductAttributes(db, foundCat.id, foundCat.name, input.specs || input.attributesJson || {}, {}, effectiveAttributes);
+    // Visão legada normalizada (mesmos valores dos tipados): alimenta products.attributes_json e product_attributes na transição.
+    const specsMap = prepared.legacySpecs;
 
     // 5. Build clean, non-fictional product entity
     // countryCode/currency are NOT taken from client input — they are derived from the
@@ -320,28 +294,15 @@ export class ProductCreationService {
       updatedAt: new Date(),
     };
 
-    // 6. DB Transaction (Product + product_attributes + product_images)
+    // 6. DB Transaction (Product + atributos tipados + visão legada + imagens + variantes/estoque)
     await db.transaction(async (tx) => {
       // Insert product
       await tx.insert(products).values(newProduct as any);
 
-      // Insert product_attributes
-      const attrEntries = Object.entries(specsMap);
-      if (attrEntries.length > 0) {
-        const attrInserts = attrEntries
-          .filter(([_, val]) => val !== undefined && val !== null && String(val).trim() !== '')
-          .map(([key, val], idx) => ({
-            id: `pattr_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 5)}`,
-            productId,
-            name: key,
-            value: String(val),
-            createdAt: new Date(),
-          }));
-
-        if (attrInserts.length > 0) {
-          await tx.insert(productAttributes).values(attrInserts);
-        }
-      }
+      // Valores tipados (fonte principal) + visão legada de transição — na MESMA transação do produto: se qualquer parte falhar
+      // (atributo, imagem, variante, estoque), nada é criado.
+      await replaceProductAttributeValues(tx, productId, prepared.values);
+      await writeLegacyAttributeRows(tx, productId, specsMap);
 
       // Insert product_images
       const rawGalleryInput = Array.isArray((input as any).galleryImages) && (input as any).galleryImages.length > 0

@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { ProductCreationService } from './modules/catalog/productCreationService.js';
+import { ProductAttributeValidationError } from './modules/catalog/attributeValidator.js';
+import { loadProductAttributeValues, composeProductSpecs } from './modules/catalog/attributeValueService.js';
 import { InventoryService } from './modules/inventory/inventoryService.js';
 import { syncVariantsForProduct } from './modules/catalog/variantService.js';
 import { getDb, checkDbConnection } from '../db/index.js';
@@ -2041,6 +2043,9 @@ sellerRouter.get('/products/:id', async (req: AuthRequest, res: Response) => {
         const variants = await db.select().from(productVariants).where(eq(productVariants.productId, id));
         const images = await db.select().from(productImages).where(eq(productImages.productId, id));
         const attrs = await db.select().from(productAttributes).where(eq(productAttributes.productId, id));
+        // Fase 3: valores tipados (fonte principal) sobre a visão legada; `attributes` segue com as linhas legadas como antes.
+        const typedValues = (await loadProductAttributeValues(db, [id])).get(id) ?? [];
+        const composedSpecs = composeProductSpecs(attrs, p.attributesJson, typedValues);
         const imageUrls = images.map(img => img.imageUrl).filter(Boolean);
         const coverImg = images.find(img => img.isCover)?.imageUrl || (imageUrls.length > 0 ? imageUrls[0] : p.image);
 
@@ -2062,6 +2067,9 @@ sellerRouter.get('/products/:id', async (req: AuthRequest, res: Response) => {
             galleryImages: imageUrls.length > 0 ? imageUrls : (p.image ? [p.image] : []),
             productImages: images,
             attributes: attrs,
+            specs: composedSpecs,
+            attributesJson: composedSpecs,
+            attributeValues: typedValues,
           },
         });
       }
@@ -2100,6 +2108,13 @@ sellerRouter.post('/products', async (req: AuthRequest, res: Response) => {
       data: createdProduct,
     });
   } catch (err: any) {
+    if (err instanceof ProductAttributeValidationError) {
+      return res.status(400).json({
+        success: false,
+        message: err.message,
+        error: { code: err.code, message: err.message, details: err.details },
+      });
+    }
     return res.status(400).json({
       success: false,
       message: err.message || 'Erro ao publicar produto.',
