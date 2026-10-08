@@ -93,6 +93,10 @@ export const SellerService = {
     return SellerApi.getProducts(params);
   },
 
+  async getProduct(id: string): Promise<ApiResponse<any>> {
+    return SellerApi.getProduct(id);
+  },
+
   async createProduct(data: any): Promise<ApiResponse<any>> {
     return SellerApi.createProduct(data);
   },

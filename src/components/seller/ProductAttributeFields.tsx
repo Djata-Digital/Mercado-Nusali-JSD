@@ -14,8 +14,10 @@ interface Props {
   errors: Record<string, string>;
   onChange: (code: string, value: FormValue) => void;
   isLoading?: boolean;
-  /** Edição: o backend ainda não grava alterações de atributos (Fase 6) — campos só leitura, com aviso. */
+  /** Campos só leitura (não usado pelo assistente desde a Fase 6; mantido para outras telas). */
   readOnly?: boolean;
+  /** Edição: características gravadas que a categoria atual não pede mais (desativadas). Continuam salvas, mas não aparecem na página. */
+  inactiveLabels?: string[];
   /** Categoria ainda não é uma subcategoria final (folha): pede para escolher uma. */
   needsLeafCategory?: boolean;
   /** Atributos descartados na última troca de subcategoria (só aviso). */
@@ -26,7 +28,7 @@ const inputBase = 'w-full p-2.5 border rounded-xl text-sm font-medium bg-white f
 const borderFor = (hasError: boolean) => (hasError ? 'border-red-400' : 'border-gray-300');
 
 /** Campos dinâmicos de atributos da categoria: texto, número, seleção, múltipla seleção e Sim/Não. Só apresentação: regras em attributeFormModel. */
-export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors, onChange, isLoading, readOnly, needsLeafCategory, droppedLabels = [] }) => {
+export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors, onChange, isLoading, readOnly, needsLeafCategory, droppedLabels = [], inactiveLabels = [] }) => {
   const groups = React.useMemo(() => groupFormAttributes(fields), [fields]);
 
   const renderControl = (f: FormAttribute) => {
@@ -126,7 +128,14 @@ export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors
 
       {readOnly && (
         <p role="note" className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs font-medium text-amber-900">
-          A edição das características de um produto já publicado será liberada em breve. Os valores abaixo são os atuais, somente para conferência.
+          Estas características estão somente para conferência.
+        </p>
+      )}
+
+      {inactiveLabels.length > 0 && (
+        <p role="note" data-testid="inactive-attributes-note" className="p-3 bg-gray-50 border border-gray-200 rounded-xl text-xs font-medium text-gray-700">
+          {inactiveLabels.length === 1 ? 'A característica' : 'As características'} <strong>{inactiveLabels.join(', ')}</strong>{' '}
+          {inactiveLabels.length === 1 ? 'foi desativada' : 'foram desativadas'} pelo catálogo. {inactiveLabels.length === 1 ? 'O valor continua salvo' : 'Os valores continuam salvos'}, mas não {inactiveLabels.length === 1 ? 'aparece' : 'aparecem'} mais na página do produto nem {inactiveLabels.length === 1 ? 'pode' : 'podem'} ser alterado{inactiveLabels.length === 1 ? '' : 's'}.
         </p>
       )}
 
@@ -179,3 +188,34 @@ export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors
 };
 
 export default ProductAttributeFields;
+
+interface CategoryChangeProps {
+  fromName?: string | null;
+  toName: string;
+  /** Características que serão removidas por não existirem (ou não valerem) na nova categoria. */
+  removedLabels: string[];
+  confirmed: boolean;
+  onConfirm: (value: boolean) => void;
+  /** Aviso vindo do servidor (409) quando a lista de removidos difere da calculada no formulário. */
+  serverMessage?: string | null;
+}
+
+/** Edição: aviso de troca de subcategoria + confirmação explícita antes de perder especificações. */
+export const AttributeCategoryChangeNotice: React.FC<CategoryChangeProps> = ({ fromName, toName, removedLabels, confirmed, onConfirm, serverMessage }) => (
+  <div id="attr-category-change" data-testid="attr-category-change" role="alert" className="p-4 bg-amber-50 border border-amber-300 rounded-2xl space-y-2 text-xs font-medium text-amber-900">
+    <p className="font-black text-sm">Mudança de categoria{fromName ? `: ${fromName} → ${toName}` : `: ${toName}`}</p>
+    <p>As características compatíveis foram mantidas. Preencha as que a nova categoria exige; variações, preço e estoque não mudam.</p>
+    {removedLabels.length > 0 && (
+      <>
+        <p>
+          <strong>Serão removidas</strong> por não existirem na nova categoria: <strong>{removedLabels.join(', ')}</strong>.
+        </p>
+        <label className="flex items-start gap-2 cursor-pointer select-none">
+          <input type="checkbox" checked={confirmed} onChange={(e) => onConfirm(e.target.checked)} className="mt-0.5 w-4 h-4 accent-amber-700" />
+          <span>Entendo que {removedLabels.length === 1 ? 'esta característica será perdida' : 'estas características serão perdidas'} ao salvar.</span>
+        </label>
+      </>
+    )}
+    {serverMessage && <p className="text-red-700 font-bold">{serverMessage}</p>}
+  </div>
+);

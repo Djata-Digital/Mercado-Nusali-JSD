@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { ProductCreationService } from './modules/catalog/productCreationService.js';
 import { ProductAttributeValidationError } from './modules/catalog/attributeValidator.js';
 import { loadProductAttributeValues, composeProductSpecs } from './modules/catalog/attributeValueService.js';
+import { planAttributeUpdate, applyAttributePlan, writeAttributeAudit, ProductAttributeUpdateError } from './modules/catalog/productAttributeUpdateService.js';
 import { InventoryService } from './modules/inventory/inventoryService.js';
 import { syncVariantsForProduct } from './modules/catalog/variantService.js';
 import { getDb, checkDbConnection } from '../db/index.js';
@@ -2343,12 +2344,43 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    if (Object.keys(fieldsToUpdate).length > 1) {
-      await db.update(products).set(fieldsToUpdate).where(eq(products.id, id));
+    // Fase 6 — edição de atributos e/ou troca de subcategoria. Só entra aqui quem manda `attributes` ou uma categoria DIFERENTE da atual:
+    // preço/estoque/descrição sozinhos nunca passam pela validação de atributos (obrigatórios criados depois não os bloqueiam).
+    // Tudo numa transação com a linha do produto travada: valores tipados + espelho legado + categoria + UPDATE do produto + auditoria.
+    const wantsAttributes = updates.attributeUpdates !== undefined;
+    const requestedCategory = typeof updates.categoryId === 'string' && updates.categoryId.trim() !== '' && updates.categoryId.trim() !== check.product.categoryId
+      ? updates.categoryId.trim() : undefined;
+    const needsAttributePlan = wantsAttributes || requestedCategory !== undefined;
+
+    if (needsAttributePlan || Object.keys(fieldsToUpdate).length > 1) {
+      await db.transaction(async (tx: any) => {
+        if (needsAttributePlan) {
+          const [locked] = await tx.select().from(products).where(eq(products.id, id)).for('update').limit(1);
+          const plan = await planAttributeUpdate(tx, {
+            productId: id,
+            product: locked,
+            patch: updates.attributeUpdates,
+            requestedCategory,
+            confirmRemoval: updates.confirmAttributeRemoval === true,
+          });
+          if (wantsAttributes || plan.categoryChange) {
+            await applyAttributePlan(tx, id, plan);
+            await writeAttributeAudit(tx, { actorUserId: req.user!.id, sellerId: check.seller.id, productId: id, ip: req.ip || null, userAgent: (req.headers['user-agent'] as string) || null, countryCode: (req.user as any)?.countryCode || null }, plan);
+          }
+        }
+        if (Object.keys(fieldsToUpdate).length > 1) {
+          await tx.update(products).set(fieldsToUpdate).where(eq(products.id, id));
+        }
+      });
     }
 
     if (updates.stock !== undefined) {
-      await InventoryService.updateSellerStock(id, Number(updates.stock), check.seller.id, null, req.user.id);
+      // Produto COM variações ativas: o estoque é por variante (inventory). O "stock" do produto é só a soma derivada e aplicá-lo
+      // sobrescrevia a linha de UMA variante (o assistente de edição o reenviava a cada salvamento). Sem variações, segue como antes.
+      const activeVariant = await db.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, id), eq(productVariants.isActive, true))).limit(1);
+      if (activeVariant.length === 0) {
+        await InventoryService.updateSellerStock(id, Number(updates.stock), check.seller.id, null, req.user.id);
+      }
     }
 
     // FASE D16-A2 — variantes NUNCA entram no UPDATE de products acima
@@ -2376,6 +2408,12 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     await CatalogService.invalidateCatalogCaches([id]);
     return res.json({ success: true, message: 'Produto atualizado com sucesso!' });
   } catch (err: any) {
+    if (err instanceof ProductAttributeValidationError) {
+      return res.status(400).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
+    }
+    if (err instanceof ProductAttributeUpdateError) {
+      return res.status(err.status).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
+    }
     return res.status(500).json({ success: false, message: err?.message });
   }
 });

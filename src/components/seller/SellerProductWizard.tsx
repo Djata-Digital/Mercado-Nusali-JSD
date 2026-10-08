@@ -41,7 +41,7 @@ import {
 import { useCategories } from '../../hooks/useProducts';
 import { getCategoryPath, isLeafCategory, getDirectChildren, getDescendantIds } from '../../utils/categoryUtils';
 import { CategoriesApi } from '../../api/clients/CategoriesApi';
-import { ProductAttributeFields } from './ProductAttributeFields';
+import { ProductAttributeFields, AttributeCategoryChangeNotice } from './ProductAttributeFields';
 import {
   selectFormAttributes,
   validateFormFields,
@@ -49,6 +49,8 @@ import {
   reconcileValues,
   initialValuesFromProduct,
   extractSubmitError,
+  buildAttributePatch,
+  removedByCategoryChange,
   type FormAttribute,
   type FormValue,
   type FormValues,
@@ -178,9 +180,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   const attrValuesRef = useRef<FormValues>({});
   attrValuesRef.current = attrValues;
   const previousFieldsRef = useRef<FormAttribute[]>([]);
-  const editValuesLoadedRef = useRef(false);
+  // Fase 6 (edição): fotografia dos campos/valores da categoria ORIGINAL do produto — base do diff enviado ao PATCH e da lista do que
+  // se perde numa troca de subcategoria.
+  const originalCapturedRef = useRef(false);
+  const originalFieldsRef = useRef<FormAttribute[]>([]);
+  const originalValuesRef = useRef<FormValues>({});
+  const [confirmRemoval, setConfirmRemoval] = useState(false);
+  const [serverRemoval, setServerRemoval] = useState<{ message: string; labels: string[] } | null>(null);
 
   useEffect(() => {
+    setServerRemoval(null);
+    setConfirmRemoval(false);
     if (!category) {
       setDbAttributes([]);
       return;
@@ -191,6 +201,12 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     CategoriesApi.getCategoryAttributes(category)
       .then((res) => {
         if (isSubscribed && res.success && Array.isArray(res.data)) {
+          if (isEditing && !originalCapturedRef.current && category === (initialProduct?.categoryId ?? category)) {
+            const originalFields = selectFormAttributes(res.data).fields;
+            originalFieldsRef.current = originalFields;
+            originalValuesRef.current = initialValuesFromProduct(originalFields, initialProduct);
+            originalCapturedRef.current = true;
+          }
           setDbAttributes(res.data);
         } else if (isSubscribed) {
           setDbAttributes([]);
@@ -212,11 +228,9 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   // Quando os atributos efetivos mudam (primeira carga ou troca de subcategoria): mantém o que continua válido (ex.: Cor herdada),
   // descarta o resto e avisa. Na edição, os valores atuais do produto entram uma única vez.
   useEffect(() => {
-    let base = attrValuesRef.current;
-    if (isEditing && !editValuesLoadedRef.current && formFields.length > 0) {
-      editValuesLoadedRef.current = true;
-      base = { ...initialValuesFromProduct(formFields, initialProduct), ...base };
-    }
+    // Na edição os valores atuais do produto entram por baixo do que a pessoa já mexeu (voltar à categoria original recupera o que
+    // tinha sido descartado numa troca).
+    const base: FormValues = isEditing && originalCapturedRef.current ? { ...originalValuesRef.current, ...attrValuesRef.current } : attrValuesRef.current;
     const { values, dropped } = reconcileValues(formFields, base);
     const names = dropped.map((code) => previousFieldsRef.current.find((f) => f.code === code)?.name || code);
     setAttrValues(values);
@@ -234,6 +248,25 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return rest;
     });
   };
+
+  const currentCategoryObj = React.useMemo(
+    () => activeCategories.find((c: any) => c.id === category || c.slug === category || c.name === category),
+    [activeCategories, category]
+  );
+  const categoryChanged = isEditing && !!currentCategoryObj && currentCategoryObj.id !== initialProduct?.categoryId;
+  const removedLabels: string[] = React.useMemo(
+    () => (categoryChanged && originalCapturedRef.current ? removedByCategoryChange(originalFieldsRef.current, formFields, originalValuesRef.current) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [categoryChanged, formFields]
+  );
+  const displayRemoved = removedLabels.length > 0 ? removedLabels : serverRemoval?.labels ?? [];
+  // características gravadas que a categoria atual já não pede (desativadas): seguem salvas, mas ficam fora da página e da edição
+  const inactiveLabels: string[] =
+    isEditing && !categoryChanged && originalCapturedRef.current && Array.isArray((initialProduct as any)?.attributeValues)
+      ? ((initialProduct as any).attributeValues as any[])
+          .filter((v) => !originalFieldsRef.current.some((f) => f.code === v.code))
+          .map((v) => String(v.name || v.code))
+      : [];
 
   /** Leva o vendedor ao primeiro campo com erro (etapa 1) e foca nele. */
   const focusFirstAttrError = (codes: string[]) => {
@@ -1004,9 +1037,15 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
-    // Fase 5: valida TODOS os atributos efetivos com as mesmas regras do servidor (obrigatório, tipo, limites, opções). 0 e "Não" valem.
-    // Na edição os atributos são só leitura (o backend ainda não grava alterações deles), então não bloqueiam a publicação.
-    if (!isEditing && formFields.length > 0) {
+    // Fase 5/6: valida TODOS os atributos efetivos com as mesmas regras do servidor (obrigatório, tipo, limites, opções). 0 e "Não" valem.
+    // Na EDIÇÃO só valida quando a pessoa mexeu em características ou trocou de categoria — preço/estoque nunca ficam presos por um
+    // obrigatório criado depois — e uma troca que perde especificações exige a confirmação explícita.
+    let attributePatch: Record<string, unknown> = {};
+    if (isEditing) {
+      attributePatch = buildAttributePatch(formFields, originalValuesRef.current, attrValues);
+    }
+    const attributesDirty = isEditing ? Object.keys(attributePatch).length > 0 || categoryChanged : true;
+    if (attributesDirty && formFields.length > 0) {
       const found = validateFormFields(formFields, attrValues);
       if (Object.keys(found).length > 0) {
         setAttrErrors(found);
@@ -1015,6 +1054,12 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         focusFirstAttrError(firstCode ? [firstCode] : []);
         return;
       }
+    }
+    if (isEditing && categoryChanged && displayRemoved.length > 0 && !confirmRemoval) {
+      showToast(`Confirme a remoção das características que a nova categoria não tem: ${displayRemoved.join(', ')}.`);
+      setWizardStep(1);
+      setTimeout(() => document.getElementById('attr-category-change')?.scrollIntoView?.({ block: 'center', behavior: 'smooth' }), 60);
+      return;
     }
 
     // Validate cover image (Requirement 2: no fake Unsplash fallback, mandatory image)
@@ -1126,7 +1171,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         condition: condition || null,
         brand: brand && brand.trim() ? brand.trim() : undefined,
         model: model && model.trim() ? model.trim() : undefined,
-        stock: parsedStock,
+        ...(productMode === 'simple' ? { stock: parsedStock } : {}),
         description: description ? description.trim() : '',
         shipping: {
           ...initialProduct.shipping,
@@ -1135,10 +1180,37 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
           targetCountries: effectiveTargetCountries,
         },
         specs: cleanEditSpecs,
+        // Fase 6: só o que mudou nas características (null = limpar), e a confirmação explícita de perda numa troca de categoria.
+        // `attributes`/`attributeValues` vindos do GET não voltam ao servidor.
+        ...({
+          attributes: undefined,
+          attributeValues: undefined,
+          ...(Object.keys(attributePatch).length > 0 ? { attributeUpdates: attributePatch } : {}),
+          ...(categoryChanged && displayRemoved.length > 0 && confirmRemoval ? { confirmAttributeRemoval: true } : {}),
+        } as Record<string, unknown>),
       };
 
       if (onUpdateProduct) {
-        await onUpdateProduct(updatedProduct);
+        try {
+          await onUpdateProduct(updatedProduct);
+        } catch (err: any) {
+          // O painel já avisou (toast) com a mensagem do servidor; aqui o erro vai ao campo certo ou ao painel de confirmação.
+          const parsed = extractSubmitError(err);
+          if (parsed.code === 'ATTRIBUTE_LOSS_CONFIRMATION_REQUIRED') {
+            const labels = Array.isArray(parsed.details?.removed) ? parsed.details.removed.map((r: any) => String(r.name || r.code)) : [];
+            setServerRemoval({ message: parsed.message, labels });
+            setConfirmRemoval(false);
+            setWizardStep(1);
+            setTimeout(() => document.getElementById('attr-category-change')?.scrollIntoView?.({ block: 'center', behavior: 'smooth' }), 60);
+          } else {
+            const known = Object.fromEntries(Object.entries(parsed.fieldErrors).filter(([code]) => formFields.some((f) => f.code === code)));
+            if (Object.keys(known).length > 0) {
+              setAttrErrors(known);
+              focusFirstAttrError(formFields.filter((f) => known[f.code]).map((f) => f.code));
+            }
+          }
+          return;
+        }
       }
       showToast('Alterações do produto salvas com sucesso!');
       if (updatedProduct?.id && typeof updatedProduct.id === 'string' && updatedProduct.id !== 'undefined') {
@@ -1472,15 +1544,25 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
             </div>
 
             {/* Características da categoria (Fase 5): campos dinâmicos por tipo, agrupados, com unidade, limites e erros por campo */}
+            {isEditing && categoryChanged && currentCategoryObj && (
+              <AttributeCategoryChangeNotice
+                fromName={getCategoryPath(initialProduct?.categoryId || '', activeCategories).map((c: any) => c.name).join(' > ') || null}
+                toName={getCategoryPath(currentCategoryObj.id, activeCategories).map((c: any) => c.name).join(' > ') || currentCategoryObj.name}
+                removedLabels={displayRemoved}
+                confirmed={confirmRemoval}
+                onConfirm={setConfirmRemoval}
+                serverMessage={serverRemoval?.message ?? null}
+              />
+            )}
             <ProductAttributeFields
               fields={formFields}
               values={attrValues}
               errors={attrErrors}
               onChange={handleAttrChange}
               isLoading={isLoadingDbAttributes}
-              readOnly={isEditing}
+              inactiveLabels={inactiveLabels}
               needsLeafCategory={Boolean(category) && !isLeafCategory(category, activeCategories)}
-              droppedLabels={droppedLabels}
+              droppedLabels={isEditing && categoryChanged ? [] : droppedLabels}
             />
           </div>
         )}

@@ -195,6 +195,8 @@ const fmt = (n: number) => new Intl.NumberFormat('pt-BR', { maximumFractionDigit
 export interface SubmitError {
   message: string;
   code?: string;
+  /** Corpo `error.details` cru (ex.: lista `removed` do 409 de confirmação de perda). */
+  details?: any;
   /** Erros por campo devolvidos pelo backend (PRODUCT_ATTRIBUTES_INVALID.details). */
   fieldErrors: Record<string, string>;
 }
@@ -208,5 +210,38 @@ export function extractSubmitError(err: any): SubmitError {
     for (const d of detailsRaw) if (d && typeof d.field === 'string' && typeof d.message === 'string' && !(d.field in fieldErrors)) fieldErrors[d.field] = d.message;
   }
   const message = data?.message || data?.error?.message || (typeof err?.message === 'string' && !/^Request failed with status code/.test(err.message) ? err.message : '') || 'Não foi possível cadastrar o produto.';
-  return { message, code: data?.error?.code ?? err?.code, fieldErrors };
+  return { message, code: data?.error?.code ?? err?.code, details: data?.error?.details, fieldErrors };
+}
+
+// ---------------------------------------------------------------- edição (Fase 6)
+
+const normForCompare = (v: FormValue | undefined): string =>
+  Array.isArray(v) ? JSON.stringify([...v].map(String).sort()) : JSON.stringify(String(v ?? '').trim());
+
+/**
+ * Diferença entre o que o produto tinha (`original`) e o formulário agora, no formato do PATCH (`attributeUpdates`):
+ *   valor novo/alterado => valor tipado (0 e false preservados) | esvaziado => null | igual => ausente (o servidor preserva).
+ * Só olha campos EFETIVOS atuais; valores de atributos que deixaram de existir (troca de categoria) não são enviados — o servidor
+ * os remove somente com a confirmação explícita.
+ */
+export function buildAttributePatch(fields: FormAttribute[], original: FormValues, current: FormValues): Record<string, string | number | boolean | string[] | null> {
+  const typedNow = buildAttributeSpecs(fields, current);
+  const patch: Record<string, string | number | boolean | string[] | null> = {};
+  for (const f of fields) {
+    const was = original[f.code];
+    const now = current[f.code];
+    const wasEmpty = isEmptyFormValue(was);
+    const nowEmpty = isEmptyFormValue(now);
+    if (nowEmpty) { if (!wasEmpty) patch[f.code] = null; continue; }
+    if (wasEmpty || normForCompare(was) !== normForCompare(now)) {
+      if (f.code in typedNow) patch[f.code] = typedNow[f.code];
+    }
+  }
+  return patch;
+}
+
+/** Valores do produto que deixam de existir/valer ao trocar para `newFields` (nomes, usando as definições ANTERIORES). */
+export function removedByCategoryChange(originalFields: FormAttribute[], newFields: FormAttribute[], originalValues: FormValues): string[] {
+  const { dropped } = reconcileValues(newFields, originalValues);
+  return dropped.map((code) => originalFields.find((f) => f.code === code)?.name || code);
 }

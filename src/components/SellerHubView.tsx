@@ -326,9 +326,15 @@ export const SellerHubView: React.FC = () => {
       setEditingProduct(null);
       setActiveSection('products_list');
       return res?.data || p;
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error updating product:', err);
-      showToast('Erro ao atualizar o produto.');
+      // Fase 6: a mensagem real do servidor (obrigatório, valor inválido, confirmação de perda...) chega ao assistente, que mostra
+      // o erro no campo certo; o painel NÃO fecha a edição nem mostra sucesso.
+      const parsed = extractSubmitError(err);
+      showToast(parsed.message === 'Não foi possível cadastrar o produto.' ? 'Erro ao atualizar o produto.' : parsed.message);
+      const surfaced: any = new Error(parsed.message);
+      surfaced.data = err?.response?.data;
+      throw surfaced;
     }
   };
 
@@ -528,8 +534,17 @@ export const SellerHubView: React.FC = () => {
             }}
             onOpenProductDetail={openProductDetail}
             onUpdateProduct={handleUpdateProduct}
-            onEditProduct={(p) => {
-              setEditingProduct(p);
+            onEditProduct={async (p) => {
+              // Fase 6: a edição parte dos valores TIPADOS atuais (detalhe do vendedor), não do espelho legado da listagem.
+              // Se o detalhe não carregar, a edição continua com o que a listagem trouxe.
+              let editable: any = p;
+              try {
+                const detail = await SellerService.getProduct(p.id);
+                if (detail?.success && detail.data) editable = { ...p, attributeValues: detail.data.attributeValues, specs: detail.data.specs ?? (p as any).specs };
+              } catch (err) {
+                console.warn('Detalhe do produto indisponível; editando com os dados da listagem.', err);
+              }
+              setEditingProduct(editable);
               setActiveSection('product_create');
             }}
             onDeleteProduct={handleDeleteProduct}

@@ -123,6 +123,11 @@ export class SellerApi {
     return apiClient.post('/seller/products', data);
   }
 
+  /** Detalhe do produto do vendedor (inclui os valores tipados dos atributos: `attributeValues`). */
+  static async getProduct(id: string): Promise<ApiResponse<any>> {
+    return apiClient.get(`/seller/products/${id}`);
+  }
+
   static async updateProduct(id: string, data: any): Promise<ApiResponse<any>> {
     return apiClient.patch(`/seller/products/${id}`, data);
   }
