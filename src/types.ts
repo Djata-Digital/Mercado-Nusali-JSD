@@ -179,6 +179,23 @@ export interface ProductKit {
   badge?: string; // e.g. "Mais Vendido", "Preço de Atacado", "Economize 15%"
 }
 
+/** Ficha técnica pública montada pelo backend (Fase 4). `code` é interno: a interface nunca o exibe. */
+export interface SpecSheetItem {
+  code: string | null;
+  label: string;
+  type: string;
+  value: string | number | boolean | string[];
+  unit: string | null;
+  displayValue: string;
+  source: { categoryId: string | null; categoryName: string | null; inherited: boolean; overridden: boolean; replacesCategoryName: string | null } | null;
+  legacy: boolean;
+}
+export interface ProductSpecSheet {
+  general: Array<{ key: string; label: string; displayValue: string; placement: 'general' | 'packaging' }>;
+  groups: Array<{ name: string; items: SpecSheetItem[] }>;
+  other: SpecSheetItem[];
+}
+
 export interface Product {
   id: string;
   sku?: string;
@@ -219,6 +236,7 @@ export interface Product {
   isActive?: boolean;
   status?: string;
   attributesJson?: Record<string, string>;
+  specSheet?: ProductSpecSheet;
   storeName?: string;
   isDigitalProduct?: boolean;
   weightKg?: number;

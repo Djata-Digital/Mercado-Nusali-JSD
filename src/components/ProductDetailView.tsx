@@ -56,6 +56,8 @@ import { DeliveryDestinationModal } from './DeliveryDestinationModal';
 import { ProductMediaViewerModal, MediaItem } from './ProductMediaViewerModal';
 import { ProductShareModal } from './ProductShareModal';
 import { ProductRecommendationsSection } from './ProductRecommendationsSection';
+import ProductSpecSheetView from './ProductSpecSheetView';
+import { humanizeAttributeKey } from '../utils/attributeFormat';
 import { ProductKit, ProductColor, ProductVariant } from '../types';
 import {
   getActiveVariants,
@@ -329,19 +331,17 @@ export const ProductDetailView: React.FC = () => {
     return product.description;
   }, [product, activeVariant]);
 
-  const activeSpecs = useMemo(() => {
-    if (!product) return {};
-    const specsMap = { ...(product.specs || {}) };
-    if (selectedColor) {
-      specsMap['Cor / Variação'] = selectedColor;
-    }
-    if (selectedSize) {
-      specsMap['Tamanho / Especificação'] = selectedSize;
-    }
+  // Fase 4: a ficha técnica do produto vem pronta do backend (product.specSheet); aqui só a escolha atual de variação, que continua
+  // vindo das variantes (cor, tamanho e especificações da variante) e é mostrada em bloco próprio, sem misturar com os atributos.
+  const variantSpecRows = useMemo<Array<[string, string]>>(() => {
+    if (!product) return [];
+    const rows = new Map<string, string>();
+    if (selectedColor) rows.set('Cor / Variação', selectedColor);
+    if (selectedSize) rows.set('Tamanho / Especificação', selectedSize);
     if (activeVariant?.specs) {
-      Object.assign(specsMap, activeVariant.specs);
+      for (const [k, v] of Object.entries(activeVariant.specs)) rows.set(humanizeAttributeKey(k), String(v));
     }
-    return specsMap;
+    return Array.from(rows.entries());
   }, [product, selectedColor, selectedSize, activeVariant]);
 
   // FASE D16-G2.0.1 — bugfix de crash: hooks NUNCA podem ficar depois de um
@@ -1725,9 +1725,11 @@ export const ProductDetailView: React.FC = () => {
           {activeDescription}
         </p>
 
-        {/* Specs Table */}
-        {activeSpecs && Object.keys(activeSpecs).length > 0 && (
-          <div className="pt-4 space-y-3">
+        {/* Ficha técnica (Fase 4): informações gerais + especificações agrupadas, nomes amigáveis e unidades */}
+        {((product.specSheet
+          ? product.specSheet.general.some((g) => g.placement === 'general') || product.specSheet.groups.length > 0 || product.specSheet.other.length > 0
+          : Boolean(product.specs && Object.keys(product.specs).length > 0)) || variantSpecRows.length > 0) && (
+          <div className="pt-2 space-y-1">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-gray-900">Especificações Técnicas Completas</h3>
               {selectedColor && (
@@ -1736,17 +1738,7 @@ export const ProductDetailView: React.FC = () => {
                 </span>
               )}
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-gray-50 p-4 rounded-lg border border-gray-100 text-xs">
-              {Object.entries(activeSpecs).map(([key, value]) => (
-                <div
-                  key={key}
-                  className="flex justify-between py-1.5 border-b border-gray-200/60 last:border-none gap-2"
-                >
-                  <span className="font-semibold text-gray-600">{key}</span>
-                  <span className="text-gray-900 text-right font-medium">{value}</span>
-                </div>
-              ))}
-            </div>
+            <ProductSpecSheetView specSheet={product.specSheet} legacySpecs={product.specs} variantRows={variantSpecRows} />
           </div>
         )}
       </div>

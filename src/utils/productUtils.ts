@@ -178,6 +178,8 @@ export function normalizeProduct(p: any): Product {
     salesCount: typeof p.salesCount === 'number' ? p.salesCount : 0,
     description: p.description || '',
     specs: p.specs || {},
+    // Fase 4: ficha técnica pronta do backend (nomes amigáveis, unidades, grupos). Ausente em produtos de mock/cache antigo.
+    specSheet: p.specSheet && typeof p.specSheet === 'object' && Array.isArray(p.specSheet.groups) ? p.specSheet : undefined,
     questions: Array.isArray(p.questions) ? p.questions : [],
     reviews: Array.isArray(p.reviews) ? p.reviews : [],
     featured: Boolean(p.featured),

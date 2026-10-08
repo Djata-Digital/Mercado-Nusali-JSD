@@ -1,5 +1,7 @@
 import { getDb } from '../../../db/index.js';
 import { loadProductAttributeValues, composeProductSpecs } from './attributeValueService.js';
+import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
+import { buildProductSpecSheet } from './productSpecSheet.js';
 import { products, categories, brands, productVariants, productImages, productAttributes, reviews, reviewImages, sellers, stores, inventory, orderItems, orders, countries } from '../../../db/schema.js';
 import { getCache, setCache, delCache, delCacheByPattern } from '../../../db/redis.js';
 import { eq, ne, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
@@ -499,6 +501,11 @@ export class CatalogService {
     // Fase 3: valores tipados (product_attribute_values) vencem a visão legada para o mesmo código; o restante segue como antes.
     const attributeValues = (await loadProductAttributeValues(db, [id])).get(id) ?? [];
     const combinedSpecs = composeProductSpecs(attrRes, p.attributesJson, attributeValues);
+    // Fase 4: ficha técnica pública (nomes amigáveis, unidades, grupos, origem herdada/substituída). Uma consulta de valores (em lote,
+    // acima) + a resolução dos atributos efetivos da categoria — nunca uma consulta por atributo. O resultado vai no cache do detalhe.
+    const effectiveAttrs = p.categoryId ? await resolveEffectiveAttributes(db, p.categoryId) : [];
+    const legacyOnly = composeProductSpecs(attrRes, p.attributesJson, []);
+    const specSheet = buildProductSpecSheet({ product: p as any, effective: effectiveAttrs, typed: attributeValues, legacySpecs: legacyOnly });
 
     // FASE D17-C7 — fotos reais da review, buscadas em uma única query
     // separada (evita N+1: 1 query para todas as reviews desta página, nunca
@@ -561,6 +568,7 @@ export class CatalogService {
       specs: combinedSpecs,
       attributesJson: combinedSpecs,
       attributeValues,
+      specSheet,
       // FASE D16-C2.1 — mesmo sinal leve da listagem, calculado aqui sem
       // query extra (variantsRes já foi buscado acima).
       hasVariants: variantsRes.some((v) => v.isActive !== false),
@@ -632,6 +640,14 @@ export class CatalogService {
    * C2.2 — invalida listagens públicas/admin (`catalog:products:*`, TTL 60 s) e o detalhe (`product:{id}`, TTL 120 s) dos
    * produtos informados. Chamar após pausar/republicar/editar/excluir produto e após pausar/reativar loja.
    */
+  /**
+   * Fase 4: a ficha técnica (nomes, unidades, grupos, origem) vai junto no detalhe em cache. Mudou uma definição de atributo =>
+   * descarta os detalhes em cache (TTL 120 s de qualquer forma). Só chaves `product:*` (nunca estoque/pedidos).
+   */
+  static async invalidateProductDetailCaches() {
+    await delCacheByPattern('product:*');
+  }
+
   static async invalidateCatalogCaches(productIds: string[] = []) {
     await delCacheByPattern('catalog:products:*');
     // hasPublicProducts das categorias muda quando produto/loja entra ou sai do catálogo público.

@@ -126,15 +126,33 @@ export async function resolveEffectiveAttributes(db: any, categoryIdOrSlug: stri
     .where(inArray(categoryAttributes.categoryId, chain.map((c) => c.id)))
     .orderBy(asc(categoryAttributes.sortOrder), asc(categoryAttributes.name));
   const effective = new Map<string, any>();
+  const rowById = new Map<string, any>(rows.map((r) => [r.id, r]));
+  // Origem sempre informada (Fase 4): categoria que DEFINE o atributo efetivo, se é herdado e, quando for uma substituição
+  // explícita, de qual categoria veio o atributo substituído. inheritedFrom* continuam como antes (só quando herdado).
+  const describe = (a: any, cat: CatRow) => {
+    const replaced = a.overridesId ? rowById.get(a.overridesId) : undefined;
+    const replacedCat = replaced ? g.byId.get(replaced.categoryId) : undefined;
+    return {
+      ...serializeAttribute(a),
+      inheritedFrom: cat.id !== target.id ? cat.name : undefined,
+      inheritedFromCategoryId: cat.id !== target.id ? cat.id : undefined,
+      originCategoryId: cat.id,
+      originCategoryName: cat.name,
+      isInherited: cat.id !== target.id,
+      isOverride: Boolean(a.overridesId),
+      overridesCategoryId: replacedCat?.id,
+      overridesCategoryName: replacedCat?.name,
+    };
+  };
   for (const cat of chain) {
     for (const a of rows.filter((r) => r.categoryId === cat.id)) {
       if (a.overridesId) {
         if (a.isActive === false) effective.delete(a.code);
-        else effective.set(a.code, { ...serializeAttribute(a), inheritedFrom: cat.id !== target.id ? cat.name : undefined, inheritedFromCategoryId: cat.id !== target.id ? cat.id : undefined });
+        else effective.set(a.code, describe(a, cat));
         continue;
       }
       if (a.isActive === false) continue;
-      effective.set(a.code, { ...serializeAttribute(a), inheritedFrom: cat.id !== target.id ? cat.name : undefined, inheritedFromCategoryId: cat.id !== target.id ? cat.id : undefined });
+      effective.set(a.code, describe(a, cat));
     }
   }
   return Array.from(effective.values()).sort((a, b) => {

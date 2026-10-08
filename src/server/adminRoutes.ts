@@ -3982,6 +3982,7 @@ adminRouter.post('/categories/:id/attributes', requireAuth, requireCatalogDefini
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
     const { attribute, warnings } = await createAttributeDefinition(db, req.params.id, req.body ?? {});
+    await CatalogService.invalidateProductDetailCaches();
     await writeRealAudit(req, 'admin.category_attribute.created', 'category_attributes', attribute.id, { categoryId: req.params.id, code: attribute.code, type: attribute.type, role: attribute.role, overridesId: attribute.overridesId });
     return res.json({ success: true, message: `Atributo "${attribute.name}" salvo com sucesso!`, data: attribute, warnings });
   } catch (error) {
@@ -3998,6 +3999,7 @@ adminRouter.post('/categories/:id/attributes/disable-inherited', requireAuth, re
     const attributeId = String(req.body?.attributeId || '').trim();
     if (!attributeId) throw new AdminRequestError(400, 'Informe o atributo herdado a desativar (attributeId).');
     const { attribute, warnings } = await disableInheritedAttributeDefinition(db, req.params.id, attributeId);
+    await CatalogService.invalidateProductDetailCaches();
     await writeRealAudit(req, 'admin.category_attribute.disabled_inherited', 'category_attributes', attribute.id, { categoryId: req.params.id, overridesId: attribute.overridesId, code: attribute.code });
     return res.json({ success: true, message: `Atributo herdado "${attribute.name}" desativado nesta categoria.`, data: attribute, warnings });
   } catch (error) {
@@ -4011,6 +4013,7 @@ adminRouter.patch('/category-attributes/:id', requireAuth, requireCatalogDefinit
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
     const { attribute, warnings } = await updateAttributeDefinition(db, req.params.id, req.body ?? {});
+    await CatalogService.invalidateProductDetailCaches();
     await writeRealAudit(req, 'admin.category_attribute.updated', 'category_attributes', attribute.id, { fields: Object.keys(req.body ?? {}), code: attribute.code });
     return res.json({ success: true, message: `Atributo "${attribute.name}" atualizado com sucesso!`, data: attribute, warnings });
   } catch (error) {
@@ -4024,6 +4027,7 @@ adminRouter.delete('/category-attributes/:id', requireAuth, requireCatalogDefini
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
     const removed = await deleteAttributeDefinition(db, req.params.id);
+    await CatalogService.invalidateProductDetailCaches();
     await writeRealAudit(req, 'admin.category_attribute.deleted', 'category_attributes', req.params.id, { name: removed.name, wasOverride: removed.wasOverride });
     return res.json({ success: true, message: removed.wasOverride ? `Substituição "${removed.name}" removida: a herança foi restaurada.` : `Atributo "${removed.name}" removido com sucesso!` });
   } catch (error) {
