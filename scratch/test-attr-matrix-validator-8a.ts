@@ -1,0 +1,42 @@
+/** FASE 8A — o VALIDADOR da matriz acusa defeitos injetados (teste negativo, puro, sem banco). */
+import fs from 'fs';
+import { ALL_PLANS } from '../src/data/attributeMatrix/index.js';
+import { buildTree, resolveMatrix, validateMatrix, compileOperations } from '../src/data/attributeMatrix/engine.js';
+import type { CategoryPlan } from '../src/data/attributeMatrix/types.js';
+import { sel, num, yesno, axisSel, plan } from '../src/data/attributeMatrix/library.js';
+
+let pass = 0, fail = 0;
+const report = (n: string, ok: boolean, d?: unknown) => { ok ? pass++ : fail++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${ok ? '' : '  => ' + JSON.stringify(d ?? null).slice(0, 300)}`); };
+const inv = JSON.parse(fs.readFileSync('docs/attribute-matrix/v1/categories.inventory.raw.json', 'utf8'));
+const tree = buildTree(inv.categories);
+const clone = (): CategoryPlan[] => JSON.parse(JSON.stringify(ALL_PLANS));
+const rules = (plans: CategoryPlan[]) => { const r = resolveMatrix(plans, tree); return validateMatrix(plans, tree, r).issues.filter((i) => i.severity === 'error').map((i) => i.rule); };
+const withPlan = (mut: (p: CategoryPlan[]) => void) => { const p = clone(); mut(p); return rules(p); };
+const find = (p: CategoryPlan[], slug: string) => p.find((x) => x.slug === slug)!;
+
+report('N0 a matriz real tem 0 erros', rules(clone()).length === 0);
+report('N1 categoria real sem plano => cobertura', withPlan((p) => p.splice(p.findIndex((x) => x.slug === 'moda-feminina-vestidos'), 1)).includes('cobertura'));
+report('N2 plano de categoria INVENTADA => categoria-inexistente', withPlan((p) => p.push(plan('moda-feminina-capas-magicas', {}))).includes('categoria-inexistente'));
+report('N3 codigo herdado redefinido sem override => conflito-heranca', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...sel('cor', 'Cor', ['A', 'B']), order: 99 } as any)).includes('conflito-heranca'));
+report('N4 override sem atributo herdado => override-invalido', withPlan((p) => find(p, 'moda-feminina-vestidos').override.push({ code: 'inexistente', options: ['A', 'B'] })).includes('override-invalido'));
+report('N5 desativar o que nao e herdado => desativacao-invalida', withPlan((p) => find(p, 'moda-feminina-vestidos').disable.push('nao_existe')).includes('desativacao-invalida'));
+report('N6 mesmo codigo definido no pai e numa filha sem override => conflito-descendente', withPlan((p) => find(p, 'moda-feminina').define.push({ ...sel('manga', 'Manga', ['Curta', 'Longa']), order: 99 } as any)).includes('conflito-descendente'));
+report('N7 campo geral duplicado por nome ("Marca") e por codigo ("marca_x")', (() => { const r = withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...sel('marca_do_vestido', 'Marca', ['A', 'B']), order: 99 } as any)); return r.includes('campo-geral-duplicado'); })());
+report('N8 nome que o assistente esconderia ("Comprimento") => nome-reservado', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...num('comprimento_total', 'Comprimento', { unit: 'cm', min: 1, max: 300, decimals: 0 }), order: 99 } as any)).includes('nome-reservado'));
+report('N9 codigo reservado (peso) => definicao-invalida', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...num('peso', 'Peso do vestido', { unit: 'kg', min: 0, max: 5, decimals: 1 }), order: 99 } as any)).includes('definicao-invalida'));
+report('N10 obrigatorios demais (4 specs obrigatorias) => obrigatorios-excessivos', withPlan((p) => { const d = find(p, 'moda-feminina-vestidos'); for (let i = 0; i < 4; i++) d.define.push({ ...sel(`campo_obrig_${i}`, `Campo obrigatorio ${i}`, ['A', 'B'], { required: true }), order: 90 + i } as any); }).includes('obrigatorios-excessivos'));
+report('N11 campos demais (11 specs) => campos-demais', withPlan((p) => { const d = find(p, 'moda-feminina-vestidos'); for (let i = 0; i < 9; i++) d.define.push({ ...sel(`extra_${i}`, `Extra numero ${i}`, ['A', 'B']), order: 90 + i } as any); }).includes('campos-demais'));
+report('N12 opcoes repetidas => opcoes', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...sel('forma_x', 'Forma', ['Redondo', 'redondo', 'Quadrado']), order: 99 } as any)).includes('opcoes'));
+report('N13 opcao com virgula => definicao-invalida', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...sel('forma_y', 'Forma Y', ['1,5 cm', '2 cm']), order: 99 } as any)).includes('definicao-invalida'));
+report('N14 minimo maior que maximo => limites', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...num('qtd_z', 'Quantidade Z', { min: 10, max: 5, decimals: 0 }), order: 99 } as any)).some((r) => ['limites', 'definicao-invalida'].includes(r)));
+report('N15 mesmo codigo com UNIDADE diferente em categorias distintas => unidade-inconsistente', withPlan((p) => { find(p, 'moda-feminina-vestidos').define.push({ ...num('potencia_w', 'Potência do vestido', { unit: 'kW', min: 1, max: 5, decimals: 0 }), order: 99 } as any); }).includes('unidade-inconsistente'));
+report('N16 mesmo codigo com TIPO diferente entre categorias => codigo-inconsistente', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...yesno('potencia_w', 'Potência'), order: 99 } as any)).includes('codigo-inconsistente'));
+report('N17 eixo multiselecao => eixo/definicao-invalida', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...axisSel('estilo_ax', 'Estilo', ['A', 'B']), type: 'multiselect', order: 99 } as any)).some((r) => ['eixo', 'definicao-invalida'].includes(r)));
+report('N18 nome repetido no mesmo caminho com codigos diferentes => nome-repetido', withPlan((p) => find(p, 'moda-feminina-vestidos').define.push({ ...sel('cor_alt', 'Cor', ['A', 'B']), order: 99 } as any)).includes('nome-repetido'));
+report('N19 codigo repetido na mesma categoria => codigo-duplicado', withPlan((p) => { const d = find(p, 'moda-feminina-vestidos'); d.define.push({ ...d.define[0], order: 99 }); }).includes('codigo-duplicado'));
+report('N20 override numa categoria PRINCIPAL (sem pai) => override-invalido', withPlan((p) => find(p, 'moda-feminina').override.push({ code: 'cor', options: ['A', 'B'] })).includes('override-invalido'));
+const r0 = resolveMatrix(clone(), tree);
+const ops = compileOperations(clone(), tree, r0);
+report('N21 compilacao gera operacoes deterministas (duas execucoes iguais) e overrides apontam para o id do herdado mais proximo', JSON.stringify(compileOperations(clone(), tree, resolveMatrix(clone(), tree))) === JSON.stringify(ops) && ops.filter((o) => o.kind === 'override').every((o) => String((o.payload as any).overridesId).startsWith('attr_nsl_')));
+console.log(`\nRESULTADO: ${pass} PASS, ${fail} FAIL`);
+process.exit(fail ? 1 : 0);

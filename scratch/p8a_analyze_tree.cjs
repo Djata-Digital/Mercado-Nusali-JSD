@@ -1,0 +1,11 @@
+const fs=require('fs');const d=JSON.parse(fs.readFileSync('docs/attribute-matrix/v1/categories.inventory.raw.json','utf8'));
+const cats=d.categories;const by=new Map(cats.map(c=>[c.id,c]));
+const roots=cats.filter(c=>!c.parent_id);const kids=new Map();cats.forEach(c=>{if(c.parent_id){(kids.get(c.parent_id)||kids.set(c.parent_id,[]).get(c.parent_id)).push(c)}});
+console.log('total',cats.length,'roots',roots.length,'subs',cats.length-roots.length,'inativas',cats.filter(c=>!c.is_active).length);
+const depth=(c)=>{let n=0,x=c;const seen=new Set();while(x.parent_id&&!seen.has(x.id)){seen.add(x.id);x=by.get(x.parent_id);n++;if(!x)break}return n};
+const hist={};cats.forEach(c=>{const k=depth(c);hist[k]=(hist[k]||0)+1});console.log('profundidade',hist);
+console.log('orfas',cats.filter(c=>c.parent_id&&!by.get(c.parent_id)).length,'slug dup',cats.length-new Set(cats.map(c=>c.slug)).size);
+const nameCount={};cats.forEach(c=>{const k=c.name.toLowerCase();(nameCount[k]=nameCount[k]||[]).push(c)});
+console.log('nomes repetidos entre categorias:');Object.entries(nameCount).filter(([k,v])=>v.length>1).forEach(([k,v])=>console.log(' ',k,'=>',v.map(x=>(by.get(x.parent_id)?.name||'(raiz)')+'>'+x.name).join(' | ')));
+roots.forEach(r=>console.log(r.id.padEnd(34),String(kids.get(r.id)?.length||0).padStart(3),r.name,'| commission',r.commission_rate));
+console.log('comissao nao nula:',cats.filter(c=>c.commission_rate!==null).length);

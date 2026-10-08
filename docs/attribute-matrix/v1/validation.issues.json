@@ -1,0 +1,338 @@
+[
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "celulares-e-telefones-radios-comunicadores",
+  "code": "canais",
+  "message": "canais: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "informatica-e-computadores-redes-e-roteadores",
+  "code": "portas_rede",
+  "message": "portas_rede: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "eletrodomesticos-ventiladores",
+  "code": "velocidades",
+  "message": "velocidades: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "eletrodomesticos-liquidificadores",
+  "code": "velocidades",
+  "message": "velocidades: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "moda-feminina-conjuntos",
+  "code": "numero_pecas",
+  "message": "numero_pecas: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "moda-masculina-fatos-e-blazers",
+  "code": "numero_pecas",
+  "message": "numero_pecas: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "casa-moveis-e-decoracao-mesas-e-cadeiras",
+  "code": "lugares_mesa",
+  "message": "lugares_mesa: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "cozinha-e-utilidades-domesticas-pratos-e-tigelas",
+  "code": "numero_pecas",
+  "message": "numero_pecas: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "cozinha-e-utilidades-domesticas-copos-e-canecas",
+  "code": "numero_pecas",
+  "message": "numero_pecas: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "cozinha-e-utilidades-domesticas-talheres",
+  "code": "numero_pecas",
+  "message": "numero_pecas: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "construcao-e-materiais-blocos-e-tijolos",
+  "code": "unidades_pacote",
+  "message": "unidades_pacote: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "ferramentas-e-maquinas-ferramentas-manuais",
+  "code": "numero_pecas",
+  "message": "numero_pecas: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "industria-comercio-e-escritorio-embalagens",
+  "code": "unidades_pacote",
+  "message": "unidades_pacote: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "industria-comercio-e-escritorio-maquinas-de-costura",
+  "code": "pontos",
+  "message": "pontos: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "bebes-e-criancas-fraldas",
+  "code": "unidades_pacote",
+  "message": "unidades_pacote: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "brinquedos-e-jogos-jogos-de-tabuleiro",
+  "code": "jogadores_min",
+  "message": "jogadores_min: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "brinquedos-e-jogos-jogos-de-tabuleiro",
+  "code": "jogadores_max",
+  "message": "jogadores_max: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "brinquedos-e-jogos-quebra-cabecas",
+  "code": "numero_pecas",
+  "message": "numero_pecas: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "esportes-e-fitness-ciclismo",
+  "code": "numero_velocidades",
+  "message": "numero_velocidades: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "livros-papelaria-e-educacao-canetas-e-lapis",
+  "code": "unidades_pacote",
+  "message": "unidades_pacote: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "saude-e-bem-estar-mascaras-e-luvas",
+  "code": "unidades_pacote",
+  "message": "unidades_pacote: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "festas-e-eventos-baloes",
+  "code": "unidades_pacote",
+  "message": "unidades_pacote: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "festas-e-eventos-lembrancas",
+  "code": "unidades_pacote",
+  "message": "unidades_pacote: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "festas-e-eventos-utensilios-descartaveis",
+  "code": "unidades_pacote",
+  "message": "unidades_pacote: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "unidade",
+  "category": "instrumentos-musicais-mesas-de-som",
+  "code": "canais_mesa",
+  "message": "canais_mesa: número sem unidade (contagem?)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "casa-moveis-e-decoracao-iluminacao",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-geladeiras-e-frigorificos",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-congeladores-e-arcas",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-fogoes-e-fornos",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-micro-ondas",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-maquinas-de-lavar",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-ventiladores",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-ar-condicionado",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-liquidificadores",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-ferros-de-passar",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "eletrodomesticos-pequenos-eletrodomesticos",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "ferramentas-e-maquinas-ferramentas-eletricas",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "ferramentas-e-maquinas-furadeiras",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "ferramentas-e-maquinas-serras",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "ferramentas-e-maquinas-maquinas-de-solda",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "ferramentas-e-maquinas-compressores",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "ferramentas-e-maquinas-geradores",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "industria-comercio-e-escritorio-equipamentos-comerciais",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "industria-comercio-e-escritorio-maquinas-industriais",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "industria-comercio-e-escritorio-equipamentos-para-restaurantes",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "industria-comercio-e-escritorio-maquinas-de-costura",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ },
+ {
+  "severity": "info",
+  "rule": "eixo-por-anuncio",
+  "category": "industria-comercio-e-escritorio-equipamentos-de-escritorio",
+  "code": "voltagem",
+  "message": "Eixo \"Voltagem\" (voltagem) vale UM valor por anúncio no assistente atual (não varia entre variações)."
+ }
+]

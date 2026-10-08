@@ -1,0 +1,22 @@
+{
+ "version": "v1-2026-10-08",
+ "categorias": 322,
+ "principais": 30,
+ "subcategorias": 292,
+ "definicoes": 806,
+ "overrides": 7,
+ "desativacoes": 34,
+ "operacoes": 847,
+ "atributosDefinidos": 806,
+ "categoriasComAtributos": 307,
+ "categoriasComEixos": 210,
+ "efetivosPorSubcategoria": {
+  "media": 3.66,
+  "maxSpecs": 8,
+  "maxObrigatoriosSpec": 3,
+  "maxEixos": 2
+ },
+ "erros": 0,
+ "avisos": 0,
+ "informativos": 48
+}

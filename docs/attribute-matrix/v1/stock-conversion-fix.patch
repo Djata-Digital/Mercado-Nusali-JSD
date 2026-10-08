@@ -1,0 +1,148 @@
+diff --git a/src/server/buyerRoutes.ts b/src/server/buyerRoutes.ts
+index 37ac6a2..127944d 100644
+--- a/src/server/buyerRoutes.ts
++++ b/src/server/buyerRoutes.ts
+@@ -1251,6 +1251,14 @@ async function addSingleCartLine(
+   let realUnitPrice = Number(prod.price);
+   const targetVariantId = line.variantId || null;
+ 
++  // FASE 8A (proposta): produto com variações ativas exige variação em QUALQUER porta de entrada do carrinho (o lote já exigia).
++  if (!targetVariantId) {
++    const activeVariantRows = await executor.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, prod.id), eq(productVariants.isActive, true))).limit(1);
++    if (activeVariantRows.length > 0) {
++      throw new CartOperationError(400, 'VARIANT_REQUIRED', `Selecione uma variação de "${prod.title}" antes de adicionar ao carrinho.`);
++    }
++  }
++
+   if (targetVariantId) {
+     const varRows = await executor.select().from(productVariants).where(eq(productVariants.id, targetVariantId)).limit(1);
+     const variantRow = varRows[0] || null;
+diff --git a/src/server/modules/catalog/catalogService.ts b/src/server/modules/catalog/catalogService.ts
+index 7b9a1f3..89b9d36 100644
+--- a/src/server/modules/catalog/catalogService.ts
++++ b/src/server/modules/catalog/catalogService.ts
+@@ -54,7 +54,11 @@ export async function computeLiveStockAndSales(productIds: string[], executor?:
+       // Fase 7: estoque de variante DESATIVADA (combinação que saiu do anúncio) não conta no disponível do produto — a linha continua em
+       // inventory (histórico/ajuste em Estoque & Armazéns), só não infla o total vendável. Linhas sem variante (produto simples) contam sempre.
+       .leftJoin(productVariants, eq(productVariants.id, inventory.variantId))
+-      .where(and(inArray(inventory.productId, productIds), or(sql`${inventory.variantId} IS NULL`, eq(productVariants.isActive, true))))
++      .where(and(inArray(inventory.productId, productIds), or(
++        // linha de produto simples só conta enquanto o produto NÃO tem variações ativas (defesa também para dados anteriores à correção)
++        sql`(${inventory.variantId} IS NULL AND NOT EXISTS (SELECT 1 FROM product_variants pv WHERE pv.product_id = ${inventory.productId} AND pv.is_active = true))`,
++        eq(productVariants.isActive, true),
++      )))
+       .groupBy(inventory.productId),
+     // "Vendidos" = soma de order_items.quantity de pedidos realmente PAGOS,
+     // excluindo cancelados/reembolsados (nunca conta pending_payment,
+diff --git a/src/server/modules/catalog/variantService.ts b/src/server/modules/catalog/variantService.ts
+index 0976036..70881da 100644
+--- a/src/server/modules/catalog/variantService.ts
++++ b/src/server/modules/catalog/variantService.ts
+@@ -36,6 +36,7 @@ import { products, productVariants, inventory, inventoryMovements } from '../../
+ // origem física real da store — nunca uma segunda lógica de "achar/criar a
+ // location", nunca uma store adivinhada.
+ import { ensureStoreFulfillmentLocation } from '../logistics/fulfillmentLocationService.js';
++import { InventoryService } from '../inventory/inventoryService.js';
+ // FASE 7 — eixos de variante (atributos da categoria com role = variant_axis) e identidade da combinação (variant_key).
+ import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
+ import { activeAxes, buildVariantKey, validateVariantAxes, type VariantAxisError } from '../../../utils/variantAxes.js';
+@@ -382,5 +383,8 @@ export async function syncVariantsForProduct(
+     await db.update(productVariants).set({ variantKey: r.key }).where(eq(productVariants.id, r.id));
+   }
+ 
++  // FASE 8A (proposta): produto que acaba de ganhar variações ativas aposenta a linha de estoque do produto simples (sem apagá-la).
++  if (seenIds.size > 0) await InventoryService.retireProductLevelStockForVariants(db, { productId, performedBy });
++
+   return results;
+ }
+diff --git a/src/server/modules/inventory/inventoryService.ts b/src/server/modules/inventory/inventoryService.ts
+index 4bae3ed..658ea69 100644
+--- a/src/server/modules/inventory/inventoryService.ts
++++ b/src/server/modules/inventory/inventoryService.ts
+@@ -18,12 +18,17 @@ export class InventoryService {
+     const db = executor || getDb();
+     if (!db || !productId) return 0;
+ 
++    // Resumo do que é VENDÁVEL: linhas de variante DESATIVADA e a linha de produto simples de um produto que já tem variações ativas
++    // não entram (continuam gravadas — histórico e reservas — mas não inflam o total).
+     const rows = await db
+-      .select({ qty: inventory.quantityOnHand })
++      .select({ qty: inventory.quantityOnHand, variantId: inventory.variantId, variantActive: productVariants.isActive })
+       .from(inventory)
++      .leftJoin(productVariants, eq(productVariants.id, inventory.variantId))
+       .where(eq(inventory.productId, productId));
+-
+-    const totalStock = rows.reduce((acc: number, r: any) => acc + (r.qty || 0), 0);
++    const hasActiveVariants = rows.some((r: any) => r.variantId && r.variantActive === true);
++    const totalStock = rows
++      .filter((r: any) => (r.variantId ? r.variantActive === true : !hasActiveVariants))
++      .reduce((acc: number, r: any) => acc + (r.qty || 0), 0);
+ 
+     await db
+       .update(products)
+@@ -36,6 +41,46 @@ export class InventoryService {
+     return totalStock;
+   }
+ 
++  /**
++   * FASE 8A (proposta) — converter um produto SIMPLES em VARIÁVEL: o estoque que estava na linha do produto (variantId nulo) passa a
++   * ser representado pelas linhas das variações. A linha do produto NÃO é apagada (histórico, FKs, reservas de pedidos em andamento):
++   * é aposentada — quantityOnHand cai para o já reservado (disponível 0) e a baixa entra como AJUSTE auditável. Idempotente.
++   * Estoque do produto em HUB (sem variação) não pode ser aposentado aqui (pertence à operação do armazém): bloqueia a conversão.
++   * Sempre dentro da transação do chamador.
++   */
++  static async retireProductLevelStockForVariants(tx: any, params: { productId: string; performedBy?: string | null }): Promise<{ retired: number }> {
++    const { productId, performedBy } = params;
++    const active = await tx.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, productId), eq(productVariants.isActive, true))).limit(1);
++    if (active.length === 0) return { retired: 0 };
++    const rows = await tx.select().from(inventory).where(and(eq(inventory.productId, productId), isNull(inventory.variantId))).for('update');
++    let retired = 0;
++    for (const r of rows) {
++      const onHand = Number(r.quantityOnHand) || 0;
++      const reserved = Number(r.quantityReserved) || 0;
++      if (onHand <= reserved) continue;
++      if (r.locationType !== 'SELLER_LOCATION') {
++        throw new Error('VARIANT_CONVERSION_BLOCKED_HUB_STOCK: este produto tem estoque no armazém sem variação. Transfira ou ajuste esse estoque em Estoque & Armazéns antes de criar variações.');
++      }
++      const delta = reserved - onHand; // negativo
++      await tx.update(inventory).set({ quantityOnHand: reserved, updatedAt: new Date() }).where(eq(inventory.id, r.id));
++      await tx.insert(inventoryMovements).values({
++        id: `mov_${Date.now()}_conv_${Math.random().toString(36).substring(2, 6)}`,
++        inventoryId: r.id,
++        warehouseId: r.warehouseId || null,
++        productId,
++        variantId: null,
++        type: 'ADJUSTMENT',
++        quantity: delta,
++        reason: 'Estoque do produto simples substituído pelo estoque por variação (conversão)',
++        performedBy: performedBy || null,
++        createdAt: new Date(),
++      });
++      retired += -delta;
++    }
++    await InventoryService.syncProductStockSummary(productId, tx);
++    return { retired };
++  }
++
+   /**
+    * Updates a seller's physical stock at their SELLER_LOCATION.
+    * @param sellerId Primary Key of sellers table (sellers.id).
+diff --git a/src/server/modules/orders/orderService.ts b/src/server/modules/orders/orderService.ts
+index 5cc1483..98f760b 100644
+--- a/src/server/modules/orders/orderService.ts
++++ b/src/server/modules/orders/orderService.ts
+@@ -575,6 +575,14 @@ export class OrderService {
+           }
+         }
+ 
++        // FASE 8A (proposta): carrinho antigo com linha SEM variação de um produto que passou a ter variações ativas não pode ser comprado.
++        if (!ci.variantId) {
++          const activeVariantRows = await tx.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, prod.id), eq(productVariants.isActive, true))).limit(1);
++          if (activeVariantRows.length > 0) {
++            throw new Error(`VARIANT_REQUIRED: o produto "${prod.title}" agora tem variações — escolha uma variação no carrinho.`);
++          }
++        }
++
+         // Requirement 1: Mandatory product weight check (NO 0.5kg fallback)
+         if (!itemWeightKg || itemWeightKg <= 0) {
+           throw new Error(`PRODUCT_WEIGHT_REQUIRED: O peso do produto "${prod.title}" não foi cadastrado e é obrigatório para cálculo de frete.`);

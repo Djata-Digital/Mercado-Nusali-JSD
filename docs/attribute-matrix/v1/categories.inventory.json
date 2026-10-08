@@ -1,0 +1,2578 @@
+[
+ {
+  "id": "cat_nsl_celulares-e-telefones",
+  "slug": "celulares-e-telefones",
+  "name": "Celulares e Telefones",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores",
+  "slug": "informatica-e-computadores",
+  "name": "Informática e Computadores",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio",
+  "slug": "eletronicos-tv-e-audio",
+  "name": "Eletrônicos, TV e Áudio",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos",
+  "slug": "eletrodomesticos",
+  "name": "Eletrodomésticos",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina",
+  "slug": "moda-feminina",
+  "name": "Moda Feminina",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina",
+  "slug": "moda-masculina",
+  "name": "Moda Masculina",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados",
+  "slug": "calcados",
+  "name": "Calçados",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios",
+  "slug": "bolsas-malas-e-acessorios",
+  "name": "Bolsas, Malas e Acessórios",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais",
+  "slug": "beleza-e-cuidados-pessoais",
+  "name": "Beleza e Cuidados Pessoais",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia",
+  "slug": "supermercado-e-mercearia",
+  "name": "Supermercado e Mercearia",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas",
+  "slug": "alimentos-frescos-e-bebidas",
+  "name": "Alimentos Frescos e Bebidas",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao",
+  "slug": "casa-moveis-e-decoracao",
+  "name": "Casa, Móveis e Decoração",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas",
+  "slug": "cozinha-e-utilidades-domesticas",
+  "name": "Cozinha e Utilidades Domésticas",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais",
+  "slug": "construcao-e-materiais",
+  "name": "Construção e Materiais",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas",
+  "slug": "ferramentas-e-maquinas",
+  "name": "Ferramentas e Máquinas",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade",
+  "slug": "energia-solar-e-eletricidade",
+  "name": "Energia Solar e Eletricidade",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas",
+  "slug": "automoveis-motos-e-pecas",
+  "name": "Automóveis, Motos e Peças",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria",
+  "slug": "agricultura-e-pecuaria",
+  "name": "Agricultura e Pecuária",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas",
+  "slug": "bebes-e-criancas",
+  "name": "Bebês e Crianças",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos",
+  "slug": "brinquedos-e-jogos",
+  "name": "Brinquedos e Jogos",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness",
+  "slug": "esportes-e-fitness",
+  "name": "Esportes e Fitness",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao",
+  "slug": "livros-papelaria-e-educacao",
+  "name": "Livros, Papelaria e Educação",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar",
+  "slug": "saude-e-bem-estar",
+  "name": "Saúde e Bem-estar",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais",
+  "slug": "pet-shop-e-animais",
+  "name": "Pet Shop e Animais",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos",
+  "slug": "festas-e-eventos",
+  "name": "Festas e Eventos",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio",
+  "slug": "industria-comercio-e-escritorio",
+  "name": "Indústria, Comércio e Escritório",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato",
+  "slug": "produtos-tradicionais-e-artesanato",
+  "name": "Produtos Tradicionais e Artesanato",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior",
+  "slug": "jardim-e-exterior",
+  "name": "Jardim e Exterior",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais",
+  "slug": "instrumentos-musicais",
+  "name": "Instrumentos Musicais",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_games-e-consoles",
+  "slug": "games-e-consoles",
+  "name": "Games e Consoles",
+  "parentSlug": null,
+  "depth": 0,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-sementes",
+  "slug": "agricultura-e-pecuaria-sementes",
+  "name": "Sementes",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-fertilizantes",
+  "slug": "agricultura-e-pecuaria-fertilizantes",
+  "name": "Fertilizantes",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-ferramentas-agricolas",
+  "slug": "agricultura-e-pecuaria-ferramentas-agricolas",
+  "name": "Ferramentas agrícolas",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-maquinas-agricolas",
+  "slug": "agricultura-e-pecuaria-maquinas-agricolas",
+  "name": "Máquinas agrícolas",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-irrigacao",
+  "slug": "agricultura-e-pecuaria-irrigacao",
+  "name": "Irrigação",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-equipamentos-para-pesca",
+  "slug": "agricultura-e-pecuaria-equipamentos-para-pesca",
+  "name": "Equipamentos para pesca",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-equipamentos-de-pecuaria",
+  "slug": "agricultura-e-pecuaria-equipamentos-de-pecuaria",
+  "name": "Equipamentos de pecuária",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-racoes-animais",
+  "slug": "agricultura-e-pecuaria-racoes-animais",
+  "name": "Rações animais",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-produtos-para-horticultura",
+  "slug": "agricultura-e-pecuaria-produtos-para-horticultura",
+  "name": "Produtos para horticultura",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_agricultura-e-pecuaria-armazenamento-agricola",
+  "slug": "agricultura-e-pecuaria-armazenamento-agricola",
+  "name": "Armazenamento agrícola",
+  "parentSlug": "agricultura-e-pecuaria",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-frutas",
+  "slug": "alimentos-frescos-e-bebidas-frutas",
+  "name": "Frutas",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-legumes-e-verduras",
+  "slug": "alimentos-frescos-e-bebidas-legumes-e-verduras",
+  "name": "Legumes e verduras",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-tuberculos",
+  "slug": "alimentos-frescos-e-bebidas-tuberculos",
+  "name": "Tubérculos",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-carnes",
+  "slug": "alimentos-frescos-e-bebidas-carnes",
+  "name": "Carnes",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-peixes-e-mariscos",
+  "slug": "alimentos-frescos-e-bebidas-peixes-e-mariscos",
+  "name": "Peixes e mariscos",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-ovos",
+  "slug": "alimentos-frescos-e-bebidas-ovos",
+  "name": "Ovos",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-produtos-congelados",
+  "slug": "alimentos-frescos-e-bebidas-produtos-congelados",
+  "name": "Produtos congelados",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-agua-mineral",
+  "slug": "alimentos-frescos-e-bebidas-agua-mineral",
+  "name": "Água mineral",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-sumos-e-refrigerantes",
+  "slug": "alimentos-frescos-e-bebidas-sumos-e-refrigerantes",
+  "name": "Sumos e refrigerantes",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-bebidas-nao-alcoolicas",
+  "slug": "alimentos-frescos-e-bebidas-bebidas-nao-alcoolicas",
+  "name": "Bebidas não alcoólicas",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_alimentos-frescos-e-bebidas-produtos-alimentares-locais",
+  "slug": "alimentos-frescos-e-bebidas-produtos-alimentares-locais",
+  "name": "Produtos alimentares locais",
+  "parentSlug": "alimentos-frescos-e-bebidas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-pecas-de-automoveis",
+  "slug": "automoveis-motos-e-pecas-pecas-de-automoveis",
+  "name": "Peças de automóveis",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-pecas-de-motocicletas",
+  "slug": "automoveis-motos-e-pecas-pecas-de-motocicletas",
+  "name": "Peças de motocicletas",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-pneus",
+  "slug": "automoveis-motos-e-pecas-pneus",
+  "name": "Pneus",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-baterias-automotivas",
+  "slug": "automoveis-motos-e-pecas-baterias-automotivas",
+  "name": "Baterias automotivas",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-oleos-e-lubrificantes",
+  "slug": "automoveis-motos-e-pecas-oleos-e-lubrificantes",
+  "name": "Óleos e lubrificantes",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-acessorios-automotivos",
+  "slug": "automoveis-motos-e-pecas-acessorios-automotivos",
+  "name": "Acessórios automotivos",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-capacetes",
+  "slug": "automoveis-motos-e-pecas-capacetes",
+  "name": "Capacetes",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-ferramentas-automotivas",
+  "slug": "automoveis-motos-e-pecas-ferramentas-automotivas",
+  "name": "Ferramentas automotivas",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-som-automotivo",
+  "slug": "automoveis-motos-e-pecas-som-automotivo",
+  "name": "Som automotivo",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_automoveis-motos-e-pecas-produtos-de-limpeza-automotiva",
+  "slug": "automoveis-motos-e-pecas-produtos-de-limpeza-automotiva",
+  "name": "Produtos de limpeza automotiva",
+  "parentSlug": "automoveis-motos-e-pecas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-roupas-para-bebes",
+  "slug": "bebes-e-criancas-roupas-para-bebes",
+  "name": "Roupas para bebês",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-fraldas",
+  "slug": "bebes-e-criancas-fraldas",
+  "name": "Fraldas",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-produtos-de-higiene-infantil",
+  "slug": "bebes-e-criancas-produtos-de-higiene-infantil",
+  "name": "Produtos de higiene infantil",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-mamadeiras",
+  "slug": "bebes-e-criancas-mamadeiras",
+  "name": "Mamadeiras",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-carrinhos-de-bebe",
+  "slug": "bebes-e-criancas-carrinhos-de-bebe",
+  "name": "Carrinhos de bebê",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-bercos",
+  "slug": "bebes-e-criancas-bercos",
+  "name": "Berços",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-cadeiras-infantis",
+  "slug": "bebes-e-criancas-cadeiras-infantis",
+  "name": "Cadeiras infantis",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-alimentacao-infantil",
+  "slug": "bebes-e-criancas-alimentacao-infantil",
+  "name": "Alimentação infantil",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-acessorios-para-maternidade",
+  "slug": "bebes-e-criancas-acessorios-para-maternidade",
+  "name": "Acessórios para maternidade",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bebes-e-criancas-seguranca-infantil",
+  "slug": "bebes-e-criancas-seguranca-infantil",
+  "name": "Segurança infantil",
+  "parentSlug": "bebes-e-criancas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-perfumes",
+  "slug": "beleza-e-cuidados-pessoais-perfumes",
+  "name": "Perfumes",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-maquiagem",
+  "slug": "beleza-e-cuidados-pessoais-maquiagem",
+  "name": "Maquiagem",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-cuidados-com-a-pele",
+  "slug": "beleza-e-cuidados-pessoais-cuidados-com-a-pele",
+  "name": "Cuidados com a pele",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-produtos-capilares",
+  "slug": "beleza-e-cuidados-pessoais-produtos-capilares",
+  "name": "Produtos capilares",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-cabelos-e-extensoes",
+  "slug": "beleza-e-cuidados-pessoais-cabelos-e-extensoes",
+  "name": "Cabelos e extensões",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-perucas",
+  "slug": "beleza-e-cuidados-pessoais-perucas",
+  "name": "Perucas",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-barbearia",
+  "slug": "beleza-e-cuidados-pessoais-barbearia",
+  "name": "Barbearia",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-manicure-e-pedicure",
+  "slug": "beleza-e-cuidados-pessoais-manicure-e-pedicure",
+  "name": "Manicure e pedicure",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-higiene-pessoal",
+  "slug": "beleza-e-cuidados-pessoais-higiene-pessoal",
+  "name": "Higiene pessoal",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_beleza-e-cuidados-pessoais-equipamentos-de-salao",
+  "slug": "beleza-e-cuidados-pessoais-equipamentos-de-salao",
+  "name": "Equipamentos de salão",
+  "parentSlug": "beleza-e-cuidados-pessoais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-bolsas-femininas",
+  "slug": "bolsas-malas-e-acessorios-bolsas-femininas",
+  "name": "Bolsas femininas",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-mochilas",
+  "slug": "bolsas-malas-e-acessorios-mochilas",
+  "name": "Mochilas",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-malas-de-viagem",
+  "slug": "bolsas-malas-e-acessorios-malas-de-viagem",
+  "name": "Malas de viagem",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-carteiras",
+  "slug": "bolsas-malas-e-acessorios-carteiras",
+  "name": "Carteiras",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-cintos",
+  "slug": "bolsas-malas-e-acessorios-cintos",
+  "name": "Cintos",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-bones-e-chapeus",
+  "slug": "bolsas-malas-e-acessorios-bones-e-chapeus",
+  "name": "Bonés e chapéus",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-oculos-de-sol",
+  "slug": "bolsas-malas-e-acessorios-oculos-de-sol",
+  "name": "Óculos de sol",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-relogios",
+  "slug": "bolsas-malas-e-acessorios-relogios",
+  "name": "Relógios",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-joias-e-bijuterias",
+  "slug": "bolsas-malas-e-acessorios-joias-e-bijuterias",
+  "name": "Joias e bijuterias",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_bolsas-malas-e-acessorios-acessorios-de-cabelo",
+  "slug": "bolsas-malas-e-acessorios-acessorios-de-cabelo",
+  "name": "Acessórios de cabelo",
+  "parentSlug": "bolsas-malas-e-acessorios",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-bonecas",
+  "slug": "brinquedos-e-jogos-bonecas",
+  "name": "Bonecas",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-carrinhos-de-brinquedo",
+  "slug": "brinquedos-e-jogos-carrinhos-de-brinquedo",
+  "name": "Carrinhos de brinquedo",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-brinquedos-educativos",
+  "slug": "brinquedos-e-jogos-brinquedos-educativos",
+  "name": "Brinquedos educativos",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-jogos-de-tabuleiro",
+  "slug": "brinquedos-e-jogos-jogos-de-tabuleiro",
+  "name": "Jogos de tabuleiro",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-quebra-cabecas",
+  "slug": "brinquedos-e-jogos-quebra-cabecas",
+  "name": "Quebra-cabeças",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-brinquedos-eletronicos",
+  "slug": "brinquedos-e-jogos-brinquedos-eletronicos",
+  "name": "Brinquedos eletrônicos",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-bicicletas-infantis",
+  "slug": "brinquedos-e-jogos-bicicletas-infantis",
+  "name": "Bicicletas infantis",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-pelucias",
+  "slug": "brinquedos-e-jogos-pelucias",
+  "name": "Pelúcias",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-brinquedos-de-exterior",
+  "slug": "brinquedos-e-jogos-brinquedos-de-exterior",
+  "name": "Brinquedos de exterior",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_brinquedos-e-jogos-jogos-tradicionais",
+  "slug": "brinquedos-e-jogos-jogos-tradicionais",
+  "name": "Jogos tradicionais",
+  "parentSlug": "brinquedos-e-jogos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-sapatos-masculinos",
+  "slug": "calcados-sapatos-masculinos",
+  "name": "Sapatos masculinos",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-sapatos-femininos",
+  "slug": "calcados-sapatos-femininos",
+  "name": "Sapatos femininos",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-tenis",
+  "slug": "calcados-tenis",
+  "name": "Tênis",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-sandalias",
+  "slug": "calcados-sandalias",
+  "name": "Sandálias",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-chinelos",
+  "slug": "calcados-chinelos",
+  "name": "Chinelos",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-botas",
+  "slug": "calcados-botas",
+  "name": "Botas",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-calcados-infantis",
+  "slug": "calcados-calcados-infantis",
+  "name": "Calçados infantis",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-calcados-de-seguranca",
+  "slug": "calcados-calcados-de-seguranca",
+  "name": "Calçados de segurança",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_calcados-acessorios-para-calcados",
+  "slug": "calcados-acessorios-para-calcados",
+  "name": "Acessórios para calçados",
+  "parentSlug": "calcados",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-sofas-e-poltronas",
+  "slug": "casa-moveis-e-decoracao-sofas-e-poltronas",
+  "name": "Sofás e poltronas",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-mesas-e-cadeiras",
+  "slug": "casa-moveis-e-decoracao-mesas-e-cadeiras",
+  "name": "Mesas e cadeiras",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-camas-e-colchoes",
+  "slug": "casa-moveis-e-decoracao-camas-e-colchoes",
+  "name": "Camas e colchões",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-guarda-roupas",
+  "slug": "casa-moveis-e-decoracao-guarda-roupas",
+  "name": "Guarda-roupas",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-estantes-e-armarios",
+  "slug": "casa-moveis-e-decoracao-estantes-e-armarios",
+  "name": "Estantes e armários",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-moveis-de-escritorio",
+  "slug": "casa-moveis-e-decoracao-moveis-de-escritorio",
+  "name": "Móveis de escritório",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-tapetes-e-cortinas",
+  "slug": "casa-moveis-e-decoracao-tapetes-e-cortinas",
+  "name": "Tapetes e cortinas",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-decoracao",
+  "slug": "casa-moveis-e-decoracao-decoracao",
+  "name": "Decoração",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-iluminacao",
+  "slug": "casa-moveis-e-decoracao-iluminacao",
+  "name": "Iluminação",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-organizacao-domestica",
+  "slug": "casa-moveis-e-decoracao-organizacao-domestica",
+  "name": "Organização doméstica",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_casa-moveis-e-decoracao-artigos-para-banheiro",
+  "slug": "casa-moveis-e-decoracao-artigos-para-banheiro",
+  "name": "Artigos para banheiro",
+  "parentSlug": "casa-moveis-e-decoracao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-smartphones",
+  "slug": "celulares-e-telefones-smartphones",
+  "name": "Smartphones",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-celulares-basicos",
+  "slug": "celulares-e-telefones-celulares-basicos",
+  "name": "Celulares básicos",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-capas-e-peliculas",
+  "slug": "celulares-e-telefones-capas-e-peliculas",
+  "name": "Capas e películas",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-carregadores-e-cabos",
+  "slug": "celulares-e-telefones-carregadores-e-cabos",
+  "name": "Carregadores e cabos",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-baterias-e-pecas",
+  "slug": "celulares-e-telefones-baterias-e-pecas",
+  "name": "Baterias e peças",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-smartwatches",
+  "slug": "celulares-e-telefones-smartwatches",
+  "name": "Smartwatches",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-acessorios-para-celulares",
+  "slug": "celulares-e-telefones-acessorios-para-celulares",
+  "name": "Acessórios para celulares",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-telefones-fixos",
+  "slug": "celulares-e-telefones-telefones-fixos",
+  "name": "Telefones fixos",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_celulares-e-telefones-radios-comunicadores",
+  "slug": "celulares-e-telefones-radios-comunicadores",
+  "name": "Rádios comunicadores",
+  "parentSlug": "celulares-e-telefones",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-cimento-e-argamassa",
+  "slug": "construcao-e-materiais-cimento-e-argamassa",
+  "name": "Cimento e argamassa",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-ferro-e-aco",
+  "slug": "construcao-e-materiais-ferro-e-aco",
+  "name": "Ferro e aço",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-blocos-e-tijolos",
+  "slug": "construcao-e-materiais-blocos-e-tijolos",
+  "name": "Blocos e tijolos",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-areia-e-brita",
+  "slug": "construcao-e-materiais-areia-e-brita",
+  "name": "Areia e brita",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-telhas-e-coberturas",
+  "slug": "construcao-e-materiais-telhas-e-coberturas",
+  "name": "Telhas e coberturas",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-portas-e-janelas",
+  "slug": "construcao-e-materiais-portas-e-janelas",
+  "name": "Portas e janelas",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-tintas-e-vernizes",
+  "slug": "construcao-e-materiais-tintas-e-vernizes",
+  "name": "Tintas e vernizes",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-canalizacao-e-hidraulica",
+  "slug": "construcao-e-materiais-canalizacao-e-hidraulica",
+  "name": "Canalização e hidráulica",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-materiais-eletricos",
+  "slug": "construcao-e-materiais-materiais-eletricos",
+  "name": "Materiais elétricos",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-pisos-e-revestimentos",
+  "slug": "construcao-e-materiais-pisos-e-revestimentos",
+  "name": "Pisos e revestimentos",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_construcao-e-materiais-loucas-sanitarias",
+  "slug": "construcao-e-materiais-loucas-sanitarias",
+  "name": "Louças sanitárias",
+  "parentSlug": "construcao-e-materiais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-panelas",
+  "slug": "cozinha-e-utilidades-domesticas-panelas",
+  "name": "Panelas",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-pratos-e-tigelas",
+  "slug": "cozinha-e-utilidades-domesticas-pratos-e-tigelas",
+  "name": "Pratos e tigelas",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-copos-e-canecas",
+  "slug": "cozinha-e-utilidades-domesticas-copos-e-canecas",
+  "name": "Copos e canecas",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-talheres",
+  "slug": "cozinha-e-utilidades-domesticas-talheres",
+  "name": "Talheres",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-facas-e-utensilios",
+  "slug": "cozinha-e-utilidades-domesticas-facas-e-utensilios",
+  "name": "Facas e utensílios",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-recipientes-e-conservacao",
+  "slug": "cozinha-e-utilidades-domesticas-recipientes-e-conservacao",
+  "name": "Recipientes e conservação",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-garrafas-termicas",
+  "slug": "cozinha-e-utilidades-domesticas-garrafas-termicas",
+  "name": "Garrafas térmicas",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-utensilios-de-limpeza",
+  "slug": "cozinha-e-utilidades-domesticas-utensilios-de-limpeza",
+  "name": "Utensílios de limpeza",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_cozinha-e-utilidades-domesticas-acessorios-de-cozinha",
+  "slug": "cozinha-e-utilidades-domesticas-acessorios-de-cozinha",
+  "name": "Acessórios de cozinha",
+  "parentSlug": "cozinha-e-utilidades-domesticas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-geladeiras-e-frigorificos",
+  "slug": "eletrodomesticos-geladeiras-e-frigorificos",
+  "name": "Geladeiras e frigoríficos",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-congeladores-e-arcas",
+  "slug": "eletrodomesticos-congeladores-e-arcas",
+  "name": "Congeladores e arcas",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-fogoes-e-fornos",
+  "slug": "eletrodomesticos-fogoes-e-fornos",
+  "name": "Fogões e fornos",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-micro-ondas",
+  "slug": "eletrodomesticos-micro-ondas",
+  "name": "Micro-ondas",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-maquinas-de-lavar",
+  "slug": "eletrodomesticos-maquinas-de-lavar",
+  "name": "Máquinas de lavar",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-ventiladores",
+  "slug": "eletrodomesticos-ventiladores",
+  "name": "Ventiladores",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-ar-condicionado",
+  "slug": "eletrodomesticos-ar-condicionado",
+  "name": "Ar-condicionado",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-liquidificadores",
+  "slug": "eletrodomesticos-liquidificadores",
+  "name": "Liquidificadores",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-ferros-de-passar",
+  "slug": "eletrodomesticos-ferros-de-passar",
+  "name": "Ferros de passar",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-pequenos-eletrodomesticos",
+  "slug": "eletrodomesticos-pequenos-eletrodomesticos",
+  "name": "Pequenos eletrodomésticos",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletrodomesticos-pecas-e-acessorios",
+  "slug": "eletrodomesticos-pecas-e-acessorios",
+  "name": "Peças e acessórios",
+  "parentSlug": "eletrodomesticos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-televisores",
+  "slug": "eletronicos-tv-e-audio-televisores",
+  "name": "Televisores",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-projetores",
+  "slug": "eletronicos-tv-e-audio-projetores",
+  "name": "Projetores",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-caixas-de-som",
+  "slug": "eletronicos-tv-e-audio-caixas-de-som",
+  "name": "Caixas de som",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-fones-de-ouvido",
+  "slug": "eletronicos-tv-e-audio-fones-de-ouvido",
+  "name": "Fones de ouvido",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-home-theater",
+  "slug": "eletronicos-tv-e-audio-home-theater",
+  "name": "Home theater",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-cameras-digitais",
+  "slug": "eletronicos-tv-e-audio-cameras-digitais",
+  "name": "Câmeras digitais",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-cameras-de-seguranca",
+  "slug": "eletronicos-tv-e-audio-cameras-de-seguranca",
+  "name": "Câmeras de segurança",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-drones",
+  "slug": "eletronicos-tv-e-audio-drones",
+  "name": "Drones",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-acessorios-de-audio-e-video",
+  "slug": "eletronicos-tv-e-audio-acessorios-de-audio-e-video",
+  "name": "Acessórios de áudio e vídeo",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_eletronicos-tv-e-audio-controles-remotos",
+  "slug": "eletronicos-tv-e-audio-controles-remotos",
+  "name": "Controles remotos",
+  "parentSlug": "eletronicos-tv-e-audio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-paineis-solares",
+  "slug": "energia-solar-e-eletricidade-paineis-solares",
+  "name": "Painéis solares",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-baterias-solares",
+  "slug": "energia-solar-e-eletricidade-baterias-solares",
+  "name": "Baterias solares",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-inversores",
+  "slug": "energia-solar-e-eletricidade-inversores",
+  "name": "Inversores",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-controladores-de-carga",
+  "slug": "energia-solar-e-eletricidade-controladores-de-carga",
+  "name": "Controladores de carga",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-kits-solares",
+  "slug": "energia-solar-e-eletricidade-kits-solares",
+  "name": "Kits solares",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-lampadas-solares",
+  "slug": "energia-solar-e-eletricidade-lampadas-solares",
+  "name": "Lâmpadas solares",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-cabos-e-conectores",
+  "slug": "energia-solar-e-eletricidade-cabos-e-conectores",
+  "name": "Cabos e conectores",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-estabilizadores-e-ups",
+  "slug": "energia-solar-e-eletricidade-estabilizadores-e-ups",
+  "name": "Estabilizadores e UPS",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_energia-solar-e-eletricidade-sistemas-de-energia-de-emergencia",
+  "slug": "energia-solar-e-eletricidade-sistemas-de-energia-de-emergencia",
+  "name": "Sistemas de energia de emergência",
+  "parentSlug": "energia-solar-e-eletricidade",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-futebol",
+  "slug": "esportes-e-fitness-futebol",
+  "name": "Futebol",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-basquetebol",
+  "slug": "esportes-e-fitness-basquetebol",
+  "name": "Basquetebol",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-corrida",
+  "slug": "esportes-e-fitness-corrida",
+  "name": "Corrida",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-ciclismo",
+  "slug": "esportes-e-fitness-ciclismo",
+  "name": "Ciclismo",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-equipamentos-de-ginastica",
+  "slug": "esportes-e-fitness-equipamentos-de-ginastica",
+  "name": "Equipamentos de ginástica",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-roupas-esportivas",
+  "slug": "esportes-e-fitness-roupas-esportivas",
+  "name": "Roupas esportivas",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-bolas-e-acessorios",
+  "slug": "esportes-e-fitness-bolas-e-acessorios",
+  "name": "Bolas e acessórios",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-artes-marciais",
+  "slug": "esportes-e-fitness-artes-marciais",
+  "name": "Artes marciais",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-camping",
+  "slug": "esportes-e-fitness-camping",
+  "name": "Camping",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_esportes-e-fitness-pesca-esportiva",
+  "slug": "esportes-e-fitness-pesca-esportiva",
+  "name": "Pesca esportiva",
+  "parentSlug": "esportes-e-fitness",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-ferramentas-manuais",
+  "slug": "ferramentas-e-maquinas-ferramentas-manuais",
+  "name": "Ferramentas manuais",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-ferramentas-eletricas",
+  "slug": "ferramentas-e-maquinas-ferramentas-eletricas",
+  "name": "Ferramentas elétricas",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-furadeiras",
+  "slug": "ferramentas-e-maquinas-furadeiras",
+  "name": "Furadeiras",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-serras",
+  "slug": "ferramentas-e-maquinas-serras",
+  "name": "Serras",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-maquinas-de-solda",
+  "slug": "ferramentas-e-maquinas-maquinas-de-solda",
+  "name": "Máquinas de solda",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-compressores",
+  "slug": "ferramentas-e-maquinas-compressores",
+  "name": "Compressores",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-geradores",
+  "slug": "ferramentas-e-maquinas-geradores",
+  "name": "Geradores",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-equipamentos-de-oficina",
+  "slug": "ferramentas-e-maquinas-equipamentos-de-oficina",
+  "name": "Equipamentos de oficina",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-equipamentos-de-protecao",
+  "slug": "ferramentas-e-maquinas-equipamentos-de-protecao",
+  "name": "Equipamentos de proteção",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_ferramentas-e-maquinas-pecas-para-maquinas",
+  "slug": "ferramentas-e-maquinas-pecas-para-maquinas",
+  "name": "Peças para máquinas",
+  "parentSlug": "ferramentas-e-maquinas",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-decoracao-de-festas",
+  "slug": "festas-e-eventos-decoracao-de-festas",
+  "name": "Decoração de festas",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-baloes",
+  "slug": "festas-e-eventos-baloes",
+  "name": "Balões",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-artigos-de-casamento",
+  "slug": "festas-e-eventos-artigos-de-casamento",
+  "name": "Artigos de casamento",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-artigos-de-aniversario",
+  "slug": "festas-e-eventos-artigos-de-aniversario",
+  "name": "Artigos de aniversário",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-lembrancas",
+  "slug": "festas-e-eventos-lembrancas",
+  "name": "Lembranças",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-utensilios-descartaveis",
+  "slug": "festas-e-eventos-utensilios-descartaveis",
+  "name": "Utensílios descartáveis",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-equipamentos-de-som",
+  "slug": "festas-e-eventos-equipamentos-de-som",
+  "name": "Equipamentos de som",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-iluminacao-para-eventos",
+  "slug": "festas-e-eventos-iluminacao-para-eventos",
+  "name": "Iluminação para eventos",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-tendas-e-coberturas",
+  "slug": "festas-e-eventos-tendas-e-coberturas",
+  "name": "Tendas e coberturas",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_festas-e-eventos-artigos-religiosos-para-eventos",
+  "slug": "festas-e-eventos-artigos-religiosos-para-eventos",
+  "name": "Artigos religiosos para eventos",
+  "parentSlug": "festas-e-eventos",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_games-e-consoles-consoles-de-jogos",
+  "slug": "games-e-consoles-consoles-de-jogos",
+  "name": "Consoles de jogos",
+  "parentSlug": "games-e-consoles",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_games-e-consoles-jogos-fisicos",
+  "slug": "games-e-consoles-jogos-fisicos",
+  "name": "Jogos físicos",
+  "parentSlug": "games-e-consoles",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_games-e-consoles-controles",
+  "slug": "games-e-consoles-controles",
+  "name": "Controles",
+  "parentSlug": "games-e-consoles",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_games-e-consoles-acessorios-para-consoles",
+  "slug": "games-e-consoles-acessorios-para-consoles",
+  "name": "Acessórios para consoles",
+  "parentSlug": "games-e-consoles",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_games-e-consoles-equipamentos-gamer",
+  "slug": "games-e-consoles-equipamentos-gamer",
+  "name": "Equipamentos gamer",
+  "parentSlug": "games-e-consoles",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_games-e-consoles-pecas-para-consoles",
+  "slug": "games-e-consoles-pecas-para-consoles",
+  "name": "Peças para consoles",
+  "parentSlug": "games-e-consoles",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-equipamentos-comerciais",
+  "slug": "industria-comercio-e-escritorio-equipamentos-comerciais",
+  "name": "Equipamentos comerciais",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-maquinas-industriais",
+  "slug": "industria-comercio-e-escritorio-maquinas-industriais",
+  "name": "Máquinas industriais",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-equipamentos-para-restaurantes",
+  "slug": "industria-comercio-e-escritorio-equipamentos-para-restaurantes",
+  "name": "Equipamentos para restaurantes",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-balancas-comerciais",
+  "slug": "industria-comercio-e-escritorio-balancas-comerciais",
+  "name": "Balanças comerciais",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-embalagens",
+  "slug": "industria-comercio-e-escritorio-embalagens",
+  "name": "Embalagens",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-maquinas-de-costura",
+  "slug": "industria-comercio-e-escritorio-maquinas-de-costura",
+  "name": "Máquinas de costura",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-equipamentos-de-escritorio",
+  "slug": "industria-comercio-e-escritorio-equipamentos-de-escritorio",
+  "name": "Equipamentos de escritório",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-uniformes-profissionais",
+  "slug": "industria-comercio-e-escritorio-uniformes-profissionais",
+  "name": "Uniformes profissionais",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-materiais-de-armazenagem",
+  "slug": "industria-comercio-e-escritorio-materiais-de-armazenagem",
+  "name": "Materiais de armazenagem",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_industria-comercio-e-escritorio-equipamentos-de-seguranca",
+  "slug": "industria-comercio-e-escritorio-equipamentos-de-seguranca",
+  "name": "Equipamentos de segurança",
+  "parentSlug": "industria-comercio-e-escritorio",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-notebooks",
+  "slug": "informatica-e-computadores-notebooks",
+  "name": "Notebooks",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-computadores-de-mesa",
+  "slug": "informatica-e-computadores-computadores-de-mesa",
+  "name": "Computadores de mesa",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-tablets",
+  "slug": "informatica-e-computadores-tablets",
+  "name": "Tablets",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-monitores",
+  "slug": "informatica-e-computadores-monitores",
+  "name": "Monitores",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-teclados-e-mouses",
+  "slug": "informatica-e-computadores-teclados-e-mouses",
+  "name": "Teclados e mouses",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-impressoras-e-scanners",
+  "slug": "informatica-e-computadores-impressoras-e-scanners",
+  "name": "Impressoras e scanners",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-cartuchos-e-toners",
+  "slug": "informatica-e-computadores-cartuchos-e-toners",
+  "name": "Cartuchos e toners",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-discos-ssd-e-hd",
+  "slug": "informatica-e-computadores-discos-ssd-e-hd",
+  "name": "Discos SSD e HD",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-memorias-e-processadores",
+  "slug": "informatica-e-computadores-memorias-e-processadores",
+  "name": "Memórias e processadores",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-redes-e-roteadores",
+  "slug": "informatica-e-computadores-redes-e-roteadores",
+  "name": "Redes e roteadores",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_informatica-e-computadores-acessorios-de-informatica",
+  "slug": "informatica-e-computadores-acessorios-de-informatica",
+  "name": "Acessórios de informática",
+  "parentSlug": "informatica-e-computadores",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais-guitarras",
+  "slug": "instrumentos-musicais-guitarras",
+  "name": "Guitarras",
+  "parentSlug": "instrumentos-musicais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais-teclados-musicais",
+  "slug": "instrumentos-musicais-teclados-musicais",
+  "name": "Teclados musicais",
+  "parentSlug": "instrumentos-musicais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais-baterias-e-percussao",
+  "slug": "instrumentos-musicais-baterias-e-percussao",
+  "name": "Baterias e percussão",
+  "parentSlug": "instrumentos-musicais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais-microfones",
+  "slug": "instrumentos-musicais-microfones",
+  "name": "Microfones",
+  "parentSlug": "instrumentos-musicais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais-mesas-de-som",
+  "slug": "instrumentos-musicais-mesas-de-som",
+  "name": "Mesas de som",
+  "parentSlug": "instrumentos-musicais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais-instrumentos-tradicionais",
+  "slug": "instrumentos-musicais-instrumentos-tradicionais",
+  "name": "Instrumentos tradicionais",
+  "parentSlug": "instrumentos-musicais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais-acessorios-musicais",
+  "slug": "instrumentos-musicais-acessorios-musicais",
+  "name": "Acessórios musicais",
+  "parentSlug": "instrumentos-musicais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_instrumentos-musicais-equipamentos-de-gravacao",
+  "slug": "instrumentos-musicais-equipamentos-de-gravacao",
+  "name": "Equipamentos de gravação",
+  "parentSlug": "instrumentos-musicais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-plantas-e-sementes",
+  "slug": "jardim-e-exterior-plantas-e-sementes",
+  "name": "Plantas e sementes",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-vasos",
+  "slug": "jardim-e-exterior-vasos",
+  "name": "Vasos",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-ferramentas-de-jardinagem",
+  "slug": "jardim-e-exterior-ferramentas-de-jardinagem",
+  "name": "Ferramentas de jardinagem",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-mangueiras",
+  "slug": "jardim-e-exterior-mangueiras",
+  "name": "Mangueiras",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-mobiliario-exterior",
+  "slug": "jardim-e-exterior-mobiliario-exterior",
+  "name": "Mobiliário exterior",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-iluminacao-exterior",
+  "slug": "jardim-e-exterior-iluminacao-exterior",
+  "name": "Iluminação exterior",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-cercas",
+  "slug": "jardim-e-exterior-cercas",
+  "name": "Cercas",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-equipamentos-de-rega",
+  "slug": "jardim-e-exterior-equipamentos-de-rega",
+  "name": "Equipamentos de rega",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_jardim-e-exterior-decoracao-de-jardim",
+  "slug": "jardim-e-exterior-decoracao-de-jardim",
+  "name": "Decoração de jardim",
+  "parentSlug": "jardim-e-exterior",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-livros-escolares",
+  "slug": "livros-papelaria-e-educacao-livros-escolares",
+  "name": "Livros escolares",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-livros-universitarios",
+  "slug": "livros-papelaria-e-educacao-livros-universitarios",
+  "name": "Livros universitários",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-literatura",
+  "slug": "livros-papelaria-e-educacao-literatura",
+  "name": "Literatura",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-livros-religiosos",
+  "slug": "livros-papelaria-e-educacao-livros-religiosos",
+  "name": "Livros religiosos",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-cadernos",
+  "slug": "livros-papelaria-e-educacao-cadernos",
+  "name": "Cadernos",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-canetas-e-lapis",
+  "slug": "livros-papelaria-e-educacao-canetas-e-lapis",
+  "name": "Canetas e lápis",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-mochilas-escolares",
+  "slug": "livros-papelaria-e-educacao-mochilas-escolares",
+  "name": "Mochilas escolares",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-materiais-didaticos",
+  "slug": "livros-papelaria-e-educacao-materiais-didaticos",
+  "name": "Materiais didáticos",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-artigos-de-escritorio",
+  "slug": "livros-papelaria-e-educacao-artigos-de-escritorio",
+  "name": "Artigos de escritório",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_livros-papelaria-e-educacao-materiais-de-desenho",
+  "slug": "livros-papelaria-e-educacao-materiais-de-desenho",
+  "name": "Materiais de desenho",
+  "parentSlug": "livros-papelaria-e-educacao",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-vestidos",
+  "slug": "moda-feminina-vestidos",
+  "name": "Vestidos",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-blusas-e-camisetas",
+  "slug": "moda-feminina-blusas-e-camisetas",
+  "name": "Blusas e camisetas",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-saias",
+  "slug": "moda-feminina-saias",
+  "name": "Saias",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-calcas",
+  "slug": "moda-feminina-calcas",
+  "name": "Calças",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-conjuntos",
+  "slug": "moda-feminina-conjuntos",
+  "name": "Conjuntos",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-roupas-tradicionais-africanas",
+  "slug": "moda-feminina-roupas-tradicionais-africanas",
+  "name": "Roupas tradicionais africanas",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-roupas-intimas",
+  "slug": "moda-feminina-roupas-intimas",
+  "name": "Roupas íntimas",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-moda-praia",
+  "slug": "moda-feminina-moda-praia",
+  "name": "Moda praia",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-roupas-esportivas",
+  "slug": "moda-feminina-roupas-esportivas",
+  "name": "Roupas esportivas",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-feminina-casacos",
+  "slug": "moda-feminina-casacos",
+  "name": "Casacos",
+  "parentSlug": "moda-feminina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-camisas",
+  "slug": "moda-masculina-camisas",
+  "name": "Camisas",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-camisetas-e-polos",
+  "slug": "moda-masculina-camisetas-e-polos",
+  "name": "Camisetas e polos",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-calcas",
+  "slug": "moda-masculina-calcas",
+  "name": "Calças",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-bermudas",
+  "slug": "moda-masculina-bermudas",
+  "name": "Bermudas",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-fatos-e-blazers",
+  "slug": "moda-masculina-fatos-e-blazers",
+  "name": "Fatos e blazers",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-roupas-tradicionais-africanas",
+  "slug": "moda-masculina-roupas-tradicionais-africanas",
+  "name": "Roupas tradicionais africanas",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-roupa-intima",
+  "slug": "moda-masculina-roupa-intima",
+  "name": "Roupa íntima",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-roupa-esportiva",
+  "slug": "moda-masculina-roupa-esportiva",
+  "name": "Roupa esportiva",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-casacos",
+  "slug": "moda-masculina-casacos",
+  "name": "Casacos",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_moda-masculina-uniformes",
+  "slug": "moda-masculina-uniformes",
+  "name": "Uniformes",
+  "parentSlug": "moda-masculina",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-racoes-para-caes",
+  "slug": "pet-shop-e-animais-racoes-para-caes",
+  "name": "Rações para cães",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-racoes-para-gatos",
+  "slug": "pet-shop-e-animais-racoes-para-gatos",
+  "name": "Rações para gatos",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-acessorios-para-animais",
+  "slug": "pet-shop-e-animais-acessorios-para-animais",
+  "name": "Acessórios para animais",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-coleiras-e-guias",
+  "slug": "pet-shop-e-animais-coleiras-e-guias",
+  "name": "Coleiras e guias",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-camas-para-animais",
+  "slug": "pet-shop-e-animais-camas-para-animais",
+  "name": "Camas para animais",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-higiene-animal",
+  "slug": "pet-shop-e-animais-higiene-animal",
+  "name": "Higiene animal",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-aquarios",
+  "slug": "pet-shop-e-animais-aquarios",
+  "name": "Aquários",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-gaiolas",
+  "slug": "pet-shop-e-animais-gaiolas",
+  "name": "Gaiolas",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_pet-shop-e-animais-brinquedos-para-animais",
+  "slug": "pet-shop-e-animais-brinquedos-para-animais",
+  "name": "Brinquedos para animais",
+  "parentSlug": "pet-shop-e-animais",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-tecidos-africanos",
+  "slug": "produtos-tradicionais-e-artesanato-tecidos-africanos",
+  "name": "Tecidos africanos",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-panos-tradicionais",
+  "slug": "produtos-tradicionais-e-artesanato-panos-tradicionais",
+  "name": "Panos tradicionais",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-artesanato-guineense",
+  "slug": "produtos-tradicionais-e-artesanato-artesanato-guineense",
+  "name": "Artesanato guineense",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-cestos-e-cestaria",
+  "slug": "produtos-tradicionais-e-artesanato-cestos-e-cestaria",
+  "name": "Cestos e cestaria",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-artigos-de-madeira",
+  "slug": "produtos-tradicionais-e-artesanato-artigos-de-madeira",
+  "name": "Artigos de madeira",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-bijuterias-artesanais",
+  "slug": "produtos-tradicionais-e-artesanato-bijuterias-artesanais",
+  "name": "Bijuterias artesanais",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-instrumentos-tradicionais",
+  "slug": "produtos-tradicionais-e-artesanato-instrumentos-tradicionais",
+  "name": "Instrumentos tradicionais",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-decoracao-africana",
+  "slug": "produtos-tradicionais-e-artesanato-decoracao-africana",
+  "name": "Decoração africana",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-produtos-culturais",
+  "slug": "produtos-tradicionais-e-artesanato-produtos-culturais",
+  "name": "Produtos culturais",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_produtos-tradicionais-e-artesanato-lembrancas-regionais",
+  "slug": "produtos-tradicionais-e-artesanato-lembrancas-regionais",
+  "name": "Lembranças regionais",
+  "parentSlug": "produtos-tradicionais-e-artesanato",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar-primeiros-socorros",
+  "slug": "saude-e-bem-estar-primeiros-socorros",
+  "name": "Primeiros socorros",
+  "parentSlug": "saude-e-bem-estar",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar-termometros",
+  "slug": "saude-e-bem-estar-termometros",
+  "name": "Termômetros",
+  "parentSlug": "saude-e-bem-estar",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar-medidores-de-pressao",
+  "slug": "saude-e-bem-estar-medidores-de-pressao",
+  "name": "Medidores de pressão",
+  "parentSlug": "saude-e-bem-estar",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar-produtos-ortopedicos",
+  "slug": "saude-e-bem-estar-produtos-ortopedicos",
+  "name": "Produtos ortopédicos",
+  "parentSlug": "saude-e-bem-estar",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar-mobilidade-e-acessibilidade",
+  "slug": "saude-e-bem-estar-mobilidade-e-acessibilidade",
+  "name": "Mobilidade e acessibilidade",
+  "parentSlug": "saude-e-bem-estar",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar-mascaras-e-luvas",
+  "slug": "saude-e-bem-estar-mascaras-e-luvas",
+  "name": "Máscaras e luvas",
+  "parentSlug": "saude-e-bem-estar",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar-higiene-e-prevencao",
+  "slug": "saude-e-bem-estar-higiene-e-prevencao",
+  "name": "Higiene e prevenção",
+  "parentSlug": "saude-e-bem-estar",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_saude-e-bem-estar-equipamentos-de-cuidados-pessoais",
+  "slug": "saude-e-bem-estar-equipamentos-de-cuidados-pessoais",
+  "name": "Equipamentos de cuidados pessoais",
+  "parentSlug": "saude-e-bem-estar",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-arroz-e-cereais",
+  "slug": "supermercado-e-mercearia-arroz-e-cereais",
+  "name": "Arroz e cereais",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-farinha-e-massas",
+  "slug": "supermercado-e-mercearia-farinha-e-massas",
+  "name": "Farinha e massas",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-oleos-alimentares",
+  "slug": "supermercado-e-mercearia-oleos-alimentares",
+  "name": "Óleos alimentares",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-acucar-e-sal",
+  "slug": "supermercado-e-mercearia-acucar-e-sal",
+  "name": "Açúcar e sal",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-conservas-e-enlatados",
+  "slug": "supermercado-e-mercearia-conservas-e-enlatados",
+  "name": "Conservas e enlatados",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-leite-e-derivados",
+  "slug": "supermercado-e-mercearia-leite-e-derivados",
+  "name": "Leite e derivados",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-cafe-cha-e-cacau",
+  "slug": "supermercado-e-mercearia-cafe-cha-e-cacau",
+  "name": "Café, chá e cacau",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-bolachas-e-doces",
+  "slug": "supermercado-e-mercearia-bolachas-e-doces",
+  "name": "Bolachas e doces",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-temperos-e-condimentos",
+  "slug": "supermercado-e-mercearia-temperos-e-condimentos",
+  "name": "Temperos e condimentos",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-produtos-de-limpeza",
+  "slug": "supermercado-e-mercearia-produtos-de-limpeza",
+  "name": "Produtos de limpeza",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ },
+ {
+  "id": "cat_nsl_supermercado-e-mercearia-produtos-de-higiene-domestica",
+  "slug": "supermercado-e-mercearia-produtos-de-higiene-domestica",
+  "name": "Produtos de higiene doméstica",
+  "parentSlug": "supermercado-e-mercearia",
+  "depth": 1,
+  "active": true
+ }
+]

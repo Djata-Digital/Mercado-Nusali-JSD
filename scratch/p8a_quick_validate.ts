@@ -1,0 +1,18 @@
+import fs from 'fs';
+import { ALL_PLANS } from '../src/data/attributeMatrix/index.js';
+import { buildTree, resolveMatrix, validateMatrix } from '../src/data/attributeMatrix/engine.js';
+const inv = JSON.parse(fs.readFileSync('docs/attribute-matrix/v1/categories.inventory.raw.json', 'utf8'));
+const tree = buildTree(inv.categories);
+const res = resolveMatrix(ALL_PLANS, tree);
+const rep = validateMatrix(ALL_PLANS, tree, res);
+const bySev: Record<string, number> = {};
+rep.issues.forEach((i) => { bySev[i.severity] = (bySev[i.severity] || 0) + 1; });
+console.log(JSON.stringify({ plans: ALL_PLANS.length, categorias: tree.size, bySev, stats: rep.stats }));
+rep.issues.filter((i) => i.severity !== 'info').slice(0, 80).forEach((i) => console.log(`${i.severity.toUpperCase()} [${i.rule}] ${i.category ?? ''} ${i.code ?? ''}: ${i.message}`));
+const subs = [...res.effective.entries()].filter(([s]) => tree.get(s)!.depth === 1);
+const dist = (f: (l: any[]) => number) => { const h: Record<number, number> = {}; subs.forEach(([, l]) => { const k = f(l); h[k] = (h[k] || 0) + 1; }); return h; };
+console.log('specs por sub', dist((l) => l.filter((a) => a.role === 'spec').length));
+console.log('eixos por sub', dist((l) => l.filter((a) => a.role === 'variant_axis').length));
+console.log('obrigatorios (spec) por sub', dist((l) => l.filter((a) => a.role === 'spec' && a.required).length));
+console.log('obrigatorios (eixo) por sub', dist((l) => l.filter((a) => a.role === 'variant_axis' && a.required).length));
+console.log('total efetivos medio', (subs.reduce((n, [, l]) => n + l.length, 0) / subs.length).toFixed(2));
