@@ -260,6 +260,13 @@
       "when": 1791399107755,
       "tag": "0036_user_legal_consents",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1791483151540,
+      "tag": "0037_attributes_foundation",
+      "breakpoints": true
     }
   ]
 }

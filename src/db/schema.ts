@@ -379,6 +379,8 @@ export const products = pgTable('products', {
   // onde condição não se aplica). null = "não se aplica/não informado".
   condition: varchar('condition', { length: 50 }), // new, used, refurbished, ou null (não se aplica)
   warranty: varchar('warranty', { length: 100 }),
+  // Fase 1 de atributos (0037): campo geral "modelo" (até aqui só existia como texto em specs). Nenhum código atual o escreve.
+  model: varchar('model', { length: 255 }),
   status: varchar('status', { length: 50 }).notNull().default('active'), // active, draft, paused, archived
   isActive: boolean('is_active').notNull().default(true),
   attributesJson: jsonb('attributes_json'),
@@ -425,9 +427,13 @@ export const productVariants = pgTable('product_variants', {
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  // Fase 1 de atributos (0037): chave canônica da combinação de eixos da variante (ex.: "color=preto|size=42"); só a Fase 7 a escreve.
+  // NULL (todas as variantes atuais) fica fora do índice único parcial abaixo, então nada existente é afetado.
+  variantKey: text('variant_key'),
 }, (table) => ({
   product_variants_product_idx: index('product_variants_product_idx').on(table.productId),
   product_variants_sku_uq: uniqueIndex('product_variants_sku_uq').on(table.sku),
+  product_variants_product_key_uq: uniqueIndex('product_variants_product_key_uq').on(table.productId, table.variantKey).where(sql`${table.variantKey} IS NOT NULL`),
 }));
 
 export const productImages = pgTable('product_images', {
@@ -469,8 +475,57 @@ export const categoryAttributes = pgTable('category_attributes', {
   isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  // ---- Fase 1 do sistema de atributos (migração 0037, aditiva): nenhum código atual lê ou escreve estas colunas ainda;
+  // todas têm default/nullable para que os INSERTs existentes continuem válidos.
+  /** 'spec' = especificação (um valor por produto); 'variant_axis' = eixo de variante (cor, tamanho, capacidade…). */
+  role: varchar('role', { length: 20 }).notNull().default('spec'),
+  minValue: numeric('min_value', { precision: 18, scale: 6 }),
+  maxValue: numeric('max_value', { precision: 18, scale: 6 }),
+  maxLength: integer('max_length'),
+  decimals: integer('decimals'),
+  /** Pode virar filtro no catálogo (uso futuro; planejado desde já para evitar migração estrutural). */
+  isFilterable: boolean('is_filterable').notNull().default(false),
+  displayGroup: varchar('display_group', { length: 100 }),
+  /** Substituição EXPLÍCITA de um atributo herdado de um ancestral (a substituição implícita por código passa a ser rejeitada). */
+  overridesId: varchar('overrides_id', { length: 255 }).references((): AnyPgColumn => categoryAttributes.id, { onDelete: 'restrict' }),
+  /** 'admin' = criado/editado pelo painel; 'seed' = carga em massa (a carga nunca sobrescreve linhas editadas pelo admin). */
+  source: varchar('source', { length: 20 }).notNull().default('admin'),
+  adminModifiedAt: timestamp('admin_modified_at'),
 }, (table) => ({
   category_attributes_cat_idx: index('category_attributes_cat_idx').on(table.categoryId),
+  category_attributes_cat_code_uq: uniqueIndex('category_attributes_cat_code_uq').on(table.categoryId, table.code),
+  category_attributes_overrides_idx: index('category_attributes_overrides_idx').on(table.overridesId),
+  category_attributes_type_check: check('category_attributes_type_check', sql`${table.type} IN ('text', 'number', 'select', 'multiselect', 'boolean')`),
+  category_attributes_role_check: check('category_attributes_role_check', sql`${table.role} IN ('spec', 'variant_axis')`),
+  category_attributes_source_check: check('category_attributes_source_check', sql`${table.source} IN ('admin', 'seed')`),
+  category_attributes_range_check: check('category_attributes_range_check', sql`${table.minValue} IS NULL OR ${table.maxValue} IS NULL OR ${table.minValue} <= ${table.maxValue}`),
+  category_attributes_limits_check: check('category_attributes_limits_check', sql`(${table.maxLength} IS NULL OR ${table.maxLength} > 0) AND (${table.decimals} IS NULL OR (${table.decimals} >= 0 AND ${table.decimals} <= 6))`),
+  category_attributes_override_self_check: check('category_attributes_override_self_check', sql`${table.overridesId} IS NULL OR ${table.overridesId} <> ${table.id}`),
+}));
+
+/**
+ * Fase 1 (0037) — FONTE ÚNICA e tipada dos valores de atributos por produto (ainda sem nenhum escritor/leitor: as Fases 3+ passam a
+ * usá-la). Uma linha por (produto, atributo); multiseleção = uma linha por opção. Exatamente UMA coluna de valor é preenchida.
+ * `attribute_code` é desnormalizado de propósito: permite índices e filtros sem JOIN e documenta o código estável usado na gravação.
+ */
+export const productAttributeValues = pgTable('product_attribute_values', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  productId: varchar('product_id', { length: 255 }).notNull().references(() => products.id, { onDelete: 'cascade' }),
+  attributeId: varchar('attribute_id', { length: 255 }).notNull().references(() => categoryAttributes.id, { onDelete: 'restrict' }),
+  attributeCode: varchar('attribute_code', { length: 100 }).notNull(),
+  valueText: text('value_text'),
+  valueNumber: numeric('value_number', { precision: 18, scale: 6 }),
+  valueBool: boolean('value_bool'),
+  optionValue: varchar('option_value', { length: 100 }),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  product_attribute_values_product_idx: index('product_attribute_values_product_idx').on(table.productId),
+  product_attribute_values_uq: uniqueIndex('product_attribute_values_uq').on(table.productId, table.attributeId, sql`coalesce(${table.optionValue}, '')`),
+  product_attribute_values_option_idx: index('product_attribute_values_option_idx').on(table.attributeId, table.optionValue).where(sql`${table.optionValue} IS NOT NULL`),
+  product_attribute_values_number_idx: index('product_attribute_values_number_idx').on(table.attributeId, table.valueNumber).where(sql`${table.valueNumber} IS NOT NULL`),
+  product_attribute_values_bool_idx: index('product_attribute_values_bool_idx').on(table.attributeId, table.valueBool).where(sql`${table.valueBool} IS NOT NULL`),
+  product_attribute_values_one_value_check: check('product_attribute_values_one_value_check', sql`num_nonnulls(${table.valueText}, ${table.valueNumber}, ${table.valueBool}, ${table.optionValue}) = 1`),
 }));
 
 // ============================================================================
