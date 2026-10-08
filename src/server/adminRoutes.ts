@@ -3668,6 +3668,8 @@ adminRouter.get('/categories', async (req: Request, res: Response) => {
         total: count(products.id),
       })
       .from(products)
+      // "Produtos Ativos" por categoria: só produtos ativos (is_active), como o rótulo da tela promete.
+      .where(eq(products.isActive, true))
       .groupBy(products.categoryId);
 
     const countsMap = new Map(productCounts.map((p) => [p.categoryId, p.total]));
@@ -3885,6 +3887,24 @@ adminRouter.delete('/categories/:id', requireAuth, async (req: AuthRequest, res:
         400,
         `Esta categoria possui ${prodRefs.length} produto(s) associado(s) e não pode ser excluída. Desative-a para preservar o histórico do catálogo.`
       );
+    }
+
+    // Outras dependências: nunca apagar em silêncio (atributos caem em CASCADE) nem deixar referência solta (lojas) nem estourar
+    // erro cru de FK (campanhas de frete têm ON DELETE RESTRICT).
+    const attrRefs = await db.select({ id: categoryAttributes.id }).from(categoryAttributes).where(eq(categoryAttributes.categoryId, id));
+    if (attrRefs.length > 0) {
+      throw new AdminRequestError(
+        400,
+        `Esta categoria possui ${attrRefs.length} atributo(s) cadastrado(s) e não pode ser excluída. Remova os atributos primeiro ou desative a categoria.`
+      );
+    }
+    const storeRefs = await db.select({ id: stores.id }).from(stores).where(eq(stores.categoryId, id));
+    if (storeRefs.length > 0) {
+      throw new AdminRequestError(400, `Esta categoria é usada por ${storeRefs.length} loja(s) e não pode ser excluída. Desative-a para preservar o histórico.`);
+    }
+    const campaignRefs = await db.select({ id: shippingSubsidyCampaigns.id }).from(shippingSubsidyCampaigns).where(eq(shippingSubsidyCampaigns.categoryId, id));
+    if (campaignRefs.length > 0) {
+      throw new AdminRequestError(400, `Esta categoria é usada por ${campaignRefs.length} campanha(s) de frete e não pode ser excluída. Desative-a para preservar o histórico.`);
     }
 
     await db.delete(categories).where(eq(categories.id, id));
