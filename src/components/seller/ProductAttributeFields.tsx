@@ -198,10 +198,12 @@ interface CategoryChangeProps {
   onConfirm: (value: boolean) => void;
   /** Aviso vindo do servidor (409) quando a lista de removidos difere da calculada no formulário. */
   serverMessage?: string | null;
+  /** Avisos extras sobre a troca (comissão das vendas futuras, variações incompatíveis). */
+  extraNotes?: string[];
 }
 
 /** Edição: aviso de troca de subcategoria + confirmação explícita antes de perder especificações. */
-export const AttributeCategoryChangeNotice: React.FC<CategoryChangeProps> = ({ fromName, toName, removedLabels, confirmed, onConfirm, serverMessage }) => (
+export const AttributeCategoryChangeNotice: React.FC<CategoryChangeProps> = ({ fromName, toName, removedLabels, confirmed, onConfirm, serverMessage, extraNotes = [] }) => (
   <div id="attr-category-change" data-testid="attr-category-change" role="alert" className="p-4 bg-amber-50 border border-amber-300 rounded-2xl space-y-2 text-xs font-medium text-amber-900">
     <p className="font-black text-sm">Mudança de categoria{fromName ? `: ${fromName} → ${toName}` : `: ${toName}`}</p>
     <p>As características compatíveis foram mantidas. Preencha as que a nova categoria exige; variações, preço e estoque não mudam.</p>
@@ -216,6 +218,9 @@ export const AttributeCategoryChangeNotice: React.FC<CategoryChangeProps> = ({ f
         </label>
       </>
     )}
+    {extraNotes.map((note) => (
+      <p key={note} data-testid="category-change-note" className="p-2 bg-white/70 border border-amber-200 rounded-lg">{note}</p>
+    ))}
     {serverMessage && <p className="text-red-700 font-bold">{serverMessage}</p>}
   </div>
 );

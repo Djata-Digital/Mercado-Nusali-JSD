@@ -283,7 +283,7 @@ export async function applyAttributePlan(tx: any, productId: string, plan: Attri
 }
 
 /** Auditoria na MESMA transação (se falhar, a edição inteira é desfeita). */
-export async function writeAttributeAudit(tx: any, ctx: { actorUserId: string; sellerId: string; productId: string; ip?: string | null; userAgent?: string | null; countryCode?: string | null }, plan: AttributeUpdatePlan): Promise<void> {
+export async function writeAttributeAudit(tx: any, ctx: { actorUserId: string; sellerId: string; productId: string; ip?: string | null; userAgent?: string | null; countryCode?: string | null }, plan: AttributeUpdatePlan, extra?: Record<string, unknown>): Promise<void> {
   const action = plan.categoryChange ? 'seller.product.category_changed' : 'seller.product.attributes_updated';
   await tx.insert(auditLogs).values({
     id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
@@ -296,6 +296,7 @@ export async function writeAttributeAudit(tx: any, ctx: { actorUserId: string; s
       changes: plan.changes,
       removed: plan.removed,
       preserved: plan.preserved,
+      ...(extra ?? {}),
       ...(plan.categoryChange ? { category: { from: plan.categoryChange.fromId, to: plan.categoryChange.toId, fromName: plan.categoryChange.fromName, toName: plan.categoryChange.toName } } : {}),
     },
     ipAddress: ctx.ip ?? null,

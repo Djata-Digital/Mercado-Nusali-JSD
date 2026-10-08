@@ -128,6 +128,11 @@ export class SellerApi {
     return apiClient.get(`/seller/products/${id}`);
   }
 
+  /** Prévia da troca de categoria (só leitura): comissão das vendas futuras e compatibilidade das variações com os eixos novos. */
+  static async getCategoryChangePreview(id: string, categoryId: string): Promise<ApiResponse<any>> {
+    return apiClient.get(`/seller/products/${id}/category-change-preview`, { params: { categoryId } });
+  }
+
   static async updateProduct(id: string, data: any): Promise<ApiResponse<any>> {
     return apiClient.patch(`/seller/products/${id}`, data);
   }

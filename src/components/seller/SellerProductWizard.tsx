@@ -42,6 +42,10 @@ import { useCategories } from '../../hooks/useProducts';
 import { getCategoryPath, isLeafCategory, getDirectChildren, getDescendantIds } from '../../utils/categoryUtils';
 import { CategoriesApi } from '../../api/clients/CategoriesApi';
 import { ProductAttributeFields, AttributeCategoryChangeNotice } from './ProductAttributeFields';
+import { VariantAxesPanel } from './VariantAxesPanel';
+import { planAxisUi, buildVariantKey } from '../../utils/variantAxes';
+import { SellerApi } from '../../api/clients/SellerApi';
+import { buildAxisPayload, effectiveSecondColumn, extraAxisValuesFromVariants, uiVariantsFromLoaded, validatePayloadAgainstAxes } from '../../utils/variantAxisWizard';
 import {
   selectFormAttributes,
   validateFormFields,
@@ -240,6 +244,38 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [formFields]);
 
+  // Fase 7 (edição): ao escolher OUTRA categoria, prévia do servidor — comissão das vendas futuras e se as variações atuais cabem nos eixos novos.
+  useEffect(() => {
+    setCategoryPreview(null);
+    if (!isEditing || !initialProduct?.id || !category || !currentCategoryObjId || currentCategoryObjId === initialProduct.categoryId) return;
+    let alive = true;
+    SellerApi.getCategoryChangePreview(String(initialProduct.id), currentCategoryObjId)
+      .then((res) => { if (alive && res?.success && res.data) setCategoryPreview({ commission: res.data.commission, variants: res.data.variants }); })
+      .catch(() => { /* a prévia é só um aviso; o servidor valida de qualquer forma ao salvar */ });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [category, activeCategories]);
+
+  const handleToggleColorOption = (name: string) => {
+    const idx = colors.findIndex((c) => c.name.toLowerCase() === name.toLowerCase());
+    if (idx >= 0) {
+      handleRemoveColor(idx);
+      return;
+    }
+    const updated = [...colors, { name, hex: '#111827' }];
+    setColors(updated);
+    handleRegenerateMatrix(updated, sizes);
+  };
+
+  const handleToggleSecondOption = (value: string) => {
+    const idx = sizes.findIndex((s2) => s2.toLowerCase() === value.toLowerCase());
+    if (idx >= 0) {
+      handleRemoveSize(idx);
+      return;
+    }
+    handleAddSize(value);
+  };
+
   const handleAttrChange = (code: string, value: FormValue) => {
     setAttrValues((prev) => ({ ...prev, [code]: value }));
     setAttrErrors((prev) => {
@@ -377,10 +413,37 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   // Stock per variant matrix
   const [variantsMatrix, setVariantsMatrix] = useState<ProductVariant[]>(() => {
     if (initialProduct?.variants && initialProduct.variants.length > 0) {
-      return initialProduct.variants;
+      return uiVariantsFromLoaded(initialProduct.variants);
     }
     return [];
   });
+
+  const currentCategoryObjId: string | undefined = activeCategories.find((c: any) => c.id === category || c.slug === category || c.name === category)?.id;
+
+  // Fase 7 — eixos de variante da categoria (herança/substituição/desativação já resolvidas pelo backend) e a ponte com a matriz.
+  const axes = React.useMemo(() => selectFormAttributes(dbAttributes).axes, [dbAttributes]);
+  const axisUi = React.useMemo(() => planAxisUi(axes), [axes]);
+  const secondColumn = effectiveSecondColumn(axes, initialProduct?.variants as any);
+  // Fase 7 (edição): combinações que JÁ existem — o estoque delas se ajusta em Estoque & Armazéns (o salvamento do anúncio não o altera).
+  const existingVariantKeys = React.useMemo(() => new Set((initialProduct?.variants ?? []).map((v: any) => buildVariantKey({ color: v.color, size: v.size, capacity: v.capacity, attributesJson: v.attributesJson })).filter(Boolean) as string[]), [initialProduct]);
+  const [extraAxisValues, setExtraAxisValues] = useState<Record<string, string>>({});
+  const extraAxisLoadedRef = useRef(false);
+  const [variantProblems, setVariantProblems] = useState<string[]>([]);
+  const [categoryPreview, setCategoryPreview] = useState<{ commission: { from: { rate: number | null }; to: { rate: number | null }; changed: boolean }; variants: { compatible: boolean; issues: Array<{ message: string }> } } | null>(null);
+
+  useEffect(() => {
+    if (isEditing && !extraAxisLoadedRef.current && axisUi.extraAxes.length > 0) {
+      extraAxisLoadedRef.current = true;
+      setExtraAxisValues(extraAxisValuesFromVariants(axisUi.extraAxes, initialProduct?.variants as any));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [axisUi]);
+
+  useEffect(() => {
+    if (variantProblems.length > 0) setVariantProblems([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variantsMatrix, extraAxisValues]);
+
 
   // Product Kits (Bundles)
   const [productKits, setProductKits] = useState<ProductKit[]>(() => {
@@ -502,7 +565,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         setSizes(initialProduct.availableSizes);
       }
       if (initialProduct.variants && initialProduct.variants.length > 0) {
-        setVariantsMatrix(initialProduct.variants);
+        setVariantsMatrix(uiVariantsFromLoaded(initialProduct.variants));
       }
       if (initialProduct.productKits && initialProduct.productKits.length > 0) {
         setProductKits(initialProduct.productKits);
@@ -1062,6 +1125,22 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
+    // Fase 7: variações — eixos da categoria (obrigatório, opções) e combinação única, com as mesmas regras do servidor. A 2ª dimensão do
+    // assistente grava em tamanho ou capacidade conforme o eixo; eixos extras valem para o anúncio inteiro.
+    const axisPayloadMatrix = productMode === 'variable'
+      ? buildAxisPayload(variantsMatrix, { secondColumn, extraAxes: axisUi.extraAxes, extraValues: extraAxisValues })
+      : variantsMatrix;
+    if (productMode === 'variable') {
+      const axisErrors = validatePayloadAgainstAxes(axes, axisPayloadMatrix as any[]);
+      if (axisErrors.length > 0) {
+        const msgs = Array.from(new Set(axisErrors.map((e) => e.message)));
+        setVariantProblems(msgs);
+        setWizardStep(3);
+        showToast(msgs[0]);
+        return;
+      }
+    }
+
     // Validate cover image (Requirement 2: no fake Unsplash fallback, mandatory image)
     if (!gallery || gallery.length === 0 || !gallery[0] || !gallery[0].trim()) {
       showToast('Por favor, adicione pelo menos uma imagem real de capa para o produto.');
@@ -1142,7 +1221,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         productKits,
         availableColors: colors,
         availableSizes: sizes,
-        variants: buildVariantsPayloadForSubmit(productMode, variantsMatrix, hadRealVariantsOnLoadRef.current),
+        variants: buildVariantsPayloadForSubmit(productMode, axisPayloadMatrix, hadRealVariantsOnLoadRef.current),
         videos: cleanVideoUrl
           ? [
               {
@@ -1196,7 +1275,11 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         } catch (err: any) {
           // O painel já avisou (toast) com a mensagem do servidor; aqui o erro vai ao campo certo ou ao painel de confirmação.
           const parsed = extractSubmitError(err);
-          if (parsed.code === 'ATTRIBUTE_LOSS_CONFIRMATION_REQUIRED') {
+          if (parsed.code === 'VARIANT_AXES_INVALID' || parsed.code === 'VARIANT_AXES_INCOMPATIBLE') {
+            const msgs = Array.isArray(parsed.details) ? Array.from(new Set<string>(parsed.details.map((d: any) => String(d.message)))) : [parsed.message];
+            setVariantProblems(msgs);
+            setWizardStep(3);
+          } else if (parsed.code === 'ATTRIBUTE_LOSS_CONFIRMATION_REQUIRED') {
             const labels = Array.isArray(parsed.details?.removed) ? parsed.details.removed.map((r: any) => String(r.name || r.code)) : [];
             setServerRemoval({ message: parsed.message, labels });
             setConfirmRemoval(false);
@@ -1212,7 +1295,10 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
           return;
         }
       }
-      showToast('Alterações do produto salvas com sucesso!');
+      const commissionNote = categoryChanged && categoryPreview?.commission?.changed && categoryPreview.commission.from.rate !== null && categoryPreview.commission.to.rate !== null
+        ? ` Comissão das vendas futuras: ${categoryPreview.commission.from.rate}% → ${categoryPreview.commission.to.rate}% (pedidos já feitos não mudam).`
+        : '';
+      showToast(`Alterações do produto salvas com sucesso!${commissionNote}`);
       if (updatedProduct?.id && typeof updatedProduct.id === 'string' && updatedProduct.id !== 'undefined') {
         onOpenProductDetail(updatedProduct.id);
       }
@@ -1253,7 +1339,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       productKits,
       availableColors: colors,
       availableSizes: sizes,
-      variants: variantsMatrix,
+      variants: axisPayloadMatrix,
       videos: cleanVideoUrl
         ? [
             {
@@ -1285,6 +1371,12 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     } catch (err: any) {
       // O painel já mostrou o aviso do erro; aqui o servidor aponta o campo exato (PRODUCT_ATTRIBUTES_INVALID.details).
       const parsed = extractSubmitError(err);
+      if (parsed.code === 'VARIANT_AXES_INVALID' || parsed.code === 'VARIANT_AXES_INCOMPATIBLE') {
+        const msgs = Array.isArray(parsed.details) ? Array.from(new Set<string>(parsed.details.map((d: any) => String(d.message)))) : [parsed.message];
+        setVariantProblems(msgs);
+        setWizardStep(3);
+        return;
+      }
       const known = Object.fromEntries(Object.entries(parsed.fieldErrors).filter(([code]) => formFields.some((f) => f.code === code)));
       if (Object.keys(known).length > 0) {
         setAttrErrors(known);
@@ -1552,6 +1644,16 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                 confirmed={confirmRemoval}
                 onConfirm={setConfirmRemoval}
                 serverMessage={serverRemoval?.message ?? null}
+                extraNotes={[
+                  ...(categoryPreview?.commission?.changed
+                    ? [categoryPreview.commission.from.rate !== null && categoryPreview.commission.to.rate !== null
+                        ? `Comissão: nas vendas FUTURAS deste produto a comissão passará de ${categoryPreview.commission.from.rate}% para ${categoryPreview.commission.to.rate}%. Pedidos já realizados não mudam.`
+                        : 'Comissão: a regra de comissão das vendas FUTURAS deste produto pode mudar com a nova categoria. Pedidos já realizados não mudam.']
+                    : []),
+                  ...(categoryPreview && !categoryPreview.variants.compatible
+                    ? ['Variações: as variações atuais não cabem nos eixos da nova categoria. Ajuste-as na etapa 3 antes de salvar (estoque e SKU são preservados).']
+                    : []),
+                ]}
               />
             )}
             <ProductAttributeFields
@@ -1907,6 +2009,16 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                 className="hidden"
                 onChange={handleColorImageFileSelected}
               />
+              <VariantAxesPanel
+                axes={axes}
+                selectedColors={colors.map((c) => c.name)}
+                selectedSeconds={sizes}
+                onToggleColor={handleToggleColorOption}
+                onToggleSecond={handleToggleSecondOption}
+                extraValues={extraAxisValues}
+                onExtraChange={(code, value) => setExtraAxisValues((prev) => ({ ...prev, [code]: value }))}
+                problems={variantProblems}
+              />
               {/* Cores Builder */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
@@ -2260,6 +2372,8 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                                           type="number"
                                           min="0"
                                           value={item.stock}
+                                          disabled={isEditing && existingVariantKeys.has(buildVariantKey(buildAxisPayload([item], { secondColumn, extraAxes: axisUi.extraAxes, extraValues: extraAxisValues })[0] as any) ?? '')}
+                                          title={isEditing && existingVariantKeys.size > 0 ? 'O estoque de uma variação já cadastrada se ajusta em Estoque & Armazéns.' : undefined}
                                           onChange={(e) => handleUpdateVariantStock(idx, parseInt(e.target.value) || 0)}
                                           className={`w-full p-1.5 border rounded-lg font-bold text-xs text-center bg-white ${
                                             errors.stock ? 'border-red-400' : 'border-gray-300'

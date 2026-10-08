@@ -540,7 +540,16 @@ export const SellerHubView: React.FC = () => {
               let editable: any = p;
               try {
                 const detail = await SellerService.getProduct(p.id);
-                if (detail?.success && detail.data) editable = { ...p, attributeValues: detail.data.attributeValues, specs: detail.data.specs ?? (p as any).specs };
+                if (detail?.success && detail.data) {
+                  // A listagem não traz as variações; sem elas o assistente tratava produto variável como simples. Só as ATIVAS entram,
+                  // com o estoque ao vivo (inventory) e preços como número.
+                  const liveVariants = Array.isArray(detail.data.variants)
+                    ? detail.data.variants
+                        .filter((v: any) => v.isActive !== false)
+                        .map((v: any) => ({ ...v, price: Number(v.price), originalPrice: v.originalPrice ? Number(v.originalPrice) : undefined, stock: Number(v.availableStock ?? 0), image: v.imageUrl || undefined }))
+                    : undefined;
+                  editable = { ...p, attributeValues: detail.data.attributeValues, specs: detail.data.specs ?? (p as any).specs, ...(liveVariants && liveVariants.length > 0 ? { variants: liveVariants } : {}) };
+                }
               } catch (err) {
                 console.warn('Detalhe do produto indisponível; editando com os dados da listagem.', err);
               }

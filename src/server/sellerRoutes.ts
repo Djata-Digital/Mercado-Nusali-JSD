@@ -4,7 +4,10 @@ import { ProductAttributeValidationError } from './modules/catalog/attributeVali
 import { loadProductAttributeValues, composeProductSpecs } from './modules/catalog/attributeValueService.js';
 import { planAttributeUpdate, applyAttributePlan, writeAttributeAudit, ProductAttributeUpdateError } from './modules/catalog/productAttributeUpdateService.js';
 import { InventoryService } from './modules/inventory/inventoryService.js';
-import { syncVariantsForProduct } from './modules/catalog/variantService.js';
+import { syncVariantsForProduct, VariantAxisValidationError, assertExistingVariantsFitCategory } from './modules/catalog/variantService.js';
+import { compareCommission, type CommissionChange } from './modules/catalog/commissionPreview.js';
+import { computeLiveVariantStock } from './modules/catalog/catalogService.js';
+import { resolveTargetCategory } from './modules/catalog/productAttributeUpdateService.js';
 import { getDb, checkDbConnection } from '../db/index.js';
 import {
   products,
@@ -2041,7 +2044,10 @@ sellerRouter.get('/products/:id', async (req: AuthRequest, res: Response) => {
       const rows = await db.select().from(products).where(and(eq(products.id, id), eq(products.sellerId, seller.id))).limit(1);
       if (rows.length > 0) {
         const p = rows[0];
-        const variants = await db.select().from(productVariants).where(eq(productVariants.productId, id));
+        const variantRowsRaw = await db.select().from(productVariants).where(eq(productVariants.productId, id));
+        // Fase 7: estoque AO VIVO por variante (inventory) junto das linhas — o assistente de edição mostra o estoque real, nunca product_variants.stock
+        const liveVariantStock = variantRowsRaw.length > 0 ? await computeLiveVariantStock(variantRowsRaw.map((v: any) => v.id), db) : new Map<string, number>();
+        const variants = variantRowsRaw.map((v: any) => ({ ...v, availableStock: liveVariantStock.get(v.id) ?? 0 }));
         const images = await db.select().from(productImages).where(eq(productImages.productId, id));
         const attrs = await db.select().from(productAttributes).where(eq(productAttributes.productId, id));
         // Fase 3: valores tipados (fonte principal) sobre a visão legada; `attributes` segue com as linhas legadas como antes.
@@ -2109,6 +2115,9 @@ sellerRouter.post('/products', async (req: AuthRequest, res: Response) => {
       data: createdProduct,
     });
   } catch (err: any) {
+    if (err instanceof VariantAxisValidationError) {
+      return res.status(err.status).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
+    }
     if (err instanceof ProductAttributeValidationError) {
       return res.status(400).json({
         success: false,
@@ -2352,7 +2361,10 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
       ? updates.categoryId.trim() : undefined;
     const needsAttributePlan = wantsAttributes || requestedCategory !== undefined;
 
-    if (needsAttributePlan || Object.keys(fieldsToUpdate).length > 1) {
+    let commissionChange: CommissionChange | null = null;
+    const hasVariantsPayload = updates.variants !== undefined;
+
+    if (needsAttributePlan || Object.keys(fieldsToUpdate).length > 1 || hasVariantsPayload) {
       await db.transaction(async (tx: any) => {
         if (needsAttributePlan) {
           const [locked] = await tx.select().from(products).where(eq(products.id, id)).for('update').limit(1);
@@ -2363,13 +2375,31 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
             requestedCategory,
             confirmRemoval: updates.confirmAttributeRemoval === true,
           });
+          if (plan.categoryChange) {
+            // Fase 7: eixos de variante da NOVA categoria x variantes existentes (quando o payload não traz variantes novas, elas é que valem)
+            if (!hasVariantsPayload) await assertExistingVariantsFitCategory(tx, id, plan.categoryChange.toId, plan.categoryChange.toName);
+            // Fase 7: aviso de comissão das vendas FUTURAS (leitura; pedidos já feitos não são recalculados)
+            commissionChange = await compareCommission(tx, plan.categoryChange.fromId, plan.categoryChange.toId, check.seller.id);
+          }
           if (wantsAttributes || plan.categoryChange) {
             await applyAttributePlan(tx, id, plan);
-            await writeAttributeAudit(tx, { actorUserId: req.user!.id, sellerId: check.seller.id, productId: id, ip: req.ip || null, userAgent: (req.headers['user-agent'] as string) || null, countryCode: (req.user as any)?.countryCode || null }, plan);
+            await writeAttributeAudit(tx, { actorUserId: req.user!.id, sellerId: check.seller.id, productId: id, ip: req.ip || null, userAgent: (req.headers['user-agent'] as string) || null, countryCode: (req.user as any)?.countryCode || null }, plan, commissionChange ? { commission: commissionChange } : undefined);
           }
         }
         if (Object.keys(fieldsToUpdate).length > 1) {
           await tx.update(products).set(fieldsToUpdate).where(eq(products.id, id));
+        }
+        // FASE D16-A2 — variantes NUNCA entram no UPDATE de products acima. `variants` ausente = não mexe em nenhuma variante
+        // (diferente de `variants: []`, que desativa todas — nunca deleta). Fase 7: agora na MESMA transação do produto/atributos/categoria
+        // (eixos da categoria, combinação única, SKU) — qualquer falha desfaz tudo.
+        if (hasVariantsPayload) {
+          const variantsArray = Array.isArray(updates.variants) ? updates.variants : [];
+          await syncVariantsForProduct(tx, {
+            sellerId: check.seller.id,
+            productId: id,
+            variants: variantsArray,
+            performedBy: req.user!.id,
+          });
         }
       });
     }
@@ -2383,34 +2413,47 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // FASE D16-A2 — variantes NUNCA entram no UPDATE de products acima
-    // (fieldsToUpdate nunca inclui updates.variants). Sync separado, na
-    // própria transação: `variants` ausente do payload = não mexe em
-    // nenhuma variante existente (diferente de `variants: []`, que
-    // desativa todas — nunca deleta nenhuma).
-    if (updates.variants !== undefined) {
-      const variantsArray = Array.isArray(updates.variants) ? updates.variants : [];
-      await db.transaction((tx: any) =>
-        syncVariantsForProduct(tx, {
-          sellerId: check.seller.id,
-          productId: id,
-          variants: variantsArray,
-          performedBy: req.user.id,
-        })
-      );
-    }
-
     await delCache('products_list_all');
     // Sem isso, GET /products/:id (CatalogService.getProductById) continuava
     // servindo o cache antigo por até 120s depois do vendedor mudar o
     // escopo/países de destino — a mudança "não respeitava imediatamente".
     // C2.2 — também as listagens (`catalog:products:*`, 60 s), que nunca eram invalidadas.
     await CatalogService.invalidateCatalogCaches([id]);
-    return res.json({ success: true, message: 'Produto atualizado com sucesso!' });
+    return res.json({ success: true, message: 'Produto atualizado com sucesso!', ...(commissionChange ? { commission: commissionChange } : {}) });
   } catch (err: any) {
+    if (err instanceof VariantAxisValidationError) {
+      return res.status(err.status).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
+    }
     if (err instanceof ProductAttributeValidationError) {
       return res.status(400).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
     }
+    if (err instanceof ProductAttributeUpdateError) {
+      return res.status(err.status).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
+    }
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
+// Fase 7 — prévia da TROCA de categoria (só leitura): comissão das vendas futuras e se as variações atuais cabem nos eixos da nova categoria.
+sellerRouter.get('/products/:id/category-change-preview', async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db || !req.user?.id) return res.status(401).json({ success: false, message: 'Não autorizado.' });
+    const check = await checkSellerProductOwnership(db, req.user.id, req.params.id);
+    if (!check.authorized) {
+      return res.status(check.status).json({ success: false, error: { code: check.code, message: check.error } });
+    }
+    const target = await resolveTargetCategory(db, req.query.categoryId);
+    const commission = await compareCommission(db, check.product.categoryId ?? null, target.id, check.seller.id);
+    let variants: { compatible: boolean; issues: unknown[] } = { compatible: true, issues: [] };
+    try {
+      await assertExistingVariantsFitCategory(db, req.params.id, target.id, target.name);
+    } catch (e: any) {
+      if (e instanceof VariantAxisValidationError) variants = { compatible: false, issues: e.details };
+      else throw e;
+    }
+    return res.json({ success: true, data: { category: target, sameCategory: target.id === check.product.categoryId, commission, variants } });
+  } catch (err: any) {
     if (err instanceof ProductAttributeUpdateError) {
       return res.status(err.status).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
     }

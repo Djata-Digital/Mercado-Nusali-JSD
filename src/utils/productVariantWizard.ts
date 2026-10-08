@@ -51,9 +51,11 @@ export function deriveSizesFromVariants(variants: ProductVariant[] | undefined |
   const seen = new Set<string>();
   const order: string[] = [];
   for (const v of variants) {
-    if (v.size && !seen.has(v.size)) {
-      seen.add(v.size);
-      order.push(v.size);
+    // Fase 7: variante que só tem CAPACIDADE (categoria com eixo Capacidade) aparece na lista de "Tamanhos / Capacidades".
+    const second = v.size || v.capacity;
+    if (second && !seen.has(second)) {
+      seen.add(second);
+      order.push(second);
     }
   }
   return order;

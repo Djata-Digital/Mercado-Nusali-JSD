@@ -51,7 +51,10 @@ export async function computeLiveStockAndSales(productIds: string[], executor?: 
         reserved: sql<string>`COALESCE(SUM(${inventory.quantityReserved}), 0)`,
       })
       .from(inventory)
-      .where(inArray(inventory.productId, productIds))
+      // Fase 7: estoque de variante DESATIVADA (combinação que saiu do anúncio) não conta no disponível do produto — a linha continua em
+      // inventory (histórico/ajuste em Estoque & Armazéns), só não infla o total vendável. Linhas sem variante (produto simples) contam sempre.
+      .leftJoin(productVariants, eq(productVariants.id, inventory.variantId))
+      .where(and(inArray(inventory.productId, productIds), or(sql`${inventory.variantId} IS NULL`, eq(productVariants.isActive, true))))
       .groupBy(inventory.productId),
     // "Vendidos" = soma de order_items.quantity de pedidos realmente PAGOS,
     // excluindo cancelados/reembolsados (nunca conta pending_payment,

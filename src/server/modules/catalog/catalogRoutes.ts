@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { buildCategoryTree } from '../../../utils/categoryUtils.js';
 import { ProductCreationService, getCategoryAttributesWithInheritance } from './productCreationService.js';
 import { ProductAttributeValidationError } from './attributeValidator.js';
+import { VariantAxisValidationError } from './variantService.js';
 
 export const catalogRouter = Router();
 
@@ -476,6 +477,9 @@ catalogRouter.post('/products', requireAuth, requireRole('SELLER', 'ADMIN'), asy
       data: createdProduct,
     });
   } catch (err: any) {
+    if (err instanceof VariantAxisValidationError) {
+      return res.status(err.status).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
+    }
     if (err instanceof ProductAttributeValidationError) {
       return res.status(400).json({
         success: false,

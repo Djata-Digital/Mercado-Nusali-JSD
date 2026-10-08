@@ -29,13 +29,54 @@
  *     produto (ou, por extensão, a outro seller) é sempre rejeitada — nunca
  *     silenciosamente ignorada nem "adotada".
  */
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { products, productVariants, inventory, inventoryMovements } from '../../../db/schema.js';
 // FASE D16-E2 — mesma função já usada por GET /seller/fulfillment-locations
 // (D15-C3), agora também para vincular o inventory NOVO de uma variante à
 // origem física real da store — nunca uma segunda lógica de "achar/criar a
 // location", nunca uma store adivinhada.
 import { ensureStoreFulfillmentLocation } from '../logistics/fulfillmentLocationService.js';
+// FASE 7 — eixos de variante (atributos da categoria com role = variant_axis) e identidade da combinação (variant_key).
+import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
+import { activeAxes, buildVariantKey, validateVariantAxes, type VariantAxisError } from '../../../utils/variantAxes.js';
+
+export class VariantAxisValidationError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(public readonly details: VariantAxisError[], code = 'VARIANT_AXES_INVALID', status = 400) {
+    const first = details[0];
+    const extra = details.length > 1 ? ` (e mais ${details.length - 1} problema${details.length - 1 > 1 ? 's' : ''})` : '';
+    super(first ? `${first.message.replace(/\.$/, '')}${extra}.` : 'Variações inválidas.');
+    this.name = 'VariantAxisValidationError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** Eixos ATIVOS da categoria do produto (herança/substituição/desativação resolvidas). Categoria ausente => sem eixos (variantes livres). */
+export async function loadCategoryAxes(db: any, categoryId: string | null | undefined) {
+  if (!categoryId) return [];
+  return activeAxes(await resolveEffectiveAttributes(db, categoryId));
+}
+
+/**
+ * Categoria nova x variantes JÁ existentes (troca de categoria sem reenviar variantes): cada variante ativa precisa caber nos eixos da
+ * nova categoria (obrigatórios presentes, valores nas opções). Lança VariantAxisValidationError 409 VARIANT_AXES_INCOMPATIBLE.
+ */
+export async function assertExistingVariantsFitCategory(db: any, productId: string, categoryId: string, categoryName?: string): Promise<void> {
+  const axes = await loadCategoryAxes(db, categoryId);
+  if (axes.length === 0) return;
+  const rows = await db.select().from(productVariants).where(and(eq(productVariants.productId, productId), eq(productVariants.isActive, true)));
+  const { errors } = validateVariantAxes(axes, rows.map((r: any) => ({ id: r.id, sku: r.sku, title: r.title, color: r.color, size: r.size, capacity: r.capacity, attributesJson: r.attributesJson })));
+  const blocking = errors.filter((e) => e.code !== 'DUPLICATE_COMBINATION');
+  if (blocking.length > 0) {
+    throw new VariantAxisValidationError(
+      blocking.map((e) => ({ ...e, message: `${e.message}${categoryName ? ` (categoria "${categoryName}")` : ''}` })),
+      'VARIANT_AXES_INCOMPATIBLE',
+      409,
+    );
+  }
+}
 
 export interface VariantSyncInput {
   /** ID real existente (edição) OU um ID efêmero do frontend (ex.: "var-1") — nunca usado como PK novo. */
@@ -84,11 +125,21 @@ export async function syncVariantsForProduct(
   const { sellerId, productId, variants, performedBy } = params;
   if (!db) throw new Error('VARIANT_SYNC_DB_UNAVAILABLE: banco de dados indisponível.');
 
-  const [product] = await db.select().from(products).where(eq(products.id, productId)).limit(1);
+  // FASE 7 — trava a linha do produto: dois salvamentos simultâneos de variantes do mesmo produto são serializados (a unicidade da
+  // combinação não depende de quem chegou primeiro) — dentro da transação do chamador; fora de uma, é só uma leitura.
+  const [product] = await db.select().from(products).where(eq(products.id, productId)).for('update').limit(1);
   if (!product) throw new Error(`PRODUCT_NOT_FOUND: produto "${productId}" não encontrado.`);
   if (product.sellerId !== sellerId) {
     throw new Error('PRODUCT_NOT_OWNED: este produto não pertence ao vendedor autenticado.');
   }
+
+  // FASE 7 — eixos da categoria do produto: valores validados/canonizados e identidade (variant_key) calculada para todas as variantes
+  // recebidas (eixos definidos OU valores livres). Duplicata dentro do payload é recusada aqui, antes de qualquer escrita.
+  const axes = await loadCategoryAxes(db, product.categoryId);
+  const axisCheck = validateVariantAxes(axes, variants as any[]);
+  if (axisCheck.errors.length > 0) throw new VariantAxisValidationError(axisCheck.errors);
+  const normalizedVariants: VariantSyncInput[] = axisCheck.items.map((i) => i.variant as VariantSyncInput);
+  const payloadKeys: Array<string | null> = axisCheck.items.map((i) => i.key);
 
   // FASE D16-E2 — origem física real do inventory NOVO desta variante: a
   // MESMA store dona do produto (products.storeId), nunca uma store
@@ -108,15 +159,40 @@ export async function syncVariantsForProduct(
   const seenIds = new Set<string>();
   const results: VariantSyncResult[] = [];
 
-  for (const v of variants) {
+  // FASE 7 — chave de identidade das linhas existentes (a coluna pode estar nula em variantes anteriores a esta fase: deriva dos valores).
+  const existingKey = new Map<string, string | null>(existingRows.map((r: any) => [r.id, r.variantKey ?? buildVariantKey({ color: r.color, size: r.size, capacity: r.capacity, attributesJson: r.attributesJson })]));
+  // Solta TODAS as chaves do produto antes de escrever: trocas de combinação entre duas variantes (P<->M) e reaproveitamento de
+  // combinação de variante desativada não esbarram no índice único durante a transação. As chaves finais são regravadas abaixo.
+  if (existingRows.length > 0) {
+    await db.update(productVariants).set({ variantKey: null }).where(eq(productVariants.productId, productId));
+  }
+  // Variantes cujo id real não veio mas cuja COMBINAÇÃO já existe no produto (o assistente regenera a matriz com ids efêmeros):
+  // são a MESMA variante — reaproveita a linha (e o seu estoque/histórico) em vez de criar uma duplicata e desativar a original.
+  const claimedByRealId = new Set<string>();
+  for (const v of normalizedVariants) {
+    if (v.id && existingRows.some((r: any) => r.id === String(v.id))) claimedByRealId.add(String(v.id));
+  }
+  const adoptedRowForIndex = new Map<number, any>();
+  normalizedVariants.forEach((v, idx) => {
+    const key = payloadKeys[idx];
+    if (!key) return;
+    if (v.id && existingRows.some((r: any) => r.id === String(v.id))) return;
+    const match = existingRows.find((r: any) => existingKey.get(r.id) === key && !claimedByRealId.has(r.id) && ![...adoptedRowForIndex.values()].some((a: any) => a.id === r.id));
+    if (match) adoptedRowForIndex.set(idx, match);
+  });
+
+  let variantIndex = -1;
+  for (const v of normalizedVariants) {
+    variantIndex++;
+    const variantKey = payloadKeys[variantIndex];
     // ------------------------------------------------------------------
     // Resolve se o id recebido é uma variante real deste produto, uma
     // variante real de OUTRO produto (rejeitar, nunca adotar) ou não existe
     // no banco (ephemeral do frontend, ou simplesmente ausente) — nesse
     // último caso é sempre CRIAÇÃO com um ID novo gerado aqui.
     // ------------------------------------------------------------------
-    let targetRow: any | null = null;
-    if (v.id) {
+    let targetRow: any | null = adoptedRowForIndex.get(variantIndex) ?? null;
+    if (!targetRow && v.id) {
       const [anyRow] = await db.select().from(productVariants).where(eq(productVariants.id, String(v.id))).limit(1);
       if (anyRow) {
         if (anyRow.productId !== productId) {
@@ -212,6 +288,7 @@ export async function syncVariantsForProduct(
         weight: weightStr,
         imageUrl: imageClean,
         attributesJson: attributesJsonClean,
+        variantKey,
         isActive: true,
         updatedAt: new Date(),
       }).where(eq(productVariants.id, targetRow.id));
@@ -237,6 +314,7 @@ export async function syncVariantsForProduct(
         weight: weightStr,
         imageUrl: imageClean,
         attributesJson: attributesJsonClean,
+        variantKey,
         isActive: true,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -289,6 +367,19 @@ export async function syncVariantsForProduct(
     if (!seenIds.has(row.id) && row.isActive) {
       await db.update(productVariants).set({ isActive: false, updatedAt: new Date() }).where(eq(productVariants.id, row.id));
     }
+  }
+
+  // FASE 7 — devolve a chave às linhas que não vieram no payload (desativadas ou antigas) quando NÃO colide com uma combinação em uso:
+  // a combinação continua reservada (e reaproveitável) sem nunca violar o índice único. Colisão => a linha antiga fica sem chave.
+  const usedKeys = new Set<string>(payloadKeys.filter((k): k is string => Boolean(k)));
+  const toRestore: Array<{ id: string; key: string }> = [];
+  for (const row of existingRows) {
+    if (seenIds.has(row.id)) continue;
+    const key = existingKey.get(row.id);
+    if (key && !usedKeys.has(key)) { usedKeys.add(key); toRestore.push({ id: row.id, key }); }
+  }
+  for (const r of toRestore) {
+    await db.update(productVariants).set({ variantKey: r.key }).where(eq(productVariants.id, r.id));
   }
 
   return results;
