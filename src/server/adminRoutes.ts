@@ -94,6 +94,16 @@ import { validateShippingCampaignDefinition } from './modules/shipping/shippingC
 
 import { bannersAdminRouter } from './modules/banners/bannersRoutes.js';
 
+import {
+  AttributeDefinitionError,
+  assertCategoryMoveAllowed,
+  createAttribute as createAttributeDefinition,
+  deleteAttribute as deleteAttributeDefinition,
+  disableInheritedAttribute as disableInheritedAttributeDefinition,
+  listForCategory as listAttributesForCategory,
+  updateAttribute as updateAttributeDefinition,
+} from './modules/catalog/attributeDefinitionService.js';
+
 export const adminRouter = Router();
 
 
@@ -705,6 +715,13 @@ async function writeRealAudit(req: AuthRequest, action: string, resource: string
 }
 
 function sendAdminError(res: Response, error: unknown) {
+  if (error instanceof AttributeDefinitionError) {
+    return res.status(error.status).json({
+      success: false,
+      message: error.message,
+      error: { code: error.code, message: error.message, details: error.details },
+    });
+  }
   if (error instanceof ScopeError) {
     return res.status(error.status).json({
       success: false,
@@ -3814,6 +3831,8 @@ adminRouter.patch('/categories/:id', requireAuth, async (req: AuthRequest, res: 
     if (icon !== undefined) updateData.icon = icon;
     if (parentId !== undefined) {
       const newParentId = parentId || null;
+      // mudar o pai muda os atributos HERDADOS da subárvore: bloqueia com produtos ou conflito de códigos (ver attributeDefinitionService)
+      await assertCategoryMoveAllowed(db, id, newParentId);
       if (newParentId) {
         const allCats = await db.select().from(categories);
         const parentExists = allCats.some((c) => c.id === newParentId);
@@ -3924,205 +3943,89 @@ adminRouter.delete('/categories/:id', requireAuth, async (req: AuthRequest, res:
 // CATEGORY ATTRIBUTES MANAGEMENT
 // ============================================================================
 
+// Escrita das DEFINIÇÕES de atributos (estrutura do catálogo): só Administrador Geral e Administrador. A leitura segue aberta ao pessoal
+// interno (como as demais rotas administrativas). As regras (unicidade, herança, substituição, uso por produtos) vivem em
+// attributeDefinitionService; aqui só ficam autorização, auditoria e formato da resposta.
+const CATALOG_DEFINITION_MANAGER_ROLES = new Set(['GLOBAL_ADMIN', 'ADMIN']);
+function requireCatalogDefinitionManager(req: AuthRequest, res: Response, next: NextFunction) {
+  const role = (req.user?.role || '').toUpperCase();
+  if (!req.user) {
+    return res.status(401).json({ success: false, error: { code: 'UNAUTHORIZED', message: 'Acesso não autorizado.' } });
+  }
+  if (!CATALOG_DEFINITION_MANAGER_ROLES.has(role)) {
+    return res.status(403).json({
+      success: false,
+      message: 'Somente o Administrador Geral ou um Administrador podem criar, alterar ou excluir atributos de categoria.',
+      error: { code: 'FORBIDDEN_CATALOG_DEFINITION_MANAGER_ONLY', message: 'Somente o Administrador Geral ou um Administrador podem criar, alterar ou excluir atributos de categoria.' },
+    });
+  }
+  return next();
+}
+
 // GET /admin/categories/:id/attributes
+// `data` continua sendo a lista dos atributos PRÓPRIOS da categoria (formato antigo), agora com uso por produtos e substituições;
+// `inherited` traz os herdados com a categoria de origem e o estado aqui; `effective` o que o vendedor verá.
 adminRouter.get('/categories/:id/attributes', requireAuth, async (req: Request, res: Response) => {
   try {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
-
-    const { id } = req.params;
-
-    const list = await db
-      .select()
-      .from(categoryAttributes)
-      .where(eq(categoryAttributes.categoryId, id))
-      .orderBy(asc(categoryAttributes.sortOrder), asc(categoryAttributes.name));
-
-    return res.json({
-      success: true,
-      data: list,
-    });
+    const result = await listAttributesForCategory(db, req.params.id);
+    return res.json({ success: true, data: result.own, inherited: result.inherited, effective: result.effective, category: result.category, path: result.path });
   } catch (error) {
     return sendAdminError(res, error);
   }
 });
 
 // POST /admin/categories/:id/attributes
-adminRouter.post('/categories/:id/attributes', requireAuth, async (req: AuthRequest, res: Response) => {
+adminRouter.post('/categories/:id/attributes', requireAuth, requireCatalogDefinitionManager, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+    const { attribute, warnings } = await createAttributeDefinition(db, req.params.id, req.body ?? {});
+    await writeRealAudit(req, 'admin.category_attribute.created', 'category_attributes', attribute.id, { categoryId: req.params.id, code: attribute.code, type: attribute.type, role: attribute.role, overridesId: attribute.overridesId });
+    return res.json({ success: true, message: `Atributo "${attribute.name}" salvo com sucesso!`, data: attribute, warnings });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
 
-    const { id: categoryId } = req.params;
-    const {
-      name,
-      code,
-      type,
-      isRequired,
-      optionsJson,
-      placeholder,
-      helpText,
-      unit,
-      sortOrder,
-      isActive,
-    } = req.body ?? {};
-
-    if (!name || typeof name !== 'string' || !name.trim()) {
-      throw new AdminRequestError(400, 'O nome do atributo é obrigatório.');
-    }
-
-    const cleanName = name.trim();
-    const cleanCode = (code || cleanName)
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9_]+/g, '_')
-      .replace(/(^_|_$)+/g, '');
-
-    const attrId = req.body.id || `attr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-
-    let parsedOptions = optionsJson;
-    if (typeof optionsJson === 'string') {
-      try {
-        parsedOptions = JSON.parse(optionsJson);
-      } catch {
-        parsedOptions = optionsJson.split('\n').map((s: string) => s.trim()).filter(Boolean);
-      }
-    }
-
-    const newAttr = {
-      id: attrId,
-      categoryId,
-      name: cleanName,
-      code: cleanCode,
-      type: type || 'text',
-      isRequired: Boolean(isRequired),
-      optionsJson: parsedOptions || null,
-      placeholder: placeholder || null,
-      helpText: helpText || null,
-      unit: unit || null,
-      sortOrder: Number(sortOrder) || 0,
-      isActive: isActive !== false,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-
-    await db.insert(categoryAttributes).values(newAttr).onConflictDoUpdate({
-      target: categoryAttributes.id,
-      set: {
-        name: newAttr.name,
-        code: newAttr.code,
-        type: newAttr.type,
-        isRequired: newAttr.isRequired,
-        optionsJson: newAttr.optionsJson,
-        placeholder: newAttr.placeholder,
-        helpText: newAttr.helpText,
-        unit: newAttr.unit,
-        sortOrder: newAttr.sortOrder,
-        isActive: newAttr.isActive,
-        updatedAt: new Date(),
-      },
-    });
-
-    await delCache(`catalog:categories:${categoryId}:attributes`);
-
-    return res.json({
-      success: true,
-      message: `Atributo "${cleanName}" salvo com sucesso!`,
-      data: newAttr,
-    });
+// POST /admin/categories/:id/attributes/disable-inherited  { attributeId }
+// "Desativar aqui": cria uma substituição INATIVA do atributo herdado nesta categoria (o original não muda).
+adminRouter.post('/categories/:id/attributes/disable-inherited', requireAuth, requireCatalogDefinitionManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+    const attributeId = String(req.body?.attributeId || '').trim();
+    if (!attributeId) throw new AdminRequestError(400, 'Informe o atributo herdado a desativar (attributeId).');
+    const { attribute, warnings } = await disableInheritedAttributeDefinition(db, req.params.id, attributeId);
+    await writeRealAudit(req, 'admin.category_attribute.disabled_inherited', 'category_attributes', attribute.id, { categoryId: req.params.id, overridesId: attribute.overridesId, code: attribute.code });
+    return res.json({ success: true, message: `Atributo herdado "${attribute.name}" desativado nesta categoria.`, data: attribute, warnings });
   } catch (error) {
     return sendAdminError(res, error);
   }
 });
 
 // PATCH /admin/category-attributes/:id
-adminRouter.patch('/category-attributes/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+adminRouter.patch('/category-attributes/:id', requireAuth, requireCatalogDefinitionManager, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
-
-    const { id } = req.params;
-    const {
-      name,
-      code,
-      type,
-      isRequired,
-      optionsJson,
-      placeholder,
-      helpText,
-      unit,
-      sortOrder,
-      isActive,
-    } = req.body ?? {};
-
-    const [existing] = await db.select().from(categoryAttributes).where(eq(categoryAttributes.id, id)).limit(1);
-    if (!existing) {
-      throw new AdminRequestError(404, 'Atributo não encontrado.');
-    }
-
-    const updateData: any = { updatedAt: new Date() };
-    if (name !== undefined) updateData.name = String(name).trim();
-    if (code !== undefined) {
-      updateData.code = String(code)
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9_]+/g, '_')
-        .replace(/(^_|_$)+/g, '');
-    }
-    if (type !== undefined) updateData.type = type;
-    if (isRequired !== undefined) updateData.isRequired = Boolean(isRequired);
-    if (optionsJson !== undefined) {
-      let parsedOptions = optionsJson;
-      if (typeof optionsJson === 'string') {
-        try {
-          parsedOptions = JSON.parse(optionsJson);
-        } catch {
-          parsedOptions = optionsJson.split('\n').map((s: string) => s.trim()).filter(Boolean);
-        }
-      }
-      updateData.optionsJson = parsedOptions;
-    }
-    if (placeholder !== undefined) updateData.placeholder = placeholder || null;
-    if (helpText !== undefined) updateData.helpText = helpText || null;
-    if (unit !== undefined) updateData.unit = unit || null;
-    if (sortOrder !== undefined) updateData.sortOrder = Number(sortOrder);
-    if (isActive !== undefined) updateData.isActive = Boolean(isActive);
-
-    await db.update(categoryAttributes).set(updateData).where(eq(categoryAttributes.id, id));
-    await delCache(`catalog:categories:${existing.categoryId}:attributes`);
-
-    const [updated] = await db.select().from(categoryAttributes).where(eq(categoryAttributes.id, id)).limit(1);
-    return res.json({
-      success: true,
-      message: `Atributo "${updated?.name}" atualizado com sucesso!`,
-      data: updated,
-    });
+    const { attribute, warnings } = await updateAttributeDefinition(db, req.params.id, req.body ?? {});
+    await writeRealAudit(req, 'admin.category_attribute.updated', 'category_attributes', attribute.id, { fields: Object.keys(req.body ?? {}), code: attribute.code });
+    return res.json({ success: true, message: `Atributo "${attribute.name}" atualizado com sucesso!`, data: attribute, warnings });
   } catch (error) {
     return sendAdminError(res, error);
   }
 });
 
 // DELETE /admin/category-attributes/:id
-adminRouter.delete('/category-attributes/:id', requireAuth, async (req: AuthRequest, res: Response) => {
+adminRouter.delete('/category-attributes/:id', requireAuth, requireCatalogDefinitionManager, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
-
-    const { id } = req.params;
-    const [existing] = await db.select().from(categoryAttributes).where(eq(categoryAttributes.id, id)).limit(1);
-    if (!existing) {
-      throw new AdminRequestError(404, 'Atributo não encontrado.');
-    }
-
-    await db.delete(categoryAttributes).where(eq(categoryAttributes.id, id));
-    await delCache(`catalog:categories:${existing.categoryId}:attributes`);
-
-    return res.json({
-      success: true,
-      message: `Atributo "${existing.name}" removido com sucesso!`,
-    });
+    const removed = await deleteAttributeDefinition(db, req.params.id);
+    await writeRealAudit(req, 'admin.category_attribute.deleted', 'category_attributes', req.params.id, { name: removed.name, wasOverride: removed.wasOverride });
+    return res.json({ success: true, message: removed.wasOverride ? `Substituição "${removed.name}" removida: a herança foi restaurada.` : `Atributo "${removed.name}" removido com sucesso!` });
   } catch (error) {
     return sendAdminError(res, error);
   }

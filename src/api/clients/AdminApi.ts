@@ -299,6 +299,11 @@ export class AdminApi {
     return apiClient.delete(`/admin/category-attributes/${attributeId}`);
   }
 
+  /** "Desativar aqui": cria uma substituição inativa do atributo herdado nesta categoria (o original não muda). */
+  static async disableInheritedAttribute(categoryId: string, attributeId: string): Promise<ApiResponse<any>> {
+    return apiClient.post(`/admin/categories/${categoryId}/attributes/disable-inherited`, { attributeId });
+  }
+
   // FASE D16-I5 — métodos de Shipping Rates (país↔país, Requirement 8)
   // removidos: eram o único cliente do painel admin legado
   // (AdminShippingRatesManager.tsx, removido nesta fase) e das rotas

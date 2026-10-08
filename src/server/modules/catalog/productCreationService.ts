@@ -14,6 +14,7 @@ import {
 import { eq, inArray, asc, or, and } from 'drizzle-orm';
 import { delCache } from '../../../db/redis.js';
 import { syncVariantsForProduct, type VariantSyncInput } from './variantService.js';
+import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
 // FASE D16-E2 — mesma função já usada por GET /seller/fulfillment-locations
 // (D15-C3) e agora por variantService.ts, para vincular o inventory NOVO do
 // produto simples à origem física real da store — nunca uma store adivinhada.
@@ -61,61 +62,12 @@ export interface CreateProductInput {
 }
 
 /**
- * Returns effective attributes for a category by calculating ancestor hierarchy inheritance.
+ * Atributos EFETIVOS de uma categoria (herança por ancestrais, com substituição explícita e "desativar aqui").
+ * A lógica vive em attributeDefinitionService (fonte única, também usada pelo painel admin); esta função mantém a assinatura antiga
+ * porque a criação de produto e o endpoint público GET /categories/:id/attributes já a importam.
  */
 export async function getCategoryAttributesWithInheritance(db: any, targetCategoryId: string): Promise<any[]> {
-  if (!db || !targetCategoryId) return [];
-
-  // 1. Fetch all active categories to build hierarchy chain
-  const allCats = await db.select().from(categories).where(eq(categories.isActive, true));
-  const catMap = new Map(allCats.map((c: any) => [c.id, c]));
-  const catSlugMap = new Map(allCats.map((c: any) => [c.slug, c]));
-
-  const targetCat: any = catMap.get(targetCategoryId) || catSlugMap.get(targetCategoryId);
-  if (!targetCat) return [];
-
-  // 2. Build chain from Root down to Target Category
-  const chain: any[] = [];
-  let current: any = targetCat;
-  const visited = new Set<string>();
-
-  while (current && !visited.has(current.id)) {
-    visited.add(current.id);
-    chain.unshift(current);
-    if (current.parentId && catMap.has(current.parentId)) {
-      current = catMap.get(current.parentId);
-    } else {
-      break;
-    }
-  }
-
-  const categoryIds = chain.map((c) => c.id);
-  if (categoryIds.length === 0) return [];
-
-  // 3. Fetch attributes for all categories in the chain
-  const attrRows = await db
-    .select()
-    .from(categoryAttributes)
-    .where(inArray(categoryAttributes.categoryId, categoryIds))
-    .orderBy(asc(categoryAttributes.sortOrder), asc(categoryAttributes.name));
-
-  // 4. Merge down (specific category attribute overrides parent with same code)
-  const attributesMap = new Map<string, any>();
-  chain.forEach((cat: any) => {
-    const catAttrs = attrRows.filter((a: any) => a.categoryId === cat.id && a.isActive !== false);
-    catAttrs.forEach((attr: any) => {
-      attributesMap.set(attr.code, {
-        ...attr,
-        inheritedFrom: cat.id !== targetCat.id ? cat.name : undefined,
-      });
-    });
-  });
-
-  return Array.from(attributesMap.values()).sort((a, b) => {
-    if (a.isRequired !== b.isRequired) return a.isRequired ? -1 : 1;
-    if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
-    return a.name.localeCompare(b.name);
-  });
+  return resolveEffectiveAttributes(db, targetCategoryId);
 }
 
 /**
