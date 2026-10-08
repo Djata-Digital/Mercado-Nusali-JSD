@@ -62,7 +62,7 @@ export function createSpaHandler(distPath: string) {
       const page = await buildSeoPage(req.path, cfg);
       const html = injectSeoHead(loadTemplate(), page);
       res.status(page.status).set('Content-Type', 'text/html; charset=UTF-8').set('Cache-Control', 'public, max-age=0, must-revalidate');
-      if (/noindex/.test(page.robots)) res.set('X-Robots-Tag', 'noindex, nofollow');
+      if (/noindex/.test(page.robots)) res.set('X-Robots-Tag', /nofollow/.test(page.robots) ? 'noindex, nofollow' : 'noindex, follow');
       return res.send(html);
     } catch (err: any) {
       logger.error({ err: err?.message, path: req.path }, 'SPA_HTML_RENDER_FAILED');

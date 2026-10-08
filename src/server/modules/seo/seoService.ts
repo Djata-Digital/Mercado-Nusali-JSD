@@ -11,7 +11,7 @@
  *   - categoria: categories.is_active.
  * Recurso inexistente/não público => HTTP 404 + noindex + SEM canonical (nunca uma página SEO válida).
  */
-import { and, eq, or, desc } from 'drizzle-orm';
+import { and, eq, or, desc, sql, isNotNull } from 'drizzle-orm';
 import { getDb } from '../../../db/index.js';
 import { products, productImages, categories, stores, sellers } from '../../../db/schema.js';
 import { getCache, setCache } from '../../../db/redis.js';
@@ -30,7 +30,9 @@ import {
   SEO_THEME_COLOR,
   ROBOTS_INDEX,
   ROBOTS_NOINDEX,
+  ROBOTS_NOINDEX_FOLLOW,
 } from '../../../utils/seoRoutes.js';
+import { computeSubtreePublicFlags, isCategoryIndexable } from '../../../utils/categoryUtils.js';
 import type { SeoConfig } from './seoConfig.js';
 
 export interface SeoPage {
@@ -133,11 +135,40 @@ async function loadActiveCategory(slugOrId: string) {
   const db = getDb();
   if (!db) throw new Error('db_unavailable');
   const rows = await db
-    .select({ id: categories.id, name: categories.name, slug: categories.slug })
+    .select({ id: categories.id, name: categories.name, slug: categories.slug, parentId: categories.parentId })
     .from(categories)
     .where(and(or(eq(categories.slug, slugOrId), eq(categories.id, slugOrId)), eq(categories.isActive, true)))
     .limit(1);
-  return rows[0] || null;
+  const row = rows[0] || null;
+  if (!row) return null;
+  // Subcategoria: o nome do departamento entra no título ("Calças - Moda Feminina"), pois nomes se repetem entre departamentos.
+  let parentName: string | null = null;
+  if (row.parentId) {
+    const parent = await db.select({ name: categories.name }).from(categories).where(eq(categories.id, row.parentId)).limit(1);
+    parentName = parent[0]?.name || null;
+  }
+  return { ...row, parentName };
+}
+
+/**
+ * Categorias ativas + quais delas (ou descendentes) têm produto PÚBLICO (mesma condição do catálogo). Uma consulta de contagem
+ * agrupada; a taxonomia tem ~322 linhas. Base da decisão de indexação e do sitemap de categorias.
+ */
+export async function loadCategoryPublicContext() {
+  const db = getDb();
+  if (!db) throw new Error('db_unavailable');
+  const cats = await db
+    .select({ id: categories.id, slug: categories.slug, parentId: categories.parentId, isActive: categories.isActive })
+    .from(categories)
+    .where(eq(categories.isActive, true));
+  const rows = await db
+    .select({ categoryId: products.categoryId, n: sql<number>`count(*)::int` })
+    .from(products)
+    .where(and(publicProductCondition(), isNotNull(products.categoryId)))
+    .groupBy(products.categoryId);
+  const counts = new Map<string, number>();
+  for (const r of rows) if (r.categoryId) counts.set(r.categoryId, Number(r.n) || 0);
+  return { cats, flags: computeSubtreePublicFlags(cats as any, counts) };
 }
 
 async function loadPublicStore(idOrSlug: string) {
@@ -180,12 +211,15 @@ export async function buildSeoPage(pathname: string, cfg: SeoConfig): Promise<Se
     if (info.kind === 'category' && info.param) {
       const c = await loadActiveCategory(info.param);
       if (!c) return notFoundPage('Categoria não encontrada', origin);
+      // Subcategoria sem produto público => noindex, follow (continua navegável); principal e categorias com produto => index.
+      const ctx = await loadCategoryPublicContext();
+      const indexable = isCategoryIndexable(c, ctx.cats as any, ctx.flags.get(c.id) === true);
       return {
         status: 200,
-        title: pageTitle(c.name),
-        description: `Veja os produtos de ${c.name} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`,
+        title: pageTitle(c.parentName ? `${c.name} - ${c.parentName}` : c.name),
+        description: `Veja os produtos de ${c.parentName ? `${c.name} (${c.parentName})` : c.name} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`,
         canonicalUrl: canonicalFor(origin, `/categories/${encodeURIComponent(c.slug || c.id)}`),
-        robots: ROBOTS_INDEX,
+        robots: indexable ? ROBOTS_INDEX : ROBOTS_NOINDEX_FOLLOW,
         image: fallbackImage,
         imageAlt: SEO_SITE_NAME,
         twitterCard: 'summary',
@@ -336,8 +370,13 @@ export async function buildSitemapXml(cfg: SeoConfig, opts: { useCache?: boolean
 
   const db = getDb();
   if (db) {
-    const cats = await db.select({ id: categories.id, slug: categories.slug }).from(categories).where(eq(categories.isActive, true));
-    for (const c of cats) entries.push({ path: `/categories/${encodeURIComponent(c.slug || c.id)}`, changefreq: 'weekly', priority: '0.7' });
+    // Categorias: só as indexáveis (principais com subcategorias ativas + qualquer categoria com produto público). Subcategorias
+    // vazias ficam fora do sitemap (e recebem noindex, follow na própria página); entram sozinhas quando houver produto público.
+    const { cats, flags } = await loadCategoryPublicContext();
+    for (const c of cats) {
+      if (!isCategoryIndexable(c as any, cats as any, flags.get(c.id) === true)) continue;
+      entries.push({ path: `/categories/${encodeURIComponent(c.slug || c.id)}`, changefreq: 'weekly', priority: c.parentId ? '0.6' : '0.7' });
+    }
 
     const storeRows = await db
       .select({ id: stores.id, slug: stores.slug, updatedAt: stores.updatedAt })

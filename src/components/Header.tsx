@@ -128,7 +128,8 @@ export const Header: React.FC = () => {
   // como já acontece entre "Ver produtos de" e o menu de categorias.
   const [isDestinationMenuOpen, setIsDestinationMenuOpen] = useState(false);
   const [isCategoryMenuOpen, setIsCategoryMenuOpen] = useState(false);
-  const [activeCategorySlug, setActiveCategorySlug] = useState<string>('celulares-e-telefonia');
+  // Vazio = a primeira categoria principal (ordem de exibição); o hover no menu define a ativa.
+  const [activeCategorySlug, setActiveCategorySlug] = useState<string>('');
   const [isCountryMenuOpen, setIsCountryMenuOpen] = useState(false);
   const [isCurrencyConverterOpen, setIsCurrencyConverterOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);

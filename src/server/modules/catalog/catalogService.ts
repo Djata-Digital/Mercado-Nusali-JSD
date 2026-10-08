@@ -4,6 +4,7 @@ import { getCache, setCache, delCache, delCacheByPattern } from '../../../db/red
 import { eq, ne, and, ilike, or, gte, lte, desc, asc, sql, inArray, notInArray } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { isProductAvailableForCountry, eligibilityReason } from './productEligibilityService.js';
+import { computeSubtreePublicFlags } from '../../../utils/categoryUtils.js';
 
 /**
  * Correção crítica (fluxo pós-pagamento — estoque/"vendidos" nunca
@@ -637,6 +638,8 @@ export class CatalogService {
    */
   static async invalidateCatalogCaches(productIds: string[] = []) {
     await delCacheByPattern('catalog:products:*');
+    // hasPublicProducts das categorias muda quando produto/loja entra ou sai do catálogo público.
+    await delCache('catalog:categories');
     for (const pid of new Set(productIds.filter(Boolean))) await delCache(`product:${pid}`);
   }
 
@@ -663,7 +666,18 @@ export class CatalogService {
     const db = getDb();
     if (!db) return [];
 
-    const cats = await db.select().from(categories).where(eq(categories.isActive, true)).orderBy(asc(categories.displayOrder));
+    const rawCats = await db.select().from(categories).where(eq(categories.isActive, true)).orderBy(asc(categories.displayOrder), asc(categories.name));
+    // hasPublicProducts (categoria ou descendente com produto público): o cliente usa para decidir noindex das subcategorias
+    // vazias com a MESMA regra do servidor (SEO/sitemap). Recalculado sempre que o cache de categorias é invalidado.
+    const countRows = await db
+      .select({ categoryId: products.categoryId, n: sql<number>`count(*)::int` })
+      .from(products)
+      .where(and(publicProductCondition(), sql`${products.categoryId} IS NOT NULL`))
+      .groupBy(products.categoryId);
+    const counts = new Map<string, number>();
+    for (const r of countRows) if (r.categoryId) counts.set(r.categoryId, Number(r.n) || 0);
+    const flags = computeSubtreePublicFlags(rawCats as any, counts);
+    const cats = rawCats.map((c) => ({ ...c, hasPublicProducts: flags.get(c.id) === true }));
     await setCache('catalog:categories', cats, 3600);
     return cats;
   }

@@ -11,7 +11,7 @@ import {
   inventory,
   inventoryMovements,
 } from '../../../db/schema.js';
-import { eq, inArray, asc, or } from 'drizzle-orm';
+import { eq, inArray, asc, or, and } from 'drizzle-orm';
 import { delCache } from '../../../db/redis.js';
 import { syncVariantsForProduct, type VariantSyncInput } from './variantService.js';
 // FASE D16-E2 — mesma função já usada por GET /seller/fulfillment-locations
@@ -206,6 +206,17 @@ export class ProductCreationService {
 
     if (!foundCat) {
       throw new Error(`Categoria "${categorySearch}" não encontrada no banco de dados.`);
+    }
+
+    // Produto só entra em categoria FOLHA (sem subcategoria ativa), também no backend: a interface já exige, mas a API não pode
+    // depender do cliente. Mesma definição de folha de isLeafCategory (utils/categoryUtils): ignora filhas inativas.
+    const [activeChild] = await db
+      .select({ id: categories.id })
+      .from(categories)
+      .where(and(eq(categories.parentId, foundCat.id), eq(categories.isActive, true)))
+      .limit(1);
+    if (activeChild) {
+      throw new Error(`A categoria "${foundCat.name}" possui subcategorias. Selecione uma subcategoria mais específica para publicar o produto.`);
     }
 
     // 4. Fetch category attributes with inheritance & validate mandatory attributes

@@ -22,6 +22,8 @@ export const SEO_THEME_COLOR = '#065f46';
 
 export const ROBOTS_INDEX = 'index, follow';
 export const ROBOTS_NOINDEX = 'noindex, nofollow';
+/** Página navegável e útil para chegar a outras páginas, mas sem conteúdo próprio para o buscador (ex.: subcategoria sem produtos). */
+export const ROBOTS_NOINDEX_FOLLOW = 'noindex, follow';
 
 export type SeoRouteKind =
   | 'home'

@@ -3,9 +3,9 @@ import { useSearchParams, useNavigate, useParams, Link } from 'react-router-dom'
 import { useQueries } from '@tanstack/react-query';
 import { useProducts, useCategories } from '../hooks/useProducts';
 import { ProductService } from '../services/productService';
-import { getDescendantIds } from '../utils/categoryUtils';
+import { getDescendantIds, getDirectChildren, getCategoryPath, isCategoryIndexable } from '../utils/categoryUtils';
 import { usePageSeo } from '../hooks/usePageSeo';
-import { pageTitle, toMetaDescription, SEO_SITE_NAME, ROBOTS_NOINDEX } from '../utils/seoRoutes';
+import { pageTitle, toMetaDescription, SEO_SITE_NAME, ROBOTS_NOINDEX, ROBOTS_NOINDEX_FOLLOW } from '../utils/seoRoutes';
 import { ProductCard } from './ProductCard';
 import { SlidersHorizontal, ArrowUpDown, X, Check, Sparkles, HelpCircle, AlertCircle, ArrowRight, Loader2 } from 'lucide-react';
 import { ProductCondition, FilterState, Product } from '../types';
@@ -38,8 +38,13 @@ export const SearchResultsView: React.FC = () => {
     const list = (rawCategories as any[]).filter((c) => c && c.isActive !== false);
     const category = list.find((c) => c.slug === categoryRouteSlug || c.id === categoryRouteSlug);
     if (!category) return null;
-    return { category, ids: [category.id, ...getDescendantIds(category.id, list)] as string[] };
+    return { category, all: list, ids: [category.id, ...getDescendantIds(category.id, list)] as string[] };
   }, [categoryRouteSlug, rawCategories]);
+  // Subcategoria: "Calças - Moda Feminina" (nomes se repetem entre departamentos; mesmo texto do servidor).
+  const categoryPath = categoryScope ? getCategoryPath(categoryScope.category.id, categoryScope.all) : [];
+  const parentCategoryName = categoryPath.length > 1 ? categoryPath[categoryPath.length - 2].name : null;
+  const categoryTitleName = categoryScope ? (parentCategoryName ? `${categoryScope.category.name} - ${parentCategoryName}` : categoryScope.category.name) : '';
+  const categoryDescName = categoryScope ? (parentCategoryName ? `${categoryScope.category.name} (${parentCategoryName})` : categoryScope.category.name) : '';
   const categoryProducts = useQueries({
     queries: (categoryScope?.ids || []).map((categoryId) => ({
       queryKey: ['products', { country: selectedCountry, originCountryFilter: catalogOriginFilter, category: categoryId }],
@@ -60,9 +65,17 @@ export const SearchResultsView: React.FC = () => {
       ? null
       : categoryScope?.category
         ? {
-            title: pageTitle(categoryScope.category.name),
-            description: `Veja os produtos de ${categoryScope.category.name} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`,
+            title: pageTitle(categoryTitleName),
+            description: `Veja os produtos de ${categoryDescName} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`,
             canonicalPath: `/categories/${encodeURIComponent(categoryScope.category.slug || categoryScope.category.id)}`,
+            // Mesma regra do servidor: subcategoria sem produto público => noindex, follow (continua navegável).
+            robots: isCategoryIndexable(
+              categoryScope.category,
+              categoryScope.all,
+              categoryScope.category.hasPublicProducts ?? categoryProducts.items.length > 0
+            )
+              ? undefined
+              : ROBOTS_NOINDEX_FOLLOW,
           }
         : categoriesPending
           ? null
@@ -260,6 +273,49 @@ export const SearchResultsView: React.FC = () => {
           </select>
         </div>
       </div>
+
+      {/* Navegação da taxonomia: caminho (departamento > subcategoria) e subcategorias diretas da categoria atual */}
+      {categoryMode && categoryScope && (() => {
+        const path = getCategoryPath(categoryScope.category.id, categoryScope.all);
+        const children = getDirectChildren(categoryScope.category.id, categoryScope.all);
+        if (path.length <= 1 && children.length === 0) return null;
+        return (
+          <nav aria-label="Navegação de categorias" className="bg-white p-4 rounded-2xl border border-gray-200 shadow-xs space-y-3">
+            {path.length > 1 && (
+              <ol className="flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
+                <li><Link to="/categories" className="hover:text-emerald-700 hover:underline">Categorias</Link></li>
+                {path.map((p, idx) => (
+                  <li key={p.id} className="flex items-center gap-1.5">
+                    <span aria-hidden="true">/</span>
+                    {idx === path.length - 1 ? (
+                      <span aria-current="page" className="font-bold text-gray-800">{p.name}</span>
+                    ) : (
+                      <Link to={`/categories/${p.slug || p.id}`} className="hover:text-emerald-700 hover:underline">{p.name}</Link>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+            {children.length > 0 && (
+              <div>
+                <h2 className="text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-2">Subcategorias de {categoryScope.category.name}</h2>
+                <ul className="flex flex-wrap gap-2">
+                  {children.map((c: any) => (
+                    <li key={c.id}>
+                      <Link
+                        to={`/categories/${c.slug || c.id}`}
+                        className="inline-block px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 hover:bg-emerald-50 hover:border-emerald-300 text-xs font-semibold text-gray-800 hover:text-emerald-800 transition"
+                      >
+                        {c.name}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </nav>
+        );
+      })()}
 
       {/* "Did You Mean" / Typo Correction Banner */}
       {searchEngineResult.suggestedCorrection && (

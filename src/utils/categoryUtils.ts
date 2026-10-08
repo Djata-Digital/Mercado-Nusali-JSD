@@ -170,6 +170,47 @@ export function isLeafCategory(categoryId: string, categoriesList: Category[]): 
 }
 
 /**
+ * Marca, para cada categoria, se ela ou algum descendente tem produto PÚBLICO. Entrada: lista plana e as contagens de
+ * produtos públicos por categoria (id -> quantidade). Usada pelo servidor (sitemap/SEO) e pelo cliente (robots da página),
+ * para que ambos decidam igual. Tolerante a ciclos e a pais inexistentes.
+ */
+export function computeSubtreePublicFlags(categoriesList: Category[], publicCountById: Map<string, number> | Record<string, number>): Map<string, boolean> {
+  const counts = publicCountById instanceof Map ? publicCountById : new Map(Object.entries(publicCountById || {}));
+  const byId = new Map<string, Category>();
+  (categoriesList || []).forEach((c) => c && c.id && byId.set(c.id, c));
+  const flags = new Map<string, boolean>();
+  byId.forEach((c) => flags.set(c.id, (counts.get(c.id) || 0) > 0));
+  // propaga de cada categoria com produto para todos os ancestrais
+  byId.forEach((c) => {
+    if (!flags.get(c.id) || !(counts.get(c.id) || 0)) return;
+    const visited = new Set<string>([c.id]);
+    let parent = c.parentId ? byId.get(c.parentId) : undefined;
+    while (parent && !visited.has(parent.id)) {
+      visited.add(parent.id);
+      flags.set(parent.id, true);
+      parent = parent.parentId ? byId.get(parent.parentId) : undefined;
+    }
+  });
+  return flags;
+}
+
+/**
+ * Indexação de uma página de categoria (decisão do proprietário): categorias com produto público (próprio ou de
+ * descendentes) são indexáveis; a categoria PRINCIPAL continua indexável enquanto serve de vitrine de subcategorias ativas;
+ * subcategoria sem produto público => "noindex, follow" (continua navegável, buscável e válida para cadastrar produtos).
+ */
+export function isCategoryIndexable(
+  category: Pick<Category, 'id' | 'parentId'>,
+  categoriesList: Category[],
+  hasPublicProducts: boolean
+): boolean {
+  if (hasPublicProducts) return true;
+  const isRoot = !category.parentId;
+  if (!isRoot) return false;
+  return (categoriesList || []).some((c) => c.parentId === category.id && c.isActive !== false);
+}
+
+/**
  * Returns direct children of a category.
  */
 export function getDirectChildren(parentId: string | null, categoriesList: Category[]): Category[] {

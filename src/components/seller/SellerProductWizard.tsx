@@ -39,7 +39,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { useCategories } from '../../hooks/useProducts';
-import { getCategoryPath, isLeafCategory, getDirectChildren } from '../../utils/categoryUtils';
+import { getCategoryPath, isLeafCategory, getDirectChildren, getDescendantIds } from '../../utils/categoryUtils';
 import { CategoriesApi } from '../../api/clients/CategoriesApi';
 import { uploadService } from '../../services/uploadService';
 import {
@@ -191,11 +191,8 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     if (keyOrCode.toLowerCase() === 'modelo' || keyOrCode.toLowerCase() === 'model') setModel(val);
   };
 
-  useEffect(() => {
-    if (!category && activeCategories.length > 0) {
-      setCategory(activeCategories[0].id);
-    }
-  }, [activeCategories, category]);
+  // Sem categoria pré-selecionada: com a taxonomia de ~320 categorias, a primeira da lista seria um departamento (não folha) e
+  // induziria o erro. O vendedor escolhe a subcategoria específica (validação de folha no cliente e no servidor).
 
   // Step 2: Scope & Visibility (Nacional vs Internacional)
   const [publishingScope, setPublishingScope] = useState<PublishingScope>(
@@ -937,7 +934,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
 
     const selectedCategoryObj = activeCategories.find(
       (c: any) => c.id === category || c.slug === category || c.name === category
-    ) || activeCategories[0];
+    );
 
     if (!selectedCategoryObj) {
       showToast('Por favor, escolha uma categoria válida cadastrada no painel Admin.');
@@ -1271,15 +1268,37 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                   ) : activeCategories.length === 0 ? (
                     <option value="">Nenhuma categoria cadastrada no Admin</option>
                   ) : (
-                    activeCategories.map((c: any) => {
-                      const path = getCategoryPath(c.id, activeCategories);
-                      const pathLabel = path.length > 0 ? path.map((p) => p.name).join(' > ') : c.name;
-                      return (
-                        <option key={c.id} value={c.id}>
-                          {pathLabel}
-                        </option>
-                      );
-                    })
+                    <>
+                      <option value="">Selecione a categoria do produto...</option>
+                      {/* Só categorias FOLHA são selecionáveis (a principal vira o rótulo do grupo): com ~320 categorias,
+                          agrupar por departamento evita uma lista corrida. Principal sem subcategoria continua selecionável. */}
+                      {activeCategories
+                        .filter((c: any) => !c.parentId)
+                        .map((root: any) => {
+                          const leaves = [root, ...getDescendantIds(root.id, activeCategories).map((id) => activeCategories.find((x: any) => x.id === id)!)]
+                            .filter((x: any) => x && isLeafCategory(x.id, activeCategories));
+                          if (leaves.length === 0) return null;
+                          if (leaves.length === 1 && leaves[0].id === root.id) {
+                            return (
+                              <option key={root.id} value={root.id}>
+                                {root.name}
+                              </option>
+                            );
+                          }
+                          return (
+                            <optgroup key={root.id} label={root.name}>
+                              {leaves.map((c: any) => {
+                                const path = getCategoryPath(c.id, activeCategories);
+                                return (
+                                  <option key={c.id} value={c.id}>
+                                    {path.slice(1).map((p) => p.name).join(' > ') || c.name}
+                                  </option>
+                                );
+                              })}
+                            </optgroup>
+                          );
+                        })}
+                    </>
                   )}
                 </select>
               </div>

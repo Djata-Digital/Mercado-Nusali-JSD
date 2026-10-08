@@ -1,11 +1,19 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { useCategories } from '../hooks/useProducts';
-import { Smartphone, Tv, Laptop, Zap, Activity, Wrench, Home, ShoppingBag } from 'lucide-react';
+import { Smartphone, Tv, Laptop, Zap, Activity, Wrench, Home, ShoppingBag, ChevronRight } from 'lucide-react';
+
+/** Quantas categorias PRINCIPAIS a Home mostra; as demais ficam em "Ver todas as categorias" (/categories). */
+const HOME_CATEGORY_LIMIT = 16;
 
 export const CategoryCarousel: React.FC = () => {
   const { data: realCategories = [] } = useCategories();
   const activeCategories = (realCategories || []).filter((c: any) => c.isActive !== false);
+  // Só departamentos (categorias principais): as subcategorias aparecem no menu "Categorias" e na página de cada departamento.
+  // Sem nenhuma principal (dados legados sem hierarquia), cai para a lista inteira como antes.
+  const roots = activeCategories.filter((c: any) => !c.parentId);
+  const departments = roots.length > 0 ? roots : activeCategories;
+  const visible = departments.slice(0, HOME_CATEGORY_LIMIT);
 
   const getIcon = (iconName?: string) => {
     switch (iconName) {
@@ -28,11 +36,13 @@ export const CategoryCarousel: React.FC = () => {
     <div className="my-6">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-bold text-gray-800 tracking-tight">Categorias Populares</h2>
-        <span className="text-xs text-gray-500 font-medium">Navegue pelas principais ofertas</span>
+        <Link to="/categories" className="text-xs text-blue-800 font-bold hover:underline flex items-center gap-1">
+          Ver todas as categorias <ChevronRight className="w-4 h-4" />
+        </Link>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-        {activeCategories.map((cat: any) => (
+        {visible.map((cat: any) => (
           <Link
             key={cat.id}
             to={`/categories/${cat.slug || cat.id}`}
@@ -50,4 +60,3 @@ export const CategoryCarousel: React.FC = () => {
     </div>
   );
 };
-
