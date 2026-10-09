@@ -3,7 +3,7 @@
 
   O que este script faz (nada é enviado ao Supabase por ele):
     1. gera uma senha forte (40 caracteres alfanuméricos, aleatória, só na memória);
-    2. monta o SQL "revogar o papel antigo + criar o novo" com essa senha e o coloca na ÁREA DE TRANSFERÊNCIA (nada é gravado em arquivo);
+    2. monta o SQL "criar ou renovar o papel" (sem DROP) com essa senha e o coloca na ÁREA DE TRANSFERÊNCIA (nada é gravado em arquivo);
     3. define ATTR_LOAD_DATABASE_URL nesta sessão do PowerShell (porta 6543) com a MESMA senha — assim não há diferença de digitação;
     4. espera você colar e executar o SQL no SQL Editor do Supabase e então limpa a área de transferência.
   A senha nunca é impressa, registrada em log nem salva em arquivo.
@@ -35,13 +35,12 @@ while ($chars.Count -lt 40) {
 }
 $pw = -join $chars
 
-# 2) SQL = revogar (idempotente) + criar com a senha + conferência do prazo
-$revoke = Get-Content (Join-Path $ops 'limited-role.revoke.sql') -Raw -Encoding UTF8
+# 2) SQL = criar OU RENOVAR o papel (sem DROP) com a senha nova + conferência do prazo
 $create = Get-Content (Join-Path $ops 'limited-role.create.sql') -Raw -Encoding UTF8
 $marker = '<<DEFINA-AQUI-UMA-SENHA-LONGA-E-ALEATORIA>>'
 if (-not $create.Contains($marker)) { throw 'limited-role.create.sql sem o marcador de senha esperado.' }
 $check = "`r`n-- Conferência: o papel deve existir, poder logar e vencer em ~3 horas`r`nSELECT rolname, rolcanlogin, rolvaliduntil, rolconnlimit FROM pg_roles WHERE rolname = '$role';`r`n"
-$sql = $revoke + "`r`n" + $create.Replace($marker, $pw) + $check
+$sql = $create.Replace($marker, $pw) + $check
 Set-Clipboard -Value $sql
 
 # 3) URL do carregador nesta sessão (porta do pooler em modo transação)
@@ -53,7 +52,7 @@ $sql = $null; $pw = $null; $chars = $null; $buf = $null   # a senha fica apenas 
 Write-Host ''
 Write-Host 'PRONTO — a senha NÃO foi exibida.' -ForegroundColor Green
 Write-Host "  Alvo configurado: ${PoolerHost}:${Port}/${Database} (usuário ${role}$(if (-not $NoRefSuffix) { '.<ref>' }))"
-Write-Host '  1) Abra o SQL Editor do Supabase, cole (Ctrl+V) e clique em Run. Se pedir confirmação de operação destrutiva (DROP), confirme.'
+Write-Host '  1) Abra o SQL Editor do Supabase, cole (Ctrl+V) e clique em Run. Se o editor pedir confirmação, confirme.'
 Write-Host '  2) A última linha do resultado deve mostrar o papel com rolcanlogin = true e rolvaliduntil ~3 horas à frente (anote o horário).'
 if (-not $NoPrompt) {
   [void](Read-Host '  3) Depois de executar no Supabase, volte aqui e pressione Enter para LIMPAR a área de transferência')

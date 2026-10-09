@@ -28,23 +28,38 @@ export const GRANTED_READS = ['categories', 'category_attributes', 'product_attr
 /** O usuário da URL pode vir como `papel.refdoprojeto` (pooler do Supabase): vale o trecho antes do primeiro ponto. */
 export const urlUserMatchesLimitedRole = (urlUser: string): boolean => urlUser.split('.')[0] === LIMITED_WRITER_ROLE;
 
+/**
+ * Cria OU RENOVA o papel (idempotente, sem DROP): senha nova, login, prazo de N horas a partir de agora, limite de conexões, e os privilégios
+ * EXATOS (revoga tudo em public e concede de novo só o mínimo). No Supabase o usuário `postgres` não é superusuário: ao criar o papel ele
+ * recebe só ADMIN OPTION (sem herdar nem poder assumir o papel, PostgreSQL 16+), por isso `DROP OWNED BY` falha com 42501 — e não é preciso:
+ * ALTER ROLE, GRANT e REVOKE funcionam com ADMIN OPTION. Os atributos de segurança (NOSUPERUSER etc.) só entram na criação — um
+ * não-superusuário não pode reafirmá-los via ALTER (42501); se alguém os alterar, verifyLimitedWriterSession recusa o papel.
+ */
 export function createRoleSql(ttlHours = LIMITED_WRITER_MAX_TTL_HOURS): string {
   if (!(ttlHours > 0 && ttlHours <= LIMITED_WRITER_MAX_TTL_HOURS)) throw new Error(`O prazo do papel deve estar entre 0 e ${LIMITED_WRITER_MAX_TTL_HOURS} h.`);
-  return `-- FASE 8C.3 — papel DEDICADO e temporário para a carga da matriz de atributos. Execute como administrador do banco (SQL Editor).
+  return `-- FASE 8C.3 — papel DEDICADO e temporário para a carga da matriz de atributos: CRIA ou RENOVA (sem DROP). Execute no SQL Editor.
+-- Se o papel já existe (ex.: expirado), só a senha, o prazo e os privilégios exatos são refeitos.
 -- 1) TROQUE a senha abaixo por uma senha longa e aleatória gerada por você (não a compartilhe em chat nem em arquivos).
 -- 2) O prazo (VALID UNTIL) começa agora; o banco recusa novas conexões depois dele.
 DO $$
+DECLARE
+  v_until text := (now() + interval '${ttlHours} hours')::text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${LIMITED_WRITER_ROLE}') THEN
-    RAISE EXCEPTION 'O papel ${LIMITED_WRITER_ROLE} já existe: revogue-o antes (ver script de revogação).';
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${LIMITED_WRITER_ROLE}') THEN
+    EXECUTE format(
+      'CREATE ROLE ${LIMITED_WRITER_ROLE} LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT 2 VALID UNTIL %L',
+      '<<DEFINA-AQUI-UMA-SENHA-LONGA-E-ALEATORIA>>', v_until);
+  ELSE
+    EXECUTE format(
+      'ALTER ROLE ${LIMITED_WRITER_ROLE} WITH LOGIN PASSWORD %L NOINHERIT CONNECTION LIMIT 2 VALID UNTIL %L',
+      '<<DEFINA-AQUI-UMA-SENHA-LONGA-E-ALEATORIA>>', v_until);
   END IF;
-  EXECUTE format(
-    'CREATE ROLE ${LIMITED_WRITER_ROLE} LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT CONNECTION LIMIT 2 VALID UNTIL %L',
-    '<<DEFINA-AQUI-UMA-SENHA-LONGA-E-ALEATORIA>>',
-    (now() + interval '${ttlHours} hours')::text);
 END $$;
 ALTER ROLE ${LIMITED_WRITER_ROLE} SET statement_timeout = '60s';
 ALTER ROLE ${LIMITED_WRITER_ROLE} SET idle_in_transaction_session_timeout = '30s';
+-- privilégios EXATOS: zera tudo em public e concede de novo só o mínimo
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${LIMITED_WRITER_ROLE};
+REVOKE ALL ON SCHEMA public FROM ${LIMITED_WRITER_ROLE};
 GRANT USAGE ON SCHEMA public TO ${LIMITED_WRITER_ROLE};
 GRANT SELECT ON ${GRANTED_READS.map((t) => `public.${t}`).join(', ')} TO ${LIMITED_WRITER_ROLE};
 GRANT INSERT, DELETE ON public.category_attributes TO ${LIMITED_WRITER_ROLE};
@@ -52,21 +67,34 @@ GRANT INSERT ON public.audit_logs TO ${LIMITED_WRITER_ROLE};
 `;
 }
 
+/**
+ * Desativa o papel ao terminar (sem DROP OWNED): derruba sessões (se houver permissão), NOLOGIN, prazo no passado, revoga tudo e tenta
+ * DROP ROLE (só funciona sem objetos dependentes; se falhar, o papel permanece DESATIVADO e sem privilégios).
+ */
 export function revokeRoleSql(): string {
-  return `-- FASE 8C.3 — REVOGAÇÃO do papel dedicado (executar ao terminar, mesmo que a operação tenha falhado).
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${LIMITED_WRITER_ROLE}';
+  return `-- FASE 8C.3 — REVOGAÇÃO do papel dedicado (executar ao terminar, mesmo que a operação tenha falhado). Sem DROP OWNED BY.
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${LIMITED_WRITER_ROLE}') THEN
+    BEGIN
+      PERFORM pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = '${LIMITED_WRITER_ROLE}';
+    EXCEPTION WHEN insufficient_privilege THEN
+      RAISE NOTICE 'Sem permissão para derrubar sessões abertas; elas deixam de funcionar quando o papel é desativado/removido.';
+    END;
     EXECUTE 'ALTER ROLE ${LIMITED_WRITER_ROLE} NOLOGIN';
+    EXECUTE 'ALTER ROLE ${LIMITED_WRITER_ROLE} VALID UNTIL ''1970-01-01''';
     EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${LIMITED_WRITER_ROLE}';
     EXECUTE 'REVOKE ALL ON SCHEMA public FROM ${LIMITED_WRITER_ROLE}';
-    EXECUTE 'DROP OWNED BY ${LIMITED_WRITER_ROLE}';
-    EXECUTE 'DROP ROLE ${LIMITED_WRITER_ROLE}';
+    BEGIN
+      EXECUTE 'DROP ROLE ${LIMITED_WRITER_ROLE}';
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'O papel ficou DESATIVADO (sem login e sem privilégios), mas não foi removido: %', SQLERRM;
+    END;
   END IF;
 END $$;
--- Conferência: deve devolver 0
-SELECT count(*) AS papeis_restantes FROM pg_roles WHERE rolname = '${LIMITED_WRITER_ROLE}';
+-- Conferência: papeis_restantes = 0 (removido) ou pode_logar = 0 (desativado)
+SELECT (SELECT count(*) FROM pg_roles WHERE rolname = '${LIMITED_WRITER_ROLE}') AS papeis_restantes,
+       (SELECT count(*) FROM pg_roles WHERE rolname = '${LIMITED_WRITER_ROLE}' AND rolcanlogin) AS pode_logar;
 `;
 }
 

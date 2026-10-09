@@ -91,8 +91,8 @@ O papel `attr_loader_8c3` vence 3 h depois de criado (o anterior venceu em 2026-
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\docs\attribute-matrix\v2\ops\new-role-session.ps1 -Ref "<REF-DO-PROJETO>"
 ```
-   O script gera uma senha de 40 caracteres, põe na **área de transferência** o SQL "revogar o papel antigo + criar o novo" já com essa senha, e define `ATTR_LOAD_DATABASE_URL` **nesta sessão** com a mesma senha, na **porta 6543**. Nada é exibido nem gravado em arquivo.
-2. No Supabase, abra o **SQL Editor**, cole (Ctrl+V) e clique em **Run**. Se pedir confirmação por causa do `DROP`, confirme. O resultado final deve mostrar `attr_loader_8c3` com `rolcanlogin = true` e `rolvaliduntil` cerca de **3 horas à frente** (anote o horário: é o prazo para o pré-voo e o piloto).
+   O script gera uma senha de 40 caracteres, põe na **área de transferência** o SQL "criar ou renovar o papel" (sem DROP) já com essa senha, e define `ATTR_LOAD_DATABASE_URL` **nesta sessão** com a mesma senha, na **porta 6543**. Nada é exibido nem gravado em arquivo.
+2. No Supabase, abra o **SQL Editor**, cole (Ctrl+V) e clique em **Run**. Se o editor pedir confirmação, confirme. O resultado final deve mostrar `attr_loader_8c3` com `rolcanlogin = true` e `rolvaliduntil` cerca de **3 horas à frente** (anote o horário: é o prazo para o pré-voo e o piloto).
 3. Volte ao PowerShell e pressione **Enter**: a área de transferência é limpa. Se você colar o SQL em outro lugar, ele contém a senha: não salve nem compartilhe.
 4. Confirme a autenticação (somente leitura):
 ```powershell
@@ -106,3 +106,6 @@ node --import tsx scripts/attribute-matrix/load.ts plan --allow-remote-read
    Esperado: `ok: true`, `readOnlySession: true`, alvo `aws-1-eu-west-3.pooler.supabase.com:6543/postgres`, árvore 322/322, `wouldCreate: 847`, `drift: 0`, hash `05b3b649e91b…`.
 6. Se não for executar o piloto em seguida, **revogue** (SQL Editor: `limited-role.revoke.sql`) e feche o PowerShell. O piloto (passo 4 deste runbook) só com a sua autorização final e dentro do prazo do papel.
 Privilégios, limites (2 conexões, 60 s por comando) e todas as travas do carregador são os mesmos de antes: nada foi alterado nos scripts SQL.
+
+### 12.1 Correção do erro `42501 permission denied to drop objects`
+Causa confirmada (reproduzida em PostgreSQL 17 com um administrador não superusuário, como o `postgres` do Supabase): ao criar um papel, o administrador recebe só `ADMIN OPTION` sobre ele (sem `INHERIT` nem `SET`, regra do PostgreSQL 16+). `ALTER ROLE`, `GRANT`, `REVOKE` e `DROP ROLE` funcionam com `ADMIN OPTION`, mas **`DROP OWNED BY` exige poder assumir o papel** e falha. Por isso o SQL passou a **criar ou renovar o papel sem `DROP OWNED`/`DROP ROLE`/`CASCADE`**: se o papel já existe (por exemplo expirado), só a senha, o prazo (3 h a partir de agora), o limite de 2 conexões e os privilégios exatos são refeitos (revoga tudo em `public` e concede de novo só o mínimo); se não existe, cria com todos os atributos de segurança. A revogação final (`limited-role.revoke.sql`) também não usa `DROP OWNED`: desativa o papel (sem login, prazo no passado, sem privilégios) e tenta `DROP ROLE`; se não puder remover, ele fica desativado. Os privilégios do SQL Editor não foram ampliados.
