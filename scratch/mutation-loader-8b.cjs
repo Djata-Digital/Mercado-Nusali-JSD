@@ -5,8 +5,10 @@
 const fs = require('fs');
 const cp = require('child_process');
 const mutations = [
-  { id: 'L1 escrita remota habilitada', file: 'scripts/attribute-matrix/loaderSafety.ts', from: 'export const REMOTE_WRITE_ENABLED = false;', to: 'export const REMOTE_WRITE_ENABLED = true;', test: 'loader' },
-  { id: 'L2 alvo igual a producao nao e reconhecido', file: 'scripts/attribute-matrix/loaderSafety.ts', from: "if (i.target.matchesKnownProduction) {", to: 'if (false) {', test: 'loader' },
+  { id: 'L1 escrita remota aberta a qualquer usuario (portao do papel dedicado removido)', file: 'scripts/attribute-matrix/loaderSafety.ts', from: 'if (!urlUserMatchesLimitedRole(i.target.user)) {', to: 'if (false) {', test: 'loader' },
+  { id: 'L2 alvo igual a producao nao e reconhecido', file: 'scripts/attribute-matrix/loaderSafety.ts', from: `      if (i.target.matchesKnownProduction) {
+        throw new LoaderSafetyError('PRODUCTION_TARGET_REFUSED'`, to: `      if (false) {
+        throw new LoaderSafetyError('PRODUCTION_TARGET_REFUSED'`, test: 'loader' },
   { id: 'L3 confirmacao digitada nao exigida', file: 'scripts/attribute-matrix/loaderSafety.ts', from: 'if (i.flags.confirm !== phrase) {', to: 'if (false) {', test: 'loader' },
   { id: 'L4 hash da matriz nao exigido', file: 'scripts/attribute-matrix/loaderSafety.ts', from: 'if (!i.flags.expectHash || i.flags.expectHash.toLowerCase() !== i.matrixHash.toLowerCase()) {', to: 'if (false) {', test: 'loader' },
   { id: 'L5 reversao apaga linha editada pelo admin / nao seed', file: 'scripts/attribute-matrix/applyEngine.ts', from: "if (row.source !== 'seed' || row.adminModifiedAt) {", to: 'if (false) {', test: 'loader' },

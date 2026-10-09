@@ -29,6 +29,7 @@ import { buildTree, compileOperations, resolveMatrix, validateMatrix, type Inven
 import { applyOperations, rollbackOperations, type OperationLogEntry } from './applyEngine.js';
 import { verifyEffective } from './verifyEffective.js';
 import { INVENTORY_FILE, outDirFor } from './paths.js';
+import { LIMITED_WRITER_ROLE, createRoleSql, revokeRoleSql, verifyLimitedWriterSession } from './limitedWriter.js';
 import { LoaderSafetyError, assertExecutionAllowed, classifyTarget, expectedConfirmPhrase, hashOperations, type CommandName } from './loaderSafety.js';
 
 const COMMANDS = new Set<CommandName>(['plan', 'verify', 'apply', 'rollback-plan', 'rollback']);
@@ -113,6 +114,11 @@ async function preflight(db: any, inv: { categories: any[] }, summary: any) {
 
 async function main() {
   const { command, flags } = parseArgs(process.argv.slice(2));
+  if (command === 'limited-role-sql') {
+    // imprime o SQL do papel dedicado (criação ou --revoke); não conecta a nenhum banco
+    process.stdout.write(flags['revoke'] === true ? revokeRoleSql() : createRoleSql(typeof flags['ttl-hours'] === 'string' ? Number(flags['ttl-hours']) : undefined));
+    return;
+  }
   if (!command || !COMMANDS.has(command as CommandName)) throw new LoaderSafetyError('COMMAND_INVALID', `Use um dos comandos: ${[...COMMANDS].join(', ')}.`);
   const cmd = command as CommandName;
   const rawUrl = process.env.ATTR_LOAD_DATABASE_URL;
@@ -125,9 +131,10 @@ async function main() {
   const ops0 = compileOperations(ALL_PLANS, tree0, resolveMatrix(ALL_PLANS, tree0));
   const hash0 = hashOperations(ops0);
 
-  const { readOnly } = assertExecutionAllowed({
-    command: cmd, target, nodeEnv: process.env.NODE_ENV, matrixVersion: MATRIX_VERSION, matrixHash: hash0,
-    flags: { allowRemoteRead: flags['allow-remote-read'] === true, expectHash: typeof flags['expect-hash'] === 'string' ? (flags['expect-hash'] as string) : undefined, confirm: typeof flags['confirm'] === 'string' ? (flags['confirm'] as string) : undefined },
+  const maxOperationsFlag = typeof flags['max-operations'] === 'string' && /^[0-9]+$/.test(flags['max-operations'] as string) ? Number(flags['max-operations']) : undefined;
+  const { readOnly, limitedWriter } = assertExecutionAllowed({
+    command: cmd, target, nodeEnv: process.env.NODE_ENV, matrixVersion: MATRIX_VERSION, matrixHash: hash0, operationsTotal: ops0.length,
+    flags: { allowRemoteRead: flags['allow-remote-read'] === true, expectHash: typeof flags['expect-hash'] === 'string' ? (flags['expect-hash'] as string) : undefined, confirm: typeof flags['confirm'] === 'string' ? (flags['confirm'] as string) : undefined, allowTarget: typeof flags['allow-target'] === 'string' ? (flags['allow-target'] as string) : undefined, maxOperations: maxOperationsFlag },
   });
 
   const runId = `run_${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}_${randomBytes(3).toString('hex')}`;
@@ -143,13 +150,33 @@ async function main() {
   const db = drizzle(pool, { schema });
   const report: LoadReport = { command: cmd, runId, matrixVersion: MATRIX_VERSION, matrixHash: hash0, target: target.label, readOnlySession: readOnly, preflight: {}, ok: false };
 
+  // janela auditada da escrita remota limitada (8C.3): aberta só depois de a sessão ser verificada; sem auditoria, nada é escrito
+  let windowOpen = false;
+  const windowAudit = async (action: string, details: Record<string, unknown>) => {
+    await db.insert(schema.auditLogs).values({
+      id: `audit_${Date.now()}_${randomBytes(3).toString('hex')}`, actorUserId: null, action, resource: 'category_attributes', resourceId: null,
+      detailsJson: { runId, command: cmd, matrixVersion: MATRIX_VERSION, matrixHash: hash0, target: target.label, role: LIMITED_WRITER_ROLE, ...details },
+      ipAddress: null, userAgent: 'attribute-matrix-loader', countryCode: null, createdAt: new Date(),
+    } as any);
+  };
+
   try {
     journal.write({ event: 'start', runId, command: cmd, matrixVersion: MATRIX_VERSION, matrixHash: hash0, target: target.label, readOnly });
     const pf = await preflight(db, inv, summary);
     report.preflight = pf.out;
+    if (limitedWriter) {
+      // a SESSÃO real é verificada no banco (papel exato, prazo, atributos e privilégios efetivos) antes de qualquer escrita
+      const lw = await verifyLimitedWriterSession(pool);
+      (report.preflight as any).limitedWriter = lw;
+      journal.write({ event: 'limited-writer-verified', ...lw });
+      await windowAudit('system.attribute_matrix.window_opened', { maxOperations: maxOperationsFlag, validUntil: lw.validUntil, minutesLeft: lw.minutesLeft });
+      windowOpen = true;
+    }
     const idBySlug = new Map<string, string>(inv.categories.map((c: any) => [c.slug, c.id]));
     const batchSize = typeof flags['batch-size'] === 'string' ? Math.max(1, Number(flags['batch-size'])) : 50;
-    const stopAfter = typeof flags['stop-after'] === 'string' ? Number(flags['stop-after']) : undefined;
+    const stopAfterFlag = typeof flags['stop-after'] === 'string' ? Number(flags['stop-after']) : undefined;
+    // escrita remota limitada: o teto de operações desta execução é OBRIGATÓRIO e nunca excedido
+    const stopAfter = limitedWriter ? Math.min(maxOperationsFlag as number, stopAfterFlag ?? Infinity) : stopAfterFlag;
 
     const seedCount = async () => Number((await db.execute(sql`SELECT count(*)::int AS n FROM category_attributes WHERE source = 'seed'`)).rows[0].n);
     const onOperation = (e: OperationLogEntry) => journal.write({ event: 'op', ...e });
@@ -204,7 +231,7 @@ async function main() {
       report.ok = v.mismatches.length === 0;
     } else {
       const dryRb = cmd === 'rollback-plan';
-      const rb = await rollbackOperations(db, pf.ops, { dryRun: dryRb, onOperation });
+      const rb = await rollbackOperations(db, pf.ops, { dryRun: dryRb, onOperation, maxRemovals: limitedWriter ? maxOperationsFlag : undefined });
       report.result = { removed: rb.removed, wouldRemove: rb.wouldRemove, blocked: rb.blocked, notOwned: rb.notOwned.length };
       report.ok = rb.blocked.length === 0;
       if (!dryRb) await db.insert(schema.auditLogs).values({
@@ -213,10 +240,12 @@ async function main() {
       } as any);
     }
     journal.write({ event: 'end', ok: report.ok, result: report.result });
+    if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: report.ok, outcome: report.result }); } catch { /* melhor-esforço: a garantia real é o prazo do papel e a revogação */ } }
   } catch (e: any) {
     report.ok = false;
     report.stoppedBecause = e instanceof LoaderSafetyError ? e.message : `ERROR: ${e?.message || e}`;
     journal.write({ event: 'abort', reason: report.stoppedBecause });
+    if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: false, aborted: report.stoppedBecause }); } catch { /* melhor-esforço */ } }
   } finally {
     journal.close();
     await pool.end();

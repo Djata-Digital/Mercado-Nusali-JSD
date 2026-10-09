@@ -124,7 +124,7 @@ export async function applyOperations(db: any, ops: MatrixOperation[], opts: App
   return res;
 }
 
-export interface RollbackOptions { dryRun?: boolean; onOperation?: (entry: OperationLogEntry) => void | Promise<void> }
+export interface RollbackOptions { dryRun?: boolean; /** teto de remoções desta execução (escrita remota limitada) */ maxRemovals?: number; onOperation?: (entry: OperationLogEntry) => void | Promise<void> }
 export interface RollbackResult { removed: number; wouldRemove: number; notOwned: string[]; blocked: Array<{ opId: string; message: string }> }
 
 /** Reversão: ordem inversa; para no primeiro atributo que já tem valores de produto (nada é forçado). */
@@ -151,6 +151,7 @@ export async function rollbackOperations(db: any, ops: MatrixOperation[], opts: 
       out.blocked.push({ opId: op.opId, message: row.source !== 'seed' ? `O atributo "${row.code}" não foi criado pela carga (origem "${row.source}") e não será removido.` : `O atributo "${row.code}" foi editado pelo admin depois da carga e não será removido automaticamente.` });
       return out;
     }
+    if (!opts.dryRun && opts.maxRemovals !== undefined && out.removed >= opts.maxRemovals) { out.blocked.push({ opId: op.opId, message: `Limite de ${opts.maxRemovals} remoções desta execução atingido (--max-operations); rode de novo para continuar.` }); return out; }
     if (opts.dryRun) { out.wouldRemove++; await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'would-create', attributeId: id, detail: 'would-remove' }); continue; }
     try {
       await deleteAttribute(db, id);
