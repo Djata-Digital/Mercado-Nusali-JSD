@@ -171,6 +171,15 @@ export function initialValuesFromProduct(fields: FormAttribute[], product: any):
   return out;
 }
 
+/** Valores de saída de listas ("Outro", "Não se aplica"...): o atributo guarda só a opção; o detalhe vai no título/descrição do anúncio. */
+export const ESCAPE_OPTION_PATTERN = /^(outro|outra|outros|outras|n[ãa]o se aplica)(\b|$)/i;
+
+/** Dica exibida quando o vendedor escolhe "Outro" num select: não há campo de complemento (evita guardar texto livre em atributo filtrável). */
+export function escapeOptionHint(def: Pick<FormAttribute, 'type'>, value: FormValue | undefined): string | null {
+  if (def.type !== 'select' || typeof value !== 'string') return null;
+  return ESCAPE_OPTION_PATTERN.test(value.trim()) ? 'Diga o que é no título ou na descrição do anúncio, para o comprador entender.' : null;
+}
+
 /** Dica de limites para exibir sob o campo: "0 a 1024 GB · sem casas decimais" / "até 100 caracteres". */
 export function describeLimits(def: FormAttribute): string | null {
   const parts: string[] = [];

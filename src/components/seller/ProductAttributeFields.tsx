@@ -2,6 +2,7 @@ import React from 'react';
 import { Loader2, Sparkles } from 'lucide-react';
 import {
   describeLimits,
+  escapeOptionHint,
   groupFormAttributes,
   type FormAttribute,
   type FormValue,
@@ -172,6 +173,7 @@ export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors
                         {f.isRequired && <span className="sr-only"> (obrigatório)</span>}
                       </label>
                       {renderControl(f)}
+                      {escapeOptionHint(f, values[f.code]) && <p className="text-[11px] text-amber-700 font-bold">{escapeOptionHint(f, values[f.code])}</p>}
                       {f.helpText && <p id={`${id}-help`} className="text-[11px] text-gray-500 font-medium">{f.helpText}</p>}
                       {limits && <p className="text-[11px] text-gray-400 font-medium">{limits}</p>}
                       {err && <p id={`${id}-error`} role="alert" className="text-[11px] text-red-600 font-bold">{err}</p>}

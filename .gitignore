@@ -10,3 +10,6 @@ coverage/
 # Scratchpad de investigação/scripts temporários e dumps de banco (podem conter
 # estrutura real do Supabase, IDs de produção, etc.) — nunca versionar.
 scratch/
+
+# diarios da carga da matriz de atributos (locais)
+attribute-matrix-journal/
