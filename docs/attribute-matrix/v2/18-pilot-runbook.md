@@ -63,3 +63,14 @@ Alvo exato (`--allow-target`), hash fixo, frase de confirmação com banco, limi
 
 ## 9. Depois do piloto
 O restante (747) é outra autorização: mesmo comando com `--max-operations 747` (dentro do prazo do papel; senão crie o papel de novo).
+
+## 10. Se o pré-voo falhar na autenticação (SQLSTATE 28P01) — diagnóstico e correção
+Já confirmado em produção (somente leitura): o papel existe, pode logar, está dentro do prazo, tem hash SCRAM e a função de autenticação do pooler (`pgbouncer.get_auth`) o enxerga. O pooler **reconhece** o papel: para um papel inexistente ele responde `user not found in the database`, e para `attr_loader_8c3` responde `28P01 password authentication failed`. Ou seja, o usuário e o formato `attr_loader_8c3.<ref>` estão corretos e o problema é **a senha enviada diferir da armazenada**.
+1. No PowerShell com `ATTR_LOAD_DATABASE_URL` definida (passo 2):
+```powershell
+node --import tsx scripts/attribute-matrix/diagnose-auth.ts
+```
+   Ele confere **localmente** (sem imprimir segredos) se a senha da URL é a armazenada, mostra o formato do usuário, o prazo do papel e a resposta de cada rota (pooler sessão 5432, pooler transação 6543, direta). A ligação direta (`db.<ref>.supabase.co`) é **só IPv6** no plano Free e não conecta nesta rede: não é alternativa.
+2. Se disser **NÃO CONFERE** (o caso esperado): redefina só a senha com `docs/attribute-matrix/v2/ops/limited-role.reset-password.sql` (SQL Editor; senha de 32+ caracteres só com letras e dígitos), refaça o passo 2 digitando **essa** senha e rode o `diagnose-auth` de novo até aparecer **CONFERE** e `CONECTOU`. Se acabou de redefinir e ainda falhar, aguarde ~1 minuto (o pooler guarda em cache o segredo do papel) e repita.
+3. Se disser **CONFERE** e mesmo assim falhar: envie só a linha `FALHOU — …` da rota (sem credenciais).
+4. Lembrete: o papel vence às 16:20 UTC do dia da criação; se vencer, recrie-o (`limited-role.revoke.sql` e depois `limited-role.create.sql`).
