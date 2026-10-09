@@ -29,6 +29,7 @@ import { buildTree, compileOperations, resolveMatrix, validateMatrix, type Inven
 import { applyOperations, rollbackOperations, type OperationLogEntry } from './applyEngine.js';
 import { verifyEffective } from './verifyEffective.js';
 import { INVENTORY_FILE, outDirFor } from './paths.js';
+import { describeError, secretsFromUrl } from './safeError.js';
 import { LIMITED_WRITER_ROLE, createRoleSql, revokeRoleSql, verifyLimitedWriterSession } from './limitedWriter.js';
 import { LoaderSafetyError, assertExecutionAllowed, classifyTarget, expectedConfirmPhrase, hashOperations, type CommandName } from './loaderSafety.js';
 
@@ -162,6 +163,12 @@ async function main() {
 
   try {
     journal.write({ event: 'start', runId, command: cmd, matrixVersion: MATRIX_VERSION, matrixHash: hash0, target: target.label, readOnly });
+    // sonda de conexão: separa "não conectou/autenticou" de "a consulta falhou" (o drizzle esconde a causa real atrás de "Failed query")
+    try {
+      await pool.query('SELECT 1');
+    } catch (e: any) {
+      throw new LoaderSafetyError('CONNECTION_FAILED', `não foi possível conectar/autenticar em ${target.label}: ${describeError(e, secretsFromUrl(rawUrl))}`);
+    }
     const pf = await preflight(db, inv, summary);
     report.preflight = pf.out;
     if (limitedWriter) {
@@ -243,7 +250,8 @@ async function main() {
     if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: report.ok, outcome: report.result }); } catch { /* melhor-esforço: a garantia real é o prazo do papel e a revogação */ } }
   } catch (e: any) {
     report.ok = false;
-    report.stoppedBecause = e instanceof LoaderSafetyError ? e.message : `ERROR: ${e?.message || e}`;
+    // diagnóstico seguro: mostra a causa real (SQLSTATE/mensagem do PostgreSQL ou erro de rede) sem credenciais, URL nem parâmetros
+    report.stoppedBecause = e instanceof LoaderSafetyError ? e.message : `ERROR: ${describeError(e, secretsFromUrl(rawUrl))}`;
     journal.write({ event: 'abort', reason: report.stoppedBecause });
     if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: false, aborted: report.stoppedBecause }); } catch { /* melhor-esforço */ } }
   } finally {
@@ -257,6 +265,6 @@ async function main() {
 
 main().catch((e) => {
   // falhas de configuração/segurança antes de qualquer conexão
-  console.error(JSON.stringify({ ok: false, refused: e instanceof LoaderSafetyError ? e.message : String(e?.message || e) }, null, 1));
+  console.error(JSON.stringify({ ok: false, refused: e instanceof LoaderSafetyError ? e.message : describeError(e, secretsFromUrl(process.env.ATTR_LOAD_DATABASE_URL)) }, null, 1));
   process.exit(2);
 });
