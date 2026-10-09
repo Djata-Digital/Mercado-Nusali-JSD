@@ -17,6 +17,8 @@ import { and, eq } from 'drizzle-orm';
 import { categoryAttributes } from '../../src/db/schema.js';
 import { createAttribute, deleteAttribute, disableInheritedAttribute } from '../../src/server/modules/catalog/attributeDefinitionService.js';
 import type { MatrixOperation } from '../../src/data/attributeMatrix/engine.js';
+import { describeError, rootCode } from './safeError.js';
+import { MAX_ATTEMPTS, backoffMs, defaultSleep, isTransient, withRetry } from './retry.js';
 
 export interface ApplyOptions {
   dryRun?: boolean;
@@ -27,8 +29,10 @@ export interface ApplyOptions {
   onBatch?: (info: { batch: number; executed: number; skipped: number; drift: number }) => void | Promise<void>;
   /** Uma chamada por operação decidida (diário de execução). Se lançar, a execução PARA (nunca escrever sem conseguir registrar). */
   onOperation?: (entry: OperationLogEntry) => void | Promise<void>;
+  /** Espera entre tentativas após falha TRANSITÓRIA de conexão (injetável nos testes). */
+  sleep?: (ms: number) => Promise<void>;
 }
-export type OperationAction = 'created' | 'would-create' | 'skipped' | 'drift' | 'error';
+export type OperationAction = 'created' | 'would-create' | 'skipped' | 'drift' | 'error' | 'retry' | 'recovered';
 export interface OperationLogEntry { opId: string; kind: string; category: string; action: OperationAction; attributeId?: string; detail?: unknown }
 export interface ApplyResult {
   total: number;
@@ -62,6 +66,20 @@ export async function applyOperations(db: any, ops: MatrixOperation[], opts: App
   const batchSize = opts.batchSize ?? 100;
   const res: ApplyResult = { total: ops.length, created: 0, skipped: 0, drift: [], errors: [], foreign: [], batches: 0, stoppedEarly: false };
   const log = async (e: OperationLogEntry) => { if (opts.onOperation) await opts.onOperation(e); };
+  const sleep = opts.sleep ?? defaultSleep;
+  // Falha TRANSITÓRIA de conexão (pooler/rede): leituras repetem; escritas só repetem depois de conferir se a anterior chegou a ser gravada.
+  const read = (op: MatrixOperation, fn: () => Promise<any>): Promise<any> =>
+    withRetry(fn, { sleep, onRetry: (n, e) => log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'retry', detail: { attempt: n, code: rootCode(e) } }) });
+  const write = async (op: MatrixOperation, fn: () => Promise<unknown>, exists: () => Promise<boolean>): Promise<'created' | 'recovered'> => {
+    for (let a = 1; ; a++) {
+      try { await fn(); return 'created'; } catch (e) {
+        if (!isTransient(e) || a >= MAX_ATTEMPTS) throw e;
+        await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'retry', detail: { attempt: a, code: rootCode(e), phase: 'write' } });
+        await sleep(backoffMs(a));
+        if (await read(op, exists)) return 'recovered'; // a gravação anterior foi confirmada antes da queda: não repete
+      }
+    }
+  };
   let executedTotal = 0;
   for (let i = 0; i < ops.length; i += batchSize) {
     const batch = ops.slice(i, i + batchSize);
@@ -70,8 +88,9 @@ export async function applyOperations(db: any, ops: MatrixOperation[], opts: App
       try {
         if (op.kind === 'disable') {
           const inheritedId = (op.payload as any).__disableInheritedId as string;
-          const [inh] = await db.select().from(categoryAttributes).where(eq(categoryAttributes.id, inheritedId)).limit(1);
-          const existing = inh ? await db.select().from(categoryAttributes).where(and(eq(categoryAttributes.categoryId, op.categoryId), eq(categoryAttributes.code, inh.code))).limit(1) : [];
+          const [inh] = await read(op, () => db.select().from(categoryAttributes).where(eq(categoryAttributes.id, inheritedId)).limit(1));
+          const existingOf = (code: string) => db.select().from(categoryAttributes).where(and(eq(categoryAttributes.categoryId, op.categoryId), eq(categoryAttributes.code, code))).limit(1);
+          const existing = inh ? await read(op, () => existingOf(inh.code)) : [];
           if (existing.length) {
             if (existing[0].isActive === false && existing[0].overridesId === inheritedId) {
               skipped++;
@@ -85,13 +104,14 @@ export async function applyOperations(db: any, ops: MatrixOperation[], opts: App
           }
           if (opts.dryRun) { executed++; res.created++; await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'would-create' }); continue; }
           if (opts.stopAfter !== undefined && executedTotal >= opts.stopAfter) { res.stoppedEarly = true; res.batches++; return res; }
-          const made = await disableInheritedAttribute(db, op.categoryId, inheritedId, { source: 'seed' });
+          let made: any = null;
+          const how = await write(op, async () => { made = await disableInheritedAttribute(db, op.categoryId, inheritedId, { source: 'seed' }); }, async () => (await existingOf(inh?.code)).some((r: any) => r.isActive === false && r.overridesId === inheritedId));
           executed++; executedTotal++; res.created++;
-          await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'created', attributeId: (made as any)?.attribute?.id });
+          await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: how === 'recovered' ? 'recovered' : 'created', attributeId: made?.attribute?.id });
           continue;
         }
         const id = (op.payload as any).id as string;
-        const [row] = await db.select().from(categoryAttributes).where(eq(categoryAttributes.id, id)).limit(1);
+        const [row] = await read(op, () => db.select().from(categoryAttributes).where(eq(categoryAttributes.id, id)).limit(1));
         if (row) {
           const d = diffAgainstRow(op, row);
           // linha com o id da carga mas de outra origem, ou editada pelo admin depois da carga, também é deriva (nunca sobrescrita)
@@ -105,12 +125,14 @@ export async function applyOperations(db: any, ops: MatrixOperation[], opts: App
         }
         if (opts.dryRun) { executed++; res.created++; await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'would-create', attributeId: id }); continue; }
         if (opts.stopAfter !== undefined && executedTotal >= opts.stopAfter) { res.stoppedEarly = true; res.batches++; return res; }
-        await createAttribute(db, op.categoryId, op.payload as Record<string, any>, { source: 'seed' });
+        const how = await write(op, () => createAttribute(db, op.categoryId, op.payload as Record<string, any>, { source: 'seed' }), async () => (await db.select({ id: categoryAttributes.id }).from(categoryAttributes).where(eq(categoryAttributes.id, id)).limit(1)).length > 0);
         executed++; executedTotal++; res.created++;
-        await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'created', attributeId: id });
+        await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: how === 'recovered' ? 'recovered' : 'created', attributeId: id });
       } catch (e: any) {
-        res.errors.push({ opId: op.opId, category: op.categorySlug, code: e?.code, message: e?.message || String(e) });
-        try { await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'error', detail: e?.code || String(e?.message || e).slice(0, 200) }); } catch { /* o erro original já está em res.errors */ }
+        // a causa real (SQLSTATE/rede) vem da cadeia `cause` — o drizzle esconde o erro do PostgreSQL atrás de "Failed query"
+        const why = describeError(e);
+        res.errors.push({ opId: op.opId, category: op.categorySlug, code: rootCode(e) ?? e?.code, message: why });
+        try { await log({ opId: op.opId, kind: op.kind, category: op.categorySlug, action: 'error', detail: why.slice(0, 300) }); } catch { /* o erro original já está em res.errors */ }
         // um erro PARA o lote: nada depois depende de operação que falhou (herança) — a retomada continua daqui
         res.skipped += skipped;
         res.batches++;

@@ -29,8 +29,9 @@ import { buildTree, compileOperations, resolveMatrix, validateMatrix, type Inven
 import { applyOperations, rollbackOperations, type OperationLogEntry } from './applyEngine.js';
 import { verifyEffective } from './verifyEffective.js';
 import { INVENTORY_FILE, outDirFor } from './paths.js';
-import { describeError, secretsFromUrl } from './safeError.js';
+import { describeError, rootCode, secretsFromUrl } from './safeError.js';
 import { beginReadOnly, endReadOnly, type ReadOnlyClient } from './readOnlySession.js';
+import { withRetry } from './retry.js';
 import { LIMITED_WRITER_ROLE, createRoleSql, revokeRoleSql, verifyLimitedWriterSession } from './limitedWriter.js';
 import { LoaderSafetyError, assertExecutionAllowed, classifyTarget, expectedConfirmPhrase, hashOperations, type CommandName } from './loaderSafety.js';
 
@@ -61,6 +62,8 @@ export interface LoadReport {
   result?: Record<string, unknown>;
   ok: boolean;
   stoppedBecause?: string;
+  /** falha (segura, sem credenciais) ao gravar o fechamento da janela de auditoria */
+  windowCloseError?: string;
 }
 
 class Journal {
@@ -144,10 +147,13 @@ async function main() {
   const journal = new Journal(journalFile);
   const pool = new pg.Pool({
     connectionString: rawUrl,
-    max: 2,
+    // escrita: UMA conexão (o papel tem limite de 2 e o pooler em modo transação pode abrir conexões de banco além do esperado); leitura: 2
+    max: readOnly ? 2 : 1,
+    connectionTimeoutMillis: 20000,
     // (sem opção de inicialização: poolers em modo transação a ignoram; a sessão somente leitura é uma transação BEGIN READ ONLY — abaixo)
     ssl: target.isLocal ? (/sslmode=disable/.test(rawUrl) ? false : { rejectUnauthorized: false }) : { rejectUnauthorized: false },
   });
+  pool.on('error', () => undefined); // conexão ociosa derrubada pelo pooler: o pool descarta e abre outra na próxima consulta
   let db: any = drizzle(pool, { schema });
   let roClient: ReadOnlyClient | null = null; // comandos que não escrevem rodam TODOS numa única transação BEGIN READ ONLY (imposta pelo banco)
   const report: LoadReport = { command: cmd, runId, matrixVersion: MATRIX_VERSION, matrixHash: hash0, target: target.label, readOnlySession: readOnly, preflight: {}, ok: false };
@@ -155,18 +161,18 @@ async function main() {
   // janela auditada da escrita remota limitada (8C.3): aberta só depois de a sessão ser verificada; sem auditoria, nada é escrito
   let windowOpen = false;
   const windowAudit = async (action: string, details: Record<string, unknown>) => {
-    await db.insert(schema.auditLogs).values({
+    await withRetry(() => db.insert(schema.auditLogs).values({
       id: `audit_${Date.now()}_${randomBytes(3).toString('hex')}`, actorUserId: null, action, resource: 'category_attributes', resourceId: null,
       detailsJson: { runId, command: cmd, matrixVersion: MATRIX_VERSION, matrixHash: hash0, target: target.label, role: LIMITED_WRITER_ROLE, ...details },
       ipAddress: null, userAgent: 'attribute-matrix-loader', countryCode: null, createdAt: new Date(),
-    } as any);
+    } as any));
   };
 
   try {
     journal.write({ event: 'start', runId, command: cmd, matrixVersion: MATRIX_VERSION, matrixHash: hash0, target: target.label, readOnly });
     // sonda de conexão: separa "não conectou/autenticou" de "a consulta falhou" (o drizzle esconde a causa real atrás de "Failed query")
     try {
-      await pool.query('SELECT 1');
+      await withRetry(() => pool.query('SELECT 1'));
     } catch (e: any) {
       throw new LoaderSafetyError('CONNECTION_FAILED', `não foi possível conectar/autenticar em ${target.label}: ${describeError(e, secretsFromUrl(rawUrl))}`);
     }
@@ -175,11 +181,11 @@ async function main() {
       db = drizzle(roClient as any, { schema });
       journal.write({ event: 'read-only-transaction', confirmed: true });
     }
-    const pf = await preflight(db, inv, summary);
+    const pf = await withRetry(() => preflight(db, inv, summary), { onRetry: (n, e) => journal.write({ event: 'retry', step: 'preflight', attempt: n, code: rootCode(e) }) });
     report.preflight = pf.out;
     if (limitedWriter) {
       // a SESSÃO real é verificada no banco (papel exato, prazo, atributos e privilégios efetivos) antes de qualquer escrita
-      const lw = await verifyLimitedWriterSession(pool);
+      const lw = await withRetry(() => verifyLimitedWriterSession(pool), { onRetry: (n, e) => journal.write({ event: 'retry', step: 'verify-session', attempt: n, code: rootCode(e) }) });
       (report.preflight as any).limitedWriter = lw;
       journal.write({ event: 'limited-writer-verified', ...lw });
       await windowAudit('system.attribute_matrix.window_opened', { maxOperations: maxOperationsFlag, validUntil: lw.validUntil, minutesLeft: lw.minutesLeft });
@@ -191,14 +197,15 @@ async function main() {
     // escrita remota limitada: o teto de operações desta execução é OBRIGATÓRIO e nunca excedido
     const stopAfter = limitedWriter ? Math.min(maxOperationsFlag as number, stopAfterFlag ?? Infinity) : stopAfterFlag;
 
-    const seedCount = async () => Number((await db.execute(sql`SELECT count(*)::int AS n FROM category_attributes WHERE source = 'seed'`)).rows[0].n);
+    const seedCount = async () => Number((await withRetry<any>(() => db.execute(sql`SELECT count(*)::int AS n FROM category_attributes WHERE source = 'seed'`))).rows[0].n);
     const onOperation = (e: OperationLogEntry) => journal.write({ event: 'op', ...e });
 
     if (cmd === 'plan' || cmd === 'apply') {
       // estado encontrado x esperado, sem escrever (dry-run)
+      // o dry-run só lê (nunca grava): consultas avulsas, repetidas com segurança se a conexão cair; no modo de escrita o pool tem UMA conexão
       const dry = await applyOperations(db, pf.ops, { dryRun: true, batchSize: 1000 });
       report.preflight.state = { wouldCreate: dry.created, alreadyPresent: dry.skipped, drift: dry.drift.length, foreign: dry.foreign.length, errors: dry.errors.length };
-      if (dry.errors.length) throw new LoaderSafetyError('DRY_RUN_ERRORS', `O dry-run encontrou ${dry.errors.length} erro(s): ${dry.errors[0].message}`);
+      if (dry.errors.length) throw new LoaderSafetyError('DRY_RUN_ERRORS', `O dry-run encontrou ${dry.errors.length} erro(s) na operação ${dry.errors[0].opId} (processadas ${dry.created + dry.skipped} de ${pf.ops.length} antes da falha): ${dry.errors[0].message}`);
       if (dry.drift.length) {
         report.result = { drift: dry.drift.slice(0, 20) };
         throw new LoaderSafetyError('DRIFT_DETECTED', `${dry.drift.length} divergência(s) entre o banco e a matriz (ex.: ${dry.drift[0].category} / ${dry.drift[0].field}). Nada será sobrescrito: resolva manualmente.`);
@@ -220,11 +227,11 @@ async function main() {
             // validação pós-lote: linhas da carga no banco == anteriores + criadas até aqui
             if (now !== before + executedSoFar) batchErrors.push(`lote ${b.batch}: banco=${now}, esperado=${before + executedSoFar}`);
             journal.write({ event: 'batch', ...b, seedRowsInDb: now, expected: before + executedSoFar });
-            await db.insert(schema.auditLogs).values({
+            await withRetry(() => db.insert(schema.auditLogs).values({
               id: `audit_${Date.now()}_${randomBytes(3).toString('hex')}`, actorUserId: null, action: 'system.attribute_matrix.batch_applied', resource: 'category_attributes',
               resourceId: null, detailsJson: { runId, matrixVersion: MATRIX_VERSION, matrixHash: hash0, batch: b.batch, executed: b.executed, skipped: b.skipped, drift: b.drift, seedRowsInDb: now },
               ipAddress: null, userAgent: 'attribute-matrix-loader', countryCode: null, createdAt: new Date(),
-            } as any);
+            } as any));
             if (batchErrors.length) throw new LoaderSafetyError('POST_BATCH_VALIDATION_FAILED', batchErrors[0]);
           },
         });
@@ -253,13 +260,13 @@ async function main() {
       } as any);
     }
     journal.write({ event: 'end', ok: report.ok, result: report.result });
-    if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: report.ok, outcome: report.result }); } catch { /* melhor-esforço: a garantia real é o prazo do papel e a revogação */ } }
+    if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: report.ok, outcome: report.result }); } catch (ce) { report.windowCloseError = describeError(ce, secretsFromUrl(rawUrl)); journal.write({ event: 'window-close-failed', why: report.windowCloseError }); } }
   } catch (e: any) {
     report.ok = false;
     // diagnóstico seguro: mostra a causa real (SQLSTATE/mensagem do PostgreSQL ou erro de rede) sem credenciais, URL nem parâmetros
     report.stoppedBecause = e instanceof LoaderSafetyError ? e.message : `ERROR: ${describeError(e, secretsFromUrl(rawUrl))}`;
     journal.write({ event: 'abort', reason: report.stoppedBecause });
-    if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: false, aborted: report.stoppedBecause }); } catch { /* melhor-esforço */ } }
+    if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: false, aborted: report.stoppedBecause }); } catch (ce) { report.windowCloseError = describeError(ce, secretsFromUrl(rawUrl)); journal.write({ event: 'window-close-failed', why: report.windowCloseError }); } }
   } finally {
     await endReadOnly(roClient);
     journal.close();

@@ -52,6 +52,12 @@ export function hintFor(link: ErrorLink | undefined): string | undefined {
   return undefined;
 }
 
+/** SQLSTATE / código de rede da causa raiz (o elo mais profundo que traz código), ou o código do próprio erro. */
+export function rootCode(e: unknown): string | undefined {
+  const chain = errorChain(e);
+  return [...chain].reverse().find((l) => l.code)?.code;
+}
+
 /** Texto seguro e curto: primeira linha da mensagem de topo + a causa raiz com SQLSTATE e dica. Nunca inclui os parâmetros da consulta. */
 export function describeError(e: unknown, secrets: string[] = []): string {
   const chain = errorChain(e);
