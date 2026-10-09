@@ -6,7 +6,9 @@ const M = [
   { id: 'O2 especificacao nao e gravada (so a opcao)', file: 'src/server/modules/catalog/attributeValueService.ts', from: "if (v.type === 'select' && v.otherDetail) rows.push", to: "if (false) rows.push", test: 'test-attr-other-8c1' },
   { id: 'O3 ficha publica mostra "Outro" em vez da especificacao', file: 'src/server/modules/catalog/productSpecSheet.ts', from: 'const text = t.otherDetail ? String(t.otherDetail) :', to: 'const text =', test: 'test-attr-other-8c1' },
   { id: 'O4 leitura perde a especificacao (edicao apagaria ao reescrever)', file: 'src/server/modules/catalog/attributeValueService.ts', from: 'const detailRow = list.find((r) => r.optionValue == null &&', to: 'const detailRow = list.find((r) => false && r.optionValue == null &&', test: 'test-attr-other-8c1' },
-  { id: 'O5 edicao aceita "Outro" novo sem especificacao', file: 'src/server/modules/catalog/productAttributeUpdateService.ts', from: 'allowBareOther: !seen.has(k)', to: 'allowBareOther: true', test: 'test-attr-other-8c1' },
+  { id: 'O5 edicao aceita "Outro" novo sem especificacao', file: 'src/server/modules/catalog/productAttributeUpdateService.ts', from: `const r = validateAttributeValue(def, value);
+    if (!r.ok) { errors.push(r.error!); continue; }`, to: `const r = validateAttributeValue(def, value, { allowBareOther: true });
+    if (!r.ok) { errors.push(r.error!); continue; }`, extra: [['allowBareOther: !seen.has(k)', 'allowBareOther: true']], test: 'test-attr-other-8c1' },
   { id: 'O6 eixo de variante aceita formato composto', file: 'src/utils/attributeValidator.ts', from: "const composite = def.role === 'variant_axis' ? null : splitOtherValue", to: 'const composite = splitOtherValue', test: 'test-attr-other-8c1' },
   { id: 'O7 formulario ignora o campo complementar', file: 'src/utils/attributeFormModel.ts', from: "if (def.type !== 'select' || typeof v !== 'string' || !isOtherOption(v)) return v;", to: 'return v;', test: 'test-attr-other-8c1' },
   { id: 'O8 valor antigo "Outro" sem especificacao bloqueia edicao de outro atributo', file: 'src/server/modules/catalog/productAttributeUpdateService.ts', from: 'validateAttributeValue(def, cur.raw, { allowBareOther: true })', to: 'validateAttributeValue(def, cur.raw)', test: 'test-attr-other-8c1' },
@@ -26,7 +28,9 @@ try {
     if (!orig.has(m.file)) orig.set(m.file, raw);
     const crlf = raw.includes('\r\n'); const text = norm(raw);
     if (!text.includes(m.from)) { res.push({ m: m.id, status: 'ALVO NAO ENCONTRADO' }); console.log(res[res.length - 1]); continue; }
-    fs.writeFileSync(m.file, (crlf ? (t) => t.replace(/\n/g, '\r\n') : (t) => t)(text.replace(m.from, () => m.to)));
+    let mutatedText = text.replace(m.from, () => m.to);
+    for (const [a, b] of (m.extra || [])) { if (!mutatedText.includes(a)) throw new Error('extra nao encontrado: ' + a); mutatedText = mutatedText.replace(a, () => b); }
+    fs.writeFileSync(m.file, (crlf ? (t) => t.replace(/\n/g, '\r\n') : (t) => t)(mutatedText));
     const db = 'p8c1_mut_' + res.length;
     cp.execSync(`docker exec nusali-pg17-restore psql -U postgres -c "DROP DATABASE IF EXISTS ${db}" -c "CREATE DATABASE ${db} TEMPLATE phase3_tmpl"`, { stdio: 'ignore' });
     let out = '';

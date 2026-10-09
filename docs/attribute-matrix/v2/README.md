@@ -11,6 +11,8 @@ Revisão da matriz v1 (Fase 8A, preservada em `../v1/` e no commit `5868d0b`). *
 | `09-commissions.md` | precedência real de comissões e opções para decisão |
 | `10-production-plan.md` | plano da Fase 8C (não autorizada) e estratégia de reversão |
 | `11-stock-conversion-fix.md` | correção do estoque simples → variável (local, não publicada) |
+| `12-other-option-structured.md` | opção "Outro" com especificação estruturada (Fase 8C.1) |
+| `13-homologation-and-deploy-plan.md` | auditoria somente leitura da produção e plano de deploy/reversão do código |
 | `matrix.json`, `operations.json`, `summary.json` (com `operationsHash`), `validation.issues.json` | dados para máquina |
 
 Código: `src/data/attributeMatrix/` · carregador: `scripts/attribute-matrix/load.ts` (+ `loaderSafety.ts`, `applyEngine.ts`, `verifyEffective.ts`) · testes: `scratch/test-attr-*-8b.ts`, `scratch/test-stock-conversion-8b.ts`, `scratch/mutation-*-8b.cjs`.
@@ -28,4 +30,7 @@ Regenerar: `npx tsx scripts/attribute-matrix/generate.ts` · `npx tsx scripts/at
 | Validador com defeitos injetados | 22/22 |
 | Estoque (conversão, reservas, cancelamento, concorrência, rollback) | 31/31 (+14/14 da 8A) |
 | Mutação — estoque / carregador e origem | 8/8 / 9/9 mutantes mortos |
+| "Outro" estruturado (validação, armazenamento, edição, ficha, legado, variantes, formulário, 137 selects da matriz) | 46/46 |
+| Reserva anterior à conversão até o despacho físico real, cancelamento, expiração, concorrência, rollback | 17/17 |
+| Mutação — "Outro" e despacho | 10/10 mutantes mortos |
 | Fases 3–7 e carrinho/checkout/estoque | sem regressão nova (ver relatório) |

@@ -1,6 +1,6 @@
 # 11 — Correção do estoque na conversão simples → variável (implementada localmente, NÃO publicada)
 
-Commit local `4ed3e0c` na branch `feat/attribute-matrix-8b`. Sem migração. Pagamentos, escrow e comissões não foram tocados. Diagnóstico original: `docs/attribute-matrix/v1/08-stock-conversion-diagnosis.md`.
+Commits locais `4ed3e0c` (8B) e `997d61c` (8C.1: trava do despacho e testes) na branch `feat/attribute-matrix-8b`. Sem migração. Pagamentos, escrow e comissões não foram tocados. Diagnóstico original: `docs/attribute-matrix/v1/08-stock-conversion-diagnosis.md`.
 
 ## O que foi corrigido
 
@@ -27,5 +27,6 @@ Commit local `4ed3e0c` na branch `feat/attribute-matrix-8b`. Sem migração. Pag
 ## Limitações
 
 - Estoque do produto no HUB sem variação bloqueia a conversão (mensagem orienta transferir/ajustar antes). A resposta HTTP hoje é 500 com a mensagem; ajuste de status é cosmético.
-- Dispatch de pedido reservado antes da conversão foi validado por análise (baixa `onHand` e `reservado` iguais) e pelos testes de despacho existentes, não por um teste específico.
+- (Fase 8C.1) O despacho físico de um pedido reservado **antes** da conversão agora tem teste do fluxo real: `test-stock-old-reservation-8c1` (**17/17**): pedido de 3 un. → conversão → confirmação → `executePhysicalDispatch` baixa a linha antiga (0/0), variantes intactas, estoque físico 6, histórico `IN 10 → AJUSTE −7 → OUT −3`, despacho idempotente, linha antiga não vendável; cancelamento e expiração após a conversão; concorrência despacho × conversão (4 rodadas); falha com rollback.
+- (Fase 8C.1) `executePhysicalDispatch` passou a travar a linha de estoque (`FOR UPDATE`) — sem isso uma conversão simultânea poderia perder a atualização; teste determinístico K2 e mutante morto.
 - Não publicada: aguarda autorização.

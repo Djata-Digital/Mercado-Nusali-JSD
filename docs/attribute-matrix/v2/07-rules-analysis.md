@@ -1,4 +1,4 @@
-# 07 — Análise das regras de atributos (Fase 8B, matriz v2)
+# 07 — Análise das regras de atributos (Fases 8B/8C.1, matriz v2)
 
 > Decisões de política e limitações conhecidas. Nada aqui foi aplicado em produção.
 
@@ -68,14 +68,14 @@ Requer 4 alterações com testes de ida e volta; **não é necessária para a ca
 
 Não foi adicionada coluna de visibilidade: a necessidade não foi demonstrada (desativar por override já cobre "não se aplica aqui").
 
-## 5. "Outro" no formulário do vendedor
+## 5. "Outro" no formulário do vendedor (atualizado na Fase 8C.1)
 
-O formulário **não tem campo de complemento** para "Outro" e criar um exigiria uma segunda linha de valor por atributo (o esquema permite um valor por linha). Para não deixar a experiência em aberto, o assistente passou a mostrar, ao escolher "Outro"/"Não se aplica" num select, a dica: *"Diga o que é no título ou na descrição do anúncio, para o comprador entender."* Testado: valores "Outro" passam no cliente e no servidor estrito em 210 subcategorias e aparecem na ficha pública (12 produtos reais de teste). Limitação: a ficha mostra "Outro" sem detalhe e esse valor aparece como opção de filtro.
+Ao escolher "Outro/Outra/Outros/Outras" num select, o formulário mostra o campo obrigatório **"Especifique sua opção"** e a ficha pública exibe a especificação ("Material: Fibra de bambu"). A especificação fica no próprio atributo (segunda linha em `value_text`), sem alterar o esquema. Regras, armazenamento, compatibilidade com valores antigos e testes: `12-other-option-structured.md`. Em atributos opcionais a regra é a mesma ("Outro" sem dizer o quê não informa nada); "Não se aplica" não exige especificação.
 
 ## 6. Limitações conhecidas
 
 1. Assistente: no máximo duas dimensões que variam (Cor × Tamanho|Capacidade). Subcategorias que gostariam de uma 3ª (ex.: Tamanho **e** Capacidade) estão em `05-variant-axes.md`; os demais eixos valem um valor por anúncio.
-2. Sem campo de complemento para "Outro" (ver §5).
+2. A especificação de "Outro" tem 2 a 80 caracteres e fica fora dos filtros (o filtro enxerga só a opção "Outro").
 3. Vírgula em opções não é suportada (ver §3).
 4. Não há flag de visibilidade por atributo (ver §4).
 5. Regulados (73 subcategorias) só com relatório de revisão, sem bloqueio (`08-regulatory-review.md`).

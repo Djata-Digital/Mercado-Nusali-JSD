@@ -169,6 +169,26 @@ async function main() {
   obs('K1 corridas despacho x conversao', notes);
   report('K1 despacho e conversao simultaneos (4 rodadas): linha antiga sempre 0/0, estoque fisico 6, sem perda de atualizacao', raceOk, notes);
 
+  // K2. o despacho TRAVA a linha de estoque: se a conversao esta com a linha travada, o despacho espera e depois enxerga o valor novo
+  const K2: any = await ProductCreationService.createProduct(sellerUser, { ...common, title: 'Trava de linha', stock: 10, specs: {} }, db);
+  const ordK2: any = await placeVariantless(K2.id, 3);
+  await q("UPDATE orders SET payment_status='paid', status='processing', escrow_status='held' WHERE id=$1", [ordK2.id]);
+  const itK2 = (await q('SELECT id FROM order_items WHERE order_id=$1', [ordK2.id]))[0];
+  await db.transaction(async (tx) => { await ShipmentService.createOrGetShipmentForOrderItem(tx, itK2.id, sellerUser); });
+  const invK2 = (await orphanOf(K2.id))!;
+  const holder = await pool.connect();
+  await holder.query('BEGIN');
+  await holder.query('SELECT id FROM inventory WHERE id=$1 FOR UPDATE', [invK2.id]);
+  let dispatched = false;
+  const dispP = db.transaction(async (tx) => { await ShipmentService.executePhysicalDispatch(tx, itK2.id, sellerUser); }).then(() => { dispatched = true; });
+  await new Promise((r) => setTimeout(r, 900));
+  const waited = !dispatched;
+  await holder.query('UPDATE inventory SET quantity_on_hand = 3 WHERE id=$1', [invK2.id]); // o que a aposentadoria faria (10 -> 3) enquanto segura a linha
+  await holder.query('COMMIT'); holder.release();
+  await dispP;
+  const o2 = (await orphanOf(K2.id))!;
+  report('K2 despacho ESPERA a linha de estoque travada pela conversao e depois usa o valor novo (sem perda de atualizacao): linha 0/0', waited && o2.q === 0 && o2.r === 0, { waited, o2 });
+
   // F. falha e rollback: conversao que falha NAO deixa a reserva antiga em estado intermediario
   const F: any = await ProductCreationService.createProduct(sellerUser, { ...common, title: 'Reserva antiga -> falha', stock: 10, specs: {} }, db);
   await placeVariantless(F.id, 2);
