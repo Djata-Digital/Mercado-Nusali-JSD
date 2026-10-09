@@ -30,6 +30,7 @@ import { applyOperations, rollbackOperations, type OperationLogEntry } from './a
 import { verifyEffective } from './verifyEffective.js';
 import { INVENTORY_FILE, outDirFor } from './paths.js';
 import { describeError, secretsFromUrl } from './safeError.js';
+import { beginReadOnly, endReadOnly, type ReadOnlyClient } from './readOnlySession.js';
 import { LIMITED_WRITER_ROLE, createRoleSql, revokeRoleSql, verifyLimitedWriterSession } from './limitedWriter.js';
 import { LoaderSafetyError, assertExecutionAllowed, classifyTarget, expectedConfirmPhrase, hashOperations, type CommandName } from './loaderSafety.js';
 
@@ -144,11 +145,11 @@ async function main() {
   const pool = new pg.Pool({
     connectionString: rawUrl,
     max: 2,
-    // sessão SOMENTE LEITURA imposta pelo próprio banco quando o comando não escreve (qualquer escrita acidental falha no servidor)
-    ...(readOnly ? { options: '-c default_transaction_read_only=on' } : {}),
+    // (sem opção de inicialização: poolers em modo transação a ignoram; a sessão somente leitura é uma transação BEGIN READ ONLY — abaixo)
     ssl: target.isLocal ? (/sslmode=disable/.test(rawUrl) ? false : { rejectUnauthorized: false }) : { rejectUnauthorized: false },
   });
-  const db = drizzle(pool, { schema });
+  let db: any = drizzle(pool, { schema });
+  let roClient: ReadOnlyClient | null = null; // comandos que não escrevem rodam TODOS numa única transação BEGIN READ ONLY (imposta pelo banco)
   const report: LoadReport = { command: cmd, runId, matrixVersion: MATRIX_VERSION, matrixHash: hash0, target: target.label, readOnlySession: readOnly, preflight: {}, ok: false };
 
   // janela auditada da escrita remota limitada (8C.3): aberta só depois de a sessão ser verificada; sem auditoria, nada é escrito
@@ -168,6 +169,11 @@ async function main() {
       await pool.query('SELECT 1');
     } catch (e: any) {
       throw new LoaderSafetyError('CONNECTION_FAILED', `não foi possível conectar/autenticar em ${target.label}: ${describeError(e, secretsFromUrl(rawUrl))}`);
+    }
+    if (readOnly) {
+      roClient = await beginReadOnly(pool as any);
+      db = drizzle(roClient as any, { schema });
+      journal.write({ event: 'read-only-transaction', confirmed: true });
     }
     const pf = await preflight(db, inv, summary);
     report.preflight = pf.out;
@@ -255,6 +261,7 @@ async function main() {
     journal.write({ event: 'abort', reason: report.stoppedBecause });
     if (windowOpen) { try { await windowAudit('system.attribute_matrix.window_closed', { ok: false, aborted: report.stoppedBecause }); } catch { /* melhor-esforço */ } }
   } finally {
+    await endReadOnly(roClient);
     journal.close();
     await pool.end();
   }

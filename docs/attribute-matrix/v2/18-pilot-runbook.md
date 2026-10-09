@@ -4,7 +4,7 @@
 
 **Backup:** `C:\Users\djata\Backups\mercado-nusali\mercado-nusali-full-20261009T123333.dump` — SHA-256 `8ae1a2f0592b7b024def740b596427e4506a112c5276938060b9a4dd17a946c3` (reconferido: OK). Se houver atividade na produção até o piloto, refaça o backup (`node scratch/p8d_backup.cjs`).
 **Matriz:** `v2-2026-10-08`, hash `05b3b649e91bd18ea0049630f54c4c0239c09759f53ae41592d0762ee6dffbc8`, 847 operações.
-**Alvo exato:** `aws-1-eu-west-3.pooler.supabase.com:5432/postgres`.
+**Alvo exato:** `aws-1-eu-west-3.pooler.supabase.com:6543/postgres`.
 
 ## 1. Criar o papel (no SQL Editor do Supabase)
 1. Abra `docs/attribute-matrix/v2/ops/limited-role.create.sql` (ou rode `node --import tsx scripts/attribute-matrix/load.ts limited-role-sql`, que só imprime o SQL).
@@ -18,11 +18,11 @@ cd "C:\Users\djata\Desktop\Mercado Nusali"
 $sec = Read-Host "Senha do papel attr_loader_8c3" -AsSecureString
 $pw  = [System.Net.NetworkCredential]::new('', $sec).Password
 $ref = "<REF-DO-PROJETO>"      # o mesmo sufixo do usuário do pooler que você já usa: postgres.<ref>
-$env:ATTR_LOAD_DATABASE_URL = "postgresql://attr_loader_8c3.$ref`:$([uri]::EscapeDataString($pw))@aws-1-eu-west-3.pooler.supabase.com:5432/postgres"
+$env:ATTR_LOAD_DATABASE_URL = "postgresql://attr_loader_8c3.$ref`:$([uri]::EscapeDataString($pw))@aws-1-eu-west-3.pooler.supabase.com:6543/postgres"
 $env:NODE_ENV = "test"
 Remove-Variable pw, sec
 $H = "05b3b649e91bd18ea0049630f54c4c0239c09759f53ae41592d0762ee6dffbc8"
-$T = "aws-1-eu-west-3.pooler.supabase.com:5432/postgres"
+$T = "aws-1-eu-west-3.pooler.supabase.com:6543/postgres"
 ```
 
 ## 3. Pré-voo (somente leitura, ~3 min)
@@ -74,3 +74,12 @@ node --import tsx scripts/attribute-matrix/diagnose-auth.ts
 2. Se disser **NÃO CONFERE** (o caso esperado): redefina só a senha com `docs/attribute-matrix/v2/ops/limited-role.reset-password.sql` (SQL Editor; senha de 32+ caracteres só com letras e dígitos), refaça o passo 2 digitando **essa** senha e rode o `diagnose-auth` de novo até aparecer **CONFERE** e `CONECTOU`. Se acabou de redefinir e ainda falhar, aguarde ~1 minuto (o pooler guarda em cache o segredo do papel) e repita.
 3. Se disser **CONFERE** e mesmo assim falhar: envie só a linha `FALHOU — …` da rota (sem credenciais).
 4. Lembrete: o papel vence às 16:20 UTC do dia da criação; se vencer, recrie-o (`limited-role.revoke.sql` e depois `limited-role.create.sql`).
+
+## 11. Porta 6543 (pooler em modo transação) — usar ESTA porta
+Para o papel `attr_loader_8c3` o pooler em sessão (5432) respondeu `28P01` mesmo com a senha conferindo, e o pooler em transação (6543) conectou. O alvo exato passa a ser `aws-1-eu-west-3.pooler.supabase.com:6543/postgres` (já ajustado nos passos 2–4; a frase de confirmação do `plan` sai com 6543). Se a sua variável ainda tem 5432:
+```powershell
+$env:ATTR_LOAD_DATABASE_URL = $env:ATTR_LOAD_DATABASE_URL -replace ':5432/', ':6543/'
+$T = "aws-1-eu-west-3.pooler.supabase.com:6543/postgres"
+node --import tsx scripts/attribute-matrix/load.ts plan --allow-remote-read
+```
+Compatibilidade verificada (somente leitura em produção e em PostgreSQL descartável): o carregador não usa locks de sessão, `SET` de sessão, `LISTEN`, nem prepared statements nomeados; só consultas parametrizadas não nomeadas e INSERT/DELETE avulsos. O modo transação **ignora** a opção de inicialização `default_transaction_read_only`, então os comandos de leitura agora rodam numa transação `BEGIN READ ONLY` num único cliente (o pooler mantém o mesmo backend até o fim) e o carregador recusa se o banco não confirmar `transaction_read_only = on`. O pré-voo leva ~3–4 min porque roda numa única transação.
