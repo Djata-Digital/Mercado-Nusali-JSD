@@ -220,6 +220,12 @@ export function validateMatrix(plans: CategoryPlan[], tree: Tree, resolution: Re
     const specs = list.filter((a) => a.role === 'spec');
     const axes = list.filter((a) => a.role === 'variant_axis');
     if (list.length > 0) withAttrs++;
+    // select OBRIGATÓRIO precisa de saída ("Outro"), salvo lista fechada por natureza: senão o vendedor cujo produto não está na lista não consegue anunciar
+    for (const r of specs) {
+      if (r.required && r.type === 'select' && !r.closed && r.originSlug === slug && !(r.options ?? []).some((o) => /^(outro|outra|outros|outras|n[ãa]o se aplica)\b/i.test(o.trim()))) {
+        push({ severity: 'error', rule: 'obrigatorio-sem-saida', category: slug, code: r.code, message: `${r.code}: select obrigatório sem opção de saída ("Outro"/"Não se aplica"). Marque closed:true só se a lista for fechada por natureza.` });
+      }
+    }
     if (axes.length > 0) withAxes++;
     const reqSpecs = specs.filter((a) => a.required).length;
     const reqAxes = axes.filter((a) => a.required).length;

@@ -1,0 +1,158 @@
+# Mudanças v1 → v2
+
+> Gerado por `scripts/attribute-matrix/diff.ts`. A matriz v1 (Fase 8A) permanece intacta em `docs/attribute-matrix/v1/` e no histórico do git.
+
+- Operações: 847 → 847 (novas: 0, removidas: 0).
+- Opção de saída acrescentada a select obrigatório: **137** atributos.
+- Obrigatório → opcional: **3** atributos.
+- Outras alterações de campo: **0**.
+
+## Opção de saída ("Outro") acrescentada a selects obrigatórios
+
+Motivo: um select obrigatório sem saída impede o vendedor cujo produto não está na lista de anunciar. Listas fechadas por natureza (nº de portas, faixa de idade, nível de ensino, estado de conservação) ficam como estavam.
+
+- `agricultura-e-pecuaria-equipamentos-para-pesca` · pesca
+- `agricultura-e-pecuaria-irrigacao` · irrigacao
+- `agricultura-e-pecuaria-racoes-animais` · destino
+- `alimentos-frescos-e-bebidas-produtos-congelados` · congelado
+- `alimentos-frescos-e-bebidas-sumos-e-refrigerantes` · sumo
+- `automoveis-motos-e-pecas-baterias-automotivas` · bateria
+- `automoveis-motos-e-pecas-capacetes` · capacete
+- `automoveis-motos-e-pecas-oleos-e-lubrificantes` · oleo
+- `automoveis-motos-e-pecas-pneus` · pneu
+- `automoveis-motos-e-pecas-produtos-de-limpeza-automotiva` · auto
+- `automoveis-motos-e-pecas-som-automotivo` · auto
+- `bebes-e-criancas-alimentacao-infantil` · infantil
+- `bebes-e-criancas-bercos` · berco
+- `bebes-e-criancas-cadeiras-infantis` · cadeira
+- `bebes-e-criancas-carrinhos-de-bebe` · carrinho
+- `bebes-e-criancas-fraldas` · fralda
+- `bebes-e-criancas-seguranca-infantil` · infantil
+- `beleza-e-cuidados-pessoais-barbearia` · barbearia
+- `beleza-e-cuidados-pessoais-cabelos-e-extensoes` · ext
+- `beleza-e-cuidados-pessoais-manicure-e-pedicure` · unhas
+- `beleza-e-cuidados-pessoais-perucas` · ext
+- `beleza-e-cuidados-pessoais-produtos-capilares` · capilar
+- `bolsas-malas-e-acessorios-joias-e-bijuterias` · joia
+- `bolsas-malas-e-acessorios-relogios` · relogio
+- `casa-moveis-e-decoracao-camas-e-colchoes` · cama
+- `casa-moveis-e-decoracao-estantes-e-armarios` · armario
+- `casa-moveis-e-decoracao-iluminacao` · luz
+- `casa-moveis-e-decoracao-mesas-e-cadeiras` · movel
+- `casa-moveis-e-decoracao-moveis-de-escritorio` · escritorio
+- `casa-moveis-e-decoracao-sofas-e-poltronas` · sofa
+- `casa-moveis-e-decoracao-tapetes-e-cortinas` · casa
+- `celulares-e-telefones-carregadores-e-cabos` · acessorio
+- `celulares-e-telefones-radios-comunicadores` · radio
+- `celulares-e-telefones-telefones-fixos` · telefone
+- `construcao-e-materiais-areia-e-brita` · agregado
+- `construcao-e-materiais-blocos-e-tijolos` · bloco
+- `construcao-e-materiais-cimento-e-argamassa` · cimento
+- `construcao-e-materiais-ferro-e-aco` · ferro
+- `construcao-e-materiais-loucas-sanitarias` · sanitaria
+- `construcao-e-materiais-pisos-e-revestimentos` · piso
+- `construcao-e-materiais-portas-e-janelas` · janela
+- `construcao-e-materiais-telhas-e-coberturas` · telha
+- `construcao-e-materiais-tintas-e-vernizes` · tinta
+- `cozinha-e-utilidades-domesticas-copos-e-canecas` · copo
+- `cozinha-e-utilidades-domesticas-facas-e-utensilios` · utensilio
+- `cozinha-e-utilidades-domesticas-panelas` · panela
+- `cozinha-e-utilidades-domesticas-pratos-e-tigelas` · louca
+- `cozinha-e-utilidades-domesticas-recipientes-e-conservacao` · recipiente
+- `cozinha-e-utilidades-domesticas-talheres` · talher
+- `eletrodomesticos-ar-condicionado` · btu
+- `eletrodomesticos-ar-condicionado` · ar
+- `eletrodomesticos-fogoes-e-fornos` · fogao
+- `eletrodomesticos-ventiladores` · ventilador
+- `eletronicos-tv-e-audio-caixas-de-som` · som
+- `eletronicos-tv-e-audio-cameras-de-seguranca` · seg
+- `eletronicos-tv-e-audio-cameras-de-seguranca` · resolucao
+- `eletronicos-tv-e-audio-cameras-digitais` · camera
+- `eletronicos-tv-e-audio-controles-remotos` · controle
+- `eletronicos-tv-e-audio-fones-de-ouvido` · fone
+- `eletronicos-tv-e-audio-home-theater` · audio
+- `eletronicos-tv-e-audio-televisores` · resolucao
+- `energia-solar-e-eletricidade-baterias-solares` · bateria
+- `energia-solar-e-eletricidade-controladores-de-carga` · controlador
+- `energia-solar-e-eletricidade-estabilizadores-e-ups` · protecao
+- `energia-solar-e-eletricidade-lampadas-solares` · solar
+- `energia-solar-e-eletricidade-sistemas-de-energia-de-emergencia` · emergencia
+- `esportes-e-fitness-basquetebol` · basquete
+- `esportes-e-fitness-ciclismo` · ciclismo
+- `esportes-e-fitness-equipamentos-de-ginastica` · ginastica
+- `esportes-e-fitness-pesca-esportiva` · esportiva
+- `ferramentas-e-maquinas-equipamentos-de-protecao` · epi
+- `ferramentas-e-maquinas-furadeiras` · furadeira
+- `ferramentas-e-maquinas-geradores` · combustivel
+- `ferramentas-e-maquinas-maquinas-de-solda` · solda
+- `ferramentas-e-maquinas-serras` · serra
+- `festas-e-eventos-artigos-de-aniversario` · aniversario
+- `festas-e-eventos-artigos-de-casamento` · casamento
+- `festas-e-eventos-baloes` · balao
+- `festas-e-eventos-decoracao-de-festas` · festa
+- `festas-e-eventos-equipamentos-de-som` · festa
+- `festas-e-eventos-iluminacao-para-eventos` · evento
+- `festas-e-eventos-tendas-e-coberturas` · tenda
+- `festas-e-eventos-utensilios-descartaveis` · descartavel
+- `games-e-consoles-acessorios-para-consoles` · plataforma
+- `games-e-consoles-consoles-de-jogos` · plataforma
+- `games-e-consoles-controles` · plataforma
+- `games-e-consoles-jogos-fisicos` · plataforma
+- `games-e-consoles-pecas-para-consoles` · plataforma
+- `industria-comercio-e-escritorio-equipamentos-de-seguranca` · seguranca
+- `industria-comercio-e-escritorio-equipamentos-para-restaurantes` · restaurante
+- `industria-comercio-e-escritorio-maquinas-de-costura` · costura
+- `industria-comercio-e-escritorio-materiais-de-armazenagem` · armazenagem
+- `industria-comercio-e-escritorio-uniformes-profissionais` · uniforme
+- `informatica-e-computadores-cartuchos-e-toners` · consumivel
+- `informatica-e-computadores-computadores-de-mesa` · computador
+- `informatica-e-computadores-computadores-de-mesa` · ram
+- `informatica-e-computadores-discos-ssd-e-hd` · disco
+- `informatica-e-computadores-impressoras-e-scanners` · impressora
+- `informatica-e-computadores-memorias-e-processadores` · componente
+- `informatica-e-computadores-notebooks` · ram
+- `informatica-e-computadores-redes-e-roteadores` · rede
+- `informatica-e-computadores-teclados-e-mouses` · periferico
+- `instrumentos-musicais-baterias-e-percussao` · percussao
+- `instrumentos-musicais-equipamentos-de-gravacao` · gravacao
+- `instrumentos-musicais-guitarras` · guitarra
+- `instrumentos-musicais-microfones` · microfone
+- `instrumentos-musicais-teclados-musicais` · teclado
+- `jardim-e-exterior-cercas` · cerca
+- `jardim-e-exterior-equipamentos-de-rega` · rega
+- `jardim-e-exterior-ferramentas-de-jardinagem` · jardinagem
+- `jardim-e-exterior-iluminacao-exterior` · luz
+- `jardim-e-exterior-mobiliario-exterior` · exterior
+- `jardim-e-exterior-plantas-e-sementes` · planta
+- `livros-papelaria-e-educacao-cadernos` · caderno
+- `livros-papelaria-e-educacao-canetas-e-lapis` · escrita
+- `livros-papelaria-e-educacao-materiais-de-desenho` · desenho
+- `livros-papelaria-e-educacao-mochilas-escolares` · escolar
+- `moda-feminina-roupas-intimas` · intima
+- `moda-masculina-fatos-e-blazers` · fato
+- `moda-masculina-roupa-intima` · intima
+- `moda-masculina-uniformes` · uniforme
+- `pet-shop-e-animais-aquarios` · aquario
+- `pet-shop-e-animais-coleiras-e-guias` · coleira
+- `pet-shop-e-animais-gaiolas` · gaiola
+- `pet-shop-e-animais-higiene-animal` · pet
+- `produtos-tradicionais-e-artesanato-artigos-de-madeira` · madeira
+- `produtos-tradicionais-e-artesanato-bijuterias-artesanais` · bijuteria
+- `produtos-tradicionais-e-artesanato-tecidos-africanos` · tecido
+- `saude-e-bem-estar-mascaras-e-luvas` · protecao
+- `saude-e-bem-estar-medidores-de-pressao` · medidor
+- `saude-e-bem-estar-mobilidade-e-acessibilidade` · mobilidade
+- `saude-e-bem-estar-termometros` · termometro
+- `supermercado-e-mercearia-acucar-e-sal` · sal
+- `supermercado-e-mercearia-bolachas-e-doces` · doce
+- `supermercado-e-mercearia-cafe-cha-e-cacau` · quente
+- `supermercado-e-mercearia-leite-e-derivados` · leite
+- `supermercado-e-mercearia-oleos-alimentares` · alimentar
+
+## Obrigatório → opcional
+
+Motivo: informação difícil de obter para muitos vendedores ou que não decide a compra sozinha; continua aparecendo na ficha quando informada.
+
+- `celulares-e-telefones-smartphones` · attr_nsl_celulares-e-telefones-smartphones_memoria_ram
+- `livros-papelaria-e-educacao-livros-escolares` · attr_nsl_livros-papelaria-e-educacao-livros-escolares_disciplina
+- `livros-papelaria-e-educacao-livros-universitarios` · attr_nsl_livros-papelaria-e-educacao-livros-universitarios_area_conhecimento

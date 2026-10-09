@@ -9,9 +9,12 @@ import path from 'path';
 import { ALL_PLANS, MATRIX_VERSION } from '../../src/data/attributeMatrix/index.js';
 import { buildTree, compileOperations, resolveMatrix, validateMatrix, type EffectiveAttribute } from '../../src/data/attributeMatrix/engine.js';
 import type { MatrixAttribute } from '../../src/data/attributeMatrix/types.js';
+import { INVENTORY_FILE, outDirFor } from './paths.js';
+import { hashOperations } from './loaderSafety.js';
 
-const DIR = path.resolve('docs/attribute-matrix/v1');
-const raw = JSON.parse(fs.readFileSync(path.join(DIR, 'categories.inventory.raw.json'), 'utf8'));
+const DIR = path.resolve(outDirFor(MATRIX_VERSION));
+fs.mkdirSync(DIR, { recursive: true });
+const raw = JSON.parse(fs.readFileSync(path.resolve(INVENTORY_FILE), 'utf8'));
 const tree = buildTree(raw.categories);
 const resolution = resolveMatrix(ALL_PLANS, tree);
 const report = validateMatrix(ALL_PLANS, tree, resolution);
@@ -30,7 +33,7 @@ const limits = (a: MatrixAttribute) => {
 };
 const roots = [...tree.values()].filter((n) => n.depth === 0).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
 const subsOf = (slug: string) => tree.get(slug)!.children.map((s) => tree.get(s)!).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-const header = (title: string) => `# ${title}\n\n> Matriz de atributos **${MATRIX_VERSION}** — proposta para revisão (Fase 8A). **Nada foi aplicado em produção.**\n> Gerado por \`scripts/attribute-matrix/generate.ts\` a partir de \`src/data/attributeMatrix/\`.\n\n`;
+const header = (title: string) => `# ${title}\n\n> Matriz de atributos **${MATRIX_VERSION}** — proposta para revisão (Fases 8A/8B). **Nada foi aplicado em produção.**\n> Gerado por \`scripts/attribute-matrix/generate.ts\` a partir de \`src/data/attributeMatrix/\`.\n\n`;
 const write = (name: string, body: string) => fs.writeFileSync(path.join(DIR, name), body.replace(/\s+$/, '') + '\n', 'utf8');
 
 // ----------------------------------------------------------------------------------------------- 01 inventário
@@ -191,5 +194,5 @@ const summary = {
   efetivosPorSubcategoria: { media: +(subs.reduce((n, l) => n + l.length, 0) / subs.length).toFixed(2), maxSpecs: Math.max(...subs.map((l) => l.filter((a) => a.role === 'spec').length)), maxObrigatoriosSpec: Math.max(...subs.map((l) => l.filter((a) => a.role === 'spec' && a.required).length)), maxEixos: Math.max(...subs.map((l) => l.filter((a) => a.role === 'variant_axis').length)) },
   erros: report.issues.filter((i) => i.severity === 'error').length, avisos: report.issues.filter((i) => i.severity === 'warning').length, informativos: report.issues.filter((i) => i.severity === 'info').length,
 };
-write('summary.json', JSON.stringify(summary, null, 1));
+write('summary.json', JSON.stringify({ ...summary, operationsHash: hashOperations(ops) }, null, 1));
 console.log(JSON.stringify(summary, null, 1));

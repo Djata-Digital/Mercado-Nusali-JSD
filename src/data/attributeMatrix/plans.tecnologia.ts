@@ -14,7 +14,7 @@ export const tecnologiaPlans: CategoryPlan[] = [
           axCor(true),
           axCapacidade('Armazenamento', ARMAZENAMENTO.filter((o) => !['2 TB'].includes(o)), true, 'Memória interna do telefone.'),
           sel('sistema_operativo', 'Sistema operativo', SO_MOVEL, { required: true, group: 'Geral' }),
-          sel('memoria_ram', 'Memória RAM', RAM_GB.filter((o) => !['32 GB', '64 GB'].includes(o)), { required: true, group: 'Desempenho' }),
+          sel('memoria_ram', 'Memória RAM', RAM_GB.filter((o) => !['32 GB', '64 GB'].includes(o)), { group: 'Desempenho' }),
           num('tamanho_ecra', 'Tamanho do ecrã', { unit: 'pol', min: 1, max: 10, decimals: 1, group: 'Ecrã', filter: true }),
           num('camara_principal', 'Câmara principal', { unit: 'MP', min: 0.3, max: 300, decimals: 1, group: 'Câmara' }),
           num('bateria_mah', 'Bateria', { unit: 'mAh', min: 500, max: 20000, decimals: 0, group: 'Bateria' }),

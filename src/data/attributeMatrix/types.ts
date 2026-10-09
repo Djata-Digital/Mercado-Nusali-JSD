@@ -35,6 +35,12 @@ export interface MatrixAttribute {
   help?: string;
   /** Pode virar filtro de busca (select/multiselect/number/boolean). */
   filterable: boolean;
+  /**
+   * Só para select OBRIGATÓRIO: lista fechada por natureza (ex.: nº de portas, faixa de idade) que dispensa a opção de saída "Outro".
+   * Qualquer outro select obrigatório TEM de oferecer uma saída (senão o vendedor cujo produto não está na lista fica sem poder anunciar).
+   * Metadado de revisão: não é gravado no banco.
+   */
+  closed?: boolean;
 }
 
 /** Atributo substituído numa subcategoria (mesmo código/tipo/função do herdado; só muda o que está declarado). */

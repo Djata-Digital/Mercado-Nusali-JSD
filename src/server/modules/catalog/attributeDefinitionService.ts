@@ -307,7 +307,15 @@ export interface AttributeWriteResult {
   warnings: string[];
 }
 
-export async function createAttribute(db: any, categoryId: string, raw: Record<string, any>): Promise<AttributeWriteResult> {
+/**
+ * Origem de um atributo gravado. É decidida SÓ pelo código do servidor (parâmetro `opts`, nunca lida do corpo da requisição): as rotas do
+ * painel não passam `opts`, então tudo que vem do admin é 'admin'; a carga inicial controlada (scripts/attribute-matrix) passa 'seed'.
+ * O CHECK category_attributes_source_check já aceita exatamente estes dois valores (Fase 1) — nenhuma migração.
+ */
+export type AttributeWriteSource = 'admin' | 'seed';
+export interface AttributeWriteOptions { source?: AttributeWriteSource }
+
+export async function createAttribute(db: any, categoryId: string, raw: Record<string, any>, opts: AttributeWriteOptions = {}): Promise<AttributeWriteResult> {
   const g = await loadGraph(db);
   const category = g.byId.get(categoryId);
   if (!category) throw fail(404, 'CATEGORY_NOT_FOUND', 'Categoria não encontrada.');
@@ -349,7 +357,7 @@ export async function createAttribute(db: any, categoryId: string, raw: Record<s
     isFilterable: draft.isFilterable,
     displayGroup: draft.displayGroup,
     overridesId,
-    source: 'admin',
+    source: opts.source === 'seed' ? 'seed' : 'admin', // nunca de raw.source: o cliente não escolhe a origem
     createdAt: now,
     updatedAt: now,
   };
@@ -525,7 +533,7 @@ export async function deleteAttribute(db: any, attributeId: string): Promise<{ n
 }
 
 /** "Desativar aqui": cria, nesta categoria, uma substituição INATIVA do atributo herdado (o original não é alterado). */
-export async function disableInheritedAttribute(db: any, categoryId: string, inheritedAttributeId: string): Promise<AttributeWriteResult> {
+export async function disableInheritedAttribute(db: any, categoryId: string, inheritedAttributeId: string, opts: AttributeWriteOptions = {}): Promise<AttributeWriteResult> {
   const g = await loadGraph(db);
   if (!g.byId.has(categoryId)) throw fail(404, 'CATEGORY_NOT_FOUND', 'Categoria não encontrada.');
   const [target] = await db.select().from(categoryAttributes).where(eq(categoryAttributes.id, inheritedAttributeId)).limit(1);
@@ -550,7 +558,7 @@ export async function disableInheritedAttribute(db: any, categoryId: string, inh
     maxLength: target.maxLength,
     decimals: target.decimals,
     overridesId: target.id,
-  });
+  }, opts);
   return result;
 }
 

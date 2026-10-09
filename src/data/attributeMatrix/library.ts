@@ -40,6 +40,8 @@ interface Common {
   placeholder?: string;
   /** Padrão: select/multiselect/boolean filtram; number e text não. */
   filter?: boolean;
+  /** select obrigatório com lista fechada por natureza: não recebe a opção de saída "Outro". */
+  closed?: boolean;
 }
 type NoOrder = Omit<MatrixAttribute, 'order'>;
 
@@ -54,10 +56,14 @@ const base = (code: string, name: string, type: MatrixAttributeType, o: Common):
   ...(o.help ? { help: o.help } : {}),
   ...(o.placeholder ? { placeholder: o.placeholder } : {}),
   filterable: o.filter ?? (type === 'select' || type === 'multiselect' || type === 'boolean'),
+  ...(o.closed ? { closed: true } : {}),
 });
 
 export const text = (code: string, name: string, o: Common & { maxLength?: number } = {}): NoOrder => ({ ...base(code, name, 'text', { ...o, filter: false }), ...(o.maxLength ? { maxLength: o.maxLength } : {}) });
-export const sel = (code: string, name: string, options: string[], o: Common = {}): NoOrder => ({ ...base(code, name, 'select', o), options });
+/** Opção de saída. Todo select OBRIGATÓRIO a recebe (v2): o vendedor cujo produto não está na lista não pode ficar impedido de anunciar. */
+export const ESCAPE_OPTION = 'Outro';
+export const hasEscapeOption = (options: readonly string[]) => options.some((x) => /^(outro|outra|outros|outras|n[ãa]o se aplica)\b/i.test(x.trim()));
+export const sel = (code: string, name: string, options: string[], o: Common = {}): NoOrder => ({ ...base(code, name, 'select', o), options: o.required && !o.closed && !hasEscapeOption(options) ? [...options, ESCAPE_OPTION] : options });
 export const multi = (code: string, name: string, options: string[], o: Common = {}): NoOrder => ({ ...base(code, name, 'multiselect', o), options });
 export const yesno = (code: string, name: string, o: Common = {}): NoOrder => base(code, name, 'boolean', o);
 export const num = (code: string, name: string, o: Common & { min?: number; max?: number; decimals?: number } = {}): NoOrder => ({

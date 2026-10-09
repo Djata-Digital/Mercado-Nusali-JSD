@@ -1,1 +1,2 @@
 docs/attribute-matrix/**/*.patch -whitespace
+*.sh text eol=lf

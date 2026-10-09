@@ -1,0 +1,23 @@
+{
+ "version": "v2-2026-10-08",
+ "categorias": 322,
+ "principais": 30,
+ "subcategorias": 292,
+ "definicoes": 806,
+ "overrides": 7,
+ "desativacoes": 34,
+ "operacoes": 847,
+ "atributosDefinidos": 806,
+ "categoriasComAtributos": 307,
+ "categoriasComEixos": 210,
+ "efetivosPorSubcategoria": {
+  "media": 3.66,
+  "maxSpecs": 8,
+  "maxObrigatoriosSpec": 3,
+  "maxEixos": 2
+ },
+ "erros": 0,
+ "avisos": 0,
+ "informativos": 48,
+ "operationsHash": "05b3b649e91bd18ea0049630f54c4c0239c09759f53ae41592d0762ee6dffbc8"
+}
