@@ -14,7 +14,7 @@ function Row({ label, value, title }: { label: string; value: string; title?: st
   return (
     <div className="flex justify-between py-1.5 border-b border-gray-200/60 last:border-none gap-2" title={title}>
       <span className="font-semibold text-gray-600">{label}</span>
-      <span className="text-gray-900 text-right font-medium">{value}</span>
+      <span className="text-gray-900 text-right font-medium min-w-0 break-words [overflow-wrap:anywhere]">{value}</span>
     </div>
   );
 }

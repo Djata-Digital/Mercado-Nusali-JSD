@@ -468,7 +468,9 @@ export class ShipmentService {
       throw new Error(`INVENTORY_NOT_INITIALIZED: O item de pedido "${item.id}" não possui alocação de estoque (inventoryId) associada.`);
     }
 
-    const invRows = await tx.select().from(inventory).where(eq(inventory.id, targetInventoryId)).limit(1);
+    // FASE 8C.1: trava a linha de estoque até o fim da transação — o despacho lê e escreve onHand/reservado; sem a trava, uma conversão
+    // simples -> variável simultânea (que aposenta esta mesma linha) poderia ter a sua atualização sobrescrita.
+    const invRows = await tx.select().from(inventory).where(eq(inventory.id, targetInventoryId)).limit(1).for('update');
     if (invRows.length === 0) {
       throw new Error(`INVENTORY_NOT_FOUND: Estoque com ID "${targetInventoryId}" não foi encontrado.`);
     }

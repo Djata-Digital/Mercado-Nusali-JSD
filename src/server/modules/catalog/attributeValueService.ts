@@ -11,6 +11,7 @@
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { categoryAttributes, productAttributeValues, productAttributes } from '../../../db/schema.js';
 import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
+import { composeOtherValue } from '../../../utils/attributeOther.js';
 import {
   ProductAttributeValidationError,
   validateProductAttributes,
@@ -64,7 +65,7 @@ function newValueId(idx: number): string {
   return `pav_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 7)}`;
 }
 
-/** Linhas de product_attribute_values de um valor normalizado: 1 linha (escalar/select) ou 1 por opção (multiselect). */
+/** Linhas de product_attribute_values de um valor normalizado: 1 linha (escalar/select), 1 por opção (multiselect) e +1 de texto para select "Outro" com especificação. */
 export function toValueRows(productId: string, values: NormalizedAttributeValue[], now = new Date()) {
   const rows: Array<typeof productAttributeValues.$inferInsert> = [];
   let idx = 0;
@@ -73,7 +74,11 @@ export function toValueRows(productId: string, values: NormalizedAttributeValue[
     if (v.type === 'text') rows.push({ id: newValueId(idx++), ...common, valueText: v.valueText! });
     else if (v.type === 'number') rows.push({ id: newValueId(idx++), ...common, valueNumber: v.valueNumber! });
     else if (v.type === 'boolean') rows.push({ id: newValueId(idx++), ...common, valueBool: v.valueBool! });
-    else for (const opt of v.options ?? []) rows.push({ id: newValueId(idx++), ...common, optionValue: opt });
+    else {
+      for (const opt of v.options ?? []) rows.push({ id: newValueId(idx++), ...common, optionValue: opt });
+      // FASE 8C.1: select na opção "Outro" guarda a especificação numa 2ª linha do MESMO atributo (value_text; option_value nulo)
+      if (v.type === 'select' && v.otherDetail) rows.push({ id: newValueId(idx++), ...common, valueText: v.otherDetail });
+    }
   }
   return rows;
 }
@@ -118,8 +123,11 @@ export interface ProductAttributeValueView {
   displayGroup: string | null;
   /** Valor tipado: texto, número, booleano (inclusive false), opção (select) ou lista de opções (multiselect). */
   value: string | number | boolean | string[];
-  /** Texto pronto para exibir no formato atual ("Sim"/"Não", opções separadas por ", "). */
+  /** Texto pronto para exibir no formato atual ("Sim"/"Não", opções separadas por ", "). Para select "Outro": a especificação. */
   displayValue: string;
+  /** select "Outro" com especificação: a opção ("Outro") e o detalhe; `value` vem composto ("Outro: Fibra de bambu") para a edição reenviar sem perdas. */
+  option?: string;
+  otherDetail?: string | null;
 }
 
 function formatNumberText(raw: unknown): string {
@@ -169,6 +177,7 @@ export async function loadProductAttributeValues(db: any, productIds: string[]):
       const first = list[0];
       let value: ProductAttributeValueView['value'];
       let displayValue: string;
+      let other: { option: string; detail: string } | null = null;
       if (first.type === 'multiselect') {
         const order: string[] = Array.isArray(first.optionsJson) ? first.optionsJson.map(String) : [];
         const picked = list.map((r) => r.optionValue as string).filter((x) => x != null);
@@ -179,8 +188,16 @@ export async function loadProductAttributeValues(db: any, productIds: string[]):
         value = sorted;
         displayValue = sorted.join(', ');
       } else if (first.type === 'select') {
-        value = first.optionValue;
-        displayValue = String(first.optionValue);
+        const optRow = list.find((r) => r.optionValue != null) ?? first;
+        const detailRow = list.find((r) => r.optionValue == null && r.valueText != null && String(r.valueText).trim() !== '');
+        if (detailRow) {
+          other = { option: String(optRow.optionValue), detail: String(detailRow.valueText) };
+          value = composeOtherValue(other.option, other.detail);
+          displayValue = other.detail;
+        } else {
+          value = optRow.optionValue;
+          displayValue = String(optRow.optionValue);
+        }
       } else if (first.type === 'number') {
         displayValue = formatNumberText(first.valueNumber);
         value = Number(displayValue);
@@ -191,7 +208,7 @@ export async function loadProductAttributeValues(db: any, productIds: string[]):
         value = first.valueText ?? '';
         displayValue = String(first.valueText ?? '');
       }
-      views.push({ attributeId: first.attributeId, code: first.code, name: first.name, type: first.type, unit: first.unit ?? null, displayGroup: first.displayGroup ?? null, value, displayValue });
+      views.push({ attributeId: first.attributeId, code: first.code, name: first.name, type: first.type, unit: first.unit ?? null, displayGroup: first.displayGroup ?? null, value, displayValue, ...(other ? { option: other.option, otherDetail: other.detail } : {}) });
     }
     out.set(productId, views);
   }

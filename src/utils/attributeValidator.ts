@@ -14,6 +14,7 @@
  *    voltam em `passthrough` para que a camada de compatibilidade as mantenha como antes; `strictUnknown` as recusa.
  */
 import { ATTRIBUTE_LIMITS, RESERVED_ATTRIBUTE_CODES } from './attributeRules.js';
+import { isOtherOption, normalizeOtherDetail, otherDetailMessage, splitOtherValue } from './attributeOther.js';
 
 export const PRODUCT_ATTRIBUTES_INVALID = 'PRODUCT_ATTRIBUTES_INVALID';
 
@@ -34,6 +35,7 @@ export type ValidationErrorCode =
   | 'TOO_MANY_DECIMALS'
   | 'TOO_LONG'
   | 'INVALID_OPTION'
+  | 'OTHER_DETAIL_REQUIRED'
   | 'MULTIPLE_VALUES'
   | 'INVALID_BOOLEAN'
   | 'CONFLICTING_VALUES'
@@ -79,6 +81,8 @@ export interface NormalizedAttributeValue {
   valueBool?: boolean;
   /** select (1 item) / multiselect (≥1 itens, sem repetição, na ordem das opções da definição) */
   options?: string[];
+  /** select na opção "Outro": a especificação informada (2ª linha do atributo em product_attribute_values, value_text). */
+  otherDetail?: string;
   /** Representação em texto no formato legado ("Sim"/"Não", opções separadas por ", "). */
   legacyText: string;
 }
@@ -234,7 +238,7 @@ function validateBoolean(def: AttributeDefinitionLike, raw: unknown): Outcome {
   return { ok: true, value: { ...base(def, 'boolean', b ? 'Sim' : 'Não'), valueBool: b } };
 }
 
-function matchOption(options: string[], raw: unknown): string | null {
+export function matchOption(options: string[], raw: unknown): string | null {
   const key = optionKey(raw);
   if (key === '') return null;
   // exato primeiro (preserva a grafia da definição), depois sem caixa/acento
@@ -248,7 +252,7 @@ function optionsSentence(options: string[]): string {
   return options.length ? ` Opções permitidas: ${options.join(', ')}.` : ' Este atributo não tem opções cadastradas.';
 }
 
-function validateSelect(def: AttributeDefinitionLike, raw: unknown): Outcome {
+function validateSelect(def: AttributeDefinitionLike, raw: unknown, opts: ValidateValueOptions = {}): Outcome {
   const options = definitionOptions(def);
   let candidate: unknown = raw;
   if (Array.isArray(raw)) {
@@ -259,9 +263,20 @@ function validateSelect(def: AttributeDefinitionLike, raw: unknown): Outcome {
   if (typeof candidate !== 'string' && typeof candidate !== 'number') {
     return fail(def, 'INVALID_TYPE', `O atributo "${def.name}" deve ser uma das opções permitidas.`, options.length ? `Opções: ${options.join(', ')}.` : undefined);
   }
-  const chosen = matchOption(options, candidate);
+  // FASE 8C.1: "Outro: especificação" (opção da família Outro + detalhe). Eixos de variante nunca usam este formato.
+  const composite = def.role === 'variant_axis' ? null : splitOtherValue(options, candidate, matchOption);
+  const chosen = composite ? composite.option : matchOption(options, candidate);
   if (chosen === null) {
     return fail(def, 'INVALID_OPTION', `Valor inválido "${String(candidate).trim()}" para o atributo "${def.name}".${optionsSentence(options)}`, 'Escolha uma das opções da lista.');
+  }
+  if (def.role !== 'variant_axis' && isOtherOption(chosen)) {
+    if (composite) {
+      const d = normalizeOtherDetail(composite.detail, chosen);
+      if (!d.ok) return fail(def, 'OTHER_DETAIL_REQUIRED', otherDetailMessage(def.name, d.reason), 'Escolha "Outro" e escreva qual é (2 a 80 caracteres).');
+      return { ok: true, value: { ...base(def, 'select', d.value!), options: [chosen], otherDetail: d.value } };
+    }
+    // valor antigo "Outro" sem especificação: só aceito quando NÃO está sendo alterado (compatibilidade com produtos históricos)
+    if (!opts.allowBareOther) return fail(def, 'OTHER_DETAIL_REQUIRED', otherDetailMessage(def.name, 'EMPTY'), 'Escolha "Outro" e escreva qual é (2 a 80 caracteres).');
   }
   return { ok: true, value: { ...base(def, 'select', chosen), options: [chosen] } };
 }
@@ -295,12 +310,17 @@ function validateMultiselect(def: AttributeDefinitionLike, raw: unknown): Outcom
 }
 
 /** Valida UM valor (já sabido como não vazio) contra a definição. Exportado para testes. */
-export function validateAttributeValue(def: AttributeDefinitionLike, raw: unknown): Outcome {
+export interface ValidateValueOptions {
+  /** Aceita a opção "Outro" SEM especificação (valores já gravados, não alterados, e texto legado). Padrão: false para valores novos. */
+  allowBareOther?: boolean;
+}
+
+export function validateAttributeValue(def: AttributeDefinitionLike, raw: unknown, opts: ValidateValueOptions = {}): Outcome {
   switch (def.type) {
     case 'text': return validateText(def, raw);
     case 'number': return validateNumber(def, raw);
     case 'boolean': return validateBoolean(def, raw);
-    case 'select': return validateSelect(def, raw);
+    case 'select': return validateSelect(def, raw, opts);
     case 'multiselect': return validateMultiselect(def, raw);
     default: return fail(def, 'INVALID_TYPE', `O atributo "${def.name}" tem um tipo desconhecido ("${def.type}").`);
   }

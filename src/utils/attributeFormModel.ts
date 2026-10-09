@@ -8,7 +8,8 @@
  * A validação usa as MESMAS regras do servidor (attributeValidator), então o que o formulário aceita é o que o backend aceita
  * e as mensagens são as mesmas. 0 e false são valores válidos.
  */
-import { normalizeLookupKey, validateAttributeValue, type AttributeDefinitionLike } from './attributeValidator';
+import { matchOption, normalizeLookupKey, validateAttributeValue, type AttributeDefinitionLike } from './attributeValidator';
+import { OTHER_FORM_SUFFIX, composeOtherValue, isOtherOption, otherFormKey, splitOtherValue } from './attributeOther';
 import { RESERVED_ATTRIBUTE_CODES, ATTRIBUTE_LIMITS } from './attributeRules';
 
 export interface FormAttribute extends AttributeDefinitionLike {
@@ -88,6 +89,24 @@ export function isEmptyFormValue(v: FormValue | undefined | null): boolean {
   return String(v).trim() === '';
 }
 
+/** select na opção "Outro": junta opção + especificação no formato "Outro: Fibra de bambu" (o mesmo que o servidor entende e devolve na edição). */
+export function withOtherDetail(def: Pick<FormAttribute, 'type'>, v: FormValue, otherDetail: FormValue | undefined): FormValue {
+  if (def.type !== 'select' || typeof v !== 'string' || !isOtherOption(v)) return v;
+  const d = typeof otherDetail === 'string' ? otherDetail.trim() : '';
+  return d === '' ? v : composeOtherValue(v, d);
+}
+
+/** O campo select está na opção "Outro" (o formulário deve pedir a especificação). */
+export function needsOtherDetail(def: Pick<FormAttribute, 'type'>, v: FormValue | undefined): boolean {
+  return def.type === 'select' && typeof v === 'string' && isOtherOption(v);
+}
+
+/** Valor efetivo do campo para comparação/envio: select "Outro" vira "Outro: especificação". */
+function effectiveValue(def: FormAttribute, values: FormValues): FormValue | undefined {
+  const v = values[def.code];
+  return v === undefined ? v : withOtherDetail(def, v, values[otherFormKey(def.code)]);
+}
+
 /** Valor do formulário -> valor aceito pelo validador (booleano de verdade, lista de opções, texto). */
 function toValidatorInput(def: FormAttribute, v: FormValue): unknown {
   if (def.type === 'boolean') return v === 'true' ? true : v === 'false' ? false : v;
@@ -95,17 +114,19 @@ function toValidatorInput(def: FormAttribute, v: FormValue): unknown {
 }
 
 /** Mensagem de erro do campo (mesmas regras/mensagens do servidor) ou null. */
-export function validateFormField(def: FormAttribute, v: FormValue | undefined): string | null {
+export function validateFormField(def: FormAttribute, v: FormValue | undefined, otherDetail?: FormValue | undefined, allowBareOther = false): string | null {
   if (isEmptyFormValue(v)) return def.isRequired ? `O campo "${def.name}" é obrigatório.` : null;
-  const r = validateAttributeValue(def, toValidatorInput(def, v as FormValue));
+  const r = validateAttributeValue(def, toValidatorInput(def, withOtherDetail(def, v as FormValue, otherDetail)), { allowBareOther });
   return r.ok ? null : r.error!.message;
 }
 
 /** Valida todos os campos; devolve só os que têm erro, por CÓDIGO. */
-export function validateFormFields(fields: FormAttribute[], values: FormValues): Record<string, string> {
+export function validateFormFields(fields: FormAttribute[], values: FormValues, original?: FormValues): Record<string, string> {
   const errors: Record<string, string> = {};
   for (const f of fields) {
-    const msg = validateFormField(f, values[f.code]);
+    // edição: um "Outro" antigo SEM especificação, que a pessoa não mexeu, não bloqueia o salvamento (produtos históricos)
+    const bareUnchanged = Boolean(original) && f.type === 'select' && values[f.code] === original![f.code] && isEmptyFormValue(values[otherFormKey(f.code)]) && isEmptyFormValue(original![otherFormKey(f.code)]);
+    const msg = validateFormField(f, values[f.code], values[otherFormKey(f.code)], bareUnchanged);
     if (msg) errors[f.code] = msg;
   }
   return errors;
@@ -120,13 +141,13 @@ export function buildAttributeSpecs(fields: FormAttribute[], values: FormValues)
   for (const f of fields) {
     const v = values[f.code];
     if (isEmptyFormValue(v)) continue;
-    const r = validateAttributeValue(f, toValidatorInput(f, v as FormValue));
+    const r = validateAttributeValue(f, toValidatorInput(f, withOtherDetail(f, v as FormValue, values[otherFormKey(f.code)])));
     if (!r.ok) continue; // submissão já foi bloqueada pela validação; nunca envia valor inválido
     const n = r.value!;
     out[f.code] = n.type === 'number' ? Number(n.valueNumber)
       : n.type === 'boolean' ? Boolean(n.valueBool)
       : n.type === 'multiselect' ? n.options!
-      : n.type === 'select' ? n.options![0]
+      : n.type === 'select' ? (n.otherDetail ? composeOtherValue(n.options![0], n.otherDetail) : n.options![0])
       : n.valueText!;
   }
   return out;
@@ -138,6 +159,7 @@ export function reconcileValues(fields: FormAttribute[], values: FormValues): { 
   const dropped: string[] = [];
   const byCode = new Map(fields.map((f) => [f.code, f]));
   for (const [code, v] of Object.entries(values)) {
+    if (code.endsWith(OTHER_FORM_SUFFIX)) continue; // especificação de "Outro": tratada junto com o campo (abaixo)
     const f = byCode.get(code);
     if (!f) { if (!isEmptyFormValue(v)) dropped.push(code); continue; }
     // opção que deixou de existir (substituição com outra lista) também é descartada
@@ -150,6 +172,8 @@ export function reconcileValues(fields: FormAttribute[], values: FormValues): { 
       continue;
     }
     next[code] = v;
+    const od = values[otherFormKey(code)];
+    if (needsOtherDetail(f, v as FormValue) && od !== undefined) next[otherFormKey(code)] = od;
   }
   return { values: next, dropped };
 }
@@ -166,18 +190,15 @@ export function initialValuesFromProduct(fields: FormAttribute[], product: any):
     if (raw === undefined || raw === null) continue;
     if (f.type === 'boolean') out[f.code] = raw === true || raw === 'Sim' || raw === 'true' ? 'true' : raw === false || raw === 'Não' || raw === 'Nao' || raw === 'false' ? 'false' : '';
     else if (f.type === 'multiselect') out[f.code] = Array.isArray(raw) ? raw.map(String) : String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+    else if (f.type === 'select' && typeof raw === 'string') {
+      // "Outro: Fibra de bambu" volta para a edição como opção + especificação
+      const opts = Array.isArray(f.optionsJson) ? (f.optionsJson as unknown[]).map(String) : [];
+      const split = splitOtherValue(opts, raw, matchOption);
+      if (split) { out[f.code] = split.option; out[otherFormKey(f.code)] = split.detail; } else out[f.code] = raw;
+    }
     else out[f.code] = typeof raw === 'number' ? String(raw).replace('.', ',') : String(raw);
   }
   return out;
-}
-
-/** Valores de saída de listas ("Outro", "Não se aplica"...): o atributo guarda só a opção; o detalhe vai no título/descrição do anúncio. */
-export const ESCAPE_OPTION_PATTERN = /^(outro|outra|outros|outras|n[ãa]o se aplica)(\b|$)/i;
-
-/** Dica exibida quando o vendedor escolhe "Outro" num select: não há campo de complemento (evita guardar texto livre em atributo filtrável). */
-export function escapeOptionHint(def: Pick<FormAttribute, 'type'>, value: FormValue | undefined): string | null {
-  if (def.type !== 'select' || typeof value !== 'string') return null;
-  return ESCAPE_OPTION_PATTERN.test(value.trim()) ? 'Diga o que é no título ou na descrição do anúncio, para o comprador entender.' : null;
 }
 
 /** Dica de limites para exibir sob o campo: "0 a 1024 GB · sem casas decimais" / "até 100 caracteres". */
@@ -237,8 +258,8 @@ export function buildAttributePatch(fields: FormAttribute[], original: FormValue
   const typedNow = buildAttributeSpecs(fields, current);
   const patch: Record<string, string | number | boolean | string[] | null> = {};
   for (const f of fields) {
-    const was = original[f.code];
-    const now = current[f.code];
+    const was = effectiveValue(f, original);
+    const now = effectiveValue(f, current);
     const wasEmpty = isEmptyFormValue(was);
     const nowEmpty = isEmptyFormValue(now);
     if (nowEmpty) { if (!wasEmpty) patch[f.code] = null; continue; }

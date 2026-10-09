@@ -278,9 +278,11 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
 
   const handleAttrChange = (code: string, value: FormValue) => {
     setAttrValues((prev) => ({ ...prev, [code]: value }));
+    // a especificação de "Outro" (chave `código__outro`) limpa o erro do próprio campo
+    const errKey = code.endsWith('__outro') ? code.slice(0, -'__outro'.length) : code;
     setAttrErrors((prev) => {
-      if (!(code in prev)) return prev;
-      const { [code]: _removed, ...rest } = prev;
+      if (!(errKey in prev)) return prev;
+      const { [errKey]: _removed, ...rest } = prev;
       return rest;
     });
   };
@@ -1109,7 +1111,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     }
     const attributesDirty = isEditing ? Object.keys(attributePatch).length > 0 || categoryChanged : true;
     if (attributesDirty && formFields.length > 0) {
-      const found = validateFormFields(formFields, attrValues);
+      const found = validateFormFields(formFields, attrValues, isEditing ? originalValuesRef.current : undefined);
       if (Object.keys(found).length > 0) {
         setAttrErrors(found);
         const firstCode = formFields.find((f) => found[f.code])?.code;

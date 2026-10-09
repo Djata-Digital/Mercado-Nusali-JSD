@@ -140,9 +140,10 @@ export function buildProductSpecSheet(input: SpecSheetInput): ProductSpecSheet {
   for (const t of typed) {
     const def = defByCode.get(normalizeLookupKey(t.code));
     if (!def) continue; // atributo desativado / "desativado aqui" / substituído por outro código: fora da página pública
-    const text = formatAttributeDisplay(def.type, t.value, def.unit);
+    // select "Outro" com especificação: a ficha mostra a especificação ("Material: Fibra de bambu"), não a palavra "Outro"
+    const text = t.otherDetail ? String(t.otherDetail) : formatAttributeDisplay(def.type, t.value, def.unit);
     if (text === '') continue;
-    entries.push({ def, item: { code: def.code, label: def.name, type: def.type, value: t.value, unit: def.unit ?? null, displayValue: text, source: sourceOf(def), legacy: false } });
+    entries.push({ def, item: { code: def.code, label: def.name, type: def.type, value: t.otherDetail ? String(t.otherDetail) : t.value, unit: def.unit ?? null, displayValue: text, source: sourceOf(def), legacy: false } });
     covered.add(normalizeLookupKey(def.code));
     covered.add(normalizeLookupKey(def.name));
   }
@@ -159,7 +160,7 @@ export function buildProductSpecSheet(input: SpecSheetInput): ProductSpecSheet {
     if (def) {
       if (covered.has(normalizeLookupKey(def.code))) continue;
       // texto legado reaproveitado pelo validador: "128" vira número com unidade, "Sim" vira booleano, etc.
-      const parsed = validateAttributeValue(def as AttributeDefinitionLike, rawVal);
+      const parsed = validateAttributeValue(def as AttributeDefinitionLike, rawVal, { allowBareOther: true });
       const n = parsed.ok ? parsed.value! : null;
       const value: SpecItem['value'] = n
         ? n.type === 'number' ? Number(n.valueNumber) : n.type === 'boolean' ? Boolean(n.valueBool) : n.type === 'select' || n.type === 'multiselect' ? (n.type === 'multiselect' ? n.options! : n.options![0]) : n.valueText!

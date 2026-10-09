@@ -25,8 +25,9 @@ import { applyOperations } from '../scripts/attribute-matrix/applyEngine.js';
 import { resolveEffectiveAttributes } from '../src/server/modules/catalog/attributeDefinitionService.js';
 import { ProductCreationService } from '../src/server/modules/catalog/productCreationService.js';
 import { CatalogService } from '../src/server/modules/catalog/catalogService.js';
-import { selectFormAttributes, buildAttributeSpecs, validateFormFields, escapeOptionHint, type FormValues } from '../src/utils/attributeFormModel.js';
+import { selectFormAttributes, buildAttributeSpecs, validateFormFields, needsOtherDetail, type FormValues } from '../src/utils/attributeFormModel.js';
 import { validateProductAttributes } from '../src/utils/attributeValidator.js';
+import { isOtherOption, otherFormKey } from '../src/utils/attributeOther.js';
 
 let passed = 0, total = 0;
 const report = (l: string, ok: boolean, d?: unknown) => { total++; if (ok) passed++; console.log(`[${ok ? 'PASS' : 'FAIL'}] ${l}${ok ? '' : ' -> ' + JSON.stringify(d ?? null).slice(0, 500)}`); };
@@ -140,14 +141,19 @@ async function main() {
     const form = selectFormAttributes(eff);
     const fv: FormValues = {};
     for (const a of form.fields) { const v = values[a.code]; fv[a.code] = a.type === 'boolean' ? (v ? 'true' : 'false') : a.type === 'multiselect' ? (v as string[]) : String(v); }
+    for (const a of outroSelects) if (isOtherOption(values[a.code])) fv[otherFormKey(a.code)] = 'Especificação de teste';
     const clientErrors = validateFormFields(form.fields, fv);
     const typed = buildAttributeSpecs(form.fields, fv);
     const strict = validateProductAttributes(eff as any, { ...typed, Marca: 'X', Modelo: 'Y', 'Condição': 'Novo' }, { strictUnknown: true });
     if (Object.keys(clientErrors).length || strict.errors.length || strict.unknownKeys.length) formIssues.push({ slug, client: clientErrors, server: strict.errors.slice(0, 2) });
     for (const a of outroSelects) {
       const f = form.fields.find((x) => x.code === a.code)!;
-      const h = escapeOptionHint(f, fv[a.code]), none = escapeOptionHint(f, (a.optionsJson as string[])[0]);
-      if (!h || none !== null) hintIssues.push({ slug, code: a.code, h, none });
+      // "Outro": pede a especificacao (sem ela o formulario bloqueia); opcoes normais e "Nao se aplica" nao pedem nada
+      const other = isOtherOption(fv[a.code]);
+      const without = { ...fv, [otherFormKey(a.code)]: '' };
+      const blocked = !!validateFormFields(form.fields, without)[a.code];
+      const none = needsOtherDetail(f, (a.optionsJson as string[])[0]);
+      if (needsOtherDetail(f, fv[a.code]) !== other || blocked !== other || none) hintIssues.push({ slug, code: a.code, other, blocked, none });
     }
     // produto real (so onde nao ha eixos obrigatorios: nao exige variantes)
     const axesReq = eff.some((a: any) => a.role === 'variant_axis' && a.isRequired);
@@ -158,12 +164,12 @@ async function main() {
         const stored = await q('SELECT option_value FROM product_attribute_values WHERE product_id=$1 AND attribute_code=$2', [prod.id, outroSelects[0].code]);
         const d: any = await CatalogService.getProductById(prod.id, undefined, db);
         const items = [...d.specSheet.groups.flatMap((g: any) => g.items), ...d.specSheet.other];
-        if (stored[0]?.option_value === (outroSelects[0].optionsJson as string[]).slice(-1)[0] && items.some((i: any) => /^outr/i.test(String(i.value)))) sheetOk++;
+        if (stored.some((r: any) => r.option_value === (outroSelects[0].optionsJson as string[]).slice(-1)[0]) && items.some((i: any) => i.displayValue === 'Especificação de teste' || !isOtherOption(typed[outroSelects[0].code]))) sheetOk++;
       } catch (e: any) { createFail.push({ slug, msg: String(e.message).slice(0, 150) }); }
     }
   }
   report(`F2 "Outro" no assistente: ${withOutro} subcategorias com select obrigatorio + saida; valores com "Outro" passam no cliente E no servidor ESTRITO`, withOutro >= 100 && formIssues.length === 0, formIssues.slice(0, 3));
-  report('F3 dica de complemento: ao escolher "Outro" o assistente orienta a descrever no titulo/descricao; nas demais opcoes nao aparece nada', hintIssues.length === 0, hintIssues.slice(0, 3));
+  report('F3 campo complementar: "Outro" exige especificacao (formulario bloqueia sem ela); demais opcoes e "Nao se aplica" nao pedem nada', hintIssues.length === 0, hintIssues.slice(0, 3));
   report(`F4 produto real com "Outro" gravado como valor tipado (option_value) e exibido na ficha publica: ${sheetOk}/${created}`, created >= 10 && sheetOk === created && createFail.length === 0, createFail.slice(0, 3));
   report('F5 efetivos das 322 categorias no servico real == resolvedor puro (herança, overrides, desativacoes, eixos)', await (async () => {
     const { verifyEffective } = await import('../scripts/attribute-matrix/verifyEffective.js');

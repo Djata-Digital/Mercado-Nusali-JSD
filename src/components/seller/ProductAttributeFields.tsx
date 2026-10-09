@@ -2,12 +2,13 @@ import React from 'react';
 import { Loader2, Sparkles } from 'lucide-react';
 import {
   describeLimits,
-  escapeOptionHint,
+  needsOtherDetail,
   groupFormAttributes,
   type FormAttribute,
   type FormValue,
   type FormValues,
 } from '../../utils/attributeFormModel';
+import { OTHER_DETAIL_MAX, otherFormKey } from '../../utils/attributeOther';
 
 interface Props {
   fields: FormAttribute[];
@@ -41,11 +42,34 @@ export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors
     const value = values[f.code];
 
     if (f.type === 'select') {
+      const other = needsOtherDetail(f, value as FormValue);
       return (
-        <select {...common} value={typeof value === 'string' ? value : ''} onChange={(e) => onChange(f.code, e.target.value)} className={`${inputBase} ${borderFor(Boolean(err))} font-bold`}>
-          <option value="">{f.placeholder || `Selecione ${f.name}...`}</option>
-          {options.map((o) => <option key={o} value={o}>{o}</option>)}
-        </select>
+        <div className="space-y-2">
+          <select {...common} value={typeof value === 'string' ? value : ''} onChange={(e) => onChange(f.code, e.target.value)} className={`${inputBase} ${borderFor(Boolean(err))} font-bold`}>
+            <option value="">{f.placeholder || `Selecione ${f.name}...`}</option>
+            {options.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+          {other && (
+            <div className="space-y-1">
+              <label htmlFor={`${id}-outro`} className="block text-gray-900 font-extrabold text-xs">
+                Especifique sua opção<span className="text-red-500 font-black ml-0.5" aria-hidden="true">*</span><span className="sr-only"> (obrigatório)</span>
+              </label>
+              <input
+                id={`${id}-outro`}
+                type="text"
+                disabled={readOnly}
+                maxLength={OTHER_DETAIL_MAX}
+                value={typeof values[otherFormKey(f.code)] === 'string' ? (values[otherFormKey(f.code)] as string) : ''}
+                onChange={(e) => onChange(otherFormKey(f.code), e.target.value)}
+                placeholder="Ex.: Fibra de bambu"
+                aria-invalid={Boolean(err) || undefined}
+                aria-describedby={err ? `${id}-error` : undefined}
+                data-testid={`${id}-outro`}
+                className={`${inputBase} ${borderFor(Boolean(err))}`}
+              />
+            </div>
+          )}
+        </div>
       );
     }
     if (f.type === 'boolean') {
@@ -173,7 +197,6 @@ export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors
                         {f.isRequired && <span className="sr-only"> (obrigatório)</span>}
                       </label>
                       {renderControl(f)}
-                      {escapeOptionHint(f, values[f.code]) && <p className="text-[11px] text-amber-700 font-bold">{escapeOptionHint(f, values[f.code])}</p>}
                       {f.helpText && <p id={`${id}-help`} className="text-[11px] text-gray-500 font-medium">{f.helpText}</p>}
                       {limits && <p className="text-[11px] text-gray-400 font-medium">{limits}</p>}
                       {err && <p id={`${id}-error`} role="alert" className="text-[11px] text-red-600 font-bold">{err}</p>}

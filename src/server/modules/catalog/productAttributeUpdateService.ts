@@ -149,7 +149,7 @@ export async function planAttributeUpdate(db: any, input: PlanInput): Promise<At
       else staleTyped.add(k);
       continue;
     }
-    const r = validateAttributeValue(def, cur.raw);
+    const r = validateAttributeValue(def, cur.raw, { allowBareOther: true }); // valor já gravado: "Outro" antigo sem especificação segue válido enquanto não for alterado
     if (r.ok) { working.set(k, cur.raw); preserved.push(def.code); }
     else if (categoryChange) removed.push({ code: cur.code, name: cur.name, value: cur.text, reason: r.error!.message });
     else if (cur.fromTyped) staleTyped.add(k); // valor já gravado que a definição passou a recusar: fica como está até o vendedor corrigi-lo
@@ -210,7 +210,8 @@ export async function planAttributeUpdate(db: any, input: PlanInput): Promise<At
       }
       continue;
     }
-    const r = validateAttributeValue(d, v);
+    // valor enviado agora (novo/alterado) exige especificação em "Outro"; valor preservado do banco é tolerado como estava
+    const r = validateAttributeValue(d, v, { allowBareOther: !seen.has(k) });
     if (!r.ok) { if (!errors.some((e) => e.field === d.code)) errors.push(r.error!); continue; }
     finalValues.push(r.value!);
   }
