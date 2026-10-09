@@ -198,7 +198,7 @@ async function main() {
   // ---------- G. obrigatorios, raizes, protecao de uso
   const smart = inv.categories.find((c: any) => c.slug === 'celulares-e-telefones-smartphones');
   let reqErr: any = null; try { await ProductCreationService.createProduct('usr_m8', { title: 'x', price: 1, image: 'x.jpg', categoryId: smart.id, storeId: 'st_m8', weightKg: 1, dimensionsCm: { length: 1, width: 1, height: 1 }, stock: 1, specs: {} }, db); } catch (e: any) { reqErr = e; }
-  report('G1 smartphone SEM atributos: acusa exatamente os 2 obrigatorios (Sistema operativo, Memoria RAM); eixos (Cor, Armazenamento) NAO sao exigidos como atributos gerais', reqErr?.details?.map((d: any) => d.field).sort().join() === 'memoria_ram,sistema_operativo', reqErr?.details);
+  report('G1 smartphone SEM atributos: acusa exatamente o unico obrigatorio da v2 (Sistema operativo; Memoria RAM passou a opcional); eixos (Cor, Armazenamento) NAO sao exigidos como atributos gerais', reqErr?.details?.map((d: any) => d.field).sort().join() === 'sistema_operativo', reqErr?.details);
   let rootErr = ''; try { await ProductCreationService.createProduct('usr_m8', { title: 'x', price: 1, image: 'x.jpg', categoryId: inv.categories.find((c: any) => !c.parent_id).id, storeId: 'st_m8', weightKg: 1, dimensionsCm: { length: 1, width: 1, height: 1 }, stock: 1, specs: {} }, db); } catch (e: any) { rootErr = e.message; }
   report('G2 categoria PRINCIPAL continua sem aceitar produto (so subcategoria folha)', /subcategorias|mais específica/.test(rootErr), rootErr);
   const rb = await rollbackOperations(db, ops);
