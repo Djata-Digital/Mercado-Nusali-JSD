@@ -1251,6 +1251,14 @@ async function addSingleCartLine(
   let realUnitPrice = Number(prod.price);
   const targetVariantId = line.variantId || null;
 
+  // FASE 8B: produto com variações ativas exige variação em QUALQUER porta de entrada do carrinho (o lote já exigia).
+  if (!targetVariantId) {
+    const activeVariantRows = await executor.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, prod.id), eq(productVariants.isActive, true))).limit(1);
+    if (activeVariantRows.length > 0) {
+      throw new CartOperationError(400, 'VARIANT_REQUIRED', `Selecione uma variação de "${prod.title}" antes de adicionar ao carrinho.`);
+    }
+  }
+
   if (targetVariantId) {
     const varRows = await executor.select().from(productVariants).where(eq(productVariants.id, targetVariantId)).limit(1);
     const variantRow = varRows[0] || null;

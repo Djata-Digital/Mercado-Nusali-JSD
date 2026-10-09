@@ -566,12 +566,27 @@ export class OrderService {
 
         if (ci.variantId) {
           const varRows = await tx.select().from(productVariants).where(eq(productVariants.id, ci.variantId)).limit(1);
+          // FASE 8B: variação inexistente, de outro produto ou desativada nunca vira pedido (carrinho antigo ou payload adulterado).
+          if (varRows.length === 0 || varRows[0].productId !== prod.id) {
+            throw new Error(`VARIANT_NOT_FOUND: a variação escolhida de "${prod.title}" não existe mais — atualize o carrinho.`);
+          }
+          if (varRows[0].isActive === false) {
+            throw new Error(`VARIANT_INACTIVE: a variação escolhida de "${prod.title}" não está mais disponível — atualize o carrinho.`);
+          }
           if (varRows.length > 0) {
             const v = varRows[0];
             if (v.price) unitPrice = Number(v.price);
             if (v.weight) itemWeightKg = Number(v.weight);
             variantTitle = v.title || null;
             variantSku = v.sku || null;
+          }
+        }
+
+        // FASE 8B: carrinho antigo com linha SEM variação de um produto que passou a ter variações ativas não pode ser comprado.
+        if (!ci.variantId) {
+          const activeVariantRows = await tx.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, prod.id), eq(productVariants.isActive, true))).limit(1);
+          if (activeVariantRows.length > 0) {
+            throw new Error(`VARIANT_REQUIRED: o produto "${prod.title}" agora tem variações — escolha uma variação no carrinho.`);
           }
         }
 

@@ -18,12 +18,17 @@ export class InventoryService {
     const db = executor || getDb();
     if (!db || !productId) return 0;
 
+    // Resumo do que é VENDÁVEL: linhas de variante DESATIVADA e a linha de produto simples de um produto que já tem variações ativas
+    // não entram (continuam gravadas — histórico e reservas — mas não inflam o total).
     const rows = await db
-      .select({ qty: inventory.quantityOnHand })
+      .select({ qty: inventory.quantityOnHand, variantId: inventory.variantId, variantActive: productVariants.isActive })
       .from(inventory)
+      .leftJoin(productVariants, eq(productVariants.id, inventory.variantId))
       .where(eq(inventory.productId, productId));
-
-    const totalStock = rows.reduce((acc: number, r: any) => acc + (r.qty || 0), 0);
+    const hasActiveVariants = rows.some((r: any) => r.variantId && r.variantActive === true);
+    const totalStock = rows
+      .filter((r: any) => (r.variantId ? r.variantActive === true : !hasActiveVariants))
+      .reduce((acc: number, r: any) => acc + (r.qty || 0), 0);
 
     await db
       .update(products)
@@ -34,6 +39,76 @@ export class InventoryService {
       .where(eq(products.id, productId));
 
     return totalStock;
+  }
+
+  /**
+   * FASE 8B — converter um produto SIMPLES em VARIÁVEL: o estoque que estava na linha do produto (variantId nulo) passa a
+   * ser representado pelas linhas das variações. A linha do produto NÃO é apagada (histórico, FKs, reservas de pedidos em andamento):
+   * é aposentada — quantityOnHand cai para o já reservado (disponível 0) e a baixa entra como AJUSTE auditável. Idempotente.
+   * Estoque do produto em HUB (sem variação) não pode ser aposentado aqui (pertence à operação do armazém): bloqueia a conversão.
+   * Sempre dentro da transação do chamador.
+   */
+  static async retireProductLevelStockForVariants(tx: any, params: { productId: string; performedBy?: string | null }): Promise<{ retired: number }> {
+    const { productId, performedBy } = params;
+    const active = await tx.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, productId), eq(productVariants.isActive, true))).limit(1);
+    if (active.length === 0) return { retired: 0 };
+    const rows = await tx.select().from(inventory).where(and(eq(inventory.productId, productId), isNull(inventory.variantId))).for('update');
+    let retired = 0;
+    for (const r of rows) {
+      const onHand = Number(r.quantityOnHand) || 0;
+      const reserved = Number(r.quantityReserved) || 0;
+      if (onHand <= reserved) continue;
+      if (r.locationType !== 'SELLER_LOCATION') {
+        throw new Error('VARIANT_CONVERSION_BLOCKED_HUB_STOCK: este produto tem estoque no armazém sem variação. Transfira ou ajuste esse estoque em Estoque & Armazéns antes de criar variações.');
+      }
+      const delta = reserved - onHand; // negativo
+      await tx.update(inventory).set({ quantityOnHand: reserved, updatedAt: new Date() }).where(eq(inventory.id, r.id));
+      await tx.insert(inventoryMovements).values({
+        id: `mov_${Date.now()}_conv_${Math.random().toString(36).substring(2, 6)}`,
+        inventoryId: r.id,
+        warehouseId: r.warehouseId || null,
+        productId,
+        variantId: null,
+        type: 'ADJUSTMENT',
+        quantity: delta,
+        reason: 'Estoque do produto simples substituído pelo estoque por variação (conversão)',
+        performedBy: performedBy || null,
+        createdAt: new Date(),
+      });
+      retired += -delta;
+    }
+    await InventoryService.syncProductStockSummary(productId, tx);
+    return { retired };
+  }
+
+  /**
+   * FASE 8B — mantém a invariante da linha de produto simples APOSENTADA (produto com variações ativas): quantityOnHand == quantityReserved.
+   * Chamada depois que uma reserva antiga é liberada: o que sobrar em onHand acima do reservado é baixado (AJUSTE auditável), nunca apagado.
+   * Não faz nada para linhas de variante, para produtos sem variações ativas ou quando a invariante já vale (idempotente).
+   */
+  static async settleRetiredProductLevelRow(tx: any, inventoryId: string): Promise<{ adjusted: number }> {
+    const [row] = await tx.select().from(inventory).where(eq(inventory.id, inventoryId)).for('update').limit(1);
+    if (!row || row.variantId || row.locationType !== 'SELLER_LOCATION') return { adjusted: 0 };
+    const onHand = Number(row.quantityOnHand) || 0;
+    const reserved = Number(row.quantityReserved) || 0;
+    if (onHand <= reserved) return { adjusted: 0 };
+    const active = await tx.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, row.productId), eq(productVariants.isActive, true))).limit(1);
+    if (active.length === 0) return { adjusted: 0 };
+    const delta = reserved - onHand;
+    await tx.update(inventory).set({ quantityOnHand: reserved, updatedAt: new Date() }).where(eq(inventory.id, row.id));
+    await tx.insert(inventoryMovements).values({
+      id: `mov_${Date.now()}_settle_${Math.random().toString(36).substring(2, 6)}`,
+      inventoryId: row.id,
+      warehouseId: row.warehouseId || null,
+      productId: row.productId,
+      variantId: null,
+      type: 'ADJUSTMENT',
+      quantity: delta,
+      reason: 'Reserva anterior à conversão liberada: unidades da linha de produto simples aposentada baixadas (não voltam a ser vendáveis)',
+      createdAt: new Date(),
+    });
+    await InventoryService.syncProductStockSummary(row.productId, tx);
+    return { adjusted: -delta };
   }
 
   /**
@@ -71,6 +146,14 @@ export class InventoryService {
     }
     if (variantId) {
       conditions.push(eq(inventory.variantId, variantId));
+    } else {
+      // FASE 8B: sem variantId o alvo é SEMPRE a linha do produto simples (antes pegava qualquer linha do produto, inclusive de variação)...
+      conditions.push(isNull(inventory.variantId));
+      // ...e produto com variações ativas não tem estoque "do produto": o estoque é por variação (a linha simples está aposentada).
+      const activeVariants = await db.select({ id: productVariants.id }).from(productVariants).where(and(eq(productVariants.productId, productId), eq(productVariants.isActive, true))).limit(1);
+      if (activeVariants.length > 0) {
+        throw new Error('VARIANT_REQUIRED: este produto tem variações — o estoque é informado por variação.');
+      }
     }
 
     let [sellerInv] = await db
@@ -708,6 +791,10 @@ export class InventoryService {
       }
 
       await db.update(stockReservations).set({ status: 'released' }).where(eq(stockReservations.id, res.id));
+
+      // FASE 8B: reserva ANTIGA (feita quando o produto ainda era simples) cancelada depois da conversão para variável não pode devolver
+      // unidades vendáveis à linha aposentada: ela volta a onHand = reservado (= 0), com ajuste auditável.
+      if (res.inventoryId) await InventoryService.settleRetiredProductLevelRow(db, res.inventoryId);
 
       await db.insert(inventoryMovements).values({
         id: `mov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,

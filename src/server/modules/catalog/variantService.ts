@@ -36,6 +36,7 @@ import { products, productVariants, inventory, inventoryMovements } from '../../
 // origem física real da store — nunca uma segunda lógica de "achar/criar a
 // location", nunca uma store adivinhada.
 import { ensureStoreFulfillmentLocation } from '../logistics/fulfillmentLocationService.js';
+import { InventoryService } from '../inventory/inventoryService.js';
 // FASE 7 — eixos de variante (atributos da categoria com role = variant_axis) e identidade da combinação (variant_key).
 import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
 import { activeAxes, buildVariantKey, validateVariantAxes, type VariantAxisError } from '../../../utils/variantAxes.js';
@@ -381,6 +382,9 @@ export async function syncVariantsForProduct(
   for (const r of toRestore) {
     await db.update(productVariants).set({ variantKey: r.key }).where(eq(productVariants.id, r.id));
   }
+
+  // FASE 8B: produto que acaba de ganhar variações ativas aposenta a linha de estoque do produto simples (sem apagá-la).
+  if (seenIds.size > 0) await InventoryService.retireProductLevelStockForVariants(db, { productId, performedBy });
 
   return results;
 }
