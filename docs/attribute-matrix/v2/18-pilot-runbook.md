@@ -83,3 +83,26 @@ $T = "aws-1-eu-west-3.pooler.supabase.com:6543/postgres"
 node --import tsx scripts/attribute-matrix/load.ts plan --allow-remote-read
 ```
 Compatibilidade verificada (somente leitura em produção e em PostgreSQL descartável): o carregador não usa locks de sessão, `SET` de sessão, `LISTEN`, nem prepared statements nomeados; só consultas parametrizadas não nomeadas e INSERT/DELETE avulsos. O modo transação **ignora** a opção de inicialização `default_transaction_read_only`, então os comandos de leitura agora rodam numa transação `BEGIN READ ONLY` num único cliente (o pooler mantém o mesmo backend até o fim) e o carregador recusa se o banco não confirmar `transaction_read_only = on`. O pré-voo leva ~3–4 min porque roda numa única transação.
+
+## 12. Recriar o papel expirado (passo a passo — executado por VOCÊ)
+O papel `attr_loader_8c3` vence 3 h depois de criado (o anterior venceu em 2026-10-09 16:20 UTC). Para recriar com **senha nova, sem digitá-la nem exibi-la**:
+1. Abra o PowerShell na pasta do projeto e rode (use o seu `<REF-DO-PROJETO>`, o mesmo sufixo de `postgres.<ref>`):
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+.\docs\attribute-matrix\v2\ops\new-role-session.ps1 -Ref "<REF-DO-PROJETO>"
+```
+   O script gera uma senha de 40 caracteres, põe na **área de transferência** o SQL "revogar o papel antigo + criar o novo" já com essa senha, e define `ATTR_LOAD_DATABASE_URL` **nesta sessão** com a mesma senha, na **porta 6543**. Nada é exibido nem gravado em arquivo.
+2. No Supabase, abra o **SQL Editor**, cole (Ctrl+V) e clique em **Run**. Se pedir confirmação por causa do `DROP`, confirme. O resultado final deve mostrar `attr_loader_8c3` com `rolcanlogin = true` e `rolvaliduntil` cerca de **3 horas à frente** (anote o horário: é o prazo para o pré-voo e o piloto).
+3. Volte ao PowerShell e pressione **Enter**: a área de transferência é limpa. Se você colar o SQL em outro lugar, ele contém a senha: não salve nem compartilhe.
+4. Confirme a autenticação (somente leitura):
+```powershell
+node --import tsx scripts/attribute-matrix/diagnose-auth.ts
+```
+   Esperado: `CONFERE com a senha armazenada`, `dentro do prazo` e `CONECTOU como "attr_loader_8c3"` na rota 6543.
+5. Pré-voo (somente leitura, ~3–4 min):
+```powershell
+node --import tsx scripts/attribute-matrix/load.ts plan --allow-remote-read
+```
+   Esperado: `ok: true`, `readOnlySession: true`, alvo `aws-1-eu-west-3.pooler.supabase.com:6543/postgres`, árvore 322/322, `wouldCreate: 847`, `drift: 0`, hash `05b3b649e91b…`.
+6. Se não for executar o piloto em seguida, **revogue** (SQL Editor: `limited-role.revoke.sql`) e feche o PowerShell. O piloto (passo 4 deste runbook) só com a sua autorização final e dentro do prazo do papel.
+Privilégios, limites (2 conexões, 60 s por comando) e todas as travas do carregador são os mesmos de antes: nada foi alterado nos scripts SQL.
