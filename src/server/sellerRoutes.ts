@@ -95,6 +95,8 @@ import {
 import { listFulfillmentLocationsForSeller, ensureStoreFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
 import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
 import { validateCouponDefinition, normalizeCouponCode } from './modules/coupons/couponService.js';
+import { loadStoredKyc, resolveStoredAccountType, saveKycProfileMeta, storedDocumentFlags } from './modules/seller/kycService.js';
+import { normalizeKycAccountType, summarizeKycIssues, validateKycSubmission } from '../utils/sellerKycRules.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -3307,6 +3309,7 @@ sellerRouter.get('/kyc', async (req: AuthRequest, res: Response) => {
     const kycRows = await db.select().from(sellerKyc).where(eq(sellerKyc.sellerId, seller.id)).limit(1);
     const kyc = kycRows[0];
     const docs = await db.select().from(sellerDocuments).where(eq(sellerDocuments.sellerId, seller.id));
+    const kycMeta = await loadStoredKyc(db, seller.id);
 
     const resolveSignedUrl = async (objectKey?: string | null, fileUrl?: string | null) => {
       if (objectKey) {
@@ -3364,6 +3367,12 @@ sellerRouter.get('/kyc', async (req: AuthRequest, res: Response) => {
             id: kyc.id,
             sellerId: kyc.sellerId,
             legalName: kyc.legalName,
+            // dados guardados no envio (additivo): a tela volta preenchida e com o tipo de conta certo
+            accountType: resolveStoredAccountType(kycMeta),
+            taxId: (seller as any).taxId,
+            phone: (seller as any).phone,
+            country: (seller as any).countryCode,
+            birthDate: kycMeta.settingsKyc.birthDate || (seller as any).dateOfBirth || null,
             documentType: kyc.documentType,
             documentNumber: kyc.documentNumber,
             documentFrontUrl: docFrontSignedUrl || kyc.documentFrontUrl,
@@ -3379,6 +3388,9 @@ sellerRouter.get('/kyc', async (req: AuthRequest, res: Response) => {
             documents: documentsWithSignedUrls,
           }
         : null,
+      // vendedor existe, mas ainda não enviou KYC (data nula): a tela NÃO deve tratar isso como "cadastro de vendedor não inicializado"
+      sellerProfileExists: true,
+      kycSubmitted: Boolean(kyc),
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao carregar KYC.' });
@@ -3413,21 +3425,33 @@ sellerRouter.post('/kyc/submit', async (req: AuthRequest, res: Response) => {
       selfieMetadata,
     } = req.body;
 
-    const missing: string[] = [];
-    if (!documentFrontUrl && !identityMetadata?.url) missing.push('Identidade (BI/Passaporte)');
-    if (!proofOfAddressUrl && !addressMetadata?.url) missing.push('Comprovante de Residência');
-    if (!selfieUrl && !selfieMetadata?.url) missing.push('Selfie de Validação');
-    if (accountType === 'empresa' && !businessLicenseUrl && !companyMetadata?.url) {
-      missing.push('Registro Empresarial / NIF');
-    }
-
-    if (missing.length > 0) {
+    // Validação ESTRUTURADA (mesmas regras da tela, por tipo de conta e país do cadastro): cada problema traz campo, rótulo, mensagem e
+    // etapa. O que já está guardado de um envio anterior (documentos) também vale — reenviar não obriga a repetir uploads.
+    const kycType = normalizeKycAccountType(accountType);
+    const storedCtx = await loadStoredKyc(db, seller.id);
+    const storedFlags = storedDocumentFlags(storedCtx);
+    const issues = validateKycSubmission(
+      {
+        accountType,
+        legalName,
+        birthDate: req.body.birthDate,
+        taxId: req.body.taxId,
+        phone: req.body.phone,
+        documentType,
+        documentNumber,
+        hasIdentityDocument: !!(documentFrontUrl || identityMetadata?.url) || storedFlags.hasIdentityDocument,
+        hasProofOfAddress: !!(proofOfAddressUrl || addressMetadata?.url) || storedFlags.hasProofOfAddress,
+        hasSelfie: !!(selfieUrl || selfieMetadata?.url) || storedFlags.hasSelfie,
+        hasBusinessLicense: !!(businessLicenseUrl || companyMetadata?.url) || storedFlags.hasBusinessLicense,
+      },
+      (seller as any).countryCode,
+    );
+    if (issues.length > 0 || !kycType) {
+      const summary = summarizeKycIssues(issues);
       return res.status(400).json({
         success: false,
-        error: {
-          code: 'MISSING_MANDATORY_DOCUMENTS',
-          message: `Documentos obrigatórios ausentes: ${missing.join(', ')}`,
-        },
+        message: summary,
+        error: { code: 'KYC_VALIDATION_FAILED', message: summary, details: issues },
       });
     }
 
@@ -3443,9 +3467,9 @@ sellerRouter.post('/kyc/submit', async (req: AuthRequest, res: Response) => {
       if (existingKyc.length > 0) {
         await tx.update(sellerKyc)
           .set({
-            legalName: legalName || existingKyc[0].legalName,
-            documentType: documentType || existingKyc[0].documentType,
-            documentNumber: documentNumber || existingKyc[0].documentNumber,
+            legalName: String(legalName).trim(),
+            documentType: String(documentType).trim(),
+            documentNumber: String(documentNumber).trim(),
             documentFrontUrl: frontUrl || existingKyc[0].documentFrontUrl,
             documentBackUrl: backUrl || existingKyc[0].documentBackUrl,
             selfieUrl: selfUrl || existingKyc[0].selfieUrl,
@@ -3458,9 +3482,9 @@ sellerRouter.post('/kyc/submit', async (req: AuthRequest, res: Response) => {
         await tx.insert(sellerKyc).values({
           id: kycId,
           sellerId: seller.id,
-          legalName: legalName || seller.companyName,
-          documentType: documentType || 'id_card',
-          documentNumber: documentNumber || seller.taxId,
+          legalName: String(legalName).trim(),
+          documentType: String(documentType).trim(),
+          documentNumber: String(documentNumber).trim(),
           documentFrontUrl: frontUrl || null,
           documentBackUrl: backUrl || null,
           selfieUrl: selfUrl || null,
@@ -3474,7 +3498,8 @@ sellerRouter.post('/kyc/submit', async (req: AuthRequest, res: Response) => {
         { type: 'identity_document', url: frontUrl, meta: identityMetadata },
         { type: 'proof_of_address', url: addressUrl, meta: addressMetadata },
         { type: 'selfie', url: selfUrl, meta: selfieMetadata },
-        { type: 'business_license', url: businessLicenseUrl || companyMetadata?.url, meta: companyMetadata },
+        // registro empresarial só existe para empresa: pessoa física nunca grava documento de empresa
+        { type: 'business_license', url: kycType === 'empresa' ? (businessLicenseUrl || companyMetadata?.url) : undefined, meta: companyMetadata },
       ].filter((d) => Boolean(d.url));
 
       for (const d of docEntries) {
@@ -3508,6 +3533,11 @@ sellerRouter.post('/kyc/submit', async (req: AuthRequest, res: Response) => {
           });
         }
       }
+
+      // NIF/CPF/CNPJ e telefone validados passam a ser os dados do vendedor (antes o NIF ficava com o telefone de preenchimento inicial);
+      // tipo de conta e nascimento ficam no JSONB do perfil (sem migração).
+      await tx.update(sellers).set({ taxId: String(req.body.taxId).trim(), phone: String(req.body.phone).trim(), updatedAt: new Date() }).where(eq(sellers.id, seller.id));
+      await saveKycProfileMeta(tx, seller.id, { accountType: kycType, birthDate: String(req.body.birthDate).trim() });
 
       // Update user kycStatus to pending
       await tx.update(users).set({ kycStatus: 'pending', updatedAt: new Date() }).where(eq(users.id, seller.userId));
@@ -3992,7 +4022,8 @@ sellerRouter.get('/settings', async (req: AuthRequest, res: Response) => {
     const [profile] = await db.select({ settingsJson: sellerProfiles.settingsJson }).from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
     const saved = (profile?.settingsJson as Record<string, any>) || {};
 
-    return res.json({ success: true, data: { ...SELLER_SETTINGS_DEFAULTS, ...saved } });
+    const { kyc: _kycInternal, ...publicSaved } = saved; // dados internos do KYC (tipo de conta, nascimento) nao fazem parte das configuracoes
+    return res.json({ success: true, data: { ...SELLER_SETTINGS_DEFAULTS, ...publicSaved } });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar configurações.' });
   }
@@ -4025,7 +4056,8 @@ sellerRouter.patch('/settings', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    return res.json({ success: true, message: 'Configurações operacionais salvas com sucesso!', data: merged });
+    const { kyc: _kycInternal, ...publicMerged } = merged as Record<string, any>;
+    return res.json({ success: true, message: 'Configurações operacionais salvas com sucesso!', data: publicMerged });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Erro ao salvar configurações.' });
   }

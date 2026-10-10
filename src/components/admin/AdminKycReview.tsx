@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, CheckCircle2, XCircle, AlertTriangle, FileText, Eye, User, Sparkles, Loader2, ExternalLink } from 'lucide-react';
+import { ShieldCheck, CheckCircle2, XCircle, AlertTriangle, FileText, Eye, User, Loader2, ExternalLink } from 'lucide-react';
 import { AdminService } from '../../services/adminService';
 import { KycReviewRecord } from '../../types/kyc';
+import { kycIssuesFromError } from '../../utils/kycClient';
 
 interface AdminKycReviewProps {
   showToast: (msg: string) => void;
@@ -41,7 +42,8 @@ export const AdminKycReview: React.FC<AdminKycReviewProps> = ({ showToast }) => 
         showToast(res.message || `Erro ao aprovar documento KYC #${id}.`);
       }
     } catch (err: any) {
-      showToast(err?.message || `Erro ao aprovar documento KYC #${id}.`);
+      // o servidor explica o que falta (400 estruturado): mostra a causa, nunca só "status code 400"
+      showToast(kycIssuesFromError(err).message || `Erro ao aprovar documento KYC #${id}.`);
     }
   };
 
@@ -69,7 +71,7 @@ export const AdminKycReview: React.FC<AdminKycReviewProps> = ({ showToast }) => 
             Fila de Análise KYC & Documentos Fiscais
           </h1>
           <p className="text-xs text-gray-500 mt-1">
-            Validação de BI, Passaportes CPLP, NIF/CNPJ e comparação facial de selfie com documentos.
+            Análise documental de BI, Passaportes CPLP e NIF/CNPJ. A selfie e os documentos são conferidos manualmente pelo administrador.
           </p>
         </div>
       </div>
@@ -113,6 +115,15 @@ export const AdminKycReview: React.FC<AdminKycReviewProps> = ({ showToast }) => 
               </div>
             </div>
 
+            {(k.missingRequirements?.length ?? 0) > 0 && k.status !== 'verified' && (
+              <div role="alert" data-testid="kyc-missing" className="bg-red-50 border border-red-200 rounded-xl p-3 text-[11px] text-red-800">
+                <p className="font-extrabold">Documentação incompleta — não pode ser aprovado:</p>
+                <ul className="list-disc pl-4 mt-1 space-y-0.5">
+                  {k.missingRequirements!.map((m) => <li key={m.field}>{m.label}: {m.message}</li>)}
+                </ul>
+              </div>
+            )}
+
             {/* Document Thumbnail Previews */}
             <div className="flex items-center gap-3 pt-2">
               <div className="text-center">
@@ -131,10 +142,10 @@ export const AdminKycReview: React.FC<AdminKycReviewProps> = ({ showToast }) => 
                 )}
                 <span className="text-[9px] text-gray-400 block mt-0.5">Selfie</span>
               </div>
-              <div className="flex-1 space-y-1">
-                <span className="text-[10px] font-bold text-gray-500 block">Comparação Facial IA:</span>
-                <div className="flex items-center gap-1 text-emerald-700 font-black text-xs bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-100">
-                  <Sparkles className="w-3.5 h-3.5" /> 98,4% Compatível
+              <div className="flex-1 space-y-1" data-testid="kyc-manual-check">
+                <span className="text-[10px] font-bold text-gray-500 block">Conferência da selfie:</span>
+                <div className="text-gray-700 font-bold text-xs bg-gray-50 px-2 py-1 rounded-lg border border-gray-200">
+                  Manual — compare a selfie com o documento
                 </div>
               </div>
             </div>
@@ -156,7 +167,9 @@ export const AdminKycReview: React.FC<AdminKycReviewProps> = ({ showToast }) => 
                 </button>
                 <button
                   onClick={() => handleApprove(k.id)}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-2 rounded-xl transition"
+                  disabled={(k.missingRequirements?.length ?? 0) > 0}
+                  title={(k.missingRequirements?.length ?? 0) > 0 ? 'Documentação incompleta' : undefined}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-2 rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   Aprovar Vendedor
                 </button>
@@ -243,7 +256,7 @@ export const AdminKycReview: React.FC<AdminKycReviewProps> = ({ showToast }) => 
               <button onClick={() => handleReject(selectedDoc.id)} className="px-4 py-2 bg-red-600 text-white font-bold text-xs rounded-xl">
                 Rejeitar
               </button>
-              <button onClick={() => handleApprove(selectedDoc.id)} className="px-4 py-2 bg-emerald-600 text-white font-bold text-xs rounded-xl">
+              <button onClick={() => handleApprove(selectedDoc.id)} disabled={(selectedDoc.missingRequirements?.length ?? 0) > 0} className="px-4 py-2 bg-emerald-600 text-white font-bold text-xs rounded-xl disabled:opacity-40 disabled:cursor-not-allowed">
                 Aprovar
               </button>
             </div>

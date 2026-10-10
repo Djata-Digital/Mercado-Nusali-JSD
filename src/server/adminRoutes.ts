@@ -60,6 +60,8 @@ import { AuthRequest, requireAuth } from './modules/auth/authMiddleware.js';
 import { CatalogService } from './modules/catalog/catalogService.js';
 import { parseOptionalBooleanQuery } from './modules/catalog/catalogRoutes.js';
 import { isGlobalCatalogAdmin, canCreateRole, canAdministrativelyResetPassword } from './modules/auth/scopeService.js';
+import { accountTypeLabel, assessKycForApproval, assessKycFromData, storedContextFrom } from './modules/seller/kycService.js';
+import { summarizeKycIssues } from '../utils/sellerKycRules.js';
 import {
   resolveAdministrativeScope,
   assertCountryAccess,
@@ -1773,6 +1775,7 @@ adminRouter.get('/kyc', requireGlobalAdmin, async (req: AuthRequest, res: Respon
     const kycList = await db.select().from(sellerKyc).orderBy(desc(sellerKyc.submittedAt));
     const allSellers = await db.select().from(sellers);
     const docRows = await db.select().from(sellerDocuments);
+    const profileRows = await db.select({ sellerId: sellerProfiles.sellerId, settingsJson: sellerProfiles.settingsJson }).from(sellerProfiles);
 
     const resolveSignedUrl = async (objectKey?: string | null, fileUrl?: string | null) => {
       if (objectKey) {
@@ -1806,13 +1809,18 @@ adminRouter.get('/kyc', requireGlobalAdmin, async (req: AuthRequest, res: Respon
         const proofAddressUrl = await resolveSignedUrl(addressEntry?.objectKey, k.proofOfAddressUrl || addressEntry?.fileUrl);
         const businessLicenseUrl = await resolveSignedUrl(businessEntry?.objectKey, businessEntry?.fileUrl);
 
+        // tipo de conta guardado no envio e o que ainda falta para poder aprovar (mesmas regras da tela e da aprovação)
+        const assessment = assessKycFromData(seller, storedContextFrom(k, docs, profileRows.find((p: any) => p.sellerId === k.sellerId)?.settingsJson));
+
         return {
           id: k.id,
           sellerId: k.sellerId,
           sellerName: seller?.companyName || k.legalName || 'Vendedor',
           companyName: seller?.tradingName || seller?.companyName || k.legalName || 'Empresa',
           country: seller?.countryCode || 'GW',
-          accountType: k.accountType || 'Empresa / Sociedade Comercial',
+          accountType: accountTypeLabel(assessment.accountType),
+          accountTypeKey: assessment.accountType,
+          missingRequirements: assessment.issues.map((i) => ({ field: i.field, label: i.label, message: i.message })),
           documentType: k.documentType || 'Bilhete de Identidade / Passaporte',
           documentNumber: k.documentNumber || '',
           submittedAt: k.submittedAt instanceof Date ? k.submittedAt.toLocaleString('pt-PT') : String(k.submittedAt || ''),
@@ -1852,6 +1860,13 @@ adminRouter.post('/kyc/:id/approve', requireGlobalAdmin, async (req: AuthRequest
         if (existingKyc.length > 0) {
           kyc = existingKyc[0];
         } else {
+          // Vendedor que nunca enviou KYC: antes esta rota criava um registro JÁ "verified" sem nenhum documento. Agora a aprovação
+          // exige a documentação guardada — sem envio, não há o que aprovar.
+          const pre = await assessKycForApproval(db, sellerId);
+          if (pre.issues.length > 0) {
+            const summary = `Não é possível aprovar: ${summarizeKycIssues(pre.issues)}`;
+            return res.status(400).json({ success: false, message: summary, error: { code: 'KYC_APPROVAL_BLOCKED', message: summary, details: pre.issues } });
+          }
           const newKycId = `kyc_${Date.now()}`;
           await db.insert(sellerKyc).values({
             id: newKycId,
@@ -1869,6 +1884,13 @@ adminRouter.post('/kyc/:id/approve', requireGlobalAdmin, async (req: AuthRequest
     }
 
     if (!kyc && !sellerId) throw new AdminRequestError(404, 'Documento KYC não encontrado.');
+
+    // Aprovação só com a documentação exigida PRESENTE no banco para o tipo de conta e o país (nunca pelo que a tela diz).
+    const assessment = await assessKycForApproval(db, sellerId!);
+    if (assessment.issues.length > 0) {
+      const summary = `Não é possível aprovar: ${summarizeKycIssues(assessment.issues)}`;
+      return res.status(400).json({ success: false, message: summary, error: { code: 'KYC_APPROVAL_BLOCKED', message: summary, details: assessment.issues } });
+    }
 
     const notes = String(req.body?.notes || 'Documentação verificada e aprovada pelo Administrador Geral.');
 
