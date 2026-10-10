@@ -130,7 +130,8 @@ export const SellerHubView: React.FC = () => {
       ]);
 
       if (resProfile.success && resProfile.data) {
-        setProfile(resProfile.data);
+        // campos que o servidor não devolve ficam com o padrão (nunca undefined nos campos do formulário da conta)
+        setProfile({ ...initialSellerProfile, ...resProfile.data });
         setNeedsOnboarding(false);
       } else {
         setNeedsOnboarding(true);
@@ -479,6 +480,8 @@ export const SellerHubView: React.FC = () => {
 
         {activeSection === 'account' && (
           <SellerAccount
+            // o formulário parte do perfil carregado: quando o perfil real chega (ex.: F5 direto nesta aba), ele é recriado com os dados do banco
+            key={profile.id || 'perfil-ainda-nao-carregado'}
             profile={profile}
             showToast={showToast}
             onNavigateSection={setActiveSection}

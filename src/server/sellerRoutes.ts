@@ -97,6 +97,7 @@ import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shippin
 import { validateCouponDefinition, normalizeCouponCode } from './modules/coupons/couponService.js';
 import { loadStoredKyc, resolveStoredAccountType, saveKycProfileMeta, storedDocumentFlags } from './modules/seller/kycService.js';
 import { normalizeKycAccountType, summarizeKycIssues, validateKycSubmission } from '../utils/sellerKycRules.js';
+import { pickFiscalPatch, validateFiscalPatch } from '../utils/sellerAccountRules.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -909,6 +910,13 @@ sellerRouter.post('/onboard', async (req: AuthRequest, res: Response) => {
   }
 });
 
+/** Cidade e endereço fiscal guardados em seller_profiles.settings_json.fiscal (as demais chaves — kyc, preferências — não são tocadas). */
+function fiscalFromSettings(settingsJson: unknown): { city: string; address: string } {
+  const settings = settingsJson && typeof settingsJson === 'object' ? (settingsJson as Record<string, any>) : {};
+  const f = settings.fiscal && typeof settings.fiscal === 'object' ? settings.fiscal : {};
+  return { city: typeof f.city === 'string' ? f.city : '', address: typeof f.address === 'string' ? f.address : '' };
+}
+
 sellerRouter.get('/profile', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -939,6 +947,9 @@ sellerRouter.get('/profile', async (req: AuthRequest, res: Response) => {
         commercialName: seller.tradingName || seller.companyName,
         companyName: seller.companyName,
         taxId: seller.taxId,
+        // dados fiscais da conta (cidade e endereço da sede): JSONB do perfil, chave "fiscal" (sem migração)
+        city: fiscalFromSettings(profile.settingsJson).city,
+        address: fiscalFromSettings(profile.settingsJson).address,
         phone: seller.phone,
         email: user?.email || '',
         country: seller.countryCode,
@@ -964,43 +975,91 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
     const seller = await resolveSeller(req);
     if (!seller) return res.status(404).json({ success: false, message: 'Vendedor não encontrado.' });
 
-    const { companyName, tradingName, phone, description, returnPolicy, shippingPolicy } = req.body;
+    const body = req.body ?? {};
+    const { companyName, tradingName, phone, description, returnPolicy, shippingPolicy } = body;
 
-    if (companyName || tradingName || phone) {
-      await db.update(sellers)
-        .set({
-          companyName: companyName || seller.companyName,
-          tradingName: tradingName || seller.tradingName,
-          phone: phone || seller.phone,
-          updatedAt: new Date(),
-        })
-        .where(eq(sellers.id, seller.id));
-    }
-
-    const profileRows = await db.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
-    if (profileRows.length > 0) {
-      await db.update(sellerProfiles)
-        .set({
-          description: description !== undefined ? description : profileRows[0].description,
-          returnPolicy: returnPolicy !== undefined ? returnPolicy : profileRows[0].returnPolicy,
-          shippingPolicy: shippingPolicy !== undefined ? shippingPolicy : profileRows[0].shippingPolicy,
-          updatedAt: new Date(),
-        })
-        .where(eq(sellerProfiles.sellerId, seller.id));
-    } else {
-      await db.insert(sellerProfiles).values({
-        id: `prof_${Date.now()}`,
-        sellerId: seller.id,
-        description,
-        returnPolicy,
-        shippingPolicy,
+    // Dados fiscais (documento fiscal, cidade, endereço): atualização PARCIAL — só o que veio é gravado. Validação ANTES de qualquer
+    // escrita, com as mesmas regras por país do KYC. O estado do KYC (seller_kyc, users.kyc_status, sellers.status) nunca é tocado aqui.
+    const fiscalPatch = pickFiscalPatch(body);
+    const fiscalSent = ['taxId', 'city', 'address'].some((k) => body[k] !== undefined && body[k] !== null);
+    const [existing] = await db.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
+    const storedFiscal = fiscalFromSettings(existing?.settingsJson);
+    if (fiscalSent) {
+      const kycCtx = await loadStoredKyc(db, seller.id);
+      const problems = validateFiscalPatch(fiscalPatch, body, {
+        country: seller.countryCode,
+        accountType: resolveStoredAccountType(kycCtx),
+        current: { taxId: seller.taxId, city: storedFiscal.city, address: storedFiscal.address },
       });
+      if (problems.length > 0) {
+        const message = problems.map((p) => p.message).join(' ');
+        return res.status(400).json({
+          success: false,
+          message,
+          error: { code: 'VALIDATION_ERROR', message, details: problems.map((p) => ({ field: p.field, message: p.message })) },
+        });
+      }
     }
+
+    await db.transaction(async (tx: any) => {
+      const sellerSet: Record<string, unknown> = {};
+      if (companyName) sellerSet.companyName = companyName;
+      if (tradingName) sellerSet.tradingName = tradingName;
+      if (phone) sellerSet.phone = phone;
+      if (fiscalPatch.taxId !== undefined && fiscalPatch.taxId !== String(seller.taxId ?? '').trim()) sellerSet.taxId = fiscalPatch.taxId;
+      if (Object.keys(sellerSet).length > 0) {
+        await tx.update(sellers).set({ ...sellerSet, updatedAt: new Date() }).where(eq(sellers.id, seller.id));
+      }
+
+      // trava a linha do perfil: duas gravações simultâneas no JSONB (KYC, preferências, dados fiscais) não se sobrescrevem
+      const [row] = await tx.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1).for('update');
+      const settings = (row?.settingsJson && typeof row.settingsJson === 'object' ? row.settingsJson : {}) as Record<string, any>;
+      const prevFiscal = settings.fiscal && typeof settings.fiscal === 'object' ? settings.fiscal : {};
+      const nextFiscal = { ...prevFiscal };
+      if (fiscalPatch.city !== undefined) nextFiscal.city = fiscalPatch.city;
+      if (fiscalPatch.address !== undefined) nextFiscal.address = fiscalPatch.address;
+      const fiscalChanged = fiscalPatch.city !== undefined || fiscalPatch.address !== undefined;
+      const settingsJson = fiscalChanged ? { ...settings, fiscal: nextFiscal } : (row?.settingsJson ?? null);
+
+      if (row) {
+        await tx.update(sellerProfiles)
+          .set({
+            description: description !== undefined ? description : row.description,
+            returnPolicy: returnPolicy !== undefined ? returnPolicy : row.returnPolicy,
+            shippingPolicy: shippingPolicy !== undefined ? shippingPolicy : row.shippingPolicy,
+            settingsJson,
+            updatedAt: new Date(),
+          })
+          .where(eq(sellerProfiles.sellerId, seller.id));
+      } else {
+        await tx.insert(sellerProfiles).values({
+          id: `prof_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          sellerId: seller.id,
+          description,
+          returnPolicy,
+          shippingPolicy,
+          settingsJson,
+        });
+      }
+    });
 
     await delCache('seller_profile');
+
+    // devolve o que FICOU gravado (a tela mostra isto, nunca o que ela mesma digitou)
+    const [savedSeller] = await db.select().from(sellers).where(eq(sellers.id, seller.id)).limit(1);
+    const [savedProfile] = await db.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
+    const savedFiscal = fiscalFromSettings(savedProfile?.settingsJson);
     return res.json({
       success: true,
       message: 'Perfil do vendedor atualizado com sucesso!',
+      data: {
+        companyName: savedSeller?.companyName,
+        commercialName: savedSeller?.tradingName,
+        phone: savedSeller?.phone,
+        taxId: (savedSeller?.taxId && savedSeller.taxId !== savedSeller.phone) ? savedSeller.taxId : (seller.taxId || ''),
+        city: savedFiscal.city,
+        address: savedFiscal.address,
+      },
     });
   } catch (error: any) {
     return res.status(500).json({ success: false, message: error?.message || 'Erro ao atualizar perfil.' });
@@ -4022,7 +4081,7 @@ sellerRouter.get('/settings', async (req: AuthRequest, res: Response) => {
     const [profile] = await db.select({ settingsJson: sellerProfiles.settingsJson }).from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
     const saved = (profile?.settingsJson as Record<string, any>) || {};
 
-    const { kyc: _kycInternal, ...publicSaved } = saved; // dados internos do KYC (tipo de conta, nascimento) nao fazem parte das configuracoes
+    const { kyc: _kycInternal, fiscal: _fiscalInternal, ...publicSaved } = saved; // dados internos (KYC, dados fiscais) nao fazem parte das configuracoes
     return res.json({ success: true, data: { ...SELLER_SETTINGS_DEFAULTS, ...publicSaved } });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar configurações.' });
@@ -4056,7 +4115,7 @@ sellerRouter.patch('/settings', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { kyc: _kycInternal, ...publicMerged } = merged as Record<string, any>;
+    const { kyc: _kycInternal, fiscal: _fiscalInternal, ...publicMerged } = merged as Record<string, any>;
     return res.json({ success: true, message: 'Configurações operacionais salvas com sucesso!', data: publicMerged });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Erro ao salvar configurações.' });

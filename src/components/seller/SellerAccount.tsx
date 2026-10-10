@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   UserCheck,
   Building2,
@@ -22,6 +22,8 @@ import { useCountries } from '../../hooks/useCountries';
 import { useAuth } from '../../context/AuthContext';
 import { uploadService } from '../../services/uploadService';
 import { BuyerService } from '../../services/buyerService';
+import { SellerService } from '../../services/sellerService';
+import { pickFiscalPatch, saveSellerAccountDetails, validateFiscalPatch, type FiscalField } from '../../utils/sellerAccountRules';
 import { UserAvatar } from '../UserAvatar';
 import { AvatarUploadField } from '../AvatarUploadField';
 import { resolveAvatarUrl } from '../../utils/avatar';
@@ -57,6 +59,17 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
   const [avatarChanged, setAvatarChanged] = useState(false);
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // O perfil pode chegar do servidor DEPOIS de a tela abrir (F5 direto nesta aba, recarga ao entrar): os três campos fiscais seguem o que
+  // o banco devolveu, a não ser que a pessoa já tenha começado a digitar neles (o que ela digitou nunca é apagado por uma recarga).
+  const fiscalDirty = useRef({ taxId: false, city: false, address: false });
+  useEffect(() => {
+    if (!fiscalDirty.current.taxId) setTaxId(profile.taxId ?? '');
+    if (!fiscalDirty.current.city) setCity(profile.city ?? '');
+    if (!fiscalDirty.current.address) setAddress(profile.address ?? '');
+  }, [profile.taxId, profile.city, profile.address]);
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<FiscalField, string>>>({});
+  const clearFieldError = (f: FiscalField) => setFieldErrors((prev) => (prev[f] ? { ...prev, [f]: undefined } : prev));
 
   // O arquivo já chega validado (tipo e tamanho) pelo AvatarUploadField; o servidor valida de novo.
   const handleAvatarFile = async (file: File) => {
@@ -79,20 +92,52 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    try {
-      await import('../../services/sellerService').then(m => m.SellerService.updateProfile({
-        companyName: fullName,
-        tradingName: commercialName,
-        phone,
-      }));
-    } catch {
-      // handled
+    if (saving) return;
+    setFieldErrors({});
+
+    // mesma validação do servidor (documento por país, cidade, endereço); o que já estava guardado e não mudou não é revalidado
+    const typed = { taxId, city, address };
+    const problems = validateFiscalPatch(pickFiscalPatch(typed), typed, {
+      country: profile.country,
+      current: { taxId: profile.taxId, city: profile.city, address: profile.address },
+    });
+    if (problems.length > 0) {
+      const errs: Partial<Record<FiscalField, string>> = {};
+      for (const pr of problems) if (!errs[pr.field]) errs[pr.field] = pr.message;
+      setFieldErrors(errs);
+      showToast(problems[0].message);
+      return;
     }
+
+    setSaving(true);
+    // só dá como salvo quando o servidor confirma; o que ele devolve é o que ficou gravado
+    const result = await saveSellerAccountDetails(
+      { companyName: fullName, tradingName: commercialName, phone, taxId, city, address },
+      (payload) => SellerService.updateProfile(payload),
+    );
+    setSaving(false);
+    if (!result.ok) {
+      setFieldErrors(result.fields);
+      showToast(result.message);
+      return;
+    }
+    const saved = result.saved;
+
+    const savedTaxId = typeof saved.taxId === 'string' ? saved.taxId : taxId;
+    const savedCity = typeof saved.city === 'string' ? saved.city : city;
+    const savedAddress = typeof saved.address === 'string' ? saved.address : address;
+    fiscalDirty.current = { taxId: false, city: false, address: false }; // o que está na tela agora é o que o servidor gravou
+    setTaxId(savedTaxId);
+    setCity(savedCity);
+    setAddress(savedAddress);
+
+    let avatarFailed = false;
     if (avatarChanged && avatar) {
       try {
         await BuyerService.updateProfile({ avatar });
         setAvatarChanged(false);
       } catch {
+        avatarFailed = true;
         setAvatarError('A foto foi enviada, mas não foi possível gravá-la na conta agora. Tente salvar de novo.');
       }
     }
@@ -101,16 +146,18 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
       fullName,
       commercialName,
       sellerType,
-      taxId,
+      taxId: savedTaxId,
       country,
-      city,
-      address,
+      city: savedCity,
+      address: savedAddress,
       phone,
       email,
       preferredCurrency,
       avatar,
     });
-    showToast('Dados e foto da conta de vendedor salvos com sucesso!');
+    showToast(avatarFailed
+      ? 'Dados da conta salvos. A foto não foi gravada: tente salvar de novo.'
+      : 'Dados da conta de vendedor salvos com sucesso!');
   };
 
   const countryConf = countriesConfig[country] || countriesConfig.GW;
@@ -201,10 +248,13 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="text"
               value={taxId}
-              onChange={(e) => setTaxId(e.target.value)}
+              onChange={(e) => { fiscalDirty.current.taxId = true; setTaxId(e.target.value); clearFieldError('taxId'); }}
               required
-              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden font-mono"
+              aria-invalid={!!fieldErrors.taxId}
+              aria-describedby={fieldErrors.taxId ? 'seller-account-taxId-error' : undefined}
+              className={`w-full p-2.5 border rounded-xl focus:border-emerald-600 focus:outline-hidden font-mono ${fieldErrors.taxId ? 'border-red-400' : 'border-gray-300'}`}
             />
+            {fieldErrors.taxId && <p id="seller-account-taxId-error" role="alert" data-testid="seller-account-taxId-error" className="mt-1 text-[11px] font-bold text-red-600">{fieldErrors.taxId}</p>}
           </div>
 
           <div>
@@ -240,10 +290,13 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="text"
               value={city}
-              onChange={(e) => setCity(e.target.value)}
+              onChange={(e) => { fiscalDirty.current.city = true; setCity(e.target.value); clearFieldError('city'); }}
               required
-              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden"
+              aria-invalid={!!fieldErrors.city}
+              aria-describedby={fieldErrors.city ? 'seller-account-city-error' : undefined}
+              className={`w-full p-2.5 border rounded-xl focus:border-emerald-600 focus:outline-hidden ${fieldErrors.city ? 'border-red-400' : 'border-gray-300'}`}
             />
+            {fieldErrors.city && <p id="seller-account-city-error" role="alert" data-testid="seller-account-city-error" className="mt-1 text-[11px] font-bold text-red-600">{fieldErrors.city}</p>}
           </div>
 
           <div className="sm:col-span-2">
@@ -251,10 +304,13 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="text"
               value={address}
-              onChange={(e) => setAddress(e.target.value)}
+              onChange={(e) => { fiscalDirty.current.address = true; setAddress(e.target.value); clearFieldError('address'); }}
               required
-              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden"
+              aria-invalid={!!fieldErrors.address}
+              aria-describedby={fieldErrors.address ? 'seller-account-address-error' : undefined}
+              className={`w-full p-2.5 border rounded-xl focus:border-emerald-600 focus:outline-hidden ${fieldErrors.address ? 'border-red-400' : 'border-gray-300'}`}
             />
+            {fieldErrors.address && <p id="seller-account-address-error" role="alert" data-testid="seller-account-address-error" className="mt-1 text-[11px] font-bold text-red-600">{fieldErrors.address}</p>}
           </div>
 
           <div>
@@ -316,9 +372,11 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
         <div className="pt-4 border-t border-gray-100 flex items-center justify-end">
           <button
             type="submit"
-            className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-6 py-3 rounded-xl text-xs transition shadow-xs flex items-center gap-2"
+            disabled={saving}
+            data-testid="seller-account-save"
+            className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white font-bold px-6 py-3 rounded-xl text-xs transition shadow-xs flex items-center gap-2"
           >
-            <Save className="w-4 h-4" /> Salvar Alterações Cadastrais
+            <Save className="w-4 h-4" /> {saving ? 'Salvando...' : 'Salvar Alterações Cadastrais'}
           </button>
         </div>
       </form>
