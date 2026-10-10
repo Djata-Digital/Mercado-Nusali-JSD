@@ -96,7 +96,7 @@ import {
 import { listFulfillmentLocationsForSeller, ensureStoreFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
 import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
 import { validateCouponDefinition, normalizeCouponCode } from './modules/coupons/couponService.js';
-import { loadStoredKyc, resolveStoredAccountType, saveKycProfileMeta, storedDocumentFlags } from './modules/seller/kycService.js';
+import { applyKycReverification, kycStatusIsApproved, loadStoredKyc, resolveStoredAccountType, reverificationRequiredPayload, saveKycProfileMeta, storedDocumentFlags } from './modules/seller/kycService.js';
 import { normalizeKycAccountType, summarizeKycIssues, validateKycSubmission } from '../utils/sellerKycRules.js';
 import {
   defaultSellerTypeFor, detectIdentityChanges, documentsNeededAfter, pickAccountPatch, pickFiscalPatch, sellerTypeToAccountType,
@@ -810,7 +810,7 @@ async function resolveSeller(req: AuthRequest) {
   const kycRow = kycRows[0];
 
   const rawKycStatus = kycRow?.status || user?.kycStatus || 'pending';
-  const isApproved = rawKycStatus === 'verified' || rawKycStatus === 'approved';
+  const isApproved = kycStatusIsApproved(rawKycStatus);
   const canonicalKycStatus = isApproved ? 'verified' : (rawKycStatus === 'under_review' ? 'under_review' : rawKycStatus === 'rejected' ? 'rejected' : 'pending');
 
   // Fix Requirement 9: NEVER return phone number as taxId!
@@ -1090,9 +1090,7 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
           { taxId: fiscalPatch.taxId, fullName: accountPatch.fullName, country: accountPatch.country, accountType: newSellerClass ?? undefined },
         );
         if (reverificationChanges.length > 0 && body.confirmReverification !== true) {
-          const what = reverificationChanges.map((c) => c.label).join(', ');
-          const message = `Alterar ${what} exige uma nova verificação (KYC) da sua conta. Se continuar, o status volta para análise e você precisará reenviar os documentos; novos dados nunca são aprovados automaticamente.`;
-          return reject(409, 'KYC_REVERIFICATION_REQUIRED', message, { changes: reverificationChanges, details: [] });
+          return res.status(409).json(reverificationRequiredPayload(reverificationChanges));
         }
       }
     }
@@ -1111,6 +1109,14 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
       }
       if (accountPatch.fullName !== undefined && accountPatch.fullName !== String(userRow?.fullName ?? '').trim()) {
         await tx.update(users).set({ fullName: accountPatch.fullName, updatedAt: new Date() }).where(eq(users.id, seller.userId));
+      }
+
+      // reverificação confirmada: MESMA rotina de todos os caminhos que alteram dados de identidade (ver kycService)
+      if (triggersReverification) {
+        await applyKycReverification(tx, {
+          sellerId: seller.id, userId: seller.userId, kycCtx, changes: reverificationChanges, source: 'seller_account',
+          actor: { userId: req.user?.id, ip: req.ip || req.socket?.remoteAddress, userAgent: req.headers['user-agent'] as string, countryCode: req.user?.countryCode },
+        });
       }
 
       // trava a linha do perfil: gravações simultâneas no JSONB (KYC, preferências, conta, dados fiscais) não se sobrescrevem
@@ -1141,39 +1147,6 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
           next.kyc = { ...prevKyc, accountType: newSellerClass };
           settingsChanged = true;
         }
-      }
-      if (triggersReverification) {
-        next.kycReverification = {
-          required: true,
-          at: new Date().toISOString(),
-          changes: reverificationChanges,
-          needs: documentsNeededAfter(reverificationChanges),
-          previousStatus: 'verified',
-          previousReviewedAt: kycCtx.kyc?.reviewedAt ? new Date(kycCtx.kyc.reviewedAt).toISOString() : null,
-        };
-        settingsChanged = true;
-        // mesmo efeito de uma rejeição/pendência: o KYC deixa de estar aprovado até nova análise (histórico de revisão preservado)
-        if (kycCtx.kyc?.id) await tx.update(sellerKyc).set({ status: 'pending' }).where(eq(sellerKyc.id, kycCtx.kyc.id));
-        await tx.update(users).set({ kycStatus: 'pending', updatedAt: new Date() }).where(eq(users.id, seller.userId));
-        await tx.insert(auditLogs).values({
-          id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
-          actorUserId: req.user?.id || null,
-          action: 'seller.kyc.reverification_required',
-          resource: 'seller_kyc',
-          resourceId: kycCtx.kyc?.id || seller.id,
-          detailsJson: {
-            sellerId: seller.id,
-            changes: reverificationChanges,
-            previousStatus: 'verified',
-            previousReviewedAt: kycCtx.kyc?.reviewedAt ?? null,
-            previousReviewerId: kycCtx.kyc?.reviewerId ?? null,
-            previousDocuments: kycCtx.docs.map((d: any) => ({ type: d.documentType, objectKey: d.objectKey ?? null, fileUrl: d.fileUrl ?? null })),
-          },
-          ipAddress: req.ip || req.socket?.remoteAddress || null,
-          userAgent: (req.headers['user-agent'] as string) || null,
-          countryCode: req.user?.countryCode || null,
-          createdAt: new Date(),
-        });
       }
       const settingsJson = settingsChanged ? next : (row?.settingsJson ?? null);
 

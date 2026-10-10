@@ -54,6 +54,8 @@ import { postBuyerDisputeMessage, DisputeMessageValidationError } from './module
 // potencialmente divergente).
 import { ACTIVE_DISPUTE_STATUSES } from './adminRoutes.js';
 import { updateBuyerTaxId, BuyerProfileValidationError } from './modules/buyer/buyerProfileService.js';
+import { applyKycReverification, loadApprovedSellerIdentity, reverificationRequiredPayload } from './modules/seller/kycService.js';
+import { detectIdentityChanges, type IdentityChange } from '../utils/sellerAccountRules.js';
 import { isProductAvailableForCountry, eligibilityReason } from './modules/catalog/productEligibilityService.js';
 // FASE D16-F2 — fundação geográfica do endereço de ENTREGA do comprador.
 // Reaproveita INTEGRALMENTE os mesmos helpers já usados pela origem
@@ -336,7 +338,32 @@ buyerRouter.put('/profile', requireAuth, async (req: AuthRequest, res: Response)
       }
     }
 
-    await db.update(users).set(userUpdates).where(eq(users.id, userId));
+    // Titular de um vendedor com KYC APROVADO: mudar o nome (alteração material) passa pela MESMA reverificação da conta do vendedor.
+    // Vale para qualquer pedido que traga fullName (mesmo parcial); a checagem vem antes de QUALQUER escrita deste pedido. Comprador
+    // comum (sem vendedor aprovado) segue como antes.
+    let identityChanges: IdentityChange[] = [];
+    let approvedSeller: Awaited<ReturnType<typeof loadApprovedSellerIdentity>> = null;
+    if (typeof fullName === 'string') {
+      approvedSeller = await loadApprovedSellerIdentity(db, userId);
+      if (approvedSeller) {
+        identityChanges = detectIdentityChanges({ fullName: approvedSeller.user?.fullName }, { fullName: String(fullName).trim() });
+        if (identityChanges.length > 0 && req.body?.confirmReverification !== true) {
+          return res.status(409).json(reverificationRequiredPayload(identityChanges));
+        }
+      }
+    }
+
+    if (approvedSeller && identityChanges.length > 0) {
+      await db.transaction(async (tx: any) => {
+        await tx.update(users).set(userUpdates).where(eq(users.id, userId));
+        await applyKycReverification(tx, {
+          sellerId: approvedSeller!.seller.id, userId, kycCtx: approvedSeller!.kycCtx, changes: identityChanges, source: 'buyer_profile',
+          actor: { userId, ip: req.ip || req.socket?.remoteAddress, userAgent: req.headers['user-agent'] as string, countryCode: req.user?.countryCode },
+        });
+      });
+    } else {
+      await db.update(users).set(userUpdates).where(eq(users.id, userId));
+    }
 
     // BLOCKER_LAUNCH (fase "Desbloqueio do lançamento") corrigido em
     // updateBuyerTaxId(): userId vem exclusivamente de req.user.id (nunca do

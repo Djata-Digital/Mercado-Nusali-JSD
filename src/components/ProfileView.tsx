@@ -118,7 +118,7 @@ export const ProfileView: React.FC = () => {
     }
   };
 
-  const handleSaveProfile = async (e: React.FormEvent) => {
+  const handleSaveProfile = async (e: React.FormEvent, confirmReverification = false) => {
     e.preventDefault();
     setIsSaving(true);
     try {
@@ -128,7 +128,8 @@ export const ProfileView: React.FC = () => {
         city: editCity,
         avatar: editAvatar,
         ...(editTaxId.trim() ? { taxId: editTaxId.trim() } : {}),
-      });
+        ...(confirmReverification ? { confirmReverification: true } : {}),
+      } as any);
 
       if (res.success && res.data) {
         setProfile(res.data);
@@ -142,8 +143,19 @@ export const ProfileView: React.FC = () => {
       } else {
         showToast(res.message || 'Erro ao salvar perfil.');
       }
-    } catch {
-      showToast('Falha na comunicação com o servidor.');
+    } catch (err: any) {
+      const data = err?.response?.data;
+      if (data?.error?.code === 'KYC_REVERIFICATION_REQUIRED') {
+        // vendedor com KYC aprovado: mudar o nome do titular exige nova verificação; só segue com confirmação explícita
+        setIsSaving(false);
+        if (window.confirm(`${data.message}\n\nConfirmar e enviar para reverificação?`)) {
+          await handleSaveProfile(e, true);
+        } else {
+          showToast('Alteração do nome cancelada: a verificação (KYC) continua como estava.');
+        }
+        return;
+      }
+      showToast(data?.message || data?.error?.message || 'Falha na comunicação com o servidor.');
     } finally {
       setIsSaving(false);
     }

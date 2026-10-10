@@ -6,12 +6,12 @@
  * migração). Cadastros antigos não têm o tipo guardado: o tipo é inferido pela presença do registro empresarial.
  */
 import { eq } from 'drizzle-orm';
-import { sellerDocuments, sellerKyc, sellerProfiles, sellers } from '../../../db/schema.js';
+import { auditLogs, sellerDocuments, sellerKyc, sellerProfiles, sellers, users } from '../../../db/schema.js';
 import {
   KYC_ACCOUNT_LABEL, normalizeKycAccountType, validateKycForApproval,
   type KycAccountType, type KycIssue,
 } from '../../../utils/sellerKycRules.js';
-import { defaultSellerTypeFor, sellerTypeToAccountType } from '../../../utils/sellerAccountRules.js';
+import { defaultSellerTypeFor, documentsNeededAfter, sellerTypeToAccountType, type IdentityChange } from '../../../utils/sellerAccountRules.js';
 
 export const IDENTITY_DOC_TYPES = ['identity_document', 'identity_card'];
 
@@ -125,4 +125,91 @@ export function assessKycFromData(sellerRow: any, ctx: StoredKycContext): { issu
     issues.unshift({ field: 'identityDocument', label: 'Reverificação de identidade', message: `Dados de identidade alterados depois da verificação (${what}). O vendedor precisa reenviar o KYC antes de uma nova aprovação.`, step: 'identity' });
   }
   return { issues, accountType: resolveStoredAccountType(ctx), country };
+}
+
+// ---------------------------------------------------------------- reverificação de identidade (regra única, usada por TODOS os caminhos)
+
+/** KYC aprovado? ('verified' e 'approved' são o mesmo estado; é a regra de resolveSeller e dos demais caminhos). */
+export function kycStatusIsApproved(rawStatus: unknown): boolean {
+  return rawStatus === 'verified' || rawStatus === 'approved';
+}
+
+/**
+ * Vendedor desta conta com KYC APROVADO (mesma leitura do status de resolveSeller: seller_kyc.status, senão users.kyc_status).
+ * Devolve null para quem não é vendedor ou não está aprovado — compradores comuns nunca passam por reverificação.
+ */
+export async function loadApprovedSellerIdentity(db: any, userId: string) {
+  const [seller] = await db.select().from(sellers).where(eq(sellers.userId, userId)).limit(1);
+  if (!seller) return null;
+  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  const kycCtx = await loadStoredKyc(db, seller.id);
+  const raw = kycCtx.kyc?.status || user?.kycStatus || 'pending';
+  if (!kycStatusIsApproved(raw)) return null;
+  return { seller, user, kycCtx };
+}
+
+/** Corpo da resposta 409 que pede confirmação explícita antes de mandar o KYC para reverificação (igual em todos os caminhos). */
+export function reverificationRequiredPayload(changes: IdentityChange[]) {
+  const what = changes.map((c) => c.label).join(', ');
+  const message = `Alterar ${what} exige uma nova verificação (KYC) da sua conta. Se continuar, o status volta para análise e você precisará reenviar os documentos; novos dados nunca são aprovados automaticamente.`;
+  return { success: false, message, error: { code: 'KYC_REVERIFICATION_REQUIRED', message, changes, details: [] as unknown[] } };
+}
+
+export interface ReverificationActor { userId?: string | null; ip?: string | null; userAgent?: string | null; countryCode?: string | null }
+
+/**
+ * Manda o KYC aprovado de volta para análise (dentro da transação de quem chama): o status vira "pending" (seller_kyc e users), a revisão
+ * anterior e os documentos antigos ficam preservados, a trilha de auditoria registra o que mudou e a aprovação do administrador fica
+ * bloqueada até o vendedor reenviar o KYC com documentos NOVOS. Preserva as demais chaves do JSONB do perfil.
+ */
+export async function applyKycReverification(
+  tx: any,
+  args: { sellerId: string; userId: string; kycCtx: StoredKycContext; changes: IdentityChange[]; actor: ReverificationActor; source: string },
+): Promise<boolean> {
+  const { sellerId, userId, kycCtx, changes, actor, source } = args;
+  // dois pedidos simultâneos: quem chega depois (KYC já em análise) não repete a reverificação nem a auditoria
+  const [kycNow] = await tx.select({ status: sellerKyc.status }).from(sellerKyc).where(eq(sellerKyc.sellerId, sellerId)).limit(1).for('update');
+  const [userNow] = await tx.select({ kycStatus: users.kycStatus }).from(users).where(eq(users.id, userId)).limit(1).for('update');
+  if (!kycStatusIsApproved(kycNow?.status || userNow?.kycStatus)) return false;
+  const [row] = await tx.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, sellerId)).limit(1).for('update');
+  const settings = (row?.settingsJson && typeof row.settingsJson === 'object' ? row.settingsJson : {}) as Record<string, any>;
+  const merged = {
+    ...settings,
+    kycReverification: {
+      required: true,
+      at: new Date().toISOString(),
+      changes,
+      needs: documentsNeededAfter(changes),
+      previousStatus: 'verified',
+      previousReviewedAt: kycCtx.kyc?.reviewedAt ? new Date(kycCtx.kyc.reviewedAt).toISOString() : null,
+    },
+  };
+  if (row) {
+    await tx.update(sellerProfiles).set({ settingsJson: merged, updatedAt: new Date() }).where(eq(sellerProfiles.sellerId, sellerId));
+  } else {
+    await tx.insert(sellerProfiles).values({ id: `prof_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`, sellerId, settingsJson: merged });
+  }
+  if (kycCtx.kyc?.id) await tx.update(sellerKyc).set({ status: 'pending' }).where(eq(sellerKyc.id, kycCtx.kyc.id));
+  await tx.update(users).set({ kycStatus: 'pending', updatedAt: new Date() }).where(eq(users.id, userId));
+  await tx.insert(auditLogs).values({
+    id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+    actorUserId: actor.userId || null,
+    action: 'seller.kyc.reverification_required',
+    resource: 'seller_kyc',
+    resourceId: kycCtx.kyc?.id || sellerId,
+    detailsJson: {
+      sellerId,
+      source,
+      changes,
+      previousStatus: 'verified',
+      previousReviewedAt: kycCtx.kyc?.reviewedAt ?? null,
+      previousReviewerId: kycCtx.kyc?.reviewerId ?? null,
+      previousDocuments: kycCtx.docs.map((d: any) => ({ type: d.documentType, objectKey: d.objectKey ?? null, fileUrl: d.fileUrl ?? null })),
+    },
+    ipAddress: actor.ip || null,
+    userAgent: actor.userAgent || null,
+    countryCode: actor.countryCode || null,
+    createdAt: new Date(),
+  });
+  return true;
 }
