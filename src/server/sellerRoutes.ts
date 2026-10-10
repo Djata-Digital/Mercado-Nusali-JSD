@@ -67,6 +67,7 @@ import {
   shippingRegions,
   shippingSectors,
   fulfillmentLocations,
+  auditLogs,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, and, or, isNull, inArray } from 'drizzle-orm';
@@ -97,7 +98,10 @@ import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shippin
 import { validateCouponDefinition, normalizeCouponCode } from './modules/coupons/couponService.js';
 import { loadStoredKyc, resolveStoredAccountType, saveKycProfileMeta, storedDocumentFlags } from './modules/seller/kycService.js';
 import { normalizeKycAccountType, summarizeKycIssues, validateKycSubmission } from '../utils/sellerKycRules.js';
-import { pickFiscalPatch, validateFiscalPatch } from '../utils/sellerAccountRules.js';
+import {
+  defaultSellerTypeFor, detectIdentityChanges, documentsNeededAfter, pickAccountPatch, pickFiscalPatch, sellerTypeToAccountType,
+  validateAccountPatch, validateFiscalPatch, type IdentityChange,
+} from '../utils/sellerAccountRules.js';
 
 export const sellerRouter = Router();
 sellerRouter.use(requireAuth);
@@ -933,6 +937,9 @@ sellerRouter.get('/profile', async (req: AuthRequest, res: Response) => {
     const kycRows = await db.select().from(sellerKyc).where(eq(sellerKyc.sellerId, seller.id)).limit(1);
     const kyc = kycRows[0];
     const kycStatus = kyc?.status || (seller.status === 'active' ? 'approved' : seller.status) || user?.kycStatus || 'pending';
+    const account = accountFromSettings(profile.settingsJson);
+    const kycCtxForType = await loadStoredKyc(db, seller.id);
+    const [countryRow] = await db.select({ currency: countries.currency }).from(countries).where(eq(countries.code, seller.countryCode)).limit(1);
 
     if (process.env.NODE_ENV !== 'production') {
       console.log(`[SELLER KYC] status recebido: ${kycStatus} source: GET /seller/profile`);
@@ -947,11 +954,17 @@ sellerRouter.get('/profile', async (req: AuthRequest, res: Response) => {
         commercialName: seller.tradingName || seller.companyName,
         companyName: seller.companyName,
         taxId: seller.taxId,
+        // tipo de vendedor escolhido na conta; sem escolha, o que o KYC já definiu (pessoa física / empresa); senão nenhum
+        sellerType: account.sellerType || defaultSellerTypeFor(resolveStoredAccountType(kycCtxForType)) || null,
+        preferredCurrency: account.preferredCurrency || countryRow?.currency || 'XOF',
+        kycReverification: reverificationFromSettings(profile.settingsJson),
         // dados fiscais da conta (cidade e endereço da sede): JSONB do perfil, chave "fiscal" (sem migração)
         city: fiscalFromSettings(profile.settingsJson).city,
         address: fiscalFromSettings(profile.settingsJson).address,
         phone: seller.phone,
-        email: user?.email || '',
+        // e-mail COMERCIAL (notificações); o e-mail de login da conta continua separado (loginEmail) e nunca é alterado por aqui
+        email: account.commercialEmail || user?.email || '',
+        loginEmail: user?.email || '',
         country: seller.countryCode,
         status: seller.status,
         kycStatus,
@@ -968,6 +981,29 @@ sellerRouter.get('/profile', async (req: AuthRequest, res: Response) => {
   }
 });
 
+/** Preferências da conta guardadas em seller_profiles.settings_json.account (tipo de vendedor, e-mail comercial, moeda preferida). */
+function accountFromSettings(settingsJson: unknown): { sellerType: string | null; commercialEmail: string | null; preferredCurrency: string | null } {
+  const settings = settingsJson && typeof settingsJson === 'object' ? (settingsJson as Record<string, any>) : {};
+  const a = settings.account && typeof settings.account === 'object' ? settings.account : {};
+  return {
+    sellerType: typeof a.sellerType === 'string' && a.sellerType ? a.sellerType : null,
+    commercialEmail: typeof a.commercialEmail === 'string' && a.commercialEmail ? a.commercialEmail : null,
+    preferredCurrency: typeof a.preferredCurrency === 'string' && a.preferredCurrency ? a.preferredCurrency : null,
+  };
+}
+
+/** Reverificação pendente (se houver), no formato que a tela recebe. */
+function reverificationFromSettings(settingsJson: unknown): { required: boolean; at: string | null; changes: Array<{ field: string; label: string }> } | null {
+  const settings = settingsJson && typeof settingsJson === 'object' ? (settingsJson as Record<string, any>) : {};
+  const rv = settings.kycReverification;
+  if (!rv || typeof rv !== 'object' || rv.required !== true) return null;
+  return {
+    required: true,
+    at: typeof rv.at === 'string' ? rv.at : null,
+    changes: Array.isArray(rv.changes) ? rv.changes.map((c: any) => ({ field: String(c?.field ?? ''), label: String(c?.label ?? '') })) : [],
+  };
+}
+
 sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -977,29 +1013,91 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
 
     const body = req.body ?? {};
     const { companyName, tradingName, phone, description, returnPolicy, shippingPolicy } = body;
+    const reject = (status: number, code: string, message: string, extra: Record<string, unknown> = {}) =>
+      res.status(status).json({ success: false, message, error: { code, message, ...extra } });
 
-    // Dados fiscais (documento fiscal, cidade, endereço): atualização PARCIAL — só o que veio é gravado. Validação ANTES de qualquer
-    // escrita, com as mesmas regras por país do KYC. O estado do KYC (seller_kyc, users.kyc_status, sellers.status) nunca é tocado aqui.
+    // Atualização PARCIAL: só o que veio é gravado. Tudo é validado ANTES de qualquer escrita, com as mesmas regras por país do KYC.
+    // O titular da conta (users.full_name) NÃO é o nome comercial (sellers.trading_name) nem a razão social (sellers.company_name).
     const fiscalPatch = pickFiscalPatch(body);
+    const accountPatch = pickAccountPatch(body);
     const fiscalSent = ['taxId', 'city', 'address'].some((k) => body[k] !== undefined && body[k] !== null);
+    const accountSent = ['fullName', 'sellerType', 'country', 'email', 'preferredCurrency'].some((k) => body[k] !== undefined && body[k] !== null);
+
     const [existing] = await db.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
     const storedFiscal = fiscalFromSettings(existing?.settingsJson);
-    if (fiscalSent) {
-      const kycCtx = await loadStoredKyc(db, seller.id);
-      const problems = validateFiscalPatch(fiscalPatch, body, {
-        country: seller.countryCode,
-        accountType: resolveStoredAccountType(kycCtx),
+    const storedAccount = accountFromSettings(existing?.settingsJson);
+    const [userRow] = await db.select().from(users).where(eq(users.id, seller.userId)).limit(1);
+    const kycCtx = await loadStoredKyc(db, seller.id);
+    const isVerified = seller.kycStatus === 'verified';
+
+    let reverificationChanges: IdentityChange[] = [];
+    let newSellerClass: ReturnType<typeof sellerTypeToAccountType> = null;
+    const currentCountry = String(seller.countryCode || '').toUpperCase();
+    const countryChanged = accountPatch.country !== undefined && accountPatch.country !== currentCountry;
+
+    if (fiscalSent || accountSent) {
+      const countryRows = await db.select({ code: countries.code, currency: countries.currency }).from(countries).where(eq(countries.isActive, true));
+      const activeCountries = countryRows.map((c: any) => String(c.code).toUpperCase());
+      const supportedCurrencies = Array.from(new Set<string>(countryRows.map((c: any) => String(c.currency).toUpperCase())));
+      const effectiveCountry = accountPatch.country ?? currentCountry;
+      const currentClass = sellerTypeToAccountType(storedAccount.sellerType) ?? resolveStoredAccountType(kycCtx) ?? (isVerified ? 'pf' : null);
+      newSellerClass = accountPatch.sellerType !== undefined ? sellerTypeToAccountType(accountPatch.sellerType) : null;
+
+      const problems: Array<{ field: string; message: string }> = [];
+      problems.push(...validateAccountPatch(accountPatch, body, {
+        current: {
+          fullName: userRow?.fullName || '', sellerType: storedAccount.sellerType, country: currentCountry,
+          email: storedAccount.commercialEmail || '', preferredCurrency: storedAccount.preferredCurrency || '',
+        },
+        activeCountries: activeCountries.length > 0 ? activeCountries : undefined,
+        supportedCurrencies: supportedCurrencies.length > 0 ? supportedCurrencies : undefined,
+      }));
+      problems.push(...validateFiscalPatch(fiscalPatch, body, {
+        country: effectiveCountry,
+        accountType: newSellerClass ?? currentClass,
         current: { taxId: seller.taxId, city: storedFiscal.city, address: storedFiscal.address },
-      });
+      }));
+      // trocar o país sem informar o documento: o documento guardado precisa valer no novo país (não dá para contornar o KYC por aqui)
+      if (countryChanged && fiscalPatch.taxId === undefined && seller.taxId && !problems.some((p) => p.field === 'country')) {
+        const recheck = validateFiscalPatch({ taxId: String(seller.taxId) }, { taxId: String(seller.taxId) }, { country: effectiveCountry, accountType: newSellerClass ?? currentClass, current: { taxId: '' } });
+        if (recheck.length > 0) problems.push({ field: 'taxId', message: `O documento fiscal atual não vale para o novo país (${effectiveCountry}). Informe o documento fiscal desse país junto com a mudança.` });
+      }
       if (problems.length > 0) {
         const message = problems.map((p) => p.message).join(' ');
-        return res.status(400).json({
-          success: false,
-          message,
-          error: { code: 'VALIDATION_ERROR', message, details: problems.map((p) => ({ field: p.field, message: p.message })) },
-        });
+        return reject(400, 'VALIDATION_ERROR', message, { details: problems.map((p) => ({ field: p.field, message: p.message })) });
+      }
+
+      // País sede mexe no escopo territorial de escrow, saques, devoluções e disputas: só vendedor SEM movimento operacional/financeiro.
+      if (countryChanged) {
+        const [hasStore, hasProduct, hasOrder, hasEscrow, hasPayout] = await Promise.all([
+          db.select({ id: storesTable.id }).from(storesTable).where(eq(storesTable.sellerId, seller.id)).limit(1),
+          db.select({ id: products.id }).from(products).where(eq(products.sellerId, seller.id)).limit(1),
+          db.select({ id: orders.id }).from(orders).where(eq(orders.sellerId, seller.id)).limit(1),
+          db.select({ id: escrowAccounts.id }).from(escrowAccounts).where(eq(escrowAccounts.sellerId, seller.id)).limit(1),
+          db.select({ id: sellerPayouts.id }).from(sellerPayouts).where(eq(sellerPayouts.sellerId, seller.id)).limit(1),
+        ]);
+        if (hasStore.length || hasProduct.length || hasOrder.length || hasEscrow.length || hasPayout.length) {
+          const message = 'Não é possível trocar o país sede: este vendedor já tem loja, produtos, pedidos ou movimento financeiro. A mudança precisa ser feita pela administração do Mercado Nusali.';
+          return reject(409, 'COUNTRY_CHANGE_BLOCKED', message, { details: [{ field: 'country', message }] });
+        }
+      }
+
+      // Dados de identidade já VERIFICADOS (documento fiscal, titular, país, classe do tipo de vendedor): mudar exige reverificação
+      // do KYC, confirmada de forma explícita — nunca silenciosa e nunca com aprovação automática dos novos dados.
+      if (isVerified) {
+        reverificationChanges = detectIdentityChanges(
+          { taxId: seller.taxId, fullName: userRow?.fullName, country: currentCountry, accountType: currentClass },
+          { taxId: fiscalPatch.taxId, fullName: accountPatch.fullName, country: accountPatch.country, accountType: newSellerClass ?? undefined },
+        );
+        if (reverificationChanges.length > 0 && body.confirmReverification !== true) {
+          const what = reverificationChanges.map((c) => c.label).join(', ');
+          const message = `Alterar ${what} exige uma nova verificação (KYC) da sua conta. Se continuar, o status volta para análise e você precisará reenviar os documentos; novos dados nunca são aprovados automaticamente.`;
+          return reject(409, 'KYC_REVERIFICATION_REQUIRED', message, { changes: reverificationChanges, details: [] });
+        }
       }
     }
+
+    const triggersReverification = isVerified && reverificationChanges.length > 0 && body.confirmReverification === true;
 
     await db.transaction(async (tx: any) => {
       const sellerSet: Record<string, unknown> = {};
@@ -1007,19 +1105,77 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
       if (tradingName) sellerSet.tradingName = tradingName;
       if (phone) sellerSet.phone = phone;
       if (fiscalPatch.taxId !== undefined && fiscalPatch.taxId !== String(seller.taxId ?? '').trim()) sellerSet.taxId = fiscalPatch.taxId;
+      if (countryChanged) sellerSet.countryCode = accountPatch.country;
       if (Object.keys(sellerSet).length > 0) {
         await tx.update(sellers).set({ ...sellerSet, updatedAt: new Date() }).where(eq(sellers.id, seller.id));
       }
+      if (accountPatch.fullName !== undefined && accountPatch.fullName !== String(userRow?.fullName ?? '').trim()) {
+        await tx.update(users).set({ fullName: accountPatch.fullName, updatedAt: new Date() }).where(eq(users.id, seller.userId));
+      }
 
-      // trava a linha do perfil: duas gravações simultâneas no JSONB (KYC, preferências, dados fiscais) não se sobrescrevem
+      // trava a linha do perfil: gravações simultâneas no JSONB (KYC, preferências, conta, dados fiscais) não se sobrescrevem
       const [row] = await tx.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1).for('update');
       const settings = (row?.settingsJson && typeof row.settingsJson === 'object' ? row.settingsJson : {}) as Record<string, any>;
-      const prevFiscal = settings.fiscal && typeof settings.fiscal === 'object' ? settings.fiscal : {};
-      const nextFiscal = { ...prevFiscal };
-      if (fiscalPatch.city !== undefined) nextFiscal.city = fiscalPatch.city;
-      if (fiscalPatch.address !== undefined) nextFiscal.address = fiscalPatch.address;
-      const fiscalChanged = fiscalPatch.city !== undefined || fiscalPatch.address !== undefined;
-      const settingsJson = fiscalChanged ? { ...settings, fiscal: nextFiscal } : (row?.settingsJson ?? null);
+      const next: Record<string, any> = { ...settings };
+      let settingsChanged = false;
+
+      if (fiscalPatch.city !== undefined || fiscalPatch.address !== undefined) {
+        const prevFiscal = settings.fiscal && typeof settings.fiscal === 'object' ? settings.fiscal : {};
+        next.fiscal = { ...prevFiscal, ...(fiscalPatch.city !== undefined ? { city: fiscalPatch.city } : {}), ...(fiscalPatch.address !== undefined ? { address: fiscalPatch.address } : {}) };
+        settingsChanged = true;
+      }
+      if (accountPatch.sellerType !== undefined || accountPatch.email !== undefined || accountPatch.preferredCurrency !== undefined) {
+        const prevAccount = settings.account && typeof settings.account === 'object' ? settings.account : {};
+        next.account = {
+          ...prevAccount,
+          ...(accountPatch.sellerType !== undefined ? { sellerType: accountPatch.sellerType } : {}),
+          ...(accountPatch.email !== undefined ? { commercialEmail: accountPatch.email } : {}),
+          ...(accountPatch.preferredCurrency !== undefined ? { preferredCurrency: accountPatch.preferredCurrency } : {}),
+        };
+        settingsChanged = true;
+      }
+      // a classe do tipo de vendedor e o tipo de conta do KYC nunca divergem: o KYC passa a exigir o que a nova classe exige
+      if (newSellerClass && (settings.kyc?.accountType || kycCtx.kyc)) {
+        const prevKyc = settings.kyc && typeof settings.kyc === 'object' ? settings.kyc : {};
+        if (prevKyc.accountType !== newSellerClass) {
+          next.kyc = { ...prevKyc, accountType: newSellerClass };
+          settingsChanged = true;
+        }
+      }
+      if (triggersReverification) {
+        next.kycReverification = {
+          required: true,
+          at: new Date().toISOString(),
+          changes: reverificationChanges,
+          needs: documentsNeededAfter(reverificationChanges),
+          previousStatus: 'verified',
+          previousReviewedAt: kycCtx.kyc?.reviewedAt ? new Date(kycCtx.kyc.reviewedAt).toISOString() : null,
+        };
+        settingsChanged = true;
+        // mesmo efeito de uma rejeição/pendência: o KYC deixa de estar aprovado até nova análise (histórico de revisão preservado)
+        if (kycCtx.kyc?.id) await tx.update(sellerKyc).set({ status: 'pending' }).where(eq(sellerKyc.id, kycCtx.kyc.id));
+        await tx.update(users).set({ kycStatus: 'pending', updatedAt: new Date() }).where(eq(users.id, seller.userId));
+        await tx.insert(auditLogs).values({
+          id: `audit_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+          actorUserId: req.user?.id || null,
+          action: 'seller.kyc.reverification_required',
+          resource: 'seller_kyc',
+          resourceId: kycCtx.kyc?.id || seller.id,
+          detailsJson: {
+            sellerId: seller.id,
+            changes: reverificationChanges,
+            previousStatus: 'verified',
+            previousReviewedAt: kycCtx.kyc?.reviewedAt ?? null,
+            previousReviewerId: kycCtx.kyc?.reviewerId ?? null,
+            previousDocuments: kycCtx.docs.map((d: any) => ({ type: d.documentType, objectKey: d.objectKey ?? null, fileUrl: d.fileUrl ?? null })),
+          },
+          ipAddress: req.ip || req.socket?.remoteAddress || null,
+          userAgent: (req.headers['user-agent'] as string) || null,
+          countryCode: req.user?.countryCode || null,
+          createdAt: new Date(),
+        });
+      }
+      const settingsJson = settingsChanged ? next : (row?.settingsJson ?? null);
 
       if (row) {
         await tx.update(sellerProfiles)
@@ -1048,7 +1204,10 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
     // devolve o que FICOU gravado (a tela mostra isto, nunca o que ela mesma digitou)
     const [savedSeller] = await db.select().from(sellers).where(eq(sellers.id, seller.id)).limit(1);
     const [savedProfile] = await db.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
+    const [savedUser] = await db.select().from(users).where(eq(users.id, seller.userId)).limit(1);
     const savedFiscal = fiscalFromSettings(savedProfile?.settingsJson);
+    const savedAccount = accountFromSettings(savedProfile?.settingsJson);
+    const [savedCountry] = await db.select({ currency: countries.currency }).from(countries).where(eq(countries.code, savedSeller?.countryCode)).limit(1);
     return res.json({
       success: true,
       message: 'Perfil do vendedor atualizado com sucesso!',
@@ -1056,9 +1215,15 @@ sellerRouter.patch('/profile', async (req: AuthRequest, res: Response) => {
         companyName: savedSeller?.companyName,
         commercialName: savedSeller?.tradingName,
         phone: savedSeller?.phone,
+        fullName: savedUser?.fullName || savedSeller?.companyName || '',
         taxId: (savedSeller?.taxId && savedSeller.taxId !== savedSeller.phone) ? savedSeller.taxId : (seller.taxId || ''),
         city: savedFiscal.city,
         address: savedFiscal.address,
+        country: savedSeller?.countryCode,
+        sellerType: savedAccount.sellerType ?? defaultSellerTypeFor(resolveStoredAccountType(await loadStoredKyc(db, seller.id))) ?? null,
+        email: savedAccount.commercialEmail || savedUser?.email || '',
+        preferredCurrency: savedAccount.preferredCurrency || savedCountry?.currency || 'XOF',
+        kycReverification: reverificationFromSettings(savedProfile?.settingsJson),
       },
     });
   } catch (error: any) {
@@ -3489,6 +3654,7 @@ sellerRouter.post('/kyc/submit', async (req: AuthRequest, res: Response) => {
     const kycType = normalizeKycAccountType(accountType);
     const storedCtx = await loadStoredKyc(db, seller.id);
     const storedFlags = storedDocumentFlags(storedCtx);
+    const rvNeeds = storedCtx.reverification?.required ? (storedCtx.reverification.needs ?? ['identityDocument']) : [];
     const issues = validateKycSubmission(
       {
         accountType,
@@ -3498,8 +3664,9 @@ sellerRouter.post('/kyc/submit', async (req: AuthRequest, res: Response) => {
         phone: req.body.phone,
         documentType,
         documentNumber,
-        hasIdentityDocument: !!(documentFrontUrl || identityMetadata?.url) || storedFlags.hasIdentityDocument,
-        hasProofOfAddress: !!(proofOfAddressUrl || addressMetadata?.url) || storedFlags.hasProofOfAddress,
+        // reverificação pendente (dados de identidade mudaram depois da aprovação): o que ficou guardado NÃO vale, é preciso enviar de novo
+        hasIdentityDocument: !!(documentFrontUrl || identityMetadata?.url) || (storedFlags.hasIdentityDocument && !rvNeeds.includes('identityDocument')),
+        hasProofOfAddress: !!(proofOfAddressUrl || addressMetadata?.url) || (storedFlags.hasProofOfAddress && !rvNeeds.includes('proofOfAddress')),
         hasSelfie: !!(selfieUrl || selfieMetadata?.url) || storedFlags.hasSelfie,
         hasBusinessLicense: !!(businessLicenseUrl || companyMetadata?.url) || storedFlags.hasBusinessLicense,
       },
@@ -4081,7 +4248,7 @@ sellerRouter.get('/settings', async (req: AuthRequest, res: Response) => {
     const [profile] = await db.select({ settingsJson: sellerProfiles.settingsJson }).from(sellerProfiles).where(eq(sellerProfiles.sellerId, seller.id)).limit(1);
     const saved = (profile?.settingsJson as Record<string, any>) || {};
 
-    const { kyc: _kycInternal, fiscal: _fiscalInternal, ...publicSaved } = saved; // dados internos (KYC, dados fiscais) nao fazem parte das configuracoes
+    const { kyc: _kycInternal, fiscal: _fiscalInternal, account: _accountInternal, kycReverification: _rvInternal, ...publicSaved } = saved; // dados internos (KYC, dados fiscais) nao fazem parte das configuracoes
     return res.json({ success: true, data: { ...SELLER_SETTINGS_DEFAULTS, ...publicSaved } });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Erro ao carregar configurações.' });
@@ -4115,7 +4282,7 @@ sellerRouter.patch('/settings', async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { kyc: _kycInternal, fiscal: _fiscalInternal, ...publicMerged } = merged as Record<string, any>;
+    const { kyc: _kycInternal, fiscal: _fiscalInternal, account: _accountInternal, kycReverification: _rvInternal, ...publicMerged } = merged as Record<string, any>;
     return res.json({ success: true, message: 'Configurações operacionais salvas com sucesso!', data: publicMerged });
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'Erro ao salvar configurações.' });

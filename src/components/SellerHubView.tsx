@@ -131,7 +131,11 @@ export const SellerHubView: React.FC = () => {
 
       if (resProfile.success && resProfile.data) {
         // campos que o servidor não devolve ficam com o padrão (nunca undefined nos campos do formulário da conta)
-        setProfile({ ...initialSellerProfile, ...resProfile.data });
+        // (valores nulos também ficam com o padrão: ex. tipo de vendedor ainda não escolhido)
+        setProfile({
+          ...initialSellerProfile,
+          ...Object.fromEntries(Object.entries(resProfile.data).filter(([, v]) => v !== null && v !== undefined)),
+        } as SellerProfileData);
         setNeedsOnboarding(false);
       } else {
         setNeedsOnboarding(true);

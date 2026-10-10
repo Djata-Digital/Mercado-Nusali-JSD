@@ -23,7 +23,10 @@ import { useAuth } from '../../context/AuthContext';
 import { uploadService } from '../../services/uploadService';
 import { BuyerService } from '../../services/buyerService';
 import { SellerService } from '../../services/sellerService';
-import { pickFiscalPatch, saveSellerAccountDetails, validateFiscalPatch, type FiscalField } from '../../utils/sellerAccountRules';
+import {
+  pickAccountPatch, pickFiscalPatch, saveSellerAccountDetails, validateAccountPatch, validateFiscalPatch,
+  type AccountField, type ReverificationPrompt,
+} from '../../utils/sellerAccountRules';
 import { UserAvatar } from '../UserAvatar';
 import { AvatarUploadField } from '../AvatarUploadField';
 import { resolveAvatarUrl } from '../../utils/avatar';
@@ -60,16 +63,48 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [saving, setSaving] = useState(false);
-  // O perfil pode chegar do servidor DEPOIS de a tela abrir (F5 direto nesta aba, recarga ao entrar): os três campos fiscais seguem o que
-  // o banco devolveu, a não ser que a pessoa já tenha começado a digitar neles (o que ela digitou nunca é apagado por uma recarga).
-  const fiscalDirty = useRef({ taxId: false, city: false, address: false });
+  // O perfil pode chegar do servidor DEPOIS de a tela abrir (F5 direto nesta aba, recarga ao entrar): os campos seguem o que o banco
+  // devolveu, a não ser que a pessoa já tenha começado a digitar neles (o que ela digitou nunca é apagado por uma recarga).
+  const dirty = useRef<Record<string, boolean>>({});
   useEffect(() => {
-    if (!fiscalDirty.current.taxId) setTaxId(profile.taxId ?? '');
-    if (!fiscalDirty.current.city) setCity(profile.city ?? '');
-    if (!fiscalDirty.current.address) setAddress(profile.address ?? '');
-  }, [profile.taxId, profile.city, profile.address]);
-  const [fieldErrors, setFieldErrors] = useState<Partial<Record<FiscalField, string>>>({});
-  const clearFieldError = (f: FiscalField) => setFieldErrors((prev) => (prev[f] ? { ...prev, [f]: undefined } : prev));
+    const d = dirty.current;
+    if (!d.fullName) setFullName(profile.fullName ?? '');
+    if (!d.commercialName) setCommercialName(profile.commercialName ?? '');
+    if (!d.sellerType) setSellerType(profile.sellerType);
+    if (!d.taxId) setTaxId(profile.taxId ?? '');
+    if (!d.country) setCountry(profile.country);
+    if (!d.city) setCity(profile.city ?? '');
+    if (!d.address) setAddress(profile.address ?? '');
+    if (!d.phone) setPhone(profile.phone ?? '');
+    if (!d.email) setEmail(profile.email ?? '');
+    if (!d.preferredCurrency) setPreferredCurrency(profile.preferredCurrency);
+  }, [profile.fullName, profile.commercialName, profile.sellerType, profile.taxId, profile.country, profile.city, profile.address, profile.phone, profile.email, profile.preferredCurrency]);
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<AccountField, string>>>({});
+  const [reverifyPrompt, setReverifyPrompt] = useState<ReverificationPrompt | null>(null);
+  const rv = (profile as any).kycReverification as { required?: boolean; changes?: Array<{ label?: string }> } | null | undefined;
+  const reverificationPending = rv?.required === true;
+  const reverificationLabels = (rv?.changes ?? []).map((c) => c.label).filter(Boolean).join(', ');
+
+  /** edita um campo: marca como digitado (a recarga não o sobrescreve) e limpa o erro dele */
+  const edit = (key: string, setter: (v: any) => void, value: string) => {
+    dirty.current[key] = true;
+    setter(value);
+    setReverifyPrompt(null);
+    setFieldErrors((prev) => (prev[key as AccountField] ? { ...prev, [key]: undefined } : prev));
+  };
+  const inputCls = (f: AccountField) => `w-full p-2.5 border rounded-xl focus:border-emerald-600 focus:outline-hidden ${fieldErrors[f] ? 'border-red-400' : 'border-gray-300'}`;
+  const fieldError = (f: AccountField) => fieldErrors[f]
+    ? <p id={`seller-account-${f}-error`} role="alert" data-testid={`seller-account-${f}-error`} className="mt-1 text-[11px] font-bold text-red-600">{fieldErrors[f]}</p>
+    : null;
+
+  // moedas oferecidas: as dos países ativos (as mesmas aceitas para saque); a moeda já escolhida nunca some da lista
+  const CURRENCY_LABELS: Record<string, string> = {
+    XOF: 'XOF - Franco CFA (África Ocidental)', EUR: 'EUR - Euro (Europa / Portugal)', BRL: 'BRL - Real (Brasil)', USD: 'USD - Dólar Norte-Americano',
+  };
+  const currencyOptions = Array.from(new Set<string>([
+    ...(operationalCountries && operationalCountries.length > 0 ? operationalCountries.map((c) => String(c.currency).toUpperCase()) : ['XOF', 'EUR', 'BRL', 'USD']),
+    ...(preferredCurrency ? [String(preferredCurrency)] : []),
+  ]));
 
   // O arquivo já chega validado (tipo e tamanho) pelo AvatarUploadField; o servidor valida de novo.
   const handleAvatarFile = async (file: File) => {
@@ -90,19 +125,25 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
     }
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submitAccount = async (confirmReverification: boolean) => {
     if (saving) return;
     setFieldErrors({});
 
-    // mesma validação do servidor (documento por país, cidade, endereço); o que já estava guardado e não mudou não é revalidado
-    const typed = { taxId, city, address };
-    const problems = validateFiscalPatch(pickFiscalPatch(typed), typed, {
-      country: profile.country,
-      current: { taxId: profile.taxId, city: profile.city, address: profile.address },
-    });
+    // mesma validação do servidor; o que já estava guardado e não mudou não é revalidado
+    const typed = { fullName, sellerType, country, email, preferredCurrency, taxId, city, address };
+    const problems: Array<{ field: AccountField; message: string }> = [
+      ...validateAccountPatch(pickAccountPatch(typed), typed, {
+        current: { fullName: profile.fullName, sellerType: profile.sellerType, country: profile.country, email: profile.email, preferredCurrency: profile.preferredCurrency },
+        activeCountries: operationalCountries && operationalCountries.length > 0 ? operationalCountries.map((c) => c.code.toUpperCase()) : undefined,
+        supportedCurrencies: operationalCountries && operationalCountries.length > 0 ? Array.from(new Set(operationalCountries.map((c) => String(c.currency).toUpperCase()))) : undefined,
+      }),
+      ...validateFiscalPatch(pickFiscalPatch(typed), typed, {
+        country,
+        current: { taxId: profile.taxId, city: profile.city, address: profile.address },
+      }),
+    ];
     if (problems.length > 0) {
-      const errs: Partial<Record<FiscalField, string>> = {};
+      const errs: Partial<Record<AccountField, string>> = {};
       for (const pr of problems) if (!errs[pr.field]) errs[pr.field] = pr.message;
       setFieldErrors(errs);
       showToast(problems[0].message);
@@ -110,26 +151,54 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
     }
 
     setSaving(true);
-    // só dá como salvo quando o servidor confirma; o que ele devolve é o que ficou gravado
+    // só dá como salvo quando o servidor confirma; o que ele devolve é o que ficou gravado. O titular (fullName) NÃO é o nome
+    // comercial (tradingName) nem a razão social: cada um segue o seu caminho.
     const result = await saveSellerAccountDetails(
-      { companyName: fullName, tradingName: commercialName, phone, taxId, city, address },
+      {
+        fullName, tradingName: commercialName, phone, sellerType, country, email, preferredCurrency, taxId, city, address,
+        ...(confirmReverification ? { confirmReverification: true } : {}),
+      },
       (payload) => SellerService.updateProfile(payload),
     );
     setSaving(false);
     if (!result.ok) {
+      if (result.reverification) {
+        // o servidor não gravou nada: pede confirmação explícita antes de mandar o KYC para reverificação
+        setReverifyPrompt(result.reverification);
+        showToast(result.message);
+        return;
+      }
+      setReverifyPrompt(null);
       setFieldErrors(result.fields);
       showToast(result.message);
       return;
     }
+    setReverifyPrompt(null);
     const saved = result.saved;
-
-    const savedTaxId = typeof saved.taxId === 'string' ? saved.taxId : taxId;
-    const savedCity = typeof saved.city === 'string' ? saved.city : city;
-    const savedAddress = typeof saved.address === 'string' ? saved.address : address;
-    fiscalDirty.current = { taxId: false, city: false, address: false }; // o que está na tela agora é o que o servidor gravou
-    setTaxId(savedTaxId);
-    setCity(savedCity);
-    setAddress(savedAddress);
+    const next = {
+      fullName: saved.fullName ?? fullName,
+      commercialName: saved.commercialName ?? commercialName,
+      sellerType: (saved.sellerType ?? sellerType) as any,
+      taxId: saved.taxId ?? taxId,
+      country: (saved.country ?? country) as CountryCode,
+      city: saved.city ?? city,
+      address: saved.address ?? address,
+      phone: saved.phone ?? phone,
+      email: saved.email ?? email,
+      preferredCurrency: (saved.preferredCurrency ?? preferredCurrency) as CurrencyCode,
+    };
+    dirty.current = {}; // o que está na tela agora é o que o servidor gravou
+    setFullName(next.fullName);
+    setCommercialName(next.commercialName);
+    setSellerType(next.sellerType);
+    setTaxId(next.taxId);
+    setCountry(next.country);
+    setCity(next.city);
+    setAddress(next.address);
+    setPhone(next.phone);
+    setEmail(next.email);
+    setPreferredCurrency(next.preferredCurrency);
+    if (saved.fullName) updateUser({ name: saved.fullName }); // cabeçalho e iniciais seguem o nome do titular
 
     let avatarFailed = false;
     if (avatarChanged && avatar) {
@@ -143,21 +212,21 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
     }
     onUpdateProfile({
       ...profile,
-      fullName,
-      commercialName,
-      sellerType,
-      taxId: savedTaxId,
-      country,
-      city: savedCity,
-      address: savedAddress,
-      phone,
-      email,
-      preferredCurrency,
+      ...next,
       avatar,
+      kycStatus: result.kycReverification ? 'pending' : profile.kycStatus,
+      kycReverification: result.kycReverification ?? null,
     });
-    showToast(avatarFailed
-      ? 'Dados da conta salvos. A foto não foi gravada: tente salvar de novo.'
-      : 'Dados da conta de vendedor salvos com sucesso!');
+    showToast(result.kycReverification
+      ? 'Dados salvos. A verificação (KYC) voltou para análise: reenvie os documentos na seção KYC.'
+      : avatarFailed
+        ? 'Dados da conta salvos. A foto não foi gravada: tente salvar de novo.'
+        : 'Dados da conta de vendedor salvos com sucesso!');
+  };
+
+  const handleSave = (e: React.FormEvent) => {
+    e.preventDefault();
+    return submitAccount(false);
   };
 
   const countryConf = countriesConfig[country] || countriesConfig.GW;
@@ -172,15 +241,21 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-xl font-black">{commercialName}</h1>
-              <span className="bg-emerald-500 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full flex items-center gap-1">
-                <BadgeCheck className="w-3.5 h-3.5" /> VERIFICADO
-              </span>
+              {profile.kycStatus === 'verified' ? (
+                <span data-testid="seller-account-kyc-badge" className="bg-emerald-500 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full flex items-center gap-1">
+                  <BadgeCheck className="w-3.5 h-3.5" /> VERIFICADO
+                </span>
+              ) : (
+                <span data-testid="seller-account-kyc-badge" className="bg-amber-500 text-white text-[10px] font-black px-2.5 py-0.5 rounded-full flex items-center gap-1">
+                  <ShieldCheck className="w-3.5 h-3.5" /> {reverificationPending ? 'REVERIFICAÇÃO PENDENTE' : 'VERIFICAÇÃO PENDENTE'}
+                </span>
+              )}
             </div>
             <p className="text-xs text-slate-300 mt-1 font-mono">
               Titular: {fullName} • {taxId}
             </p>
             <span className="text-[11px] text-yellow-300 font-bold block mt-1">
-              {profile.kycLevel} (Aprovado em {profile.verificationDate})
+              {profile.kycLevel}{profile.kycStatus === 'verified' && profile.verificationDate ? ` (Aprovado em ${profile.verificationDate})` : ''}
             </span>
           </div>
         </div>
@@ -192,6 +267,23 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
           <ShieldCheck className="w-4 h-4 text-yellow-300" /> Ver Documentos KYC
         </button>
       </div>
+
+      {reverificationPending && (
+        <div role="status" data-testid="seller-account-reverification-notice" className="bg-amber-50 border border-amber-300 text-amber-900 rounded-2xl p-4 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <p><strong>Reverificação de identidade necessária.</strong> Você alterou {reverificationLabels || 'dados de identidade'} depois da verificação. Reenvie os documentos na seção KYC para uma nova análise; os novos dados não são aprovados automaticamente.</p>
+          <button type="button" onClick={() => onNavigateSection('kyc')} className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-xl shrink-0 cursor-pointer">Ir para o KYC</button>
+        </div>
+      )}
+
+      {reverifyPrompt && (
+        <div role="alertdialog" aria-label="Confirmar reverificação" data-testid="seller-account-reverify-confirm" className="bg-red-50 border border-red-300 text-red-900 rounded-2xl p-4 text-xs space-y-3">
+          <p><strong>Esta alteração exige nova verificação (KYC).</strong> {reverifyPrompt.changes.length > 0 ? `Dados que mudam: ${reverifyPrompt.changes.map((c) => c.label).join(', ')}. ` : ''}Ao confirmar, o status de verificação volta para análise e você precisará reenviar os documentos. O histórico da verificação anterior é preservado.</p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button type="button" disabled={saving} data-testid="seller-account-reverify-confirm-button" onClick={() => submitAccount(true)} className="bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-xl cursor-pointer">Confirmar e enviar para reverificação</button>
+            <button type="button" disabled={saving} onClick={() => setReverifyPrompt(null)} className="bg-white border border-gray-300 text-gray-800 font-bold px-4 py-2 rounded-xl cursor-pointer">Cancelar alteração</button>
+          </div>
+        </div>
+      )}
 
       {/* Account Profile Form */}
       <form onSubmit={handleSave} className="bg-white rounded-2xl border border-gray-200 p-6 shadow-2xs space-y-6">
@@ -211,18 +303,20 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="text"
               value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
+              onChange={(e) => edit('fullName', setFullName, e.target.value)}
               required
-              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden"
+              aria-invalid={!!fieldErrors.fullName}
+              className={inputCls('fullName')}
             />
+            {fieldError('fullName')}
           </div>
 
           <div>
-            <label className="block text-gray-700 font-bold mb-1">Nome Comercial / Razão Social *</label>
+            <label className="block text-gray-700 font-bold mb-1">Nome Comercial da Loja *</label>
             <input
               type="text"
               value={commercialName}
-              onChange={(e) => setCommercialName(e.target.value)}
+              onChange={(e) => edit('commercialName', setCommercialName, e.target.value)}
               required
               className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden"
             />
@@ -232,8 +326,9 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <label className="block text-gray-700 font-bold mb-1">Tipo de Vendedor *</label>
             <select
               value={sellerType}
-              onChange={(e) => setSellerType(e.target.value as any)}
-              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden bg-white"
+              onChange={(e) => edit('sellerType', setSellerType as any, e.target.value)}
+              aria-invalid={!!fieldErrors.sellerType}
+              className={`${inputCls('sellerType')} bg-white`}
             >
               <option value="pessoa_fisica">Pessoa Física / Autônomo</option>
               <option value="empresa_individual">Empresa Individual / MEI</option>
@@ -241,6 +336,7 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
               <option value="marca_oficial">Marca Oficial / Distribuidor</option>
               <option value="vendedor_internacional">Vendedor Internacional Exportador</option>
             </select>
+            {fieldError('sellerType')}
           </div>
 
           <div>
@@ -248,7 +344,7 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="text"
               value={taxId}
-              onChange={(e) => { fiscalDirty.current.taxId = true; setTaxId(e.target.value); clearFieldError('taxId'); }}
+              onChange={(e) => edit('taxId', setTaxId, e.target.value)}
               required
               aria-invalid={!!fieldErrors.taxId}
               aria-describedby={fieldErrors.taxId ? 'seller-account-taxId-error' : undefined}
@@ -261,9 +357,10 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <label className="block text-gray-700 font-bold mb-1">País Sede *</label>
             <select
               value={country}
-              onChange={(e) => setCountry(e.target.value as CountryCode)}
+              onChange={(e) => edit('country', setCountry as any, e.target.value)}
               disabled={countriesLoading}
-              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden bg-white disabled:opacity-60"
+              aria-invalid={!!fieldErrors.country}
+              className={`${inputCls('country')} bg-white disabled:opacity-60`}
             >
               {/* País atual do vendedor sempre presente na lista, mesmo antes do
                   carregamento terminar ou se não estiver mais entre os ativos —
@@ -277,6 +374,8 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
                 </option>
               ))}
             </select>
+            {fieldError('country')}
+            <p className="text-[11px] text-gray-500 mt-1">Mudar o país exige o documento fiscal desse país; com a verificação aprovada, exige nova verificação (KYC).</p>
             {countriesLoading && (
               <p className="text-[11px] text-gray-500 mt-1">Carregando países operacionais...</p>
             )}
@@ -290,7 +389,7 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="text"
               value={city}
-              onChange={(e) => { fiscalDirty.current.city = true; setCity(e.target.value); clearFieldError('city'); }}
+              onChange={(e) => edit('city', setCity, e.target.value)}
               required
               aria-invalid={!!fieldErrors.city}
               aria-describedby={fieldErrors.city ? 'seller-account-city-error' : undefined}
@@ -304,7 +403,7 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="text"
               value={address}
-              onChange={(e) => { fiscalDirty.current.address = true; setAddress(e.target.value); clearFieldError('address'); }}
+              onChange={(e) => edit('address', setAddress, e.target.value)}
               required
               aria-invalid={!!fieldErrors.address}
               aria-describedby={fieldErrors.address ? 'seller-account-address-error' : undefined}
@@ -318,7 +417,7 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="text"
               value={phone}
-              onChange={(e) => setPhone(e.target.value)}
+              onChange={(e) => edit('phone', setPhone, e.target.value)}
               required
               className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden"
             />
@@ -329,10 +428,13 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
             <input
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => edit('email', setEmail, e.target.value)}
               required
-              className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden"
+              aria-invalid={!!fieldErrors.email}
+              className={inputCls('email')}
             />
+            {fieldError('email')}
+            <p className="text-[11px] text-gray-500 mt-1">É o e-mail comercial da loja. O e-mail de login da conta não muda por aqui.</p>
           </div>
         </div>
 
@@ -347,14 +449,16 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
               <label className="block text-gray-700 font-bold mb-1">Moeda Principal para Recebimentos</label>
               <select
                 value={preferredCurrency}
-                onChange={(e) => setPreferredCurrency(e.target.value as CurrencyCode)}
-                className="w-full p-2.5 border border-gray-300 rounded-xl focus:border-emerald-600 focus:outline-hidden bg-white font-bold"
+                onChange={(e) => edit('preferredCurrency', setPreferredCurrency as any, e.target.value)}
+                aria-invalid={!!fieldErrors.preferredCurrency}
+                className={`${inputCls('preferredCurrency')} bg-white font-bold`}
               >
-                <option value="XOF">XOF - Franco CFA (África Ocidental)</option>
-                <option value="EUR">EUR - Euro (Europa / Portugal)</option>
-                <option value="BRL">BRL - Real (Brasil)</option>
-                <option value="USD">USD - Dólar Norte-Americano</option>
+                {currencyOptions.map((c) => (
+                  <option key={c} value={c}>{CURRENCY_LABELS[c] || c}</option>
+                ))}
               </select>
+              {fieldError('preferredCurrency')}
+              <p className="text-[11px] text-gray-500 mt-1">Preferência de exibição. Carteiras e saques continuam por moeda, como antes.</p>
             </div>
 
             <div className="flex items-end">

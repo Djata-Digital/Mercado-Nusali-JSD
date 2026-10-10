@@ -11,14 +11,33 @@ import {
   KYC_ACCOUNT_LABEL, normalizeKycAccountType, validateKycForApproval,
   type KycAccountType, type KycIssue,
 } from '../../../utils/sellerKycRules.js';
+import { defaultSellerTypeFor, sellerTypeToAccountType } from '../../../utils/sellerAccountRules.js';
 
 export const IDENTITY_DOC_TYPES = ['identity_document', 'identity_card'];
+
+/**
+ * Reverificação pendente: dados de identidade (documento fiscal, titular, país, classe do tipo de vendedor) mudaram DEPOIS da aprovação
+ * do KYC. Fica em seller_profiles.settings_json.kycReverification (sem migração). Enquanto `required`, a aprovação do administrador é
+ * bloqueada e o envio do KYC exige documentos NOVOS (`needs`); o reenvio marca `required: false` e mantém o registro das mudanças.
+ */
+export interface StoredReverification {
+  required?: boolean;
+  at?: string;
+  changes?: Array<{ field: string; label: string; from?: string; to?: string }>;
+  needs?: Array<'identityDocument' | 'proofOfAddress'>;
+  previousStatus?: string;
+  resubmittedAt?: string;
+}
 
 export interface StoredKycContext {
   kyc: any | null;
   docs: any[];
   settingsKyc: { accountType?: string; birthDate?: string };
+  reverification?: StoredReverification | null;
 }
+
+const reverificationFrom = (settings: Record<string, any>): StoredReverification | null =>
+  (settings.kycReverification && typeof settings.kycReverification === 'object' ? settings.kycReverification : null) as StoredReverification | null;
 
 export async function loadStoredKyc(db: any, sellerId: string): Promise<StoredKycContext> {
   const [kycRows, docs, profileRows] = await Promise.all([
@@ -27,7 +46,7 @@ export async function loadStoredKyc(db: any, sellerId: string): Promise<StoredKy
     db.select({ settingsJson: sellerProfiles.settingsJson }).from(sellerProfiles).where(eq(sellerProfiles.sellerId, sellerId)).limit(1),
   ]);
   const settings = (profileRows[0]?.settingsJson as Record<string, any> | null) || {};
-  return { kyc: kycRows[0] ?? null, docs, settingsKyc: (settings.kyc && typeof settings.kyc === 'object' ? settings.kyc : {}) as StoredKycContext['settingsKyc'] };
+  return { kyc: kycRows[0] ?? null, docs, settingsKyc: (settings.kyc && typeof settings.kyc === 'object' ? settings.kyc : {}) as StoredKycContext['settingsKyc'], reverification: reverificationFrom(settings) };
 }
 
 const hasDoc = (docs: any[], types: string[]) => docs.some((d) => types.includes(d.documentType) && !!d.fileUrl);
@@ -54,13 +73,23 @@ export function accountTypeLabel(t: KycAccountType | null): string {
 /** Monta o contexto guardado a partir de linhas já carregadas. */
 export function storedContextFrom(kyc: any | null, docs: any[], settingsJson: unknown): StoredKycContext {
   const settings = (settingsJson as Record<string, any> | null) || {};
-  return { kyc, docs, settingsKyc: (settings.kyc && typeof settings.kyc === 'object' ? settings.kyc : {}) as StoredKycContext['settingsKyc'] };
+  return { kyc, docs, settingsKyc: (settings.kyc && typeof settings.kyc === 'object' ? settings.kyc : {}) as StoredKycContext['settingsKyc'], reverification: reverificationFrom(settings) };
 }
 
 /** Guarda tipo de conta e data de nascimento no JSONB de configurações, preservando as demais chaves. */
 export async function saveKycProfileMeta(tx: any, sellerId: string, meta: { accountType: KycAccountType; birthDate: string }) {
   const [existing] = await tx.select().from(sellerProfiles).where(eq(sellerProfiles.sellerId, sellerId)).limit(1);
-  const merged = { ...((existing?.settingsJson as Record<string, any>) || {}), kyc: { accountType: meta.accountType, birthDate: meta.birthDate } };
+  const prev = ((existing?.settingsJson as Record<string, any>) || {});
+  const merged: Record<string, any> = { ...prev, kyc: { accountType: meta.accountType, birthDate: meta.birthDate } };
+  // reenvio do KYC: a reverificação pendente passa a "reenviada" (o registro das mudanças continua guardado)
+  if (prev.kycReverification && typeof prev.kycReverification === 'object' && prev.kycReverification.required) {
+    merged.kycReverification = { ...prev.kycReverification, required: false, resubmittedAt: new Date().toISOString() };
+  }
+  // o tipo de conta do KYC manda: o tipo de vendedor da conta não pode ficar em outra classe (pessoa física x empresa)
+  const acc = prev.account && typeof prev.account === 'object' ? prev.account : null;
+  if (acc?.sellerType && sellerTypeToAccountType(acc.sellerType) !== meta.accountType) {
+    merged.account = { ...acc, sellerType: defaultSellerTypeFor(meta.accountType) };
+  }
   if (existing) {
     await tx.update(sellerProfiles).set({ settingsJson: merged, updatedAt: new Date() }).where(eq(sellerProfiles.sellerId, sellerId));
   } else {
@@ -91,5 +120,9 @@ export function assessKycFromData(sellerRow: any, ctx: StoredKycContext): { issu
     country,
   );
   if (!ctx.kyc) issues.unshift({ field: 'identityDocument', label: 'Envio de KYC', message: 'O vendedor ainda não enviou documentos para verificação.', step: 'identity' });
+  if (ctx.reverification?.required) {
+    const what = (ctx.reverification.changes ?? []).map((c) => c.label).filter(Boolean).join(', ') || 'dados de identidade';
+    issues.unshift({ field: 'identityDocument', label: 'Reverificação de identidade', message: `Dados de identidade alterados depois da verificação (${what}). O vendedor precisa reenviar o KYC antes de uma nova aprovação.`, step: 'identity' });
+  }
   return { issues, accountType: resolveStoredAccountType(ctx), country };
 }

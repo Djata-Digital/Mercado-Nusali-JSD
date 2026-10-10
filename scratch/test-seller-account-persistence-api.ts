@@ -152,9 +152,9 @@ async function main() {
     u: (await q('SELECT kyc_status FROM users WHERE id=$1', [ap.userId]))[0], s: (await q('SELECT status FROM sellers WHERE id=$1', [ap.sellerId]))[0],
   });
   const kycBefore = await snap();
-  r = await call('PATCH', '/seller/profile', ap.token, { taxId: '510099000', city: 'Bolama', address: 'Rua Nova da Sede 1' });
-  report('G1 vendedor com KYC aprovado altera documento/cidade/endereço: salva (200)', r.status === 200 && (await prof(ap.token)).taxId === '510099000', r);
-  report('G2 e o KYC aprovado NÃO muda (status, datas, revisão, utilizador, vendedor)', (await snap()) === kycBefore, { before: kycBefore, after: await snap() });
+  r = await call('PATCH', '/seller/profile', ap.token, { city: 'Bolama', address: 'Rua Nova da Sede 1' });
+  report('G1 vendedor com KYC aprovado altera cidade/endereço (não são dados de identidade): salva (200)', r.status === 200 && (await prof(ap.token)).city === 'Bolama', r);
+  report('G2 e o KYC aprovado NÃO muda (status, datas, revisão, utilizador, vendedor, documento fiscal)', (await snap()) === kycBefore, { before: kycBefore, after: await snap() });
   p = await prof(ap.token);
   report('G3 o estado do KYC continua "verified" na leitura do perfil', p?.kycStatus === 'verified' || p?.kycStatus === 'approved', p?.kycStatus);
 
