@@ -37,6 +37,7 @@ import {
 } from 'lucide-react';
 import { usePreferences, HeaderThemeColor } from '../context/PreferencesContext';
 import { useAuth } from '../context/AuthContext';
+import { UserAvatar } from './UserAvatar';
 import { useCart } from '../hooks/useCart';
 import { useFavorites } from '../hooks/useFavorites';
 import { useDisputes } from '../hooks/useDisputes';
@@ -805,9 +806,7 @@ export const Header: React.FC = () => {
                   className={`flex items-center gap-1.5 py-1 px-2 rounded-md transition font-bold cursor-pointer ${curTheme.userBtn}`}
                   title="Minha Conta Mercado Nusali"
                 >
-                  <div className="w-6 h-6 rounded-full bg-emerald-700 text-white text-[10px] font-extrabold flex items-center justify-center border border-white/20">
-                    {user?.name?.slice(0, 2).toUpperCase() || 'US'}
-                  </div>
+                  <UserAvatar name={user?.name} src={user?.avatar} className="w-6 h-6 text-[10px] border border-white/20" />
                   <span className="hidden xl:inline text-xs truncate max-w-[100px]">
                     {user?.name?.split(' ')[0] || 'Minha Conta'}
                   </span>

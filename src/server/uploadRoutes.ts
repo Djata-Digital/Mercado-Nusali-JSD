@@ -9,6 +9,7 @@ import {
   AuthRequest,
 } from './modules/auth/authMiddleware.js';
 import { logger } from './infra/logger.js';
+import { sniffImageMime } from '../utils/avatar.js';
 
 export const uploadRouter = Router();
 
@@ -219,6 +220,17 @@ uploadRouter.post(
             )} MB para ${folder}.`,
         },
       });
+    }
+
+    // Foto de perfil: o CONTEÚDO tem de ser mesmo JPEG/PNG/WEBP (assinatura do arquivo), não só o tipo declarado pelo navegador.
+    if (folder === 'profiles') {
+      const realType = sniffImageMime(req.file.buffer);
+      if (!realType || realType !== req.file.mimetype) {
+        return res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_IMAGE_CONTENT', message: 'O arquivo não é uma imagem JPG, PNG ou WEBP válida.' },
+        });
+      }
     }
 
     try {

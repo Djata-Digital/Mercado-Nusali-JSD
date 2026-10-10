@@ -35,6 +35,9 @@ import {
 import { SellerStoreData } from '../../data/mockSellerData';
 import { CountryCode } from '../../types';
 import { countriesConfig } from '../../utils/currencyUtils';
+import { useAuth } from '../../context/AuthContext';
+import { UserAvatar } from '../UserAvatar';
+import { getInitials } from '../../utils/avatar';
 
 export type SellerNavSection =
   | 'overview'
@@ -79,15 +82,6 @@ interface SellerSidebarProps {
   taxId?: string;
 }
 
-const getInitials = (name: string): string => {
-  if (!name || !name.trim()) return 'NV';
-  const parts = name.trim().split(/\s+/);
-  if (parts.length >= 2) {
-    return (parts[0][0] + parts[1][0]).toUpperCase();
-  }
-  return name.trim().substring(0, 2).toUpperCase();
-};
-
 export const SellerSidebar: React.FC<SellerSidebarProps> = ({
   activeSection,
   onSelectSection,
@@ -102,6 +96,7 @@ export const SellerSidebar: React.FC<SellerSidebarProps> = ({
   ordersCount = 0,
   taxId,
 }) => {
+  const { user: authUser } = useAuth();
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [isStoreDropdownOpen, setIsStoreDropdownOpen] = useState(false);
 
@@ -343,9 +338,7 @@ export const SellerSidebar: React.FC<SellerSidebarProps> = ({
         {/* Footer Seller Profile Info */}
         <div className="p-4 border-t border-slate-800 bg-slate-950/60 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-full bg-emerald-600 text-white font-bold flex items-center justify-center text-xs">
-              {getInitials(sellerName)}
-            </div>
+            <UserAvatar name={sellerName} src={authUser?.avatar} className="w-8 h-8 text-xs" />
             <div>
               <span className="font-bold text-xs text-white block">{sellerName}</span>
               <span className="text-[10px] text-slate-400 font-mono">

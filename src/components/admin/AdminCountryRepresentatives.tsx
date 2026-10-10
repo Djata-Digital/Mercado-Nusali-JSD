@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserCheck, Mail, Phone, Award, TrendingUp, UserX, Shield, Edit, Plus, X, Check, Loader2 } from 'lucide-react';
 import { AdminService } from '../../services/adminService';
+import { UserAvatar } from '../UserAvatar';
 import { CountryRepresentative } from '../../data/mockRepresentatives';
 
 interface AdminCountryRepresentativesProps {
@@ -148,17 +149,7 @@ export const AdminCountryRepresentatives: React.FC<AdminCountryRepresentativesPr
             <div key={r.id} className="bg-white rounded-2xl border border-gray-200 shadow-xs p-6 space-y-4 hover:border-purple-300 transition">
               <div className="flex justify-between items-start">
                 <div className="flex items-center gap-3">
-                  {r.avatar ? (
-                    <img
-                      src={r.avatar}
-                      alt={r.name}
-                      className="w-12 h-12 rounded-xl object-cover border border-gray-200"
-                    />
-                  ) : (
-                    <div className="w-12 h-12 rounded-xl bg-purple-100 text-purple-700 font-black text-base flex items-center justify-center border border-purple-200">
-                      {r.name ? r.name.substring(0, 2).toUpperCase() : 'RN'}
-                    </div>
-                  )}
+                  <UserAvatar name={r.name} src={r.avatar} shape="rounded" className="w-12 h-12 text-base border border-gray-200" />
                   <div>
                     <h3 className="font-extrabold text-sm text-gray-900 leading-tight">{r.name}</h3>
                     <p className="text-xs text-purple-700 font-bold">{r.countryName}</p>

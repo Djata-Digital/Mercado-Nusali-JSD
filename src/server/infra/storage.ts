@@ -127,6 +127,17 @@ export function isOwnedPublicObjectUrl(url: unknown, folder: string): boolean {
   return url.startsWith(`${publicUrl}/${folder}/`);
 }
 
+/**
+ * A URL é a foto de perfil DESTE usuário, enviada pelo mecanismo de upload (pasta "profiles", chave `profiles/<userId>/...`)?
+ * Checagem de prefixo pura (sem rede). Foto por link externo ou de outro usuário nunca passa.
+ */
+export function isOwnProfileAvatarUrl(url: unknown, userId: string): boolean {
+  if (typeof url !== 'string' || !url || !userId) return false;
+  const publicUrl = normalizePublicUrl(process.env.STORAGE_PUBLIC_URL?.trim() || '');
+  if (!publicUrl) return false;
+  return url.startsWith(`${publicUrl}/profiles/${encodeURIComponent(userId)}/`);
+}
+
 function getAccessForObjectKey(objectKey: string): StorageAccess {
   const folder = objectKey.split('/')[0];
   return getAccessForFolder(folder);

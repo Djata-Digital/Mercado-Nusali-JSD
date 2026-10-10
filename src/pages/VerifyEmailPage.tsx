@@ -11,6 +11,9 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { AuthService } from '../services/authService';
 import { storageService } from '../services/storage/storageService';
+import { dataUrlToFile, flushSignupAvatar } from '../services/signupAvatar';
+import { uploadService } from '../services/uploadService';
+import { BuyerService } from '../services/buyerService';
 import { AuthLogo } from '../components/AuthLogo';
 import { PHONE_VERIFICATION_ENABLED } from '../config/constants';
 
@@ -139,6 +142,18 @@ export const VerifyEmailPage: React.FC = () => {
       const verifiedUser = res.data?.user || user;
       if (verifiedUser) {
         updateUser({ ...verifiedUser, isEmailVerified: true });
+      }
+      // Foto escolhida no cadastro (se houver): enviada agora que a sessão existe, pelo mesmo upload do perfil. Falha => iniciais.
+      try {
+        const photo = await flushSignupAvatar(targetEmail, {
+          storage: sessionStorage,
+          toFile: dataUrlToFile,
+          upload: (file) => uploadService.uploadProfile(file),
+          save: async (url) => { await BuyerService.updateProfile({ avatar: url }); },
+        });
+        if (photo.status === 'uploaded' && photo.url) updateUser({ avatar: photo.url });
+      } catch {
+        /* a foto pode ser carregada depois, no perfil */
       }
       setSuccessMessage('E-mail verificado com sucesso! Redirecionando...');
 

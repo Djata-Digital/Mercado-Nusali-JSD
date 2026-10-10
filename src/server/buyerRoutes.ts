@@ -70,7 +70,7 @@ import {
 // (onHand-reserved) do lado de produto SIMPLES (sem variante), mesma fonte
 // única de verdade do catálogo — nunca uma segunda fórmula divergente.
 import { computeLiveVariantStock, computeLiveStockAndSales, recomputeProductReviewAggregates, lockProductRowForReviewMutation, isProductPubliclyVisible } from './modules/catalog/catalogService.js';
-import { isOwnedPublicObjectUrl } from './infra/storage.js';
+import { isOwnedPublicObjectUrl, isOwnProfileAvatarUrl } from './infra/storage.js';
 import { normalizeCouponCode, evaluateCouponForCartPreview } from './modules/coupons/couponService.js';
 
 export const buyerRouter = Router();
@@ -319,7 +319,22 @@ buyerRouter.put('/profile', requireAuth, async (req: AuthRequest, res: Response)
     if (typeof fullName === 'string') userUpdates.fullName = fullName.trim();
     if (typeof phone === 'string') userUpdates.phone = phone.trim() || null;
     if (typeof country === 'string' && country.trim()) userUpdates.countryCode = country.trim().toUpperCase();
-    if (typeof avatar === 'string') userUpdates.avatarUrl = avatar.trim() || null;
+    // Foto de perfil: só o arquivo carregado pela própria pessoa (upload "profiles"); vazio = remover (volta às iniciais). Um avatar
+    // antigo/artificial já guardado pode voltar igual (sem mudança) sem bloquear o salvamento do resto do perfil.
+    if (typeof avatar === 'string') {
+      const nextAvatar = avatar.trim();
+      if (!nextAvatar) {
+        userUpdates.avatarUrl = null;
+      } else {
+        const [currentUser] = await db.select({ avatarUrl: users.avatarUrl }).from(users).where(eq(users.id, userId)).limit(1);
+        if (nextAvatar !== (currentUser?.avatarUrl ?? '')) {
+          if (!isOwnProfileAvatarUrl(nextAvatar, userId)) {
+            return res.status(400).json({ success: false, message: 'A foto de perfil deve ser carregada do seu dispositivo (JPG, PNG ou WEBP).', error: { code: 'AVATAR_NOT_ALLOWED', message: 'A foto de perfil deve ser carregada do seu dispositivo (JPG, PNG ou WEBP).' } });
+          }
+          userUpdates.avatarUrl = nextAvatar;
+        }
+      }
+    }
 
     await db.update(users).set(userUpdates).where(eq(users.id, userId));
 

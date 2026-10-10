@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   User,
@@ -19,8 +19,6 @@ import {
   AlertCircle,
   RefreshCw,
   Camera,
-  Upload,
-  Image as ImageIcon,
   Check,
   Sparkles,
 } from 'lucide-react';
@@ -30,14 +28,9 @@ import { BuyerNavHeader } from './BuyerNavHeader';
 import { formatCurrency, countriesConfig } from '../utils/currencyUtils';
 import { BuyerService, BuyerProfile, BuyerOverviewData } from '../services/buyerService';
 import { uploadService } from '../services/uploadService';
-
-const PRESET_AVATARS = [
-  { label: 'Profissional', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Executivo', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Empreendedora', url: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Comerciante', url: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Moderno', url: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&q=80&w=250' },
-];
+import { UserAvatar } from './UserAvatar';
+import { AvatarUploadField } from './AvatarUploadField';
+import { resolveAvatarUrl } from '../utils/avatar';
 
 export const ProfileView: React.FC = () => {
   const navigate = useNavigate();
@@ -53,10 +46,8 @@ export const ProfileView: React.FC = () => {
   const [editCity, setEditCity] = useState('');
   const [editTaxId, setEditTaxId] = useState('');
   const [editAvatar, setEditAvatar] = useState('');
-  const [customAvatarUrl, setCustomAvatarUrl] = useState('');
-  const [showCustomUrlInput, setShowCustomUrlInput] = useState(false);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const avatarFileRef = useRef<HTMLInputElement | null>(null);
 
   const loadData = async () => {
     setIsLoading(true);
@@ -72,7 +63,8 @@ export const ProfileView: React.FC = () => {
         setEditPhone(profRes.data.phone);
         setEditCity(profRes.data.city);
         setEditTaxId(profRes.data.taxId || '');
-        setEditAvatar(profRes.data.avatar || user?.avatar || '');
+        // só foto REAL carregada; avatar predefinido antigo guardado no banco vira "sem foto" (iniciais) e sai do banco no próximo salvamento
+        setEditAvatar(resolveAvatarUrl(profRes.data.avatar || user?.avatar) || '');
       }
       if (overRes.success && overRes.data) {
         setOverview(overRes.data);
@@ -88,10 +80,9 @@ export const ProfileView: React.FC = () => {
     loadData();
   }, []);
 
-  const handleAvatarFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  // O arquivo já chega validado (tipo e tamanho) pelo AvatarUploadField; o servidor valida de novo (tipo declarado, conteúdo e tamanho).
+  const handleAvatarFile = async (file: File) => {
+    setAvatarError(null);
     try {
       setIsSaving(true);
       const uploaded = await uploadService.uploadProfile(file);
@@ -117,12 +108,13 @@ export const ProfileView: React.FC = () => {
       });
 
       showToast('Nova foto carregada. Clique em "Salvar Alterações" para confirmar no perfil.');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Profile avatar upload failed:', error);
-      showToast('Não foi possível enviar a foto.');
+      const message = error?.response?.data?.error?.message || 'Não foi possível enviar a foto. Tente outra imagem (JPG, PNG ou WEBP, até 5 MB).';
+      setAvatarError(message);
+      showToast(message);
     } finally {
       setIsSaving(false);
-      e.target.value = '';
     }
   };
 
@@ -169,23 +161,15 @@ export const ProfileView: React.FC = () => {
           <div className="flex items-center gap-4">
             {/* Avatar with Camera Overlay */}
             <div className="relative group shrink-0">
-              <div className="w-20 h-20 rounded-2xl bg-yellow-400 text-blue-950 font-black text-2xl flex items-center justify-center border-4 border-white/20 shadow-lg overflow-hidden">
-                {editAvatar || profile?.avatar || user?.avatar ? (
-                  <img
-                    src={editAvatar || profile?.avatar || user?.avatar}
-                    alt="Foto de perfil"
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
-                  (profile?.fullName || user?.name || 'US').substring(0, 2).toUpperCase()
-                )}
-              </div>
+              {/* foto real carregada ou, sem foto, as iniciais do nome (acompanham o nome enquanto ele é editado) */}
+              <UserAvatar
+                name={isEditing ? editName : profile?.fullName || user?.name}
+                src={editAvatar || profile?.avatar || user?.avatar}
+                className="w-20 h-20 text-2xl border-4 border-white/20 shadow-lg"
+              />
               <button
                 type="button"
-                onClick={() => {
-                  setIsEditing(true);
-                  avatarFileRef.current?.click();
-                }}
+                onClick={() => setIsEditing(true)}
                 className="absolute -bottom-1.5 -right-1.5 p-2 bg-yellow-400 hover:bg-yellow-300 text-blue-950 rounded-full shadow-lg transition cursor-pointer"
                 title="Alterar foto de perfil"
               >
@@ -235,94 +219,17 @@ export const ProfileView: React.FC = () => {
         {/* Edit Profile Form */}
         {isEditing && (
           <form onSubmit={handleSaveProfile} className="mt-6 pt-6 border-t border-white/20 space-y-4">
-            {/* Avatar Picker Section */}
-            <div className="bg-white/10 p-4 rounded-xl border border-white/20 space-y-3">
-              <div className="flex items-center justify-between">
-                <label className="text-xs font-bold text-yellow-300 flex items-center gap-2">
-                  <Camera className="w-4 h-4" /> Alterar Foto de Perfil
-                </label>
-                <span className="text-[11px] text-gray-300">Formatos aceitos: JPG, PNG, WEBP</span>
-              </div>
-
-              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-                <div className="w-14 h-14 rounded-xl overflow-hidden border-2 border-yellow-400 bg-black/30 shrink-0 flex items-center justify-center">
-                  {editAvatar ? (
-                    <img src={editAvatar} alt="Prévia" className="w-full h-full object-cover" />
-                  ) : (
-                    <User className="w-6 h-6 text-white/50" />
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={() => avatarFileRef.current?.click()}
-                    className="bg-white/20 hover:bg-white/30 text-white font-bold px-3 py-2 rounded-lg text-xs transition flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Upload className="w-3.5 h-3.5 text-yellow-300" /> Carregar do Dispositivo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowCustomUrlInput(!showCustomUrlInput)}
-                    className="bg-white/20 hover:bg-white/30 text-white font-bold px-3 py-2 rounded-lg text-xs transition flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <ImageIcon className="w-3.5 h-3.5 text-yellow-300" /> {showCustomUrlInput ? 'Fechar Link' : 'Colar Link URL'}
-                  </button>
-                  <input
-                    ref={avatarFileRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={handleAvatarFileUpload}
-                    className="hidden"
-                  />
-                </div>
-              </div>
-
-              {/* Presets */}
-              <div>
-                <span className="text-[11px] text-gray-300 font-semibold block mb-1.5">Modelos de Avatar:</span>
-                <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                  {PRESET_AVATARS.map((item, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => setEditAvatar(item.url)}
-                      className={`w-9 h-9 rounded-xl overflow-hidden shrink-0 border-2 transition cursor-pointer ${
-                        editAvatar === item.url ? 'border-yellow-400 ring-2 ring-yellow-400 scale-105' : 'border-white/30 opacity-70 hover:opacity-100'
-                      }`}
-                      title={item.label}
-                    >
-                      <img src={item.url} alt={item.label} className="w-full h-full object-cover" />
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {showCustomUrlInput && (
-                <div className="flex gap-2 pt-1 animate-fadeIn">
-                  <input
-                    type="url"
-                    value={customAvatarUrl}
-                    onChange={(e) => setCustomAvatarUrl(e.target.value)}
-                    placeholder="https://exemplo.com/minha-foto.jpg"
-                    className="flex-1 bg-white/10 border border-white/30 rounded-lg px-3 py-2 text-xs text-white placeholder-gray-400 focus:outline-hidden focus:ring-2 focus:ring-yellow-400"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (customAvatarUrl.trim()) {
-                        setEditAvatar(customAvatarUrl.trim());
-                        setCustomAvatarUrl('');
-                        setShowCustomUrlInput(false);
-                      }
-                    }}
-                    className="bg-yellow-400 hover:bg-yellow-500 text-blue-950 font-black px-4 py-2 rounded-lg text-xs transition cursor-pointer"
-                  >
-                    Aplicar
-                  </button>
-                </div>
-              )}
-            </div>
+            {/* Foto de perfil: só "Carregar Foto" (arquivo do dispositivo); sem foto, iniciais do nome */}
+            <AvatarUploadField
+              id="profile-avatar"
+              tone="dark"
+              name={editName}
+              src={editAvatar}
+              busy={isSaving}
+              error={avatarError}
+              onFile={handleAvatarFile}
+              onInvalid={setAvatarError}
+            />
 
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
               <div>

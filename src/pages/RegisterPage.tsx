@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import {
   ShieldCheck,
@@ -17,10 +17,7 @@ import {
   Eye,
   EyeOff,
   Info,
-  Camera,
-  Upload,
   Sparkles,
-  Image as ImageIcon,
   Loader2,
   RefreshCw,
 } from 'lucide-react';
@@ -28,6 +25,8 @@ import { useAuth } from '../context/AuthContext';
 import { AuthLogo } from '../components/AuthLogo';
 import { UserRole } from '../types';
 import { storageService } from '../services/storage/storageService';
+import { AvatarUploadField } from '../components/AvatarUploadField';
+import { shrinkImageInBrowser, stashSignupAvatar } from '../services/signupAvatar';
 import { CountriesApi } from '../api/clients/CountriesApi';
 
 interface OperationalCountry {
@@ -38,14 +37,6 @@ interface OperationalCountry {
   currencySymbol: string;
   phonePrefix: string;
 }
-
-const PRESET_AVATARS = [
-  { label: 'Profissional', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Executivo', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Empreendedora', url: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Comerciante', url: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Moderno', url: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&q=80&w=250' },
-];
 
 export const RegisterPage: React.FC = () => {
   const navigate = useNavigate();
@@ -91,10 +82,10 @@ export const RegisterPage: React.FC = () => {
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [dateOfBirth, setDateOfBirth] = useState('');
-  const [avatar, setAvatar] = useState('https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250');
-  const [customAvatarUrl, setCustomAvatarUrl] = useState('');
-  const [showCustomUrlInput, setShowCustomUrlInput] = useState(false);
-  const avatarFileInputRef = useRef<HTMLInputElement | null>(null);
+  // Foto de perfil OPCIONAL: só arquivo do dispositivo. Sem foto, a conta usa as iniciais do nome (nenhum avatar predefinido, nenhum link).
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
 
   const [email, setEmail] = useState('');
   const [phoneCode, setPhoneCode] = useState('');
@@ -132,16 +123,13 @@ export const RegisterPage: React.FC = () => {
     if (found) setPhoneCode(found.phonePrefix);
   };
 
-  const handleAvatarFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (reader.result) {
-        setAvatar(reader.result as string);
-      }
-    };
-    reader.readAsDataURL(file);
+  const handleAvatarPicked = (file: File) => {
+    setAvatarError(null);
+    setAvatarFile(file);
+    setAvatarPreview((prev) => {
+      if (prev && prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(file);
+    });
   };
 
   const handleNextStep = () => {
@@ -200,7 +188,6 @@ export const RegisterPage: React.FC = () => {
         firstName,
         lastName,
         dateOfBirth,
-        avatar,
         email,
         phone,
         phoneCode,
@@ -209,6 +196,11 @@ export const RegisterPage: React.FC = () => {
         privacyAccepted,
         marketingConsent,
       });
+
+      // A foto escolhida (se houver) fica guardada só nesta aba e é enviada, pelo upload do perfil, quando o e-mail for verificado.
+      if (avatarFile) {
+        await stashSignupAvatar(avatarFile, email, { storage: sessionStorage, shrink: shrinkImageInBrowser });
+      }
 
       // Guarda (só nesta aba) o e-mail que acabou de receber o código: a tela de verificação usa SOMENTE ele e ele
       // sobrevive a reload. O código acabou de ser enviado pelo cadastro.
@@ -411,106 +403,15 @@ export const RegisterPage: React.FC = () => {
                   <User className="w-4 h-4 text-blue-900" /> Dados Pessoais & Foto de Perfil
                 </h3>
 
-                {/* Profile Photo / Avatar Picker */}
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="font-bold text-gray-800 text-xs flex items-center gap-1.5">
-                      <Camera className="w-4 h-4 text-blue-900" /> Foto de Perfil / Avatar
-                    </label>
-                    <span className="text-[10px] text-gray-500 font-medium">Personalize sua conta</span>
-                  </div>
-
-                  <div className="flex items-center gap-4">
-                    <div className="relative group shrink-0">
-                      <div className="w-16 h-16 rounded-2xl overflow-hidden border-2 border-blue-900 shadow-md bg-white flex items-center justify-center">
-                        {avatar ? (
-                          <img src={avatar} alt="Avatar" className="w-full h-full object-cover" />
-                        ) : (
-                          <User className="w-8 h-8 text-gray-400" />
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => avatarFileInputRef.current?.click()}
-                        className="absolute -bottom-1.5 -right-1.5 p-1.5 bg-blue-900 text-white rounded-full shadow-md hover:bg-blue-950 transition cursor-pointer"
-                        title="Carregar foto do dispositivo"
-                      >
-                        <Camera className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-
-                    <div className="flex-1 space-y-2">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <button
-                          type="button"
-                          onClick={() => avatarFileInputRef.current?.click()}
-                          className="px-3 py-1.5 bg-white hover:bg-gray-100 text-gray-700 border border-gray-300 font-bold rounded-lg text-[11px] transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
-                        >
-                          <Upload className="w-3.5 h-3.5 text-blue-900" /> Carregar Foto
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setShowCustomUrlInput(!showCustomUrlInput)}
-                          className="px-3 py-1.5 bg-white hover:bg-gray-100 text-gray-700 border border-gray-300 font-bold rounded-lg text-[11px] transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
-                        >
-                          <ImageIcon className="w-3.5 h-3.5 text-blue-900" /> {showCustomUrlInput ? 'Fechar Link' : 'Colar Link URL'}
-                        </button>
-                      </div>
-                      <input
-                        ref={avatarFileInputRef}
-                        type="file"
-                        accept="image/*"
-                        onChange={handleAvatarFileUpload}
-                        className="hidden"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Preset Avatars Selection */}
-                  <div>
-                    <span className="text-[10px] text-gray-500 font-bold block mb-1.5">Ou escolha um avatar predefinido:</span>
-                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                      {PRESET_AVATARS.map((item, idx) => (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => setAvatar(item.url)}
-                          className={`w-9 h-9 rounded-xl overflow-hidden shrink-0 border-2 transition cursor-pointer ${
-                            avatar === item.url ? 'border-blue-900 ring-2 ring-blue-400 scale-105' : 'border-gray-200 hover:border-gray-400 opacity-80 hover:opacity-100'
-                          }`}
-                          title={item.label}
-                        >
-                          <img src={item.url} alt={item.label} className="w-full h-full object-cover" />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {showCustomUrlInput && (
-                    <div className="flex gap-2 pt-1 animate-fadeIn">
-                      <input
-                        type="url"
-                        value={customAvatarUrl}
-                        onChange={(e) => setCustomAvatarUrl(e.target.value)}
-                        placeholder="https://exemplo.com/minha-foto.jpg"
-                        className="flex-1 p-2 bg-white border border-gray-300 rounded-lg text-xs focus:border-blue-800 focus:outline-hidden"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (customAvatarUrl.trim()) {
-                            setAvatar(customAvatarUrl.trim());
-                            setCustomAvatarUrl('');
-                            setShowCustomUrlInput(false);
-                          }
-                        }}
-                        className="px-3 py-2 bg-blue-900 text-white rounded-lg text-xs font-bold hover:bg-blue-950 transition cursor-pointer"
-                      >
-                        Aplicar
-                      </button>
-                    </div>
-                  )}
-                </div>
+                {/* Foto de perfil: só "Carregar Foto"; sem foto, iniciais do nome (atualizam enquanto digita) */}
+                <AvatarUploadField
+                  id="register-avatar"
+                  name={`${firstName} ${lastName}`}
+                  src={avatarPreview}
+                  onFile={handleAvatarPicked}
+                  onInvalid={setAvatarError}
+                  error={avatarError}
+                />
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>

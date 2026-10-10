@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import {
   UserCheck,
   Building2,
@@ -14,23 +14,17 @@ import {
   CheckCircle2,
   PlusCircle,
   Save,
-  Camera,
-  Upload,
-  Image as ImageIcon,
-  User,
 } from 'lucide-react';
 import { SellerProfileData } from '../../data/mockSellerData';
 import { CountryCode, CurrencyCode } from '../../types';
 import { countriesConfig } from '../../utils/currencyUtils';
 import { useCountries } from '../../hooks/useCountries';
-
-const PRESET_AVATARS = [
-  { label: 'Profissional', url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Executivo', url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Empreendedora', url: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Comerciante', url: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&q=80&w=250' },
-  { label: 'Moderno', url: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&q=80&w=250' },
-];
+import { useAuth } from '../../context/AuthContext';
+import { uploadService } from '../../services/uploadService';
+import { BuyerService } from '../../services/buyerService';
+import { UserAvatar } from '../UserAvatar';
+import { AvatarUploadField } from '../AvatarUploadField';
+import { resolveAvatarUrl } from '../../utils/avatar';
 
 interface SellerAccountProps {
   profile: SellerProfileData & { avatar?: string };
@@ -56,22 +50,31 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
   const [phone, setPhone] = useState(profile.phone);
   const [email, setEmail] = useState(profile.email);
   const [preferredCurrency, setPreferredCurrency] = useState<CurrencyCode>(profile.preferredCurrency);
-  const [avatar, setAvatar] = useState((profile as any).avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=250');
-  const [customAvatarUrl, setCustomAvatarUrl] = useState('');
-  const [showCustomUrlInput, setShowCustomUrlInput] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Foto: a mesma da conta (users.avatar_url), só arquivo do dispositivo; sem foto, iniciais do nome.
+  const { user, updateUser } = useAuth();
+  const initialAvatar = resolveAvatarUrl((profile as any).avatar || user?.avatar) || '';
+  const [avatar, setAvatar] = useState(initialAvatar);
+  const [avatarChanged, setAvatarChanged] = useState(false);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+  const [avatarBusy, setAvatarBusy] = useState(false);
 
-  const handleAvatarFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (reader.result) {
-        setAvatar(reader.result as string);
-        showToast('Foto carregada! Clique em "Salvar Alterações" para confirmar.');
-      }
-    };
-    reader.readAsDataURL(file);
+  // O arquivo já chega validado (tipo e tamanho) pelo AvatarUploadField; o servidor valida de novo.
+  const handleAvatarFile = async (file: File) => {
+    setAvatarError(null);
+    setAvatarBusy(true);
+    try {
+      const uploaded = await uploadService.uploadProfile(file);
+      setAvatar(uploaded.url);
+      setAvatarChanged(true);
+      updateUser({ avatar: uploaded.url });
+      showToast('Foto carregada! Clique em "Salvar Alterações" para confirmar.');
+    } catch (err: any) {
+      const message = err?.response?.data?.error?.message || 'Não foi possível enviar a foto. Tente outra imagem (JPG, PNG ou WEBP, até 5 MB).';
+      setAvatarError(message);
+      showToast(message);
+    } finally {
+      setAvatarBusy(false);
+    }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -84,6 +87,14 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
       }));
     } catch {
       // handled
+    }
+    if (avatarChanged && avatar) {
+      try {
+        await BuyerService.updateProfile({ avatar });
+        setAvatarChanged(false);
+      } catch {
+        setAvatarError('A foto foi enviada, mas não foi possível gravá-la na conta agora. Tente salvar de novo.');
+      }
     }
     onUpdateProfile({
       ...profile,
@@ -109,23 +120,8 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
       {/* Top Banner Status Card */}
       <div className="bg-gradient-to-r from-blue-950 via-slate-900 to-emerald-950 text-white rounded-2xl p-6 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6">
         <div className="flex items-center gap-4">
-          <div className="relative group shrink-0">
-            <div className="w-16 h-16 rounded-2xl bg-yellow-400 text-blue-950 font-black text-2xl flex items-center justify-center border-2 border-white/20 shadow-md overflow-hidden">
-              {avatar ? (
-                <img src={avatar} alt="" className="w-full h-full object-cover" />
-              ) : (
-                fullName.substring(0, 2).toUpperCase()
-              )}
-            </div>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="absolute -bottom-1.5 -right-1.5 p-1.5 bg-yellow-400 text-blue-950 rounded-full shadow-md hover:bg-yellow-300 transition cursor-pointer"
-              title="Trocar foto do perfil"
-            >
-              <Camera className="w-3.5 h-3.5" />
-            </button>
-          </div>
+          {/* foto real ou, sem foto, iniciais do nome (acompanham o nome enquanto ele é editado) */}
+          <UserAvatar name={fullName} src={avatar} className="w-16 h-16 text-2xl border-2 border-white/20 shadow-md" />
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-xl font-black">{commercialName}</h1>
@@ -159,94 +155,8 @@ export const SellerAccount: React.FC<SellerAccountProps> = ({
           <span className="text-xs text-gray-400">Atualizado para operações transfronteiriças</span>
         </div>
 
-        {/* Photo Avatar Section */}
-        <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
-          <div className="flex items-center justify-between">
-            <label className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
-              <Camera className="w-4 h-4 text-emerald-700" /> Foto de Perfil do Vendedor / Logotipo Pessoal
-            </label>
-            <span className="text-[10px] text-gray-500">Exibido na sua loja e respostas aos compradores</span>
-          </div>
-
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-            <div className="w-14 h-14 rounded-xl overflow-hidden border-2 border-emerald-600 bg-white shadow-2xs shrink-0 flex items-center justify-center">
-              {avatar ? (
-                <img src={avatar} alt="Prévia" className="w-full h-full object-cover" />
-              ) : (
-                <User className="w-6 h-6 text-gray-400" />
-              )}
-            </div>
-
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="px-3 py-2 bg-white hover:bg-gray-100 text-gray-800 font-bold rounded-lg text-xs border border-gray-300 transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
-              >
-                <Upload className="w-3.5 h-3.5 text-emerald-700" /> Carregar Imagem
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowCustomUrlInput(!showCustomUrlInput)}
-                className="px-3 py-2 bg-white hover:bg-gray-100 text-gray-800 font-bold rounded-lg text-xs border border-gray-300 transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
-              >
-                <ImageIcon className="w-3.5 h-3.5 text-emerald-700" /> {showCustomUrlInput ? 'Fechar Link' : 'Colar Link URL'}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleAvatarFileUpload}
-                className="hidden"
-              />
-            </div>
-          </div>
-
-          {/* Presets */}
-          <div>
-            <span className="text-[10px] text-gray-500 font-bold block mb-1.5">Ou selecione um avatar profissional:</span>
-            <div className="flex items-center gap-2 overflow-x-auto pb-1">
-              {PRESET_AVATARS.map((item, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  onClick={() => setAvatar(item.url)}
-                  className={`w-9 h-9 rounded-xl overflow-hidden shrink-0 border-2 transition cursor-pointer ${
-                    avatar === item.url ? 'border-emerald-600 ring-2 ring-emerald-400 scale-105' : 'border-gray-200 opacity-70 hover:opacity-100'
-                  }`}
-                  title={item.label}
-                >
-                  <img src={item.url} alt={item.label} className="w-full h-full object-cover" />
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {showCustomUrlInput && (
-            <div className="flex gap-2 pt-1 animate-fadeIn">
-              <input
-                type="url"
-                value={customAvatarUrl}
-                onChange={(e) => setCustomAvatarUrl(e.target.value)}
-                placeholder="https://exemplo.com/foto-vendedor.jpg"
-                className="flex-1 p-2 bg-white border border-gray-300 rounded-lg text-xs focus:border-emerald-600 focus:outline-hidden"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  if (customAvatarUrl.trim()) {
-                    setAvatar(customAvatarUrl.trim());
-                    setCustomAvatarUrl('');
-                    setShowCustomUrlInput(false);
-                  }
-                }}
-                className="px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-lg text-xs transition cursor-pointer"
-              >
-                Aplicar
-              </button>
-            </div>
-          )}
-        </div>
+        {/* Foto de perfil: só "Carregar Foto" (arquivo do dispositivo); sem foto, iniciais do nome */}
+        <AvatarUploadField id="seller-avatar" name={fullName} src={avatar} busy={avatarBusy} error={avatarError} onFile={handleAvatarFile} onInvalid={setAvatarError} />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-medium">
           <div>
