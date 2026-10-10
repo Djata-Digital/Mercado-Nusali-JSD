@@ -165,18 +165,25 @@ export function validateVariantAxes<T extends VariantIdentityInput>(axes: Attrib
   return { errors, items };
 }
 
-/** Eixos agrupados para a interface do assistente: Cor, a segunda dimensão (Tamanho ou Capacidade) e os demais. */
+/**
+ * Eixos agrupados para a interface do assistente: Cor, a segunda dimensão e os demais.
+ * A 2ª dimensão é Tamanho, senão Capacidade e, na falta dos dois (ex.: categoria só com Voltagem, ou Cor + Voltagem), o primeiro eixo que
+ * mora em `attributes_json` (`secondJson` = código dele): assim Voltagem pode ter VÁRIOS valores (110 V, 220 V), cada um uma variação.
+ */
 export function planAxisUi(axes: AttributeDefinitionLike[]): {
   colorAxis?: AttributeDefinitionLike;
   secondAxis?: AttributeDefinitionLike;
   secondColumn: 'size' | 'capacity';
+  /** Código do eixo (em attributes_json) que é a 2ª dimensão; undefined quando a 2ª dimensão é Tamanho/Capacidade ou não existe. */
+  secondJson?: string;
   extraAxes: AttributeDefinitionLike[];
 } {
   const colorAxis = axes.find((a) => 'column' in axisTarget(a.code) && (axisTarget(a.code) as any).column === 'color');
   const sizeAxis = axes.find((a) => (axisTarget(a.code) as any).column === 'size');
   const capacityAxis = axes.find((a) => (axisTarget(a.code) as any).column === 'capacity');
-  const secondAxis = sizeAxis ?? capacityAxis;
+  const jsonAxis = sizeAxis || capacityAxis ? undefined : axes.find((a) => a !== colorAxis && 'json' in axisTarget(a.code));
+  const secondAxis = sizeAxis ?? capacityAxis ?? jsonAxis;
   const secondColumn: 'size' | 'capacity' = secondAxis && secondAxis === capacityAxis ? 'capacity' : 'size';
   const extraAxes = axes.filter((a) => a !== colorAxis && a !== secondAxis);
-  return { colorAxis, secondAxis, secondColumn, extraAxes };
+  return { colorAxis, secondAxis, secondColumn, secondJson: jsonAxis?.code, extraAxes };
 }

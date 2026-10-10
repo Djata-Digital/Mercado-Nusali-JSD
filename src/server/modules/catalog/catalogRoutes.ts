@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { buildCategoryTree } from '../../../utils/categoryUtils.js';
 import { ProductCreationService, getCategoryAttributesWithInheritance } from './productCreationService.js';
 import { ProductAttributeValidationError } from './attributeValidator.js';
+import { parseAttributeFilters } from '../../../utils/attributeFilters.js';
 import { VariantAxisValidationError } from './variantService.js';
 
 export const catalogRouter = Router();
@@ -50,23 +51,26 @@ export function parseOptionalBooleanQuery(v: unknown): boolean | undefined {
   return undefined;
 }
 
-export async function getProductsHandler(req: Request, res: Response) {
-  try {
-    const {
-      q,
-      category,
-      country,
-      originCountryFilter,
-      storeId,
-      brand,
-      minPrice,
-      maxPrice,
-      freeShipping,
-      full,
-      sort,
-      page,
-      limit,
-    } = req.query;
+const CATALOG_SORTS = new Set(['relevance', 'price_asc', 'price_desc', 'rating_desc', 'sales_desc', 'newest']);
+
+/** P3 — filtros públicos do catálogo (listagem e facets): mesma leitura da querystring e a mesma resolução de destino/origem/admin. */
+export function parsePublicCatalogFilters(req: Request) {
+  const {
+    q,
+    category,
+    categoryTree,
+    country,
+    originCountryFilter,
+    storeId,
+    brand,
+    condition,
+    attrs,
+    minPrice,
+    maxPrice,
+    freeShipping,
+    full,
+    sort,
+  } = req.query;
 
     // FASE D16-G1.6 — visão administrativa por origem para GLOBAL_ADMIN
     // navegando pelo catálogo público (Home/Search/Category/Header/
@@ -87,9 +91,13 @@ export async function getProductsHandler(req: Request, res: Response) {
     // elegibilidade real do jeito que sempre calcularam, intocados.
     const isAdminCatalogView = isGlobalCatalogAdmin(getOptionalAuthUser(req));
 
-    const result = await CatalogService.getProducts({
-      q: q as string,
+    return {
+      q: typeof q === 'string' ? q : undefined,
       category: category as string,
+      categoryTree: typeof categoryTree === 'string' && categoryTree.trim() ? categoryTree.trim() : undefined,
+      condition: typeof condition === 'string' ? condition : undefined,
+      // filtros por característica: JSON compacto; inválido/excedente é ignorado (nunca derruba a listagem)
+      attrs: typeof attrs === 'string' || (attrs && typeof attrs === 'object') ? parseAttributeFilters(attrs).filters : undefined,
       country: isAdminCatalogView ? undefined : resolveDestinationCountryFromRequest(req, country as string),
       // FASE D16-G1 — filtro de origem é INDEPENDENTE do destino: nunca lido
       // do header X-Country-Code (que representa exclusivamente o destino do
@@ -102,7 +110,25 @@ export async function getProductsHandler(req: Request, res: Response) {
       maxPrice: maxPrice ? Number(maxPrice) : undefined,
       freeShipping: parseOptionalBooleanQuery(freeShipping),
       full: parseOptionalBooleanQuery(full),
-      sort: sort as any,
+      sort: typeof sort === 'string' && CATALOG_SORTS.has(sort) ? (sort as any) : undefined,
+  };
+}
+
+/** GET /products/facets — opções de filtro (marca, condição, preço e características da categoria) para a busca atual. */
+export async function getProductFacetsHandler(req: Request, res: Response) {
+  try {
+    const facets = await CatalogService.getFacets(parsePublicCatalogFilters(req));
+    return res.json({ success: true, data: facets });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: { code: 'CATALOG_ERROR', message: err.message } });
+  }
+}
+
+export async function getProductsHandler(req: Request, res: Response) {
+  try {
+    const { page, limit } = req.query;
+    const result = await CatalogService.getProducts({
+      ...parsePublicCatalogFilters(req),
       page: page ? Number(page) : 1,
       limit: limit ? Number(limit) : 24,
     });

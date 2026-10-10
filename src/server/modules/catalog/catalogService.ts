@@ -1,6 +1,11 @@
 import { getDb } from '../../../db/index.js';
 import { loadProductAttributeValues, composeProductSpecs } from './attributeValueService.js';
-import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
+import { resolveEffectiveAttributes, categoryTreeIds } from './attributeDefinitionService.js';
+import {
+  buildAttributeConditions, buildAttributeScope, normalizeConditionFilter, parseSearchTokens, textRelevanceScore, textSearchCondition,
+  type AttributeConditions, type AttributeScope, type FilterableAttribute, type SearchToken,
+} from './catalogSearch.js';
+import type { AttributeFacet, AttributeFilters, CatalogFacets } from '../../../utils/attributeFilters.js';
 import { buildProductSpecSheet } from './productSpecSheet.js';
 import { products, categories, brands, productVariants, productImages, productAttributes, reviews, reviewImages, sellers, stores, inventory, orderItems, orders, countries } from '../../../db/schema.js';
 import { getCache, setCache, delCache, delCacheByPattern } from '../../../db/redis.js';
@@ -243,7 +248,13 @@ export interface ProductQueryFilters {
   maxPrice?: number;
   freeShipping?: boolean;
   full?: boolean;
-  sort?: 'price_asc' | 'price_desc' | 'rating_desc' | 'sales_desc' | 'newest';
+  sort?: 'relevance' | 'price_asc' | 'price_desc' | 'rating_desc' | 'sales_desc' | 'newest';
+  /** P3 — categoria (id ou slug) e TODAS as descendentes ativas; categoria desconhecida => nenhum produto. Habilita os filtros por característica. */
+  categoryTree?: string;
+  /** P3 — condição do produto: new | used | refurbished (aceita novo/usado/recondicionado); outro valor = sem filtro. */
+  condition?: string;
+  /** P3 — filtros por característica (isFilterable) da categoria escolhida, por código de atributo. */
+  attrs?: AttributeFilters;
   page?: number;
   limit?: number;
   // C2.2 — SOMENTE para a rota administrativa (GET /admin/products, global admin): lista ativos E pausados, sem o filtro
@@ -251,6 +262,15 @@ export interface ProductQueryFilters {
   adminView?: boolean;
   // Só vale com adminView: restringe a 'published' (is_active=true) ou 'paused' (is_active=false); ausente = todos.
   visibility?: 'published' | 'paused';
+}
+
+/** Escopo calculado uma vez por requisição de busca/facets (ver CatalogService.prepareSearch). */
+export interface PreparedSearch {
+  /** undefined = sem filtro de árvore; null = categoria desconhecida/inativa (nenhum resultado); lista = categoria + descendentes ativas */
+  treeIds: string[] | null | undefined;
+  scope: AttributeScope;
+  tokens: SearchToken[];
+  attr: AttributeConditions;
 }
 
 export class CatalogService {
@@ -280,102 +300,16 @@ export class CatalogService {
       };
     }
 
-    // Catálogo público: produto ativo + loja ativa + vendedor ativo (publicProductCondition). Visão administrativa
-    // (adminView) não passa pelo filtro público e pode restringir por visibility.
-    const conditions: any[] = [];
-    if (filters.adminView) {
-      if (filters.visibility === 'published') conditions.push(eq(products.isActive, true));
-      else if (filters.visibility === 'paused') conditions.push(eq(products.isActive, false));
-    } else {
-      conditions.push(publicProductCondition());
-    }
-
-    if (filters.q) {
-      const searchTerm = `%${filters.q.trim()}%`;
-      conditions.push(or(ilike(products.title, searchTerm), ilike(products.description, searchTerm), ilike(products.brand, searchTerm))!);
-    }
-
-    if (filters.category && filters.category !== 'all') {
-      conditions.push(eq(products.categoryId, filters.category));
-    }
-
-    // Melhoria pré-piloto (elegibilidade por país): "country" agora é o
-    // DESTINO do comprador, não mais uma igualdade ingênua com o país de
-    // origem — passa a respeitar venda nacional (só o próprio país) vs.
-    // internacional (só os países que o vendedor autorizou explicitamente).
-    // Produtos legados (sem publishingScope definido) são 'national' por
-    // default no schema, então o comportamento para eles não muda em nada.
-    if (filters.country && filters.country !== 'ALL') {
-      const dest = filters.country.toUpperCase();
-      conditions.push(sql`(
-        (${products.publishingScope} = 'national' AND ${products.countryCode} = ${dest})
-        OR
-        (${products.publishingScope} = 'international' AND ${products.targetCountriesJson} @> ${JSON.stringify([dest])}::jsonb)
-      )`);
-    }
-
-    // FASE D16-G1 — filtro ADICIONAL de país de ORIGEM (products.countryCode).
-    // NUNCA substitui a condição de destino/elegibilidade acima — é sempre um
-    // AND sobre ela ("de qual origem, DENTRO do que já é elegível para o meu
-    // destino"). 'ALL'/ausente/vazio = nenhum filtro de origem. Country code
-    // inválido (não cadastrado em `countries`) é IGNORADO silenciosamente —
-    // nunca quebra a listagem nem esvazia o catálogo por um parâmetro de UI
-    // malformado; equivalente a não ter passado o filtro.
-    if (filters.originCountryFilter && filters.originCountryFilter.trim().toUpperCase() !== 'ALL') {
-      const origin = filters.originCountryFilter.trim().toUpperCase();
-      const [originCountryRow] = await db.select({ code: countries.code }).from(countries).where(eq(countries.code, origin)).limit(1);
-      if (originCountryRow) {
-        conditions.push(eq(products.countryCode, origin));
-      }
-    }
-
-    // Fase "Lojas oficiais reais": relacionamento real produto↔loja — nunca
-    // heurística de texto no nome do seller.
-    if (filters.storeId) {
-      conditions.push(eq(products.storeId, filters.storeId));
-    }
-
-    // FASE D17-B1 — exclui o próprio produto (recomendações nunca sugerem o
-    // produto que o comprador já está vendo). Nunca afeta nenhum outro
-    // chamador existente (Home/Search/Category/Store/Favorites/AIAssistant)
-    // porque nenhum deles passa excludeProductId.
-    if (filters.excludeProductId) {
-      conditions.push(ne(products.id, filters.excludeProductId));
-    }
-
-    if (filters.brand) {
-      conditions.push(ilike(products.brand, filters.brand));
-    }
-
-    if (filters.minPrice !== undefined && !isNaN(filters.minPrice)) {
-      conditions.push(gte(products.price, String(filters.minPrice)));
-    }
-
-    if (filters.maxPrice !== undefined && !isNaN(filters.maxPrice)) {
-      conditions.push(lte(products.price, String(filters.maxPrice)));
-    }
-
-    if (filters.freeShipping !== undefined) {
-      conditions.push(eq(products.freeShipping, filters.freeShipping));
-    }
-
-    if (filters.full !== undefined) {
-      conditions.push(eq(products.full, filters.full));
-    }
-
-    let orderByClause: any = desc(products.createdAt);
-    if (filters.sort === 'price_asc') {
-      orderByClause = asc(products.price);
-    } else if (filters.sort === 'price_desc') {
-      orderByClause = desc(products.price);
-    } else if (filters.sort === 'rating_desc') {
-      orderByClause = desc(products.rating);
-    }
+    // Catálogo público + busca por características (P3): escopo calculado UMA vez e condições montadas por buildConditions (a mesma
+    // função alimenta a listagem e os facets, para os números do filtro nunca divergirem da lista).
+    const search = await CatalogService.prepareSearch(filters, db);
+    const conditions = await CatalogService.buildConditions(filters, db, search);
+    const orderBys = CatalogService.buildOrderBy(filters, search);
 
     const whereClause = conditions.length > 1 ? and(...conditions) : conditions[0];  // vazio (admin, sem filtros) => sem WHERE
 
     const [items, totalResult] = await Promise.all([
-      db.select().from(products).where(whereClause).orderBy(orderByClause).limit(limit).offset(offset),
+      db.select().from(products).where(whereClause).orderBy(...orderBys).limit(limit).offset(offset),
       db
         .select({ count: sql<number>`cast(count(*) as integer)` })
         .from(products)
@@ -433,6 +367,241 @@ export class CatalogService {
     }
 
     return result;
+  }
+
+  // ---------------------------------------------------------------- P3: busca e filtros por características
+
+  /** Escopo da busca (árvore de categorias, atributos filtráveis efetivos, palavras da pesquisa e filtros de atributo válidos), uma vez por requisição. */
+  static async prepareSearch(filters: ProductQueryFilters, db: any, opts: { forceScope?: boolean } = {}): Promise<PreparedSearch> {
+    let treeIds: string[] | null | undefined;
+    if (filters.categoryTree && filters.categoryTree !== 'all') {
+      const tree = await categoryTreeIds(db, filters.categoryTree);
+      treeIds = tree ? tree.ids : null; // categoria desconhecida/inativa => NENHUM produto (nunca o catálogo inteiro)
+    }
+    const hasAttrFilters = !!filters.attrs && Object.keys(filters.attrs).length > 0;
+    const scope: AttributeScope = treeIds && treeIds.length > 0 && (hasAttrFilters || opts.forceScope) ? await buildAttributeScope(db, treeIds) : new Map();
+    return { treeIds, scope, tokens: parseSearchTokens(filters.q), attr: buildAttributeConditions(filters.attrs, scope) };
+  }
+
+  /** Condições SQL do catálogo. `exclude` tira UM grupo ('brand' | 'condition' | 'price' | 'attr:<código>') — usado pelos facets, que não contam contra o próprio filtro. */
+  static async buildConditions(filters: ProductQueryFilters, db: any, search: PreparedSearch, exclude: Set<string> = new Set()): Promise<any[]> {
+    // Catálogo público: produto ativo + loja ativa + vendedor ativo (publicProductCondition). Visão administrativa
+    // (adminView) não passa pelo filtro público e pode restringir por visibility.
+    const conditions: any[] = [];
+    if (filters.adminView) {
+      if (filters.visibility === 'published') conditions.push(eq(products.isActive, true));
+      else if (filters.visibility === 'paused') conditions.push(eq(products.isActive, false));
+    } else {
+      conditions.push(publicProductCondition());
+    }
+
+    // Pesquisa textual: título, marca, descrição, categoria e características (sem acento, com sinônimos). Todas as palavras precisam aparecer.
+    const text = textSearchCondition(search.tokens);
+    if (text) conditions.push(text);
+
+    if (filters.category && filters.category !== 'all') {
+      conditions.push(eq(products.categoryId, filters.category));
+    }
+    if (search.treeIds === null) conditions.push(sql`false`);
+    else if (search.treeIds && search.treeIds.length > 0) conditions.push(inArray(products.categoryId, search.treeIds));
+
+    // Melhoria pré-piloto (elegibilidade por país): "country" agora é o
+    // DESTINO do comprador, não mais uma igualdade ingênua com o país de
+    // origem — passa a respeitar venda nacional (só o próprio país) vs.
+    // internacional (só os países que o vendedor autorizou explicitamente).
+    // Produtos legados (sem publishingScope definido) são 'national' por
+    // default no schema, então o comportamento para eles não muda em nada.
+    if (filters.country && filters.country !== 'ALL') {
+      const dest = filters.country.toUpperCase();
+      conditions.push(sql`(
+        (${products.publishingScope} = 'national' AND ${products.countryCode} = ${dest})
+        OR
+        (${products.publishingScope} = 'international' AND ${products.targetCountriesJson} @> ${JSON.stringify([dest])}::jsonb)
+      )`);
+    }
+
+    // FASE D16-G1 — filtro ADICIONAL de país de ORIGEM (products.countryCode).
+    // NUNCA substitui a condição de destino/elegibilidade acima — é sempre um
+    // AND sobre ela ("de qual origem, DENTRO do que já é elegível para o meu
+    // destino"). 'ALL'/ausente/vazio = nenhum filtro de origem. Country code
+    // inválido (não cadastrado em `countries`) é IGNORADO silenciosamente —
+    // nunca quebra a listagem nem esvazia o catálogo por um parâmetro de UI
+    // malformado; equivalente a não ter passado o filtro.
+    if (filters.originCountryFilter && filters.originCountryFilter.trim().toUpperCase() !== 'ALL') {
+      const origin = filters.originCountryFilter.trim().toUpperCase();
+      const [originCountryRow] = await db.select({ code: countries.code }).from(countries).where(eq(countries.code, origin)).limit(1);
+      if (originCountryRow) {
+        conditions.push(eq(products.countryCode, origin));
+      }
+    }
+
+    // Fase "Lojas oficiais reais": relacionamento real produto↔loja — nunca
+    // heurística de texto no nome do seller.
+    if (filters.storeId) {
+      conditions.push(eq(products.storeId, filters.storeId));
+    }
+
+    // FASE D17-B1 — exclui o próprio produto (recomendações nunca sugerem o
+    // produto que o comprador já está vendo). Nunca afeta nenhum outro
+    // chamador existente (Home/Search/Category/Store/Favorites/AIAssistant)
+    // porque nenhum deles passa excludeProductId.
+    if (filters.excludeProductId) {
+      conditions.push(ne(products.id, filters.excludeProductId));
+    }
+
+    if (filters.brand && !exclude.has('brand')) {
+      conditions.push(ilike(products.brand, filters.brand));
+    }
+
+    const condition = normalizeConditionFilter(filters.condition);
+    if (condition && !exclude.has('condition')) {
+      conditions.push(eq(products.condition, condition));
+    }
+
+    if (!exclude.has('price')) {
+      if (filters.minPrice !== undefined && !isNaN(filters.minPrice)) {
+        conditions.push(gte(products.price, String(filters.minPrice)));
+      }
+
+      if (filters.maxPrice !== undefined && !isNaN(filters.maxPrice)) {
+        conditions.push(lte(products.price, String(filters.maxPrice)));
+      }
+    }
+
+    if (filters.freeShipping !== undefined) {
+      conditions.push(eq(products.freeShipping, filters.freeShipping));
+    }
+
+    if (filters.full !== undefined) {
+      conditions.push(eq(products.full, filters.full));
+    }
+
+    // Características (isFilterable): E entre atributos; dentro de um atributo de seleção, OU entre as opções.
+    for (const [code, cond] of search.attr.byCode) {
+      if (!exclude.has(`attr:${code}`)) conditions.push(cond);
+    }
+    return conditions;
+  }
+
+  /** Ordenação estável (desempate por id: a paginação nunca repete nem pula produto). Pesquisa textual sem ordem explícita => relevância. */
+  static buildOrderBy(filters: ProductQueryFilters, search: PreparedSearch): any[] {
+    const soldSubquery = sql`(SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi JOIN orders o ON o.id = oi.order_id
+      WHERE oi.product_id = ${products.id} AND o.payment_status = 'paid' AND o.status NOT IN (${sql.join(SOLD_ORDER_STATUSES_EXCLUDED.map((s) => sql`${s}`), sql`, `)}))`;
+    let primary: any[];
+    if (filters.sort === 'price_asc') primary = [asc(products.price)];
+    else if (filters.sort === 'price_desc') primary = [desc(products.price)];
+    else if (filters.sort === 'rating_desc') primary = [desc(products.rating)];
+    else if (filters.sort === 'sales_desc') primary = [sql`${soldSubquery} DESC`];
+    else if (filters.sort === 'newest') primary = [desc(products.createdAt)];
+    else {
+      const score = textRelevanceScore(search.tokens);
+      primary = score ? [sql`(${score}) DESC`, desc(products.createdAt)] : [desc(products.createdAt)];
+    }
+    return [...primary, asc(products.id)];
+  }
+
+  /**
+   * Opções de filtro da busca atual (marca, condição, preço e características da categoria), calculadas sobre os produtos que existem de
+   * verdade: cada grupo é contado com TODOS os outros filtros aplicados e SEM o próprio (selecionar uma opção não esconde as irmãs), e só
+   * aparece o que tem resultado. Características só valem com uma categoria escolhida (categoryTree).
+   */
+  static async getFacets(filters: ProductQueryFilters, executor?: any): Promise<CatalogFacets> {
+    const cacheKey = `catalog:facets:${JSON.stringify(filters)}`;
+    if (!executor) {
+      const cached = await getCache<any>(cacheKey);
+      if (cached) return cached;
+    }
+    const db = executor ?? getDb();
+    const empty: CatalogFacets = { total: 0, brands: [], conditions: [], price: null, attributes: [], ignoredAttributes: [] };
+    if (!db) return empty;
+
+    const search = await CatalogService.prepareSearch(filters, db, { forceScope: true });
+    const where = async (exclude: Set<string> = new Set()) => {
+      const conds = await CatalogService.buildConditions(filters, db, search, exclude);
+      return conds.length > 1 ? and(...conds) : conds[0];
+    };
+
+    // consultas independentes em paralelo (o pool enfileira o excedente)
+    const [whereAll, whereNoBrand, whereNoCondition, whereNoPrice] = await Promise.all([where(), where(new Set(['brand'])), where(new Set(['condition'])), where(new Set(['price']))]);
+    const [totalRow, brandRows, condRows, priceRow] = await Promise.all([
+      db.select({ count: sql<number>`cast(count(*) as integer)` }).from(products).where(whereAll),
+      db.select({ value: products.brand, count: sql<number>`cast(count(*) as integer)` }).from(products)
+        .where(and(whereNoBrand, sql`${products.brand} IS NOT NULL AND ${products.brand} <> ''`)).groupBy(products.brand)
+        .orderBy(sql`count(*) DESC`, asc(products.brand)).limit(30),
+      db.select({ value: products.condition, count: sql<number>`cast(count(*) as integer)` }).from(products)
+        .where(and(whereNoCondition, sql`${products.condition} IS NOT NULL`)).groupBy(products.condition).orderBy(sql`count(*) DESC`),
+      db.select({ min: sql<string>`min(${products.price})`, max: sql<string>`max(${products.price})` }).from(products).where(whereNoPrice),
+    ]);
+
+    const attributes: AttributeFacet[] = [];
+    if (search.treeIds && search.scope.size > 0) {
+      const activeCodes = new Set(search.attr.byCode.keys());
+      const rowsByCode = new Map<string, any[]>();
+      const runFacetQuery = async (attrs: FilterableAttribute[], exclude: Set<string>) => {
+        if (attrs.length === 0) return;
+        const pairs = attrs.flatMap((a) => a.pairs.map((p) => ({ ...p, code: a.code })));
+        const res: any = await db.execute(sql`
+          SELECT e.code AS code, v.option_value AS option_value, v.value_bool AS value_bool,
+                 COUNT(DISTINCT v.product_id)::int AS n, MIN(v.value_number)::text AS mn, MAX(v.value_number)::text AS mx
+          FROM products
+          JOIN product_attribute_values v ON v.product_id = products.id
+          JOIN jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS e(cid text, aid text, code text) ON e.aid = v.attribute_id AND e.cid = products.category_id
+          WHERE ${await where(exclude)}
+          GROUP BY e.code, v.option_value, v.value_bool`);
+        for (const row of res.rows ?? res) (rowsByCode.get(row.code) || rowsByCode.set(row.code, []).get(row.code)!).push(row);
+      };
+      const all = Array.from(search.scope.values());
+      await Promise.all([
+        runFacetQuery(all.filter((a) => !activeCodes.has(a.code)), new Set()),       // um passo para todos os atributos sem filtro ativo
+        ...all.filter((x) => activeCodes.has(x.code)).map((a) => runFacetQuery([a], new Set([`attr:${a.code}`]))), // com filtro ativo: sem o próprio
+      ]);
+      for (const a of all.sort((x, y) => x.sortOrder - y.sortOrder || x.name.localeCompare(y.name, 'pt-BR'))) {
+        const facet = CatalogService.assembleAttributeFacet(a, rowsByCode.get(a.code) ?? [], filters.attrs?.[a.code]);
+        if (facet) attributes.push(facet);
+      }
+    }
+
+    const result: CatalogFacets = {
+      total: totalRow[0]?.count ?? 0,
+      brands: brandRows.map((r: any) => ({ value: String(r.value), count: Number(r.count) })),
+      conditions: condRows.map((r: any) => ({ value: String(r.value), count: Number(r.count) })),
+      price: priceRow[0]?.min !== null && priceRow[0]?.min !== undefined ? { min: Number(priceRow[0].min), max: Number(priceRow[0].max) } : null,
+      attributes: attributes.slice(0, 16),
+      ignoredAttributes: search.attr.ignored,
+    };
+    if (!executor) await setCache(cacheKey, result, 60);
+    return result;
+  }
+
+  /** Linhas agregadas de um atributo -> facet pronto para a tela (só opções com resultado; o que está selecionado sempre fica para poder desmarcar). */
+  static assembleAttributeFacet(a: FilterableAttribute, rows: any[], selected: unknown): AttributeFacet | null {
+    const base = { code: a.code, name: a.name, unit: a.unit, decimals: a.decimals, displayGroup: a.displayGroup };
+    if (a.type === 'select' || a.type === 'multiselect') {
+      const counts = new Map<string, number>();
+      for (const r of rows) if (r.option_value !== null && r.option_value !== undefined) counts.set(String(r.option_value), Number(r.n));
+      const picked = Array.isArray(selected) ? (selected as string[]) : [];
+      for (const s of picked) if (!counts.has(s)) counts.set(s, 0);
+      if (counts.size === 0) return null;
+      const order = a.options;
+      const rank = (v: string) => { const i = order.indexOf(v); return i < 0 ? Number.MAX_SAFE_INTEGER : i; };
+      const options = Array.from(counts.entries()).map(([value, count]) => ({ value, count })).sort((x, y) => rank(x.value) - rank(y.value) || x.value.localeCompare(y.value, 'pt-BR'));
+      return { ...base, type: a.type, options: options.slice(0, 60) };
+    }
+    if (a.type === 'boolean') {
+      const yes = rows.filter((r) => r.value_bool === true).reduce((s, r) => s + Number(r.n), 0);
+      const no = rows.filter((r) => r.value_bool === false).reduce((s, r) => s + Number(r.n), 0);
+      if (yes + no === 0 && typeof selected !== 'boolean') return null;
+      return { ...base, type: 'boolean', bool: { yes, no } };
+    }
+    const mins = rows.map((r) => (r.mn === null || r.mn === undefined ? NaN : Number(r.mn))).filter((x) => !isNaN(x));
+    const maxs = rows.map((r) => (r.mx === null || r.mx === undefined ? NaN : Number(r.mx))).filter((x) => !isNaN(x));
+    const selectedRange = selected && typeof selected === 'object' && !Array.isArray(selected);
+    if (mins.length === 0 || maxs.length === 0) {
+      return selectedRange ? { ...base, type: 'number', range: { min: (selected as any).min ?? 0, max: (selected as any).max ?? (selected as any).min ?? 0 } } : null;
+    }
+    const range = { min: Math.min(...mins), max: Math.max(...maxs) };
+    if (range.min === range.max && !selectedRange) return null; // um único valor existente: filtro sem sentido
+    return { ...base, type: 'number', range };
   }
 
   // FASE D17-B1 — lookup mínimo para recomendações (GET /products/:id/

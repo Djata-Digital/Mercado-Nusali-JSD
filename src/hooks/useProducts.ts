@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { ProductService } from '../services/productService';
 import { FilterState, Product } from '../types';
 
@@ -10,6 +10,28 @@ export const useProducts = (filters?: Partial<FilterState>) => {
       return res.data;
     },
     staleTime: 1000 * 60 * 5, // 5 minutes cache
+  });
+};
+
+// P3 — página do catálogo filtrada pelo servidor; mantém a página anterior na tela enquanto a nova carrega (sem piscar).
+export const useCatalogSearch = (params: Record<string, string | number>, enabled = true) => {
+  return useQuery({
+    queryKey: ['catalog-search', params],
+    queryFn: () => ProductService.searchProducts(params),
+    enabled,
+    staleTime: 1000 * 60,
+    placeholderData: keepPreviousData,
+  });
+};
+
+// P3 — opções de filtro da mesma busca (marca, condição, preço, características da categoria).
+export const useCatalogFacets = (params: Record<string, string | number>, enabled = true) => {
+  return useQuery({
+    queryKey: ['catalog-facets', params],
+    queryFn: () => ProductService.getFacets(params),
+    enabled,
+    staleTime: 1000 * 60,
+    placeholderData: keepPreviousData,
   });
 };
 

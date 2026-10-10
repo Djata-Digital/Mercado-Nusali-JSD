@@ -125,6 +125,14 @@ export async function resolveEffectiveAttributes(db: any, categoryIdOrSlug: stri
     .from(categoryAttributes)
     .where(inArray(categoryAttributes.categoryId, chain.map((c) => c.id)))
     .orderBy(asc(categoryAttributes.sortOrder), asc(categoryAttributes.name));
+  return resolveFromRows(g, target, chain, rows);
+}
+
+/**
+ * Atributos EFETIVOS de UMA categoria a partir das linhas já carregadas (núcleo PURO do resolvedor: sem banco). É a ÚNICA implementação
+ * de herança/substituição/desativação — usada pelo resolvedor de uma categoria e pelo lote do catálogo (filtros da busca).
+ */
+function resolveFromRows(g: Graph, target: CatRow, chain: CatRow[], rows: any[]): any[] {
   const effective = new Map<string, any>();
   const rowById = new Map<string, any>(rows.map((r) => [r.id, r]));
   // Origem sempre informada (Fase 4): categoria que DEFINE o atributo efetivo, se é herdado e, quando for uma substituição
@@ -160,6 +168,48 @@ export async function resolveEffectiveAttributes(db: any, categoryIdOrSlug: stri
     if ((a.sortOrder ?? 0) !== (b.sortOrder ?? 0)) return (a.sortOrder ?? 0) - (b.sortOrder ?? 0);
     return String(a.name).localeCompare(String(b.name));
   });
+}
+
+/**
+ * Atributos efetivos de VÁRIAS categorias de uma vez (uma consulta de categorias + uma de definições): é o que a busca do catálogo usa
+ * para resolver, por categoria final, qual definição vale (herança, substituição explícita e "desativar aqui" já aplicadas).
+ * Categoria desconhecida => lista vazia.
+ */
+export async function resolveEffectiveAttributesBatch(db: any, categoryIds: string[]): Promise<Map<string, any[]>> {
+  const out = new Map<string, any[]>();
+  if (!db || categoryIds.length === 0) return out;
+  const g = await loadGraph(db);
+  const chains = new Map<string, CatRow[]>();
+  const needed = new Set<string>();
+  for (const id of categoryIds) {
+    const target = g.byId.get(id);
+    if (!target) { out.set(id, []); continue; }
+    const chain = chainTo(g, target.id);
+    chains.set(id, chain);
+    for (const c of chain) needed.add(c.id);
+  }
+  const rows: any[] = needed.size === 0 ? [] : await db
+    .select()
+    .from(categoryAttributes)
+    .where(inArray(categoryAttributes.categoryId, Array.from(needed)))
+    .orderBy(asc(categoryAttributes.sortOrder), asc(categoryAttributes.name));
+  const byCategory = new Map<string, any[]>();
+  for (const r of rows) (byCategory.get(r.categoryId) || byCategory.set(r.categoryId, []).get(r.categoryId)!).push(r);
+  for (const [id, chain] of chains) {
+    const chainRows = chain.flatMap((c) => byCategory.get(c.id) || []);
+    out.set(id, resolveFromRows(g, g.byId.get(id)!, chain, chainRows));
+  }
+  return out;
+}
+
+/** Categoria (id ou slug) e TODAS as suas descendentes ativas. Desconhecida/inativa => lista vazia (nunca o catálogo inteiro). */
+export async function categoryTreeIds(db: any, categoryIdOrSlug: string): Promise<{ rootId: string; ids: string[] } | null> {
+  if (!db || !categoryIdOrSlug) return null;
+  const g = await loadGraph(db);
+  const root = g.byId.get(categoryIdOrSlug) || g.bySlug.get(categoryIdOrSlug);
+  if (!root || root.isActive === false) return null;
+  const ids = [root.id, ...descendantIds(g, root.id).filter((id) => g.byId.get(id)?.isActive !== false)];
+  return { rootId: root.id, ids };
 }
 
 // ---------------------------------------------------------------- uso por produtos

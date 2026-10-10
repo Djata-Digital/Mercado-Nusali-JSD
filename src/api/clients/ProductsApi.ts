@@ -6,6 +6,17 @@ export class ProductsApi {
     return apiClient.get('/products', { params });
   }
 
+  // P3 — busca/categoria com filtros por característica, pesquisa em atributos, ordenação e paginação NO SERVIDOR. A resposta traz
+  // `pagination` (total, page, limit, totalPages) ao lado de `data`; parâmetros: ver utils/catalogQuery.ts.
+  static async search(params: Record<string, string | number>): Promise<ApiResponse<any[]> & { pagination?: { total: number; page: number; limit: number; totalPages: number } }> {
+    return apiClient.get('/products', { params }) as any;
+  }
+
+  // P3 — opções de filtro (marca, condição, preço e características da categoria) da busca atual.
+  static async facets(params: Record<string, string | number>): Promise<ApiResponse<any>> {
+    return apiClient.get('/products/facets', { params });
+  }
+
   static async getById(id: string, destinationCountry?: string): Promise<ApiResponse<any>> {
     return apiClient.get(`/products/${id}`, destinationCountry ? { params: { destinationCountry } } : undefined);
   }

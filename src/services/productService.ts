@@ -3,6 +3,7 @@ import { ProductsApi } from '../api/clients/ProductsApi';
 import { CategoriesApi } from '../api/clients/CategoriesApi';
 import { Product, Category, FilterState } from '../types';
 import { normalizeProduct } from '../utils/productUtils';
+import type { CatalogFacets } from '../utils/attributeFilters';
 
 export const ProductService = {
   async getProducts(filters?: Partial<FilterState>): Promise<ApiResponse<Product[]>> {
@@ -18,6 +19,21 @@ export const ProductService = {
       data: rawItems.map(normalizeProduct),
       message: res.message,
     };
+  },
+
+  /** P3 — uma página do catálogo filtrada/ordenada pelo servidor. */
+  async searchProducts(params: Record<string, string | number>): Promise<{ items: Product[]; pagination: { total: number; page: number; limit: number; totalPages: number } }> {
+    const res = await ProductsApi.search(params);
+    if (!res.success) throw new Error(res.error?.message || res.message || 'Não foi possível carregar os produtos.');
+    const items = Array.isArray(res.data) ? res.data.map(normalizeProduct) : [];
+    return { items, pagination: res.pagination ?? { total: items.length, page: 1, limit: items.length, totalPages: 1 } };
+  },
+
+  /** P3 — opções de filtro da busca atual (marca, condição, preço, características). */
+  async getFacets(params: Record<string, string | number>): Promise<CatalogFacets> {
+    const res = await ProductsApi.facets(params);
+    if (!res.success || !res.data) throw new Error(res.error?.message || 'Não foi possível carregar os filtros.');
+    return res.data as CatalogFacets;
   },
 
   async getProductById(id: string, destinationCountry?: string): Promise<ApiResponse<Product | null>> {

@@ -16,6 +16,9 @@ interface Props {
   errors: Record<string, string>;
   onChange: (code: string, value: FormValue) => void;
   isLoading?: boolean;
+  /** P1: o carregamento das características falhou (não é "categoria sem atributos"): mostra o erro e o botão de nova tentativa. */
+  loadError?: boolean;
+  onRetry?: () => void;
   /** Campos só leitura (não usado pelo assistente desde a Fase 6; mantido para outras telas). */
   readOnly?: boolean;
   /** Edição: características gravadas que a categoria atual não pede mais (desativadas). Continuam salvas, mas não aparecem na página. */
@@ -30,7 +33,7 @@ const inputBase = 'w-full p-2.5 border rounded-xl text-sm font-medium bg-white f
 const borderFor = (hasError: boolean) => (hasError ? 'border-red-400' : 'border-gray-300');
 
 /** Campos dinâmicos de atributos da categoria: texto, número, seleção, múltipla seleção e Sim/Não. Só apresentação: regras em attributeFormModel. */
-export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors, onChange, isLoading, readOnly, needsLeafCategory, droppedLabels = [], inactiveLabels = [] }) => {
+export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors, onChange, isLoading, loadError, onRetry, readOnly, needsLeafCategory, droppedLabels = [], inactiveLabels = [] }) => {
   const groups = React.useMemo(() => groupFormAttributes(fields), [fields]);
 
   const renderControl = (f: FormAttribute) => {
@@ -139,14 +142,14 @@ export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors
   };
 
   return (
-    <div className="p-5 bg-white border border-gray-200 rounded-2xl space-y-5 shadow-2xs" data-testid="product-attribute-fields">
+    <div id="product-attribute-fields" className="p-5 bg-white border border-gray-200 rounded-2xl space-y-5 shadow-2xs" data-testid="product-attribute-fields">
       <div className="flex items-center justify-between border-b border-gray-100 pb-3">
         <div>
           <h4 className="font-extrabold text-sm text-gray-900 flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-purple-600" />
             Características do produto
           </h4>
-          <p className="text-xs text-gray-500 mt-0.5">Preencha as especificações da categoria para aumentar a relevância do seu anúncio nas buscas.</p>
+          <p className="text-xs text-gray-500 mt-0.5">Estas especificações aparecem na ficha do produto e ajudam os compradores a encontrar o anúncio: pela pesquisa e, nas características com filtro, pelos filtros da categoria.</p>
         </div>
         {isLoading && <Loader2 className="w-4 h-4 animate-spin text-purple-600" aria-label="Carregando" />}
       </div>
@@ -167,6 +170,16 @@ export const ProductAttributeFields: React.FC<Props> = ({ fields, values, errors
       {needsLeafCategory ? (
         <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 text-xs text-gray-500 font-medium text-center">
           Escolha a subcategoria final do produto para ver as características que ela exige.
+        </div>
+      ) : loadError && !isLoading ? (
+        <div role="alert" data-testid="attributes-load-error" className="p-4 bg-red-50 border border-red-200 rounded-xl text-xs font-medium text-red-900 space-y-2">
+          <p className="font-black">Não foi possível carregar as características desta categoria.</p>
+          <p>Os campos preenchidos foram mantidos. O anúncio só pode ser publicado ou salvo depois que as características carregarem, para que nenhum campo obrigatório seja esquecido.</p>
+          {onRetry && (
+            <button type="button" onClick={onRetry} data-testid="attributes-load-retry" className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xs cursor-pointer">
+              Tentar novamente
+            </button>
+          )}
         </div>
       ) : isLoading ? (
         <div className="p-4 text-center text-xs text-gray-400 font-medium">Carregando características da categoria...</div>

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { CartItemOptionChips } from './CartItemOptionChips';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useCart } from '../hooks/useCart';
@@ -486,16 +487,8 @@ export const CartView: React.FC = () => {
                             🎁 {item.selectedKit.title}
                           </span>
                         )}
-                        {item.selectedColor && (
-                          <span className="bg-gray-100 text-gray-800 text-[11px] font-medium px-2 py-0.5 rounded-md border border-gray-200">
-                            Cor: <strong className="text-gray-900">{item.selectedColor}</strong>
-                          </span>
-                        )}
-                        {item.selectedSize && (
-                          <span className="bg-blue-50 text-blue-800 text-[11px] font-medium px-2 py-0.5 rounded-md border border-blue-200">
-                            Tamanho: <strong className="text-blue-900">{item.selectedSize}</strong>
-                          </span>
-                        )}
+                        {/* P2: opções com o NOME REAL de cada eixo (Voltagem, Capacidade…); item antigo cai no formato de sempre */}
+                        <CartItemOptionChips item={item} />
                         {item.product.shipping?.isInternational && (
                           <span className="bg-indigo-50 text-indigo-800 text-[10px] font-bold px-1.5 py-0.5 rounded-md border border-indigo-200">
                             ✈️ Internacional ({item.product.shipping?.originCountry || 'Cross-Border'})

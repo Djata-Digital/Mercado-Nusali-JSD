@@ -2,6 +2,7 @@ import { storageService } from './storage/storageService';
 import { CartItem, Product } from '../types';
 import { normalizeProduct } from '../utils/productUtils';
 import { CartApi } from '../api/clients/CartApi';
+import { readStoredAxes, type BuyerAxisValue } from '../utils/buyerVariantAxes';
 
 export const CartService = {
   async fetchServerCart(): Promise<CartItem[]> {
@@ -17,6 +18,7 @@ export const CartService = {
         selectedColor: item.selectedAttributes?.color,
         selectedSize: item.selectedAttributes?.size,
         selectedStorage: item.selectedAttributes?.storage,
+        selectedAxes: readStoredAxes(item.selectedAttributes),
         unitPriceOverride: Number(item.unitPrice),
         selectedVariantSku: item.variantId || undefined,
         // Melhoria pré-piloto (elegibilidade por país): se o destino do
@@ -52,6 +54,8 @@ export const CartService = {
       color?: string;
       size?: string;
       storage?: string;
+      /** P2: eixos escolhidos com o nome real (Voltagem, Capacidade…); só apresentação, a FK continua sendo variantId. */
+      axes?: BuyerAxisValue[];
       kit?: any;
       unitPriceOverride?: number;
       // FASE D16-C2 — ID real da variante (pvar_*). É ISSO que vira a FK
@@ -72,8 +76,8 @@ export const CartService = {
         // selectedAttributesJson real do comprador (nunca o objeto options
         // inteiro, que misturava unitPriceOverride/selectedVariantSku/
         // selectedVariantImage dentro do que devia ser só {color, size}).
-        selectedAttributes: options?.color || options?.size || options?.storage
-          ? { color: options?.color, size: options?.size, storage: options?.storage }
+        selectedAttributes: options?.color || options?.size || options?.storage || options?.axes?.length
+          ? { color: options?.color, size: options?.size, storage: options?.storage, ...(options?.axes?.length ? { axes: options.axes } : {}) }
           : undefined,
         options,
       });
@@ -93,7 +97,8 @@ export const CartService = {
         item.selectedSize === options?.size &&
         item.selectedStorage === options?.storage &&
         item.selectedKit?.id === options?.kit?.id &&
-        item.selectedVariantSku === options?.selectedVariantSku
+        // P2: a identidade é o id real da variação (duas voltagens/capacidades nunca se fundem num item só)
+        item.selectedVariantSku === (options?.variantId ?? options?.selectedVariantSku)
     );
 
     if (existingIndex >= 0) {
@@ -107,8 +112,9 @@ export const CartService = {
         selectedSize: options?.size,
         selectedStorage: options?.storage,
         selectedKit: options?.kit,
+        selectedAxes: options?.axes,
         unitPriceOverride: options?.unitPriceOverride,
-        selectedVariantSku: options?.selectedVariantSku,
+        selectedVariantSku: options?.variantId ?? options?.selectedVariantSku,
         selectedVariantImage: options?.selectedVariantImage,
       });
     }
@@ -130,6 +136,7 @@ export const CartService = {
       quantity: number;
       color?: string;
       size?: string;
+      axes?: BuyerAxisValue[];
     }>
   ): Promise<CartItem[]> {
     const token = storageService.getToken();
@@ -139,7 +146,7 @@ export const CartService = {
           productId: product.id,
           variantId: l.variantId,
           quantity: l.quantity,
-          selectedAttributesJson: l.color || l.size ? { color: l.color, size: l.size } : undefined,
+          selectedAttributesJson: l.color || l.size || l.axes?.length ? { color: l.color, size: l.size, ...(l.axes?.length ? { axes: l.axes } : {}) } : undefined,
         }))
       );
       if (res && res.success) {
@@ -169,6 +176,7 @@ export const CartService = {
           quantity: l.quantity,
           selectedColor: l.color,
           selectedSize: l.size,
+          selectedAxes: l.axes,
           selectedVariantSku: l.variantId,
         });
       }

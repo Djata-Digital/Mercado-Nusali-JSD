@@ -4,7 +4,7 @@ import { sellerRouter } from './sellerRoutes.js';
 import { buyerRouter } from './buyerRoutes.js';
 import { ratesRouter } from './ratesRoutes.js';
 import { authRouter } from './modules/auth/authRoutes.js';
-import { catalogRouter, getProductsHandler, getProductByIdHandler, getProductRecommendationsHandler, getProductQuestionsHandler, createProductQuestionHandler } from './modules/catalog/catalogRoutes.js';
+import { catalogRouter, getProductsHandler, getProductFacetsHandler, getProductByIdHandler, getProductRecommendationsHandler, getProductQuestionsHandler, createProductQuestionHandler } from './modules/catalog/catalogRoutes.js';
 import { requireAuth } from './modules/auth/authMiddleware.js';
 import { shipmentRouter } from './modules/logistics/shipmentRoutes.js';
 import { orderRouter } from './modules/orders/orderRoutes.js';
@@ -526,6 +526,9 @@ export const inMemoryStore = {
 // implementação usada anteriormente em catalogRoutes.ts — nenhuma lógica
 // duplicada, uma única fonte autoritativa (CatalogService).
 apiRouter.get('/products', getProductsHandler);
+
+// P3 — opções de filtro (marca, condição, preço e características da categoria) da busca atual; ANTES de /products/:id.
+apiRouter.get('/products/facets', getProductFacetsHandler);
 
 // C2.2 — REMOVIDO o handler legado GET /products/search: lia toda a tabela `products` sem nenhum filtro de visibilidade
 // (expunha produto pausado/de loja pausada) e não tinha consumidor (a busca real é GET /products?q= via CatalogService).

@@ -24,7 +24,7 @@ const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLow
 export const VariantAxesPanel: React.FC<Props> = ({ axes, selectedColors, selectedSeconds, onToggleColor, onToggleSecond, extraValues, onExtraChange, problems }) => {
   if (axes.length === 0 && problems.length === 0) return null;
   const ui = planAxisUi(axes);
-  const where = (a: AttributeDefinitionLike) => (a === ui.colorAxis ? 'em "1. Cores Disponíveis"' : a === ui.secondAxis ? 'em "2. Tamanhos / Capacidades"' : 'abaixo, uma vez para o anúncio inteiro');
+  const where = (a: AttributeDefinitionLike) => (a === ui.colorAxis ? 'em "1. Cores Disponíveis"' : a === ui.secondAxis ? `em "2. ${a.name}"` : 'abaixo, uma vez para o anúncio inteiro');
 
   const chips = (axis: AttributeDefinitionLike, selected: string[], onToggle: (v: string) => void) => (
     <div className="flex flex-wrap gap-2 pt-1">

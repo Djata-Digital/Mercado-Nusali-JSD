@@ -298,6 +298,9 @@ export interface CartItem {
   unitPriceOverride?: number;
   selectedVariantSku?: string;
   selectedVariantImage?: string;
+  // P2 — o que o comprador escolheu, com o NOME REAL de cada eixo (Cor, Capacidade, Voltagem…). Só apresentação: a identidade da
+  // variação é sempre o id real (selectedVariantSku guarda o product_variants.id); itens antigos não têm este campo.
+  selectedAxes?: Array<{ key: string; label: string; value: string }>;
   // Elegibilidade geográfica calculada pelo backend para o destino atual do
   // comprador — nunca calculada no frontend (ver productEligibilityService.ts).
   isAvailableForDestination?: boolean;

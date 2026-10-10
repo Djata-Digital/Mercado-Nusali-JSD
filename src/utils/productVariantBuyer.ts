@@ -48,9 +48,52 @@ export function groupActiveVariantsByColor(variants: ProductVariant[] | undefine
   return order.map((c) => map.get(c)!);
 }
 
-/** Valor do eixo secundário de uma variante — size OU capacity, nunca os dois ao mesmo tempo nesta rodada (D16-C2 não generaliza atributos). */
-function secondaryAxisValue(v: ProductVariant): string | undefined {
-  return v.size || v.capacity || undefined;
+const COLUMN_AXIS_CODES = new Set(['cor', 'color', 'tamanho', 'size', 'capacidade', 'capacity']);
+const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+
+/** Valor textual (não vazio) de uma chave de product_variants.attributes_json, ou undefined (objetos/listas não contam). */
+export function jsonAxisValue(v: ProductVariant, key: string): string | undefined {
+  const json = v.attributesJson && typeof v.attributesJson === 'object' ? (v.attributesJson as Record<string, unknown>) : null;
+  const raw = json ? json[key] : undefined;
+  if (raw === undefined || raw === null || typeof raw === 'object') return undefined;
+  const t = String(raw).trim();
+  return t === '' ? undefined : t;
+}
+
+/** Chaves de attributes_json que são eixos de variação (não repetem cor/tamanho/capacidade), na ordem em que aparecem; `preferred` (códigos dos eixos da categoria) vem primeiro. */
+export function jsonAxisKeys(variants: ProductVariant[] | undefined | null, preferred: string[] = []): string[] {
+  const seen: string[] = [];
+  for (const v of getActiveVariants(variants)) {
+    const json = v.attributesJson && typeof v.attributesJson === 'object' ? (v.attributesJson as Record<string, unknown>) : {};
+    for (const k of Object.keys(json)) {
+      if (COLUMN_AXIS_CODES.has(norm(k)) || seen.includes(k)) continue;
+      if (jsonAxisValue(v, k) !== undefined) seen.push(k);
+    }
+  }
+  const rank = (k: string) => { const i = preferred.findIndex((p) => norm(p) === norm(k)); return i < 0 ? Number.MAX_SAFE_INTEGER : i; };
+  return [...seen].sort((a, b) => rank(a) - rank(b));
+}
+
+/**
+ * Eixo (em attributes_json) que faz de "segunda dimensão" para o comprador — ex.: Voltagem. Só existe quando NENHUMA variante ativa tem
+ * tamanho nem capacidade (Tamanho/Capacidade continuam sendo a 2ª dimensão de sempre). Os demais eixos de attributes_json são "extras".
+ */
+export function secondaryJsonKey(variants: ProductVariant[] | undefined | null, preferred: string[] = []): string | undefined {
+  const active = getActiveVariants(variants);
+  if (active.some((v) => !!(v.size || v.capacity))) return undefined;
+  return jsonAxisKeys(active, preferred)[0];
+}
+
+/** Valor da segunda dimensão de uma variante: size, senão capacity, senão o eixo de attributes_json (`jsonKey`, ver secondaryJsonKey). */
+export function secondaryAxisValue(v: ProductVariant, jsonKey?: string): string | undefined {
+  return v.size || v.capacity || (jsonKey ? jsonAxisValue(v, jsonKey) : undefined) || undefined;
+}
+
+/** O produto tem alguma segunda dimensão real (tamanho, capacidade ou um eixo de attributes_json como Voltagem)? */
+export function hasSecondaryAxis(variants: ProductVariant[] | undefined | null, preferred: string[] = []): boolean {
+  const active = getActiveVariants(variants);
+  const jk = secondaryJsonKey(active, preferred);
+  return active.some((v) => !!secondaryAxisValue(v, jk));
 }
 
 /**
@@ -59,13 +102,14 @@ function secondaryAxisValue(v: ProductVariant): string | undefined {
  * inventa uma combinação cartesiana que não existe de verdade em
  * product.variants.
  */
-export function getSizesForColor(variants: ProductVariant[] | undefined | null, color: string | null): string[] {
+export function getSizesForColor(variants: ProductVariant[] | undefined | null, color: string | null, preferredJson: string[] = []): string[] {
   const active = getActiveVariants(variants);
+  const jk = secondaryJsonKey(active, preferredJson);
   const pool = color ? active.filter((v) => v.color === color) : active;
   const seen = new Set<string>();
   const order: string[] = [];
   for (const v of pool) {
-    const val = secondaryAxisValue(v);
+    const val = secondaryAxisValue(v, jk);
     if (val && !seen.has(val)) {
       seen.add(val);
       order.push(val);
@@ -76,7 +120,18 @@ export function getSizesForColor(variants: ProductVariant[] | undefined | null, 
 
 export interface VariantSelection {
   color?: string | null;
+  /** Valor da segunda dimensão (tamanho, capacidade ou o eixo de attributes_json, ex.: Voltagem). */
   size?: string | null;
+  /** Eixos adicionais em attributes_json (código -> valor escolhido), além da segunda dimensão. */
+  extras?: Record<string, string | null | undefined>;
+  /** Códigos dos eixos da categoria, na ordem de definição (desempata qual eixo de attributes_json é a segunda dimensão). */
+  preferredJson?: string[];
+}
+
+/** Eixos extras (attributes_json) com valor em alguma variante ativa, fora o que já é a segunda dimensão. */
+export function extraAxisKeys(variants: ProductVariant[] | undefined | null, preferredJson: string[] = []): string[] {
+  const jk = secondaryJsonKey(variants, preferredJson);
+  return jsonAxisKeys(variants, preferredJson).filter((k) => k !== jk);
 }
 
 /**
@@ -97,19 +152,24 @@ export function resolveSelectedVariant(
   if (active.length === 0) return null;
   if (active.length === 1) return active[0];
 
+  const jk = secondaryJsonKey(active, selection.preferredJson);
   const hasColors = active.some((v) => !!v.color);
-  const hasSecondaryAxis = active.some((v) => !!secondaryAxisValue(v));
+  const hasSecondary = active.some((v) => !!secondaryAxisValue(v, jk));
 
   let pool = active;
   if (hasColors) {
     if (!selection.color) return null;
     pool = pool.filter((v) => v.color === selection.color);
   }
-  if (hasSecondaryAxis) {
+  if (hasSecondary) {
     if (!selection.size) {
       return pool.length === 1 ? pool[0] : null;
     }
-    pool = pool.filter((v) => secondaryAxisValue(v) === selection.size);
+    pool = pool.filter((v) => secondaryAxisValue(v, jk) === selection.size);
+  }
+  // Eixos adicionais (attributes_json): só filtram quando o comprador escolheu um valor; sem escolha, só resolve se sobrar uma variante.
+  for (const [key, value] of Object.entries(selection.extras ?? {})) {
+    if (value) pool = pool.filter((v) => jsonAxisValue(v, key) === value);
   }
   return pool.length === 1 ? pool[0] : null;
 }
@@ -173,7 +233,10 @@ export function getVariantMaxQuantity(variant: ProductVariant | null | undefined
  */
 export function getSelectionGuardMessage(
   variants: ProductVariant[] | undefined | null,
-  selection: VariantSelection
+  selection: VariantSelection,
+  /** Nome REAL da segunda dimensão ("Voltagem", "Capacidade"…) e dos eixos extras, para a mensagem; sem eles, "tamanho". */
+  secondLabel?: string,
+  extraLabels?: Record<string, string>
 ): string | null {
   const active = getActiveVariants(variants);
   if (active.length === 0) return null; // produto simples — nada a bloquear aqui
@@ -183,10 +246,15 @@ export function getSelectionGuardMessage(
     return isVariantAvailable(resolved) ? null : 'Esta variação está sem estoque no momento.';
   }
 
+  const jk = secondaryJsonKey(active, selection.preferredJson);
   const hasColors = active.some((v) => !!v.color);
-  const hasSecondaryAxis = active.some((v) => !!secondaryAxisValue(v));
+  const hasSecondary = active.some((v) => !!secondaryAxisValue(v, jk));
   if (hasColors && !selection.color) return 'Selecione uma cor.';
-  if (hasSecondaryAxis && !selection.size) return 'Selecione um tamanho.';
+  if (hasSecondary && !selection.size) return secondLabel ? `Selecione a opção de ${secondLabel}.` : 'Selecione um tamanho.';
+  for (const key of extraAxisKeys(active, selection.preferredJson)) {
+    const distinct = new Set(active.map((v) => jsonAxisValue(v, key)).filter(Boolean));
+    if (distinct.size > 1 && !selection.extras?.[key]) return `Selecione a opção de ${extraLabels?.[key] ?? key}.`;
+  }
   return 'Selecione uma variação válida antes de continuar.';
 }
 

@@ -267,9 +267,15 @@ export async function syncVariantsForProduct(
     // então é sempre derivado da combinação de opções reais, nunca
     // inventado sem base: cor/tamanho/capacidade escolhidos, senão o SKU,
     // senão um rótulo genérico apenas como último recurso.
+    // P2: eixos em attributes_json (ex.: Voltagem) também entram no título — ele é o que o pedido guarda e o vendedor/comprador leem.
+    const jsonAxisParts = attributesJsonClean
+      ? Object.entries(attributesJsonClean as Record<string, unknown>)
+          .filter(([k, raw]) => !['cor', 'color', 'tamanho', 'size', 'capacidade', 'capacity'].includes(k.trim().toLowerCase()) && raw !== null && raw !== undefined && typeof raw !== 'object' && String(raw).trim() !== '')
+          .map(([, raw]) => String(raw).trim())
+      : [];
     const titleClean =
       (v.title && String(v.title).trim()) ||
-      [colorClean, sizeClean, capacityClean].filter(Boolean).join(' / ') ||
+      [colorClean, sizeClean, capacityClean, ...jsonAxisParts].filter(Boolean).join(' / ') ||
       skuClean ||
       'Variação';
 

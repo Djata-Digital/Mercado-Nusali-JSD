@@ -58,6 +58,8 @@ import { ProductShareModal } from './ProductShareModal';
 import { ProductRecommendationsSection } from './ProductRecommendationsSection';
 import ProductSpecSheetView from './ProductSpecSheetView';
 import { humanizeAttributeKey } from '../utils/attributeFormat';
+import { CategoriesApi } from '../api/clients/CategoriesApi';
+import { buildAxisSpecRows, cartSelectionFor, describeBuyerAxes, type AxisDefinition } from '../utils/buyerVariantAxes';
 import { ProductKit, ProductColor, ProductVariant } from '../types';
 import {
   getActiveVariants,
@@ -68,6 +70,8 @@ import {
   isVariantAvailable,
   getVariantMaxQuantity,
   getSelectionGuardMessage,
+  secondaryAxisValue,
+  jsonAxisValue,
   computeMultiVariantSummary,
   buildPersistentProductGallery,
 } from '../utils/productVariantBuyer';
@@ -143,7 +147,26 @@ export const ProductDetailView: React.FC = () => {
 
   const [selectedColor, setSelectedColor] = useState<string>('');
   const [selectedSize, setSelectedSize] = useState<string>('');
+  // P2: valor escolhido de cada eixo adicional (attributes_json; ex.: Voltagem quando também há tamanho). Vazio = ainda não escolheu.
+  const [selectedExtras, setSelectedExtras] = useState<Record<string, string>>({});
   const [selectedKit, setSelectedKit] = useState<ProductKit | null>(null);
+
+  // P2: nomes REAIS dos eixos (definição da categoria, endpoint público que já existe). Enquanto não chega — ou se falhar — os rótulos
+  // vêm das próprias variantes (Cor, Tamanho, Capacidade, Voltagem…): a seleção nunca depende desta consulta.
+  const axisDefsQuery = useQuery({
+    queryKey: ['category-variant-axes', product?.categoryId],
+    queryFn: async (): Promise<AxisDefinition[]> => {
+      const res = await CategoriesApi.getCategoryAttributes(String(product?.categoryId));
+      return res && res.success && Array.isArray(res.data) ? (res.data as AxisDefinition[]).filter((d) => d.role === 'variant_axis') : [];
+    },
+    enabled: Boolean(product?.categoryId) && hasRealVariants,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  const buyerAxes = useMemo(() => describeBuyerAxes(product?.variants, axisDefsQuery.data), [product, axisDefsQuery.data]);
+  const extraAxisLabels = useMemo(() => Object.fromEntries(buyerAxes.extras.map((e) => [e.key, e.label])), [buyerAxes]);
+  const secondLabel = buyerAxes.secondLabel || undefined;
+  const currentSelection = { color: selectedColor || null, size: selectedSize || null, extras: selectedExtras, preferredJson: buyerAxes.preferredJson };
 
   // FASE D16-D2 — compra multi-variante estilo Alibaba: quantidades
   // independentes por variante (chave = productVariants.id REAL), em vez de
@@ -168,6 +191,10 @@ export const ProductDetailView: React.FC = () => {
     setSelectedSize('');
     setVariantQuantities({});
   }, [product?.id]);
+  // P2: eixos adicionais também começam sem escolha em cada produto
+  useEffect(() => {
+    setSelectedExtras({});
+  }, [product?.id]);
 
   const selectedColorGroup = useMemo(
     () => colorGroups.find((g) => g.color === selectedColor) || null,
@@ -178,8 +205,8 @@ export const ProductDetailView: React.FC = () => {
   // todas as variantes ativas, se o produto não tem eixo de cor) — nunca
   // uma combinação cartesiana inventada.
   const sizesForSelectedColor = useMemo(
-    () => getSizesForColor(product?.variants, selectedColor || null),
-    [product, selectedColor]
+    () => getSizesForColor(product?.variants, selectedColor || null, buyerAxes.preferredJson),
+    [product, selectedColor, buyerAxes]
   );
 
   // Variante concreta resolvida — NUNCA um fallback silencioso para
@@ -187,8 +214,8 @@ export const ProductDetailView: React.FC = () => {
   // resolveSelectedVariant); em qualquer outro caso fica null até o
   // comprador escolher.
   const activeVariant = useMemo<ProductVariant | null>(
-    () => resolveSelectedVariant(product?.variants, { color: selectedColor || null, size: selectedSize || null }),
-    [product, selectedColor, selectedSize]
+    () => resolveSelectedVariant(product?.variants, { color: selectedColor || null, size: selectedSize || null, extras: selectedExtras, preferredJson: buyerAxes.preferredJson }),
+    [product, selectedColor, selectedSize, selectedExtras, buyerAxes]
   );
 
   // FASE D16-D2 — este produto tem um eixo de tamanho/capacidade real
@@ -196,10 +223,7 @@ export const ProductDetailView: React.FC = () => {
   // quantidade vira multi-variante (linhas com [-] qty [+]); se não (produto
   // simples, ou variável só por cor, sem tamanho), o fluxo de seleção única
   // do D16-C2 continua exatamente como antes (D16-D1, seção O).
-  const hasSecondaryAxisOverall = useMemo(
-    () => getActiveVariants(product?.variants).some((v) => !!(v.size || v.capacity)),
-    [product]
-  );
+  const hasSecondaryAxisOverall = buyerAxes.hasSecond;
   const isMultiVariantMode = hasRealVariants && hasSecondaryAxisOverall;
 
   // Resumo puro (productVariantBuyer.ts) — nunca product.price, sempre o
@@ -222,7 +246,7 @@ export const ProductDetailView: React.FC = () => {
   const handleSelectColor = (colorName: string) => {
     setSelectedColor(colorName);
     // Trocar de cor invalida um tamanho que só existia na cor anterior.
-    setSelectedSize((prev) => (getSizesForColor(product?.variants, colorName).includes(prev) ? prev : ''));
+    setSelectedSize((prev) => (getSizesForColor(product?.variants, colorName, buyerAxes.preferredJson).includes(prev) ? prev : ''));
     const matchingMediaIndex = mediaItems.findIndex((m: any) => m.color === colorName);
     setSelectedMediaIndex(matchingMediaIndex >= 0 ? matchingMediaIndex : 0);
   };
@@ -239,7 +263,7 @@ export const ProductDetailView: React.FC = () => {
     if (item?.type === 'image' && item.color && item.color !== selectedColor) {
       const colorName = item.color as string;
       setSelectedColor(colorName);
-      setSelectedSize((prev) => (getSizesForColor(product?.variants, colorName).includes(prev) ? prev : ''));
+      setSelectedSize((prev) => (getSizesForColor(product?.variants, colorName, buyerAxes.preferredJson).includes(prev) ? prev : ''));
     }
   };
 
@@ -336,13 +360,13 @@ export const ProductDetailView: React.FC = () => {
   const variantSpecRows = useMemo<Array<[string, string]>>(() => {
     if (!product) return [];
     const rows = new Map<string, string>();
-    if (selectedColor) rows.set('Cor / Variação', selectedColor);
-    if (selectedSize) rows.set('Tamanho / Especificação', selectedSize);
+    // P2: cor, 2ª dimensão (Tamanho, Capacidade, Voltagem…) e eixos extras com o NOME REAL; eixo de opção única aparece como informação.
+    for (const [label, value] of buildAxisSpecRows(product.variants, buyerAxes, { color: selectedColor || null, size: selectedSize || null, extras: selectedExtras })) rows.set(label, value);
     if (activeVariant?.specs) {
       for (const [k, v] of Object.entries(activeVariant.specs)) rows.set(humanizeAttributeKey(k), String(v));
     }
     return Array.from(rows.entries());
-  }, [product, selectedColor, selectedSize, activeVariant]);
+  }, [product, selectedColor, selectedSize, selectedExtras, buyerAxes, activeVariant]);
 
   // FASE D16-G2.0.1 — bugfix de crash: hooks NUNCA podem ficar depois de um
   // early return condicionado por product/isLoading (violação das Regras
@@ -630,8 +654,7 @@ export const ProductDetailView: React.FC = () => {
       setCartActionPending('buy');
       try {
         await addItem(product, buyNowSingleLine.quantity, {
-          color: buyNowSingleLine.variant.color,
-          size: buyNowSingleLine.variant.size || buyNowSingleLine.variant.capacity,
+          ...cartSelectionFor(buyNowSingleLine.variant, buyerAxes),
           unitPriceOverride: buyNowSingleLine.variant.price,
           variantId: buyNowSingleLine.variantId,
           selectedVariantSku: buyNowSingleLine.variant.sku,
@@ -650,7 +673,7 @@ export const ProductDetailView: React.FC = () => {
     // FASE D16-C2 — bloqueio real: produto variável nunca envia a
     // requisição sem uma variante concreta e disponível resolvida. Nunca
     // cai silenciosamente em variants[0].
-    const guardMessage = getSelectionGuardMessage(product.variants, { color: selectedColor || null, size: selectedSize || null });
+    const guardMessage = getSelectionGuardMessage(product.variants, currentSelection, secondLabel, extraAxisLabels);
     if (guardMessage) {
       showToast(guardMessage);
       return;
@@ -661,6 +684,8 @@ export const ProductDetailView: React.FC = () => {
       await addItem(product, buyQty, {
         color: selectedColor || undefined,
         size: selectedSize || undefined,
+        // P2: retrato com o nome real de cada eixo (Voltagem, Capacidade…) para carrinho/pedido; a identidade continua sendo variantId
+        axes: cartSelectionFor(activeVariant, buyerAxes).axes,
         kit: selectedKit || undefined,
         unitPriceOverride: effectiveUnitPrice,
         // ID real da variante (pvar_*) — é isso que vira a FK no carrinho.
@@ -693,8 +718,7 @@ export const ProductDetailView: React.FC = () => {
         multiVariantSummary.lines.map((l) => ({
           variantId: l.variantId,
           quantity: l.quantity,
-          color: l.variant.color,
-          size: l.variant.size || l.variant.capacity,
+          ...cartSelectionFor(l.variant, buyerAxes),
         }))
       );
       navigate('/cart');
@@ -711,7 +735,7 @@ export const ProductDetailView: React.FC = () => {
     if (isMultiVariantMode) {
       return handleAddMultiVariantToCart();
     }
-    const guardMessage = getSelectionGuardMessage(product.variants, { color: selectedColor || null, size: selectedSize || null });
+    const guardMessage = getSelectionGuardMessage(product.variants, currentSelection, secondLabel, extraAxisLabels);
     if (guardMessage) {
       showToast(guardMessage);
       return;
@@ -722,6 +746,8 @@ export const ProductDetailView: React.FC = () => {
       await addItem(product, buyQty, {
         color: selectedColor || undefined,
         size: selectedSize || undefined,
+        // P2: retrato com o nome real de cada eixo (Voltagem, Capacidade…) para carrinho/pedido; a identidade continua sendo variantId
+        axes: cartSelectionFor(activeVariant, buyerAxes).axes,
         kit: selectedKit || undefined,
         unitPriceOverride: effectiveUnitPrice,
         variantId: activeVariant?.id,
@@ -1147,10 +1173,31 @@ export const ProductDetailView: React.FC = () => {
             <div className="space-y-2 pt-3 border-t border-gray-100">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-gray-800">
-                  Tamanho{selectedColor ? ` (${selectedColor})` : ''}:
+                  {buyerAxes.secondLabel || 'Tamanho'}{selectedColor ? ` (${selectedColor})` : ''}:
                 </span>
-                <span className="text-gray-500 text-[11px]">Guia de tamanhos</span>
+                {buyerAxes.secondIsSize && <span className="text-gray-500 text-[11px]">Guia de tamanhos</span>}
               </div>
+              {buyerAxes.extras.filter((e) => e.values.length > 1).map((e) => (
+                <div key={e.key} className="space-y-1.5" data-testid={`axis-extra-${e.key}`}>
+                  <span className="text-gray-800 text-xs">
+                    {e.label}: <strong className="text-gray-900 font-extrabold ml-1">{selectedExtras[e.key] || 'Escolha uma opção'}</strong>
+                  </span>
+                  <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={e.label}>
+                    {e.values.map((val) => (
+                      <button
+                        key={val}
+                        type="button"
+                        role="radio"
+                        aria-checked={selectedExtras[e.key] === val}
+                        onClick={() => setSelectedExtras((prev) => ({ ...prev, [e.key]: val }))}
+                        className={`px-3 py-1.5 text-xs rounded-lg border font-bold cursor-pointer transition ${selectedExtras[e.key] === val ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:border-blue-400'}`}
+                      >
+                        {val}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
 
               <div className="flex flex-col gap-2">
                 {sizesForSelectedColor.map((s, idx) => {
@@ -1158,11 +1205,15 @@ export const ProductDetailView: React.FC = () => {
                   // tamanho) — nunca "qualquer variante com esse tamanho".
                   const varItem = product.variants?.find(
                     (v) =>
-                      (v.size || v.capacity) === s &&
+                      secondaryAxisValue(v, buyerAxes.secondJsonKey) === s &&
                       (!selectedColor || v.color === selectedColor) &&
-                      v.isActive !== false
+                      v.isActive !== false &&
+                      // eixos adicionais com várias opções: sem escolha não há variante (nunca "a primeira que servir")
+                      buyerAxes.extras.every((e) => e.values.length <= 1 || jsonAxisValue(v, e.key) === selectedExtras[e.key])
                   );
 
+                  // eixo adicional com varias opcoes ainda sem escolha: a linha nao e "Esgotado", so espera a escolha
+                  const pendingExtra = !varItem ? buyerAxes.extras.find((e) => e.values.length > 1 && !selectedExtras[e.key]) : undefined;
                   const rowMax = getVariantMaxQuantity(varItem);
                   const rowAvailable = isVariantAvailable(varItem);
                   const rowQty = varItem ? variantQuantities[varItem.id] || 0 : 0;
@@ -1238,7 +1289,9 @@ export const ProductDetailView: React.FC = () => {
                           {rowOriginalPrice !== undefined && rowPrice !== undefined && rowOriginalPrice > rowPrice && (
                             <span className="text-gray-400 line-through">{formatCurrency(rowOriginalPrice, productCurrency)}</span>
                           )}
-                          {!rowAvailable ? (
+                          {pendingExtra ? (
+                            <span className="text-gray-500 font-semibold">Escolha {pendingExtra.label}</span>
+                          ) : !rowAvailable ? (
                             <span className="text-red-600 font-bold">Esgotado</span>
                           ) : rowMax > 0 && rowMax <= 5 ? (
                             <span className="text-amber-600 font-semibold">{rowMax} disponível{rowMax > 1 ? 'is' : ''}</span>

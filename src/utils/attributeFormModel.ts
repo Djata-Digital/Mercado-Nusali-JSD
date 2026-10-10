@@ -275,3 +275,38 @@ export function removedByCategoryChange(originalFields: FormAttribute[], newFiel
   const { dropped } = reconcileValues(newFields, originalValues);
   return dropped.map((code) => originalFields.find((f) => f.code === code)?.name || code);
 }
+
+/**
+ * P1 (pós-matriz v2) — "não carregou" nunca pode parecer "categoria sem atributos". Estado do carregamento das características da
+ * categoria escolhida: 'failed' (erro de rede/servidor), 'loading' (ainda buscando, ou os campos carregados são de outra categoria)
+ * ou null (pronto). Enquanto não for null a publicação/edição fica bloqueada: os obrigatórios ainda não são conhecidos.
+ */
+export type AttributeLoadBlock = 'failed' | 'loading' | null;
+
+export function attributeLoadBlock(s: { category?: string | null; loadedFor?: string | null; loading: boolean; failed: boolean }): AttributeLoadBlock {
+  if (!s.category) return null;
+  if (s.failed) return 'failed';
+  if (s.loading || s.loadedFor !== s.category) return 'loading';
+  return null;
+}
+
+export const ATTRIBUTE_LOAD_MESSAGES = {
+  failed: 'Não foi possível carregar as características desta categoria. Toque em "Tentar novamente" — o anúncio só pode ser salvo depois que elas carregarem, para não perder campos obrigatórios.',
+  loading: 'Aguarde: as características da categoria ainda estão carregando.',
+} as const;
+
+export type CategoryAttributesResult = { ok: true; data: any[] } | { ok: false; error: unknown };
+
+/** Busca as características da categoria. Lista vazia com sucesso = categoria sem atributos (ok); resposta sem sucesso, formato inesperado ou exceção = FALHA. */
+export async function loadCategoryAttributes(
+  fetcher: (category: string) => Promise<{ success?: boolean; data?: unknown } | null | undefined>,
+  category: string,
+): Promise<CategoryAttributesResult> {
+  try {
+    const res = await fetcher(category);
+    if (res && res.success && Array.isArray(res.data)) return { ok: true, data: res.data };
+    return { ok: false, error: new Error('Resposta inválida ao carregar as características da categoria.') };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}

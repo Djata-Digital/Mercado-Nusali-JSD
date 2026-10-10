@@ -112,6 +112,8 @@ export interface SellerOrderData {
   selectedSize?: string;
   selectedVariantSku?: string;
   selectedVariantImage?: string;
+  /** Título da variação comprada (order_items.variant_title): cor / tamanho / capacidade / eixos como Voltagem. */
+  variantTitle?: string | null;
   quantity: number;
   unitPrice: number;
   /** Subtotal real do item (order_items.subtotal) — autoritativo, nunca derivado de totalAmount (que inclui frete). */

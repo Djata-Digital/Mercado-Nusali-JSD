@@ -536,11 +536,14 @@ export const SellerHubView: React.FC = () => {
             onUpdateProduct={handleUpdateProduct}
             onEditProduct={async (p) => {
               // Fase 6: a edição parte dos valores TIPADOS atuais (detalhe do vendedor), não do espelho legado da listagem.
-              // Se o detalhe não carregar, a edição continua com o que a listagem trouxe.
+              // P1: se o detalhe não carregar, a edição NÃO abre com os dados parciais da listagem (sem variações nem valores tipados, salvar poderia
+              // tratar um produto variável como simples e perder características): avisa e mantém a pessoa na lista, sem alterar nada.
               let editable: any = p;
+              let detailLoaded = false;
               try {
                 const detail = await SellerService.getProduct(p.id);
                 if (detail?.success && detail.data) {
+                  detailLoaded = true;
                   // A listagem não traz as variações; sem elas o assistente tratava produto variável como simples. Só as ATIVAS entram,
                   // com o estoque ao vivo (inventory) e preços como número.
                   const liveVariants = Array.isArray(detail.data.variants)
@@ -551,7 +554,11 @@ export const SellerHubView: React.FC = () => {
                   editable = { ...p, attributeValues: detail.data.attributeValues, specs: detail.data.specs ?? (p as any).specs, ...(liveVariants && liveVariants.length > 0 ? { variants: liveVariants } : {}) };
                 }
               } catch (err) {
-                console.warn('Detalhe do produto indisponível; editando com os dados da listagem.', err);
+                console.warn('Detalhe do produto indisponível; a edição não foi aberta.', err);
+              }
+              if (!detailLoaded) {
+                showToast('Não foi possível carregar os dados completos deste produto. Tente novamente em instantes — nada foi alterado.');
+                return;
               }
               setEditingProduct(editable);
               setActiveSection('product_create');

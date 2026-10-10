@@ -6,7 +6,7 @@ interface Props {
   specSheet?: ProductSpecSheet;
   /** Formato legado { chave: texto }: só usado quando o backend ainda não enviou a ficha (cache antigo / dado de demonstração). */
   legacySpecs?: Record<string, string>;
-  /** Escolha atual de variação (cor, tamanho e especificações da variante), já com rótulos legíveis. */
+  /** Opções do produto e escolha atual de variação (Cor, Capacidade, Voltagem… com o nome real do eixo), já com rótulos legíveis. */
   variantRows?: Array<[string, string]>;
 }
 
@@ -38,7 +38,7 @@ function originTitle(item: SpecSheetItem): string | undefined {
 /** Ficha técnica pública: informações gerais, especificações agrupadas e outras informações. Nunca mostra códigos internos. */
 export default function ProductSpecSheetView({ specSheet, legacySpecs, variantRows = [] }: Props) {
   const variantBlock = variantRows.length > 0 && (
-    <Block title="Variação selecionada">
+    <Block title="Opções do produto">
       {variantRows.map(([k, v]) => <Row key={k} label={k} value={v} />)}
     </Block>
   );

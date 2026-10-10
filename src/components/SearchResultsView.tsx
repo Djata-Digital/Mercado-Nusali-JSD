@@ -1,8 +1,9 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { useSearchParams, useNavigate, useParams, Link } from 'react-router-dom';
-import { useQueries } from '@tanstack/react-query';
-import { useProducts, useCategories } from '../hooks/useProducts';
-import { ProductService } from '../services/productService';
+import { useCategories, useCatalogSearch, useCatalogFacets } from '../hooks/useProducts';
+import { CatalogFacetsPanel } from './CatalogFacetsPanel';
+import { countActiveAttributeFilters, type AttributeFilters } from '../utils/attributeFilters';
+import { buildCatalogParams, buildFacetParams, hasActiveCatalogFilters, type CatalogUiState } from '../utils/catalogQuery';
 import { getDescendantIds, getDirectChildren, getCategoryPath, isCategoryIndexable } from '../utils/categoryUtils';
 import { usePageSeo } from '../hooks/usePageSeo';
 import { pageTitle, toMetaDescription, SEO_SITE_NAME, ROBOTS_NOINDEX, ROBOTS_NOINDEX_FOLLOW } from '../utils/seoRoutes';
@@ -11,6 +12,17 @@ import { SlidersHorizontal, ArrowUpDown, X, Check, Sparkles, HelpCircle, AlertCi
 import { ProductCondition, FilterState, Product } from '../types';
 import { searchProductsIntelligent, getSynonymsForTerm } from '../utils/searchEngine';
 import { usePreferences } from '../context/PreferencesContext';
+
+const PAGE_SIZE = 24;
+
+/** Números de página a mostrar: primeira, última e a janela ao redor da atual (null = reticências). */
+export function pageWindow(current: number, total: number): Array<number | null> {
+  const set = new Set<number>([1, total, current - 1, current, current + 1].filter((n) => n >= 1 && n <= total));
+  const sorted = Array.from(set).sort((a, b) => a - b);
+  const out: Array<number | null> = [];
+  sorted.forEach((n, i) => { if (i > 0 && n - sorted[i - 1] > 1) out.push(null); out.push(n); });
+  return out;
+}
 
 export const SearchResultsView: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -23,7 +35,6 @@ export const SearchResultsView: React.FC = () => {
   // padrão já usado em HomePage.tsx. `/categories/:slug` reaproveita este
   // MESMO componente (ver App.tsx) — corrige os dois de uma vez.
   const { selectedCountry, catalogOriginFilter } = usePreferences();
-  const { data: allProducts = [] } = useProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter });
 
   // `/categories/:slug`: o slug (ou o id — Header/CategoryCarousel navegam com `cat.slug || cat.id`) define o ESCOPO do
   // catálogo. A categoria vem da tabela real (GET /categories, só ativas) e inclui as subcategorias (parentId), pois os
@@ -45,42 +56,6 @@ export const SearchResultsView: React.FC = () => {
   const parentCategoryName = categoryPath.length > 1 ? categoryPath[categoryPath.length - 2].name : null;
   const categoryTitleName = categoryScope ? (parentCategoryName ? `${categoryScope.category.name} - ${parentCategoryName}` : categoryScope.category.name) : '';
   const categoryDescName = categoryScope ? (parentCategoryName ? `${categoryScope.category.name} (${parentCategoryName})` : categoryScope.category.name) : '';
-  const categoryProducts = useQueries({
-    queries: (categoryScope?.ids || []).map((categoryId) => ({
-      queryKey: ['products', { country: selectedCountry, originCountryFilter: catalogOriginFilter, category: categoryId }],
-      queryFn: async () => (await ProductService.getProducts({ country: selectedCountry, originCountryFilter: catalogOriginFilter, category: categoryId })).data,
-      staleTime: 1000 * 60 * 5,
-    })),
-    combine: (results) => {
-      const byId = new Map<string, Product>();
-      results.forEach((r) => (r.data || []).forEach((p: Product) => byId.set(p.id, p)));
-      return { items: Array.from(byId.values()), pending: results.some((r) => r.isPending), error: results.some((r) => r.isError) };
-    },
-  });
-  const products: Product[] = categoryMode ? categoryProducts.items : allProducts;
-
-  // C3.2 — metadados reais da categoria; slug inexistente/inativo => noindex e sem canonical (enquanto carrega: estado pendente).
-  usePageSeo(
-    !categoryMode
-      ? null
-      : categoryScope?.category
-        ? {
-            title: pageTitle(categoryTitleName),
-            description: `Veja os produtos de ${categoryDescName} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`,
-            canonicalPath: `/categories/${encodeURIComponent(categoryScope.category.slug || categoryScope.category.id)}`,
-            // Mesma regra do servidor: subcategoria sem produto público => noindex, follow (continua navegável).
-            robots: isCategoryIndexable(
-              categoryScope.category,
-              categoryScope.all,
-              categoryScope.category.hasPublicProducts ?? categoryProducts.items.length > 0
-            )
-              ? undefined
-              : ROBOTS_NOINDEX_FOLLOW,
-          }
-        : categoriesPending
-          ? null
-          : { title: pageTitle('Categoria não encontrada'), canonicalPath: null, robots: ROBOTS_NOINDEX }
-  );
 
   // Fase M1-D2.6 — removidos `brand: ''` e `officialStoresOnly: false`: não
   // existem em FilterState (src/types.ts) e este componente nunca os LÊ em
@@ -109,9 +84,20 @@ export const SearchResultsView: React.FC = () => {
     setFilterState(prev => ({ ...prev, query: queryParam }));
   }, [queryParam]);
 
+  // P3: filtros/ordem/pesquisa/atributos/marca vivem aqui e SEMPRE voltam para a página 1 (nunca fica numa página que não existe mais)
+  const [brand, setBrand] = useState<string | undefined>(undefined);
+  const [attrs, setAttrs] = useState<AttributeFilters>({});
+  const [page, setPage] = useState(1);
   const updateFilterState = (patch: Partial<FilterState>) => {
     setFilterState((prev) => ({ ...prev, ...patch }));
+    setPage(1);
   };
+  // trocar de categoria (ou voltar à busca geral) descarta filtros que só valiam na anterior
+  useEffect(() => {
+    setAttrs({});
+    setBrand(undefined);
+    setPage(1);
+  }, [categoryRouteSlug]);
 
   const resetFilters = () => {
     setFilterState({
@@ -127,21 +113,47 @@ export const SearchResultsView: React.FC = () => {
       internationalOnly: false,
       sortBy: 'relevance',
     });
+    setBrand(undefined);
+    setAttrs({});
+    setPage(1);
     setSearchParams({});
   };
 
-  // Perform intelligent fuzzy & semantic search
-  const searchEngineResult = useMemo(() => {
-    if (!filterState.query.trim()) {
-      return {
-        results: products,
-        suggestedCorrection: null,
-        synonymApplied: false,
-        searchedQuery: ''
-      };
-    }
-    return searchProductsIntelligent(products, filterState.query);
-  }, [products, filterState.query]);
+  // P3 — filtros, pesquisa (título, marca, descrição, categoria e valores das características), ordenação e paginação no SERVIDOR.
+  const uiState: CatalogUiState = {
+    query: filterState.query,
+    categoryTree: categoryScope?.category?.id,
+    brand,
+    condition: filterState.condition === 'novo' || filterState.condition === 'usado' ? filterState.condition : 'all',
+    priceMin: filterState.priceMin,
+    priceMax: filterState.priceMax,
+    sortBy: filterState.sortBy,
+    attrs,
+    page,
+  };
+  const catalogCtx = { country: selectedCountry, originCountryFilter: catalogOriginFilter, limit: PAGE_SIZE };
+  const listParams = useMemo(() => buildCatalogParams(uiState, catalogCtx), [filterState, brand, attrs, page, categoryScope, selectedCountry, catalogOriginFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  const facetParams = useMemo(() => buildFacetParams(uiState, catalogCtx), [filterState, brand, attrs, categoryScope, selectedCountry, catalogOriginFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  const queriesEnabled = !categoryMode || !!categoryScope; // página de categoria só consulta depois de resolver a categoria
+  const catalog = useCatalogSearch(listParams, queriesEnabled);
+  const facets = useCatalogFacets(facetParams, queriesEnabled);
+
+  // Sem nenhum resultado para o texto: a busca aproximada de sempre (sinônimos, tolerância ortográfica, "você quis dizer") sobre os
+  // produtos dos mesmos filtros, sem o texto — preserva a "Busca Inteligente" quando o servidor não acha nada.
+  const queryText = filterState.query.trim();
+  const serverEmpty = !!catalog.data && !catalog.isFetching && catalog.data.pagination.total === 0 && queryText !== '';
+  const fallbackParams = useMemo(() => buildCatalogParams({ ...uiState, query: '', page: 1 }, { ...catalogCtx, limit: 100 }), [filterState, brand, attrs, categoryScope, selectedCountry, catalogOriginFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  const fallback = useCatalogSearch(fallbackParams, queriesEnabled && serverEmpty);
+  const fuzzy = useMemo(
+    () => (serverEmpty && fallback.data ? searchProductsIntelligent(fallback.data.items, filterState.query) : null),
+    [serverEmpty, fallback.data, filterState.query]
+  );
+
+  const displayProducts: Product[] = fuzzy ? fuzzy.results : catalog.data?.items ?? [];
+  const totalFound = fuzzy ? fuzzy.results.length : catalog.data?.pagination.total ?? 0;
+  const totalPages = fuzzy ? 1 : catalog.data?.pagination.totalPages ?? 1;
+  const activeFilters = hasActiveCatalogFilters(uiState);
+  const searchEngineResult = { suggestedCorrection: fuzzy?.suggestedCorrection ?? null };
 
   // Detected related terms for informational badge
   const relatedSynonyms = useMemo(() => {
@@ -151,48 +163,28 @@ export const SearchResultsView: React.FC = () => {
     ).slice(0, 4);
   }, [filterState.query]);
 
-  // Apply secondary facet filters on the intelligent matched products
-  const filteredProducts = useMemo(() => {
-    const candidateList = searchEngineResult.results;
-
-    return candidateList.filter((p) => {
-      // Category filter
-      if (filterState.category) {
-        if (p.categorySlug !== filterState.category && !p.category.toLowerCase().includes(filterState.category.toLowerCase())) {
-          return false;
-        }
-      }
-
-      // Condition filter
-      if (filterState.condition && filterState.condition !== 'all') {
-        if (p.condition !== filterState.condition) return false;
-      }
-
-      // Price filter
-      if (filterState.priceMin !== undefined && p.price < filterState.priceMin) return false;
-      if (filterState.priceMax !== undefined && p.price > filterState.priceMax) return false;
-
-      // Free shipping
-      if (filterState.freeShippingOnly && !p.shipping?.freeShipping) return false;
-
-      // Arrives tomorrow
-      if (filterState.arrivesTomorrowOnly && !p.shipping?.arrivesTomorrow) return false;
-
-      // FULL
-      if (filterState.fullOnly && !p.shipping?.fullFulfilled) return false;
-
-      // Seller Platinum
-      if (filterState.sellerPlatinumOnly && p.seller?.reputationLevel !== 'platinum') return false;
-
-      return true;
-    }).sort((a, b) => {
-      if (filterState.sortBy === 'price_asc') return a.price - b.price;
-      if (filterState.sortBy === 'price_desc') return b.price - a.price;
-      if (filterState.sortBy === 'sales') return b.salesCount - a.salesCount;
-      if (filterState.sortBy === 'rating') return b.rating - a.rating;
-      return 0; // relevance
-    });
-  }, [searchEngineResult.results, filterState]);
+  // C3.2 — metadados reais da categoria; slug inexistente/inativo => noindex e sem canonical (enquanto carrega: estado pendente).
+  usePageSeo(
+    !categoryMode
+      ? null
+      : categoryScope?.category
+        ? {
+            title: pageTitle(categoryTitleName),
+            description: `Veja os produtos de ${categoryDescName} no ${SEO_SITE_NAME}, marketplace de compra e venda online.`,
+            canonicalPath: `/categories/${encodeURIComponent(categoryScope.category.slug || categoryScope.category.id)}`,
+            // Mesma regra do servidor: subcategoria sem produto público => noindex, follow (continua navegável).
+            robots: isCategoryIndexable(
+              categoryScope.category,
+              categoryScope.all,
+              categoryScope.category.hasPublicProducts ?? (catalog.data?.pagination.total ?? 0) > 0
+            )
+              ? undefined
+              : ROBOTS_NOINDEX_FOLLOW,
+          }
+        : categoriesPending
+          ? null
+          : { title: pageTitle('Categoria não encontrada'), canonicalPath: null, robots: ROBOTS_NOINDEX }
+  );
 
   const handleApplyCorrection = (correction: string) => {
     setSearchParams({ q: correction });
@@ -200,15 +192,15 @@ export const SearchResultsView: React.FC = () => {
   };
 
   // Estados da página de categoria (nunca mostram o catálogo completo no lugar da categoria pedida).
-  if (categoryMode && (categoriesPending || (categoryScope && categoryProducts.pending))) {
+  if (categoryMode && (categoriesPending || (categoryScope && catalog.isPending))) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-16 flex items-center justify-center gap-2 text-sm text-gray-500" role="status">
         <Loader2 className="w-5 h-5 animate-spin text-emerald-600" /> Carregando categoria…
       </div>
     );
   }
-  if (categoryMode && (categoriesError || !categoryScope || categoryProducts.error)) {
-    const loadFailed = categoriesError || categoryProducts.error;
+  if (categoryMode && (categoriesError || !categoryScope || (catalog.isError && !catalog.data))) {
+    const loadFailed = categoriesError || (catalog.isError && !catalog.data);
     return (
       <div className="max-w-7xl mx-auto px-4 py-6">
         <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 space-y-4 shadow-xs">
@@ -251,7 +243,7 @@ export const SearchResultsView: React.FC = () => {
             )}
           </div>
           <p className="text-xs text-gray-500 mt-0.5">
-            {filteredProducts.length} {filteredProducts.length === 1 ? 'produto encontrado' : 'produtos encontrados'}
+            {totalFound} {totalFound === 1 ? 'produto encontrado' : 'produtos encontrados'}
           </p>
         </div>
 
@@ -380,70 +372,67 @@ export const SearchResultsView: React.FC = () => {
 
           {/* Filtros de envio (frete grátis / chega amanhã / FULL) ocultos: o frete e a entrega ainda estão em preparação. */}
 
-          {/* Condition (Novo / Usado) */}
-          <div className="space-y-2">
-            <h3 className="text-xs font-bold text-gray-800 uppercase tracking-wider">Condição</h3>
-            <div className="space-y-1.5 text-xs text-gray-700">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="condition"
-                  checked={filterState.condition === 'all'}
-                  onChange={() => updateFilterState({ condition: 'all' })}
-                  className="text-emerald-600 focus:ring-emerald-500"
-                />
-                <span>Todos</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="condition"
-                  checked={filterState.condition === 'novo'}
-                  onChange={() => updateFilterState({ condition: 'novo' })}
-                  className="text-emerald-600 focus:ring-emerald-500"
-                />
-                <span>Novo</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="radio"
-                  name="condition"
-                  checked={filterState.condition === 'usado'}
-                  onChange={() => updateFilterState({ condition: 'usado' })}
-                  className="text-emerald-600 focus:ring-emerald-500"
-                />
-                <span>Usado</span>
-              </label>
-            </div>
-          </div>
+          {/* P3 — condição, preço, marca e características (isFilterable) da categoria: só opções com resultado, contagens da busca atual */}
+          <CatalogFacetsPanel
+            facets={facets.data}
+            isLoading={facets.isFetching && !facets.data}
+            isError={facets.isError && !facets.data}
+            onRetry={() => facets.refetch()}
+            showAttributes={categoryMode}
+            selection={{ brand, condition: uiState.condition ?? 'all', priceMin: filterState.priceMin, priceMax: filterState.priceMax, attrs }}
+            onBrand={(b) => { setBrand(b); setPage(1); }}
+            onCondition={(c) => updateFilterState({ condition: c })}
+            onPrice={(min, max) => updateFilterState({ priceMin: min, priceMax: max })}
+            onAttrs={(next) => { setAttrs(next); setPage(1); }}
+          />
+          {countActiveAttributeFilters(attrs) > 0 && (
+            <p className="text-[11px] text-gray-500 font-medium" data-testid="active-attr-count">{countActiveAttributeFilters(attrs)} característica(s) filtrada(s)</p>
+          )}
 
           {/* Filtro por nível de vendedor removido: a Nusali ainda não tem níveis de vendedor (sellerPlatinumOnly fica sempre false). */}
         </div>
 
         {/* Product Results Grid (9 cols) */}
         <div className="lg:col-span-9">
-          {filteredProducts.length === 0 ? (
+          {catalog.isError && !catalog.data ? (
+            <div role="alert" className="bg-white p-12 text-center rounded-2xl border border-gray-200 space-y-3 shadow-xs">
+              <h3 className="text-base font-bold text-gray-800">Não foi possível carregar os produtos agora</h3>
+              <p className="text-gray-500 text-xs">Tente novamente em instantes.</p>
+              <button onClick={() => catalog.refetch()} className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm">Tentar novamente</button>
+            </div>
+          ) : catalog.isPending ? (
+            <div className="p-12 flex items-center justify-center gap-2 text-sm text-gray-500" role="status"><Loader2 className="w-5 h-5 animate-spin text-emerald-600" /> Carregando produtos…</div>
+          ) : displayProducts.length === 0 ? (
             <div className="bg-white p-12 text-center rounded-2xl border border-gray-200 space-y-4 shadow-xs">
               <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 mx-auto flex items-center justify-center">
                 <AlertCircle className="w-6 h-6" />
               </div>
               <h3 className="text-base font-bold text-gray-800">
-                {categoryMode && products.length === 0
+                {categoryMode && totalFound === 0 && !activeFilters && !filterState.query
                   ? `Ainda não há produtos em ${categoryName}`
-                  : !categoryMode && products.length === 0 && !filterState.query
+                  : !categoryMode && totalFound === 0 && !activeFilters && !filterState.query
                     ? 'Ainda não há produtos publicados'
                     : filterState.query
                       ? `Nenhum produto encontrado para "${filterState.query}"`
                       : 'Nenhum produto corresponde aos filtros selecionados'}
               </h3>
               <p className="text-gray-500 text-xs max-w-md mx-auto">
-                {categoryMode && !filterState.query
+                {activeFilters
+                  ? 'Remova alguns filtros ou limpe todos para ver mais produtos.'
+                  : categoryMode && !filterState.query
                   ? 'Volte em breve ou explore os outros produtos do catálogo.'
-                  : !categoryMode && products.length === 0 && !filterState.query
+                  : !categoryMode && totalFound === 0 && !filterState.query
                     ? 'Os primeiros produtos do Mercado Nusali serão publicados em breve.'
                     : 'Tente buscar por outro produto, categoria ou palavra-chave.'}
               </p>
-              {!categoryMode && products.length === 0 && !filterState.query ? (
+              {activeFilters ? (
+                <button
+                  onClick={resetFilters}
+                  className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
+                >
+                  Limpar filtros
+                </button>
+              ) : !categoryMode && totalFound === 0 && !filterState.query ? (
                 <button
                   onClick={() => navigate('/')}
                   className="bg-emerald-600 text-white font-bold px-5 py-2.5 rounded-xl text-xs hover:bg-emerald-700 transition shadow-sm"
@@ -460,10 +449,22 @@ export const SearchResultsView: React.FC = () => {
               )}
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              {filteredProducts.map((product) => (
-                <ProductCard key={product.id} product={product} />
-              ))}
+            <div className="space-y-6">
+              <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 transition-opacity ${catalog.isFetching ? 'opacity-60' : ''}`} aria-busy={catalog.isFetching ? 'true' : undefined}>
+                {displayProducts.map((product) => (
+                  <ProductCard key={product.id} product={product} />
+                ))}
+              </div>
+              {totalPages > 1 && (
+                <nav aria-label="Paginação dos resultados" data-testid="catalog-pagination" className="flex flex-wrap items-center justify-center gap-2 text-xs">
+                  <button type="button" disabled={page <= 1} onClick={() => { setPage(page - 1); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="px-3 py-1.5 rounded-lg border border-gray-300 bg-white font-semibold disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed">Anterior</button>
+                  {pageWindow(page, totalPages).map((n, i) => n === null
+                    ? <span key={`gap-${i}`} className="px-1 text-gray-400" aria-hidden="true">…</span>
+                    : <button key={n} type="button" aria-current={n === page ? 'page' : undefined} onClick={() => { setPage(n); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className={`min-w-8 px-2.5 py-1.5 rounded-lg border font-semibold cursor-pointer ${n === page ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:border-emerald-400'}`}>{n}</button>)}
+                  <button type="button" disabled={page >= totalPages} onClick={() => { setPage(page + 1); window.scrollTo({ top: 0, behavior: 'smooth' }); }} className="px-3 py-1.5 rounded-lg border border-gray-300 bg-white font-semibold disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed">Próxima</button>
+                  <span className="w-full text-center text-[11px] text-gray-500">Página {page} de {totalPages}</span>
+                </nav>
+              )}
             </div>
           )}
         </div>

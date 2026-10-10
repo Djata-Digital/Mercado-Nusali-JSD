@@ -11,7 +11,8 @@ import {
 } from '../../../db/schema.js';
 import { eq, inArray, asc, or, and } from 'drizzle-orm';
 import { delCache } from '../../../db/redis.js';
-import { syncVariantsForProduct, type VariantSyncInput } from './variantService.js';
+import { syncVariantsForProduct, VariantAxisValidationError, type VariantSyncInput } from './variantService.js';
+import { activeAxes } from '../../../utils/variantAxes.js';
 import { resolveEffectiveAttributes } from './attributeDefinitionService.js';
 import { prepareProductAttributes, replaceProductAttributeValues, writeLegacyAttributeRows } from './attributeValueService.js';
 // FASE D16-E2 — mesma função já usada por GET /seller/fulfillment-locations
@@ -177,6 +178,25 @@ export class ProductCreationService {
     const prepared = await prepareProductAttributes(db, foundCat.id, foundCat.name, input.specs || input.attributesJson || {}, {}, effectiveAttributes);
     // Visão legada normalizada (mesmos valores dos tipados): alimenta products.attributes_json e product_attributes na transição.
     const specsMap = prepared.legacySpecs;
+
+    // P2 — eixo OBRIGATÓRIO da categoria (ex.: Cor, Tamanho, Capacidade) continua obrigatório: o valor mora na variação, então um produto
+    // sem variações não tem onde guardá-lo. Produto com uma única opção = UMA variação (o mesmo sistema de variações, sem estrutura nova);
+    // a validação do valor de cada eixo e das combinações roda em syncVariantsForProduct, na mesma transação.
+    if (!(Array.isArray(input.variants) && input.variants.length > 0)) {
+      const required = activeAxes(effectiveAttributes).filter((a: any) => a.isRequired);
+      if (required.length > 0) {
+        const names = required.map((a: any) => a.name).join(', ');
+        throw new VariantAxisValidationError(
+          required.map((a: any) => ({
+            code: 'AXIS_REQUIRED' as const,
+            variantIndex: 0,
+            variantLabel: 'Produto',
+            axis: a.code,
+            message: `A categoria "${foundCat.name}" exige ${names}: cadastre o produto com ao menos uma variação (pode ser uma só opção) informando ${required.length > 1 ? 'esses valores' : 'esse valor'}.`,
+          })),
+        );
+      }
+    }
 
     // 5. Build clean, non-fictional product entity
     // countryCode/currency are NOT taken from client input — they are derived from the

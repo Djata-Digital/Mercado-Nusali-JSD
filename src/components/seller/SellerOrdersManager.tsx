@@ -250,12 +250,18 @@ export const SellerOrdersManager: React.FC<SellerOrdersManagerProps> = ({
                     <h3 className="font-bold text-sm text-gray-900">{ord.productTitle}</h3>
                     
                     {/* Explicit Variant Details Box for Seller Picking */}
-                    {(ord.selectedColor || ord.selectedSize || ord.selectedVariantSku) && (
+                    {(ord.selectedColor || ord.selectedSize || ord.selectedVariantSku || ord.variantTitle) && (
                       <div className="p-2 bg-amber-50/80 border border-amber-200 rounded-xl space-y-1">
                         <div className="flex items-center gap-1.5 text-amber-900 font-extrabold text-[11px]">
                           <span>📦 Opção Comprada pelo Cliente:</span>
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                          {/* P2: a variação comprada completa (cor, tamanho/capacidade e eixos como Voltagem) vem do título da variação do pedido */}
+                          {ord.variantTitle && (
+                            <span data-testid="order-variant-title" className="bg-white border border-amber-300 text-gray-900 px-2 py-0.5 rounded-md font-bold flex items-center gap-1">
+                              Variação: <strong>{ord.variantTitle}</strong>
+                            </span>
+                          )}
                           {ord.selectedColor && (
                             <span className="bg-white border border-amber-300 text-gray-900 px-2 py-0.5 rounded-md font-bold flex items-center gap-1">
                               🎨 Cor: <strong>{ord.selectedColor}</strong>

@@ -45,7 +45,7 @@ import { ProductAttributeFields, AttributeCategoryChangeNotice } from './Product
 import { VariantAxesPanel } from './VariantAxesPanel';
 import { planAxisUi, buildVariantKey } from '../../utils/variantAxes';
 import { SellerApi } from '../../api/clients/SellerApi';
-import { buildAxisPayload, effectiveSecondColumn, extraAxisValuesFromVariants, uiVariantsFromLoaded, validatePayloadAgainstAxes } from '../../utils/variantAxisWizard';
+import { buildAxisPayload, effectiveSecondColumn, effectiveSecondJson, extraAxisValuesFromVariants, inferSecondJson, requiredAxesBlockingSimple, simpleModeAxesMessage, uiVariantsFromLoaded, validatePayloadAgainstAxes } from '../../utils/variantAxisWizard';
 import {
   selectFormAttributes,
   validateFormFields,
@@ -55,10 +55,14 @@ import {
   extractSubmitError,
   buildAttributePatch,
   removedByCategoryChange,
+  attributeLoadBlock,
+  loadCategoryAttributes,
+  ATTRIBUTE_LOAD_MESSAGES,
   type FormAttribute,
   type FormValue,
   type FormValues,
 } from '../../utils/attributeFormModel';
+import { humanizeAttributeKey } from '../../utils/attributeFormat';
 import { uploadService } from '../../services/uploadService';
 import {
   Product,
@@ -170,6 +174,10 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
 
   const [dbAttributes, setDbAttributes] = useState<any[]>([]);
   const [isLoadingDbAttributes, setIsLoadingDbAttributes] = useState(false);
+  // P1: falha de carregamento != categoria sem atributos. `attrLoadedFor` = categoria cujos atributos estão em `dbAttributes`.
+  const [attrLoadError, setAttrLoadError] = useState(false);
+  const [attrLoadedFor, setAttrLoadedFor] = useState<string | null>(null);
+  const [attrReloadToken, setAttrReloadToken] = useState(0);
   // Legado: mapa de textos do produto em EDIÇÃO (rótulos gerais, chaves antigas). A criação usa os valores tipados abaixo.
   const [categorySpecs] = useState<Record<string, string>>(
     (initialProduct?.specs as Record<string, string>) || (initialProduct?.attributesJson as any) || {}
@@ -197,14 +205,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     setConfirmRemoval(false);
     if (!category) {
       setDbAttributes([]);
+      setAttrLoadError(false);
+      setAttrLoadedFor(null);
       return;
     }
     let isSubscribed = true;
     setIsLoadingDbAttributes(true);
+    setAttrLoadError(false);
 
-    CategoriesApi.getCategoryAttributes(category)
+    loadCategoryAttributes((c) => CategoriesApi.getCategoryAttributes(c), category)
       .then((res) => {
-        if (isSubscribed && res.success && Array.isArray(res.data)) {
+        if (isSubscribed && res.ok) {
           if (isEditing && !originalCapturedRef.current && category === (initialProduct?.categoryId ?? category)) {
             const originalFields = selectFormAttributes(res.data).fields;
             originalFieldsRef.current = originalFields;
@@ -212,13 +223,13 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
             originalCapturedRef.current = true;
           }
           setDbAttributes(res.data);
+          setAttrLoadedFor(category);
         } else if (isSubscribed) {
-          setDbAttributes([]);
+          // P1: NÃO zera os atributos (nem, por consequência, os valores já preenchidos/da edição): só marca a falha para a tela
+          // mostrar o erro com "Tentar novamente" e bloquear a publicação.
+          console.error('Error loading category attributes:', (res as { error?: unknown }).error);
+          setAttrLoadError(true);
         }
-      })
-      .catch((err) => {
-        console.error('Error loading category attributes:', err);
-        if (isSubscribed) setDbAttributes([]);
       })
       .finally(() => {
         if (isSubscribed) setIsLoadingDbAttributes(false);
@@ -227,7 +238,10 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     return () => {
       isSubscribed = false;
     };
-  }, [category]);
+  }, [category, attrReloadToken]);
+
+  const attrBlock = attributeLoadBlock({ category, loadedFor: attrLoadedFor, loading: isLoadingDbAttributes, failed: attrLoadError });
+  const retryAttributes = () => setAttrReloadToken((n) => n + 1);
 
   // Quando os atributos efetivos mudam (primeira carga ou troca de subcategoria): mantém o que continua válido (ex.: Cor herdada),
   // descarta o resto e avisa. Na edição, os valores atuais do produto entram uma única vez.
@@ -409,13 +423,13 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   const colorImageInputRef = useRef<HTMLInputElement | null>(null);
   const [editingColorImageIndex, setEditingColorImageIndex] = useState<number | null>(null);
 
-  const [sizes, setSizes] = useState<string[]>(() => deriveSizesFromVariants(initialProduct?.variants));
+  const [sizes, setSizes] = useState<string[]>(() => deriveSizesFromVariants(uiVariantsFromLoaded(initialProduct?.variants ?? [], inferSecondJson(initialProduct?.variants as any))));
   const [newSizeName, setNewSizeName] = useState('');
 
   // Stock per variant matrix
   const [variantsMatrix, setVariantsMatrix] = useState<ProductVariant[]>(() => {
     if (initialProduct?.variants && initialProduct.variants.length > 0) {
-      return uiVariantsFromLoaded(initialProduct.variants);
+      return uiVariantsFromLoaded(initialProduct.variants, inferSecondJson(initialProduct.variants as any));
     }
     return [];
   });
@@ -426,6 +440,10 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   const axes = React.useMemo(() => selectFormAttributes(dbAttributes).axes, [dbAttributes]);
   const axisUi = React.useMemo(() => planAxisUi(axes), [axes]);
   const secondColumn = effectiveSecondColumn(axes, initialProduct?.variants as any);
+  // P2: 2ª dimensão guardada em attributes_json (ex.: Voltagem 110 V / 220 V, cada valor uma variação) e o nome REAL dela na tela.
+  const secondJson = effectiveSecondJson(axes, initialProduct?.variants as any);
+  const secondName = axisUi.secondAxis?.name || (secondJson ? humanizeAttributeKey(secondJson) : '');
+  const secondHeading = secondName || 'Tamanhos / Capacidades';
   // Fase 7 (edição): combinações que JÁ existem — o estoque delas se ajusta em Estoque & Armazéns (o salvamento do anúncio não o altera).
   const existingVariantKeys = React.useMemo(() => new Set((initialProduct?.variants ?? []).map((v: any) => buildVariantKey({ color: v.color, size: v.size, capacity: v.capacity, attributesJson: v.attributesJson })).filter(Boolean) as string[]), [initialProduct]);
   const [extraAxisValues, setExtraAxisValues] = useState<Record<string, string>>({});
@@ -567,7 +585,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         setSizes(initialProduct.availableSizes);
       }
       if (initialProduct.variants && initialProduct.variants.length > 0) {
-        setVariantsMatrix(uiVariantsFromLoaded(initialProduct.variants));
+        setVariantsMatrix(uiVariantsFromLoaded(initialProduct.variants, inferSecondJson(initialProduct.variants as any)));
       }
       if (initialProduct.productKits && initialProduct.productKits.length > 0) {
         setProductKits(initialProduct.productKits);
@@ -850,14 +868,14 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
     const val = (sizeToAdd || newSizeName).trim();
     if (!val) return;
     if (sizes.includes(val)) {
-      showToast('Este tamanho já foi adicionado.');
+      showToast(secondName ? `Esta opção de ${secondName} já foi adicionada.` : 'Este tamanho já foi adicionado.');
       return;
     }
     const updated = [...sizes, val];
     setSizes(updated);
     setNewSizeName('');
     handleRegenerateMatrix(colors, updated);
-    showToast(`Tamanho "${val}" adicionado!`);
+    showToast(`${secondName || 'Tamanho'} "${val}" adicionado!`);
   };
 
   const handleRemoveSize = (indexToRemove: number) => {
@@ -1102,6 +1120,14 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
+    // P1: sem os atributos da categoria carregados não há como saber os obrigatórios — nunca publica/salva "às cegas".
+    if (attrBlock) {
+      showToast(ATTRIBUTE_LOAD_MESSAGES[attrBlock]);
+      setWizardStep(1);
+      setTimeout(() => document.getElementById('product-attribute-fields')?.scrollIntoView?.({ block: 'center', behavior: 'smooth' }), 60);
+      return;
+    }
+
     // Fase 5/6: valida TODOS os atributos efetivos com as mesmas regras do servidor (obrigatório, tipo, limites, opções). 0 e "Não" valem.
     // Na EDIÇÃO só valida quando a pessoa mexeu em características ou trocou de categoria — preço/estoque nunca ficam presos por um
     // obrigatório criado depois — e uma troca que perde especificações exige a confirmação explícita.
@@ -1127,10 +1153,21 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
       return;
     }
 
+    // P2: eixo obrigatório da categoria não cabe num produto simples (o valor mora na variação): uma só opção = uma variação.
+    // Produto que JÁ era simples e só está sendo editado não é bloqueado (compatibilidade com o que já existe).
+    if (productMode === 'simple' && (!isEditing || hadRealVariantsOnLoadRef.current)) {
+      const blocking = requiredAxesBlockingSimple(axes);
+      if (blocking.length > 0) {
+        showToast(simpleModeAxesMessage(blocking));
+        setWizardStep(3);
+        return;
+      }
+    }
+
     // Fase 7: variações — eixos da categoria (obrigatório, opções) e combinação única, com as mesmas regras do servidor. A 2ª dimensão do
     // assistente grava em tamanho ou capacidade conforme o eixo; eixos extras valem para o anúncio inteiro.
     const axisPayloadMatrix = productMode === 'variable'
-      ? buildAxisPayload(variantsMatrix, { secondColumn, extraAxes: axisUi.extraAxes, extraValues: extraAxisValues })
+      ? buildAxisPayload(variantsMatrix, { secondColumn, secondJson, extraAxes: axisUi.extraAxes, extraValues: extraAxisValues })
       : variantsMatrix;
     if (productMode === 'variable') {
       const axisErrors = validatePayloadAgainstAxes(axes, axisPayloadMatrix as any[]);
@@ -1664,6 +1701,8 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
               errors={attrErrors}
               onChange={handleAttrChange}
               isLoading={isLoadingDbAttributes}
+              loadError={attrLoadError}
+              onRetry={retryAttributes}
               inactiveLabels={inactiveLabels}
               needsLeafCategory={Boolean(category) && !isLeafCategory(category, activeCategories)}
               droppedLabels={isEditing && categoryChanged ? [] : droppedLabels}
@@ -1889,9 +1928,14 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                   <p className="font-black text-gray-900 text-sm flex items-center gap-2">
                     <Palette className="w-4 h-4 text-purple-600" /> Produto com variações
                   </p>
-                  <p className="text-[11px] text-gray-600 mt-1">Cores, tamanhos/capacidades, preços e estoques diferentes.</p>
+                  <p className="text-[11px] text-gray-600 mt-1">Cores, tamanhos, capacidades, voltagens, preços e estoques diferentes.</p>
                 </button>
               </div>
+              {productMode === 'simple' && (!isEditing || hadRealVariantsOnLoadRef.current) && requiredAxesBlockingSimple(axes).length > 0 && (
+                <p role="note" data-testid="simple-mode-axes-note" className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-xl text-[11px] font-medium text-amber-900">
+                  {simpleModeAxesMessage(requiredAxesBlockingSimple(axes))}
+                </p>
+              )}
             </div>
 
             {/* 1. SEÇÃO DE KITS DE PRODUTOS (BUNDLES / LOTES) */}
@@ -2127,14 +2171,17 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                   <div>
                     <h3 className="font-bold text-gray-900 text-sm flex items-center gap-2">
                       <Maximize2 className="w-4 h-4 text-blue-600" />
-                      2. Tamanhos / Capacidades ({sizes.length})
+                      2. {secondHeading} ({sizes.length})
                     </h3>
                     <p className="text-[11px] text-gray-500">
-                      Defina os tamanhos (P, M, G / 38, 40, 42 / 128GB, 256GB).
+                      {secondName
+                        ? `Adicione cada opção de ${secondName} oferecida. O comprador escolhe uma delas; cada combinação é uma variação com preço e estoque próprios.`
+                        : 'Defina os tamanhos (P, M, G / 38, 40, 42 / 128GB, 256GB).'}
                     </p>
                   </div>
 
-                  {/* Size Presets */}
+                  {/* Size Presets — só para tamanho/capacidade (nunca para Voltagem ou outro eixo) */}
+                  {!secondJson && (
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-[11px] text-gray-500 font-bold">Grades Prontas:</span>
                     <button
@@ -2159,6 +2206,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                       Memória (128GB a 1TB)
                     </button>
                   </div>
+                  )}
                 </div>
 
                 {/* Size badges */}
@@ -2186,7 +2234,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                     type="text"
                     value={newSizeName}
                     onChange={(e) => setNewSizeName(e.target.value)}
-                    placeholder="Adicionar tamanho avulso (ex: 42 ou XXL)"
+                    placeholder={secondJson ? `Adicionar ${secondName} (ex: 110V)` : 'Adicionar tamanho avulso (ex: 42 ou XXL)'}
                     className="p-2 border border-gray-300 rounded-xl text-xs flex-1"
                   />
                   <button
@@ -2194,7 +2242,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                     onClick={() => handleAddSize()}
                     className="px-3 py-2 bg-gray-800 hover:bg-gray-900 text-white font-bold rounded-xl text-xs flex items-center gap-1"
                   >
-                    <Plus className="w-3.5 h-3.5" /> Adicionar Tamanho
+                    <Plus className="w-3.5 h-3.5" /> {secondName ? `Adicionar ${secondName}` : 'Adicionar Tamanho'}
                   </button>
                 </div>
               </div>
@@ -2230,7 +2278,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
 
                 {variantsMatrix.length === 0 ? (
                   <div className="p-4 bg-gray-50 border border-dashed border-gray-300 rounded-xl text-center text-gray-500 text-xs">
-                    Adicione ao menos uma cor ou tamanho acima para começar a configurar as variações.
+                    Adicione ao menos uma cor ou {secondName ? secondName.toLowerCase() : 'tamanho'} acima para começar a configurar as variações.
                   </div>
                 ) : (
                   <>
@@ -2374,7 +2422,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                                           type="number"
                                           min="0"
                                           value={item.stock}
-                                          disabled={isEditing && existingVariantKeys.has(buildVariantKey(buildAxisPayload([item], { secondColumn, extraAxes: axisUi.extraAxes, extraValues: extraAxisValues })[0] as any) ?? '')}
+                                          disabled={isEditing && existingVariantKeys.has(buildVariantKey(buildAxisPayload([item], { secondColumn, secondJson, extraAxes: axisUi.extraAxes, extraValues: extraAxisValues })[0] as any) ?? '')}
                                           title={isEditing && existingVariantKeys.size > 0 ? 'O estoque de uma variação já cadastrada se ajusta em Estoque & Armazéns.' : undefined}
                                           onChange={(e) => handleUpdateVariantStock(idx, parseInt(e.target.value) || 0)}
                                           className={`w-full p-1.5 border rounded-lg font-bold text-xs text-center bg-white ${

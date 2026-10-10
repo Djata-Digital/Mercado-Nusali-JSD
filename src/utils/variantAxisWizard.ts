@@ -19,14 +19,44 @@ export function inferSecondColumn(variants: V[] | undefined | null): 'size' | 'c
   return anyCapacity && !anySize ? 'capacity' : 'size';
 }
 
-/** Variantes carregadas -> estado da UI: capacidade-sem-tamanho aparece na coluna de "Tamanhos / Capacidades". */
-export function uiVariantsFromLoaded<T extends V>(variants: T[]): T[] {
-  return variants.map((v) => (!v.size && v.capacity ? { ...v, size: v.capacity } : v));
+/**
+ * Variantes só com um eixo em attributes_json (ex.: Voltagem), sem tamanho nem capacidade: esse eixo é a 2ª dimensão do assistente.
+ * Sem eixos conhecidos (ainda carregando) infere pelo primeiro valor que não é cor/tamanho/capacidade.
+ */
+export function inferSecondJson(variants: V[] | undefined | null, axes?: AttributeDefinitionLike[]): string | undefined {
+  const list = (Array.isArray(variants) ? variants : []).filter((v) => v && v.isActive !== false);
+  if (list.some((v) => (v.size && String(v.size).trim() !== '') || (v.capacity && String(v.capacity).trim() !== ''))) return undefined;
+  const fromAxes = axes ? planAxisUi(axes).secondJson : undefined;
+  if (fromAxes) return fromAxes;
+  if (axes && planAxisUi(axes).secondAxis) return undefined;
+  for (const v of list) {
+    const json = v.attributesJson && typeof v.attributesJson === 'object' ? v.attributesJson : {};
+    for (const [k, raw] of Object.entries(json)) {
+      if ('column' in axisTarget(k)) continue;
+      if (raw !== undefined && raw !== null && typeof raw !== 'object' && String(raw).trim() !== '') return k;
+    }
+  }
+  return undefined;
+}
+
+/** Variantes carregadas -> estado da UI: capacidade-sem-tamanho (ou o eixo de attributes_json que é a 2ª dimensão) aparece na coluna da 2ª dimensão. */
+export function uiVariantsFromLoaded<T extends V>(variants: T[], secondJson?: string): T[] {
+  return variants.map((v) => {
+    if (v.size) return v;
+    if (v.capacity) return { ...v, size: v.capacity };
+    const raw = secondJson && v.attributesJson && typeof v.attributesJson === 'object' ? (v.attributesJson as V)[secondJson] : undefined;
+    return raw !== undefined && raw !== null && String(raw).trim() !== '' ? { ...v, size: String(raw) } : v;
+  });
 }
 
 export function effectiveSecondColumn(axes: AttributeDefinitionLike[], loadedVariants: V[] | undefined | null): 'size' | 'capacity' {
   const ui = planAxisUi(axes);
   return ui.secondAxis ? ui.secondColumn : inferSecondColumn(loadedVariants);
+}
+
+/** Eixo (attributes_json) que a 2ª dimensão grava: o da categoria ou, sem eixos carregados, o inferido das variantes. */
+export function effectiveSecondJson(axes: AttributeDefinitionLike[], loadedVariants: V[] | undefined | null): string | undefined {
+  return planAxisUi(axes).secondJson ?? inferSecondJson(loadedVariants, axes.length > 0 ? axes : undefined);
 }
 
 /** Valor atual (por anúncio) de cada eixo "sobrando", a partir de variantes carregadas. */
@@ -45,11 +75,17 @@ export function extraAxisValuesFromVariants(extraAxes: AttributeDefinitionLike[]
 /** Matriz da UI -> variantes do payload: 2ª dimensão na coluna certa e valores dos eixos extras aplicados a todas. */
 export function buildAxisPayload<T extends V>(
   matrix: T[],
-  opts: { secondColumn: 'size' | 'capacity'; extraAxes: AttributeDefinitionLike[]; extraValues: Record<string, string> },
+  opts: { secondColumn: 'size' | 'capacity'; secondJson?: string; extraAxes: AttributeDefinitionLike[]; extraValues: Record<string, string> },
 ): T[] {
   return matrix.map((v) => {
     let out: V = { ...v };
-    if (opts.secondColumn === 'capacity') {
+    if (opts.secondJson) {
+      // 2ª dimensão = eixo em attributes_json (ex.: Voltagem): o valor da coluna de UI vai para o mapa e a coluna "tamanho" fica vazia
+      const second = out.size ?? out.capacity;
+      const base = out.attributesJson && typeof out.attributesJson === 'object' ? { ...out.attributesJson } : {};
+      if (second !== undefined && second !== null && String(second).trim() !== '') base[opts.secondJson] = String(second).trim();
+      out = { ...out, size: undefined, capacity: undefined, attributesJson: Object.keys(base).length ? base : out.attributesJson };
+    } else if (opts.secondColumn === 'capacity') {
       const second = out.size ?? out.capacity;
       out = { ...out, capacity: second ?? undefined, size: undefined };
     }
@@ -67,4 +103,16 @@ export function buildAxisPayload<T extends V>(
 /** Erros que o servidor também daria (obrigatório, opção fora da lista, combinação repetida), antes de enviar. */
 export function validatePayloadAgainstAxes(axes: AttributeDefinitionLike[], payloadVariants: V[]): VariantAxisError[] {
   return validateVariantAxes(axes, payloadVariants).errors;
+}
+
+/**
+ * P2 — eixos OBRIGATÓRIOS da categoria que um produto SIMPLES não consegue informar (o valor mora na variação). Produto com uma única
+ * opção usa "Produto com variações" com uma variação só. Devolve os nomes (para a mensagem); vazio = simples liberado.
+ */
+export function requiredAxesBlockingSimple(axes: AttributeDefinitionLike[]): string[] {
+  return (Array.isArray(axes) ? axes : []).filter((a) => a && a.isRequired && a.isActive !== false).map((a) => a.name);
+}
+
+export function simpleModeAxesMessage(names: string[]): string {
+  return `Esta categoria exige ${names.join(', ')}. Escolha "Produto com variações" e cadastre ao menos uma opção — pode ser uma só (ex.: uma única cor ou capacidade).`;
 }

@@ -47,6 +47,7 @@ export const useCart = () => {
       color?: string;
       size?: string;
       storage?: string;
+      axes?: Array<{ key: string; label: string; value: string }>;
       kit?: any;
       unitPriceOverride?: number;
       // FASE D16-C2 — ID real da variante (product_variants.id, "pvar_...").
@@ -70,7 +71,7 @@ export const useCart = () => {
   // decide o que mostrar/não navegar).
   const addItemsBatch = async (
     product: Product,
-    lines: Array<{ variantId: string; quantity: number; color?: string; size?: string }>
+    lines: Array<{ variantId: string; quantity: number; color?: string; size?: string; axes?: Array<{ key: string; label: string; value: string }> }>
   ) => {
     const updated = await CartService.addItemsBatch(product, lines);
     setItems([...updated]);
