@@ -42,6 +42,7 @@ import { useCategories } from '../../hooks/useProducts';
 import { getCategoryPath, isLeafCategory, getDirectChildren, getDescendantIds } from '../../utils/categoryUtils';
 import { CategoriesApi } from '../../api/clients/CategoriesApi';
 import { ProductAttributeFields, AttributeCategoryChangeNotice } from './ProductAttributeFields';
+import { CategorySearchSelect } from './CategorySearchSelect';
 import { VariantAxesPanel } from './VariantAxesPanel';
 import { planAxisUi, buildVariantKey } from '../../utils/variantAxes';
 import { SellerApi } from '../../api/clients/SellerApi';
@@ -1529,51 +1530,16 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-gray-800 font-bold mb-1">Categoria *</label>
-                <select
+                <label htmlFor="product-category" className="block text-gray-800 font-bold mb-1">Categoria *</label>
+                {/* Seletor pesquisável (nome, subcategoria e caminho; sem acento/caixa). Só categorias FINAIS são selecionáveis; escolher
+                    chama setCategory(id) como o select antigo, então o carregamento dos atributos da matriz segue exatamente o mesmo caminho. */}
+                <CategorySearchSelect
+                  id="product-category"
+                  categories={activeCategories}
                   value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-medium text-xs"
-                  disabled={isLoadingCategories}
-                >
-                  {isLoadingCategories ? (
-                    <option value="">Carregando categorias...</option>
-                  ) : activeCategories.length === 0 ? (
-                    <option value="">Nenhuma categoria cadastrada no Admin</option>
-                  ) : (
-                    <>
-                      <option value="">Selecione a categoria do produto...</option>
-                      {/* Só categorias FOLHA são selecionáveis (a principal vira o rótulo do grupo): com ~320 categorias,
-                          agrupar por departamento evita uma lista corrida. Principal sem subcategoria continua selecionável. */}
-                      {activeCategories
-                        .filter((c: any) => !c.parentId)
-                        .map((root: any) => {
-                          const leaves = [root, ...getDescendantIds(root.id, activeCategories).map((id) => activeCategories.find((x: any) => x.id === id)!)]
-                            .filter((x: any) => x && isLeafCategory(x.id, activeCategories));
-                          if (leaves.length === 0) return null;
-                          if (leaves.length === 1 && leaves[0].id === root.id) {
-                            return (
-                              <option key={root.id} value={root.id}>
-                                {root.name}
-                              </option>
-                            );
-                          }
-                          return (
-                            <optgroup key={root.id} label={root.name}>
-                              {leaves.map((c: any) => {
-                                const path = getCategoryPath(c.id, activeCategories);
-                                return (
-                                  <option key={c.id} value={c.id}>
-                                    {path.slice(1).map((p) => p.name).join(' > ') || c.name}
-                                  </option>
-                                );
-                              })}
-                            </optgroup>
-                          );
-                        })}
-                    </>
-                  )}
-                </select>
+                  onChange={setCategory}
+                  loading={isLoadingCategories}
+                />
               </div>
 
             {/* Category Breadcrumb & Hierarchical Drill-down Picker */}
