@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { CategorySearchSelect } from './CategorySearchSelect';
 import {
   Store,
   PlusCircle,
@@ -49,6 +50,10 @@ interface CategoryItem {
   id: string;
   name: string;
   isActive?: boolean;
+  // campos que o endpoint já devolve; o seletor pesquisável usa para mostrar o caminho (principal › subcategoria)
+  slug?: string;
+  parentId?: string | null;
+  displayOrder?: number;
 }
 
 interface GeoOption { id: string; name: string; code: string; regionId?: string }
@@ -204,7 +209,7 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
     setEditingStore(null);
     setName('');
     setDescription('');
-    setSelectedCategoryId(categoriesList.length > 0 ? categoriesList[0].id : '');
+    setSelectedCategoryId(''); // sem categoria "escondida" pré-escolhida: a pessoa pesquisa e escolhe (o botão só habilita com categoria)
     setCountry('GW');
     setCity('');
     setAddress('');
@@ -222,7 +227,8 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
     setEditingStore(store);
     setName(store.name || '');
     setDescription(store.description || '');
-    setSelectedCategoryId(store.categoryId || (categoriesList.length > 0 ? categoriesList[0].id : ''));
+    // mantém a categoria já cadastrada; se ela não estiver mais na lista (inativa/removida), pede nova escolha em vez de mandar um id invisível
+    setSelectedCategoryId(store.categoryId && categoriesList.some((c) => c.id === store.categoryId) ? store.categoryId : '');
     setCountry(store.country || 'GW');
     setCity(store.city || '');
     setAddress(store.address || '');
@@ -646,20 +652,16 @@ export const SellerMultiStore: React.FC<SellerMultiStoreProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-gray-700 font-bold mb-1">Categoria Principal *</label>
+                  <label htmlFor="store-category" className="block text-gray-700 font-bold mb-1">Categoria Principal *</label>
                   {categoriesList.length > 0 ? (
-                    <select
+                    <CategorySearchSelect
+                      id="store-category"
+                      categories={categoriesList as any}
                       value={selectedCategoryId}
-                      onChange={(e) => setSelectedCategoryId(e.target.value)}
-                      required
-                      className="w-full p-2.5 border border-gray-300 rounded-xl bg-white font-bold text-gray-900"
-                    >
-                      {categoriesList.map((cat) => (
-                        <option key={cat.id} value={cat.id}>
-                          {cat.name}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={setSelectedCategoryId}
+                      loading={isLoadingCategories}
+                      selectable="any"
+                    />
                   ) : (
                     <div className="p-2.5 border border-amber-300 bg-amber-50 text-amber-900 rounded-xl font-bold text-[11px]">
                       Nenhuma categoria disponível. Aguarde o administrador cadastrar categorias.

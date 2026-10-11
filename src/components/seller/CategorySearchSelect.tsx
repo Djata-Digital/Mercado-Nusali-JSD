@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useReducer, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Check, Search, X } from 'lucide-react';
 import type { Category } from '../../utils/categoryUtils';
 import {
-  buildCategorySearchIndex, findCategoryEntry, INITIAL_PICKER_STATE, pickerReducer, pickerRows, resolveEnter,
-  type CategoryEntry, type PickerState,
+  buildCategorySearchIndex, extractTypedQuery, findCategoryEntry, INITIAL_PICKER_STATE, pickerReducer, pickerRows, resolveEnter, resolveOpenChildren,
+  type CategoryEntry, type PickerState, type SelectableMode,
 } from '../../utils/categorySearch';
 
 interface Props {
@@ -16,6 +16,11 @@ interface Props {
   loading?: boolean;
   disabled?: boolean;
   id?: string;
+  /**
+   * 'leaf' (padrão, cadastro de produtos): só categorias FINAIS são selecionáveis; as com subcategorias abrem.
+   * 'any' (categoria principal da loja): qualquer categoria é selecionável; as subcategorias abrem pelo "›" (toque) ou por →.
+   */
+  selectable?: SelectableMode;
   /** só para testes: estado inicial (ex.: lista aberta) */
   initialState?: Partial<PickerState>;
 }
@@ -37,7 +42,8 @@ const PathLabel: React.FC<{ entry: CategoryEntry; strong?: boolean }> = ({ entry
  * diferenciar maiúsculas/acentos), mostra o caminho completo, navega por teclado (↑ ↓ Home End, Enter, Esc) e deixa explorar por
  * níveis sem digitar. Só categorias FINAIS são selecionáveis; as que têm subcategorias abrem.
  */
-export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onChange, loading, disabled, id = 'category-search', initialState }) => {
+export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onChange, loading, disabled, id = 'category-search', selectable = 'leaf', initialState }) => {
+  const anyMode = selectable === 'any';
   const index = useMemo(() => buildCategorySearchIndex(categories), [categories]);
   const selected = useMemo(() => findCategoryEntry(index, value), [index, value]);
   const [state, dispatch] = useReducer((s: PickerState, a: Parameters<typeof pickerReducer>[1]) => pickerReducer(s, a, index), { ...INITIAL_PICKER_STATE, ...initialState });
@@ -65,7 +71,7 @@ export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onCha
   }, [state.open, state.active]);
 
   const choose = (entry: CategoryEntry) => {
-    if (entry.isLeaf) {
+    if (entry.isLeaf || anyMode) {
       onChange(entry.id);
       dispatch({ type: 'close' });
     } else {
@@ -95,9 +101,16 @@ export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onCha
       case 'Enter': {
         if (!state.open) break;
         e.preventDefault(); // Enter nunca envia o formulário do cadastro
-        const result = resolveEnter(index, state);
+        const result = resolveEnter(index, state, selectable);
         if (result.kind === 'select') { onChange(result.id); dispatch({ type: 'close' }); }
         else if (result.kind === 'drill') dispatch({ type: 'drill', id: result.id });
+        break;
+      }
+      case 'ArrowRight': {
+        // modo "qualquer categoria": → abre as subcategorias da linha ativa (com o texto digitado, → continua movendo o cursor)
+        if (!anyMode || !state.open || state.typed) break;
+        const r = resolveOpenChildren(index, state);
+        if (r.kind === 'drill') { e.preventDefault(); dispatch({ type: 'drill', id: r.id }); }
         break;
       }
       case 'Escape':
@@ -145,7 +158,7 @@ export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onCha
           placeholder={placeholder}
           onFocus={(e) => { if (!state.open && !unavailable) { dispatch({ type: 'open', selectedParentId: selected?.parentId ?? null }); e.target.select(); } }}
           onClick={() => { if (!state.open && !unavailable) dispatch({ type: 'open', selectedParentId: selected?.parentId ?? null }); }}
-          onChange={(e) => dispatch({ type: 'input', value: e.target.value })}
+          onChange={(e) => dispatch({ type: 'input', value: state.typed ? e.target.value : extractTypedQuery(e.target.value, selected?.pathLabel) })}
           onKeyDown={onKeyDown}
           className="w-full min-h-[44px] pl-9 pr-10 py-2 border border-gray-300 rounded-xl bg-white text-base sm:text-sm font-medium focus:border-emerald-600 focus:outline-hidden disabled:opacity-60 disabled:bg-gray-50 truncate"
         />
@@ -162,7 +175,11 @@ export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onCha
           </button>
         )}
       </div>
-      <p id={`${id}-hint`} className="sr-only">Digite para filtrar. Use as setas para percorrer, Enter para escolher e Esc para fechar. Só categorias finais podem ser escolhidas.</p>
+      <p id={`${id}-hint`} className="sr-only">
+        {anyMode
+          ? 'Digite para filtrar. Use as setas para percorrer, Enter para escolher, a seta para a direita para ver as subcategorias e Esc para fechar. Qualquer categoria pode ser escolhida.'
+          : 'Digite para filtrar. Use as setas para percorrer, Enter para escolher e Esc para fechar. Só categorias finais podem ser escolhidas.'}
+      </p>
       <div role="status" aria-live="polite" className="sr-only" data-testid="category-announce">{announce}</div>
 
       {state.open && (
@@ -181,6 +198,17 @@ export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onCha
                 </button>
               ) : null}
               <span className="truncate" data-testid="category-browse-title">{browseParent ? browseParent.pathLabel : 'Todas as categorias'}</span>
+              {anyMode && browseParent && (
+                <button
+                  type="button"
+                  data-testid="category-choose-current"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => choose(browseParent)}
+                  className="ml-auto shrink-0 min-h-[36px] px-3 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 cursor-pointer"
+                >
+                  Escolher esta
+                </button>
+              )}
             </div>
           )}
           {view.mode === 'search' && view.total > 0 && (
@@ -203,7 +231,7 @@ export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onCha
                   id={optionId(i)}
                   role="option"
                   aria-selected={isSelected}
-                  aria-label={row.isLeaf ? row.pathLabel : `${row.pathLabel}, com ${row.childCount} subcategorias. Abrir.`}
+                  aria-label={row.isLeaf ? row.pathLabel : anyMode ? `${row.pathLabel}, com ${row.childCount} subcategorias. Seta para a direita para ver as subcategorias.` : `${row.pathLabel}, com ${row.childCount} subcategorias. Abrir.`}
                   data-testid={row.isLeaf ? 'category-option-leaf' : 'category-option-branch'}
                   data-category-id={row.id}
                   onMouseDown={(e) => e.preventDefault()}
@@ -213,11 +241,23 @@ export const CategorySearchSelect: React.FC<Props> = ({ categories, value, onCha
                 >
                   <span className="flex-1 min-w-0">
                     {view.mode === 'search' || !browseParent ? <PathLabel entry={row} /> : <span className="font-bold text-gray-900">{row.name}</span>}
-                    {!row.isLeaf && <span className="block text-[11px] text-gray-500">{row.childCount} {row.childCount === 1 ? 'subcategoria' : 'subcategorias'} — toque para abrir</span>}
+                    {!row.isLeaf && <span className="block text-[11px] text-gray-500">{row.childCount} {row.childCount === 1 ? 'subcategoria' : 'subcategorias'} — {anyMode ? 'toque em › para ver' : 'toque para abrir'}</span>}
                   </span>
-                  {row.isLeaf
-                    ? (isSelected ? <Check className="w-4 h-4 text-emerald-600 shrink-0" aria-hidden="true" /> : null)
-                    : <ChevronRight className="w-4 h-4 text-gray-400 shrink-0" aria-hidden="true" />}
+                  {isSelected && (row.isLeaf || anyMode) && <Check className="w-4 h-4 text-emerald-600 shrink-0" aria-hidden="true" />}
+                  {!row.isLeaf && (anyMode ? (
+                    // alvo de toque próprio para ver as subcategorias (teclado: seta →); a linha em si escolhe a categoria
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      aria-hidden="true"
+                      data-testid="category-open-children"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={(e) => { e.stopPropagation(); dispatch({ type: 'drill', id: row.id }); inputRef.current?.focus(); }}
+                      className="shrink-0 w-11 h-11 -mr-2 flex items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 cursor-pointer"
+                    >
+                      <ChevronRight className="w-5 h-5" aria-hidden="true" />
+                    </button>
+                  ) : <ChevronRight className="w-4 h-4 text-gray-400 shrink-0" aria-hidden="true" />)}
                 </li>
               );
             })}

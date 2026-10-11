@@ -209,13 +209,36 @@ export function pickerReducer(state: PickerState, action: PickerAction, index: C
   }
 }
 
+/**
+ * Texto da pesquisa a partir do que o campo passou a conter. Com uma categoria escolhida o campo mostra o caminho dela; se a pessoa
+ * digita sem ter selecionado o texto (ex.: tocou de novo no campo), o que vale é só o que foi digitado, nunca "caminho + digitação".
+ */
+export function extractTypedQuery(next: string, shownLabel: string | null | undefined): string {
+  const label = String(shownLabel ?? '');
+  if (!label || !next.includes(label)) return next;
+  return next.replace(label, '');
+}
+
 export type EnterResult = { kind: 'select'; id: string } | { kind: 'drill'; id: string } | { kind: 'none' };
 
-/** O que Enter faz: categoria FINAL → seleciona; com subcategorias → abre (nunca seleciona); sem linha ativa → nada. */
-export function resolveEnter(index: CategoryIndex, state: PickerState): EnterResult {
+/** 'leaf' = só categorias FINAIS são selecionáveis (cadastro de produtos); 'any' = qualquer categoria (categoria principal da loja). */
+export type SelectableMode = 'leaf' | 'any';
+
+/**
+ * O que Enter faz. Modo 'leaf' (padrão, produtos): categoria FINAL → seleciona; com subcategorias → abre (nunca seleciona).
+ * Modo 'any' (lojas): seleciona a linha ativa, qualquer que seja. Sem linha ativa → nada.
+ */
+export function resolveEnter(index: CategoryIndex, state: PickerState, mode: SelectableMode = 'leaf'): EnterResult {
   if (!state.open) return { kind: 'none' };
   const { rows } = pickerRows(index, state);
   const row = rows[state.active];
   if (!row) return { kind: 'none' };
-  return row.isLeaf ? { kind: 'select', id: row.id } : { kind: 'drill', id: row.id };
+  return row.isLeaf || mode === 'any' ? { kind: 'select', id: row.id } : { kind: 'drill', id: row.id };
+}
+
+/** → no modo 'any': abre as subcategorias da linha ativa (se tiver); senão nada. */
+export function resolveOpenChildren(index: CategoryIndex, state: PickerState): EnterResult {
+  if (!state.open) return { kind: 'none' };
+  const row = pickerRows(index, state).rows[state.active];
+  return row && !row.isLeaf ? { kind: 'drill', id: row.id } : { kind: 'none' };
 }
