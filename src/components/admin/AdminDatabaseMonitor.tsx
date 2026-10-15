@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Database, Server, RefreshCw, CheckCircle2, AlertCircle, Cpu, Zap, Layers, HardDrive, Plus, Table } from 'lucide-react';
+import { AdminApi } from '../../api/clients/AdminApi';
 
 interface SystemHealth {
   status: string;
@@ -52,16 +53,22 @@ export const AdminDatabaseMonitor: React.FC = () => {
     }
   };
 
+  // Produtos do monitor: consulta ADMINISTRATIVA (GET /admin/products, autenticada pelo apiClient e restrita ao Administrador Geral), que lista o
+  // catálogo completo (ativos e pausados) sem depender do filtro público por país de entrega. Nunca o endpoint público /products.
   const fetchProducts = async () => {
     try {
-      const res = await fetch('/api/v1/products');
-      const data = await res.json();
-      if (data.success) {
-        setProducts(data.data || []);
-        setSource(data.source || 'db');
+      const res = await AdminApi.getProducts({ limit: 100 });
+      if (res.success) {
+        setProducts(Array.isArray(res.data) ? res.data : []);
+        setSource('db');
+      } else {
+        setProducts([]);
+        setMessage((res as any).error?.message || 'Não foi possível carregar os produtos administrativos.');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Products fetch error:', err);
+      setProducts([]);
+      setMessage(err?.response?.data?.error?.message || 'Não foi possível carregar os produtos administrativos.');
     }
   };
 

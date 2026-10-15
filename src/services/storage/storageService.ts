@@ -1,3 +1,4 @@
+import { readExplicitCountry } from '../../utils/countryPreference';
 const TOKEN_KEY = 'nusali_auth_token';
 const REFRESH_TOKEN_KEY = 'nusali_refresh_token';
 const USER_KEY = 'nusali_user_session';
@@ -141,9 +142,14 @@ export const storageService = {
     }
   },
 
+  /**
+   * País enviado em X-Country-Code. A escolha EXPLÍCITA do cliente ('nusali_display_country') tem prioridade sobre o valor derivado
+   * ('nusali_selected_country', gravado depois da renderização): assim a primeira chamada depois de atualizar a página já leva o país
+   * escolhido, e um padrão/perfil nunca o substitui no servidor.
+   */
   getSelectedCountry(): string | null {
     try {
-      return localStorage.getItem(COUNTRY_KEY);
+      return readExplicitCountry(localStorage) || localStorage.getItem(COUNTRY_KEY);
     } catch {
       return null;
     }

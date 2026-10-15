@@ -11,6 +11,7 @@ import { useAuth } from './AuthContext';
 import { useCountries } from '../hooks/useCountries';
 import { resolveCurrencyForCountry } from '../utils/countryResolution';
 import { storageService } from '../services/storage/storageService';
+import { initialCountry, hasManualSelection as readHasManualSelection, profileCountryToApply, countryFromStorageEvent } from '../utils/countryPreference';
 
 export type HeaderThemeColor = 'green';
 
@@ -60,12 +61,13 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // Initialize display country and currency. Não invalida a preferência
   // salva contra um mapa hardcoded — um país real (ex.: GM, SN) fora do
   // antigo COUNTRY_TO_CURRENCY_MAP não pode ser descartado silenciosamente.
+  // A escolha explícita do cliente vem do storage (sobrevive a atualizar a página); Guiné-Bissau é só o padrão quando não há escolha.
   const [selectedCountry, setSelectedCountryState] = useState<CountryCode>(() => {
     try {
-      const saved = localStorage.getItem('nusali_display_country') as CountryCode;
-      if (saved) return saved;
-    } catch (e) {}
-    return 'GW';
+      return initialCountry(localStorage) as CountryCode;
+    } catch (e) {
+      return 'GW' as CountryCode;
+    }
   });
 
   const [selectedCurrency, setSelectedCurrencyState] = useState<CurrencyCode>(() => {
@@ -110,11 +112,24 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
   // Track if user explicitly selected a preference in session or localStorage
   const [hasManualSelection, setHasManualSelection] = useState<boolean>(() => {
     try {
-      return Boolean(localStorage.getItem('nusali_display_country') || localStorage.getItem('nusali_display_currency'));
+      return readHasManualSelection(localStorage);
     } catch (e) {
       return false;
     }
   });
+
+  // Outra aba mudou a escolha explícita: esta aba acompanha (a lista e o header da API nunca ficam em países diferentes).
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      const next = countryFromStorageEvent({ key: e.key, newValue: e.newValue });
+      if (next) {
+        setSelectedCountryState(next as CountryCode);
+        setHasManualSelection(true);
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   // Assim que a lista real de países carrega, corrige a moeda exibida caso o
   // país selecionado (salvo ou do usuário) não estivesse no mapa hardcoded
@@ -130,7 +145,8 @@ export const PreferencesProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
   // Sync with authenticated user profile when logged in (unless user manually selected a header country/currency)
   useEffect(() => {
-    if (user && !hasManualSelection) {
+    // O país do perfil só entra quando NÃO há escolha explícita (profileCountryToApply devolve null caso contrário)
+    if (user && profileCountryToApply({ hasUser: true, hasManualSelection, userCountry: user.countryCode || (user as any).country }) !== null) {
       const userCountry = (user.countryCode || (user as any).country || 'GW') as CountryCode;
       const resolvedCurrency = currencyForCountry(userCountry);
       const userCurrency = ((user as any).preferredCurrency || resolvedCurrency || 'XOF') as CurrencyCode;

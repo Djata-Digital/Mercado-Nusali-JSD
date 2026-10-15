@@ -196,6 +196,16 @@ async function main() {
   const codeOnly = routes.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
   report('C34 trava: os 3 handlers públicos (lista, facets, recomendações) usam resolvePublicCatalogScope e não existe mais bypass "admin => sem destino"', (codeOnly.match(/resolvePublicCatalogScope\(/g) || []).length >= 4 && !/isAdminCatalogView\s*\?\s*undefined/.test(codeOnly) && /destinationMissing/.test(codeOnly));
 
+  // ---------- 11. consulta administrativa (usada pelo AdminDatabaseMonitor): catálogo completo, sem depender do filtro público por país
+  const admList = await get('/admin/products?limit=100', { header: 'BR', token: adminTok });
+  report('C35 GET /admin/products (consulta administrativa do monitor): lista TODOS os produtos, mesmo com X-Country-Code BR (nacional GW, internacional sem países...), sem depender do destino', admList.status === 200 && ALL.every((i) => ids(admList).includes(i)), { status: admList.status, n: ids(admList).length });
+  const admNoHeader = await get('/admin/products?limit=100', { token: adminTok });
+  report('C36 a consulta administrativa também funciona sem país, ao contrário da pública que não lista nada sem país', admNoHeader.status === 200 && ALL.every((i) => ids(admNoHeader).includes(i)) && ids(await get('/products?limit=100')).length === 0);
+  const admAnon = await get('/admin/products?limit=100'), admBuyer = await get('/admin/products?limit=100', { token: buyerTok }), admSeller = await get('/admin/products?limit=100', { token: tokenFor(await kit.makeUser('SELLER'), 'SELLER') });
+  report('C37 permissões preservadas: sem login 401; comprador e vendedor 403 (nada vaza)', admAnon.status === 401 && admBuyer.status === 403 && admSeller.status === 403 && ids(admBuyer).length === 0 && ids(admSeller).length === 0, [admAnon.status, admBuyer.status, admSeller.status]);
+  const monitor = fs.readFileSync('src/components/admin/AdminDatabaseMonitor.tsx', 'utf8').split(String.fromCharCode(13, 10)).join(String.fromCharCode(10));
+  report('C38 AdminDatabaseMonitor usa a consulta administrativa autenticada (AdminApi.getProducts) e NÃO o endpoint público /products sem país', monitor.includes('AdminApi.getProducts({ limit: 100 })') && !monitor.includes("fetch('/api/v1/products');") && fs.readFileSync('src/api/clients/AdminApi.ts', 'utf8').includes("apiClient.get('/admin/products', { params })"));
+
   server.close();
   console.log(`\n${passed}/${total} passaram`);
   await pool.end();
