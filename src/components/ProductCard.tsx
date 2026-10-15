@@ -195,21 +195,13 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
               </div>
             )}
 
-            {product.shipping?.freeShipping && (
+            {/* O selo "Frete Grátis" por produto (flag legada shipping.freeShipping) foi removido: não refletia a política real de frete nem a tarifa da rota. A promessa "Chega amanhã" também saiu: não há prazo de entrega configurado no sistema de frete por setor. */}
+            {product.shipping?.fullFulfilled && (
               <div className="flex items-center gap-1.5 text-[11px] font-bold text-green-700">
-                <span>⚡ FRETE GRÁTIS</span>
-                {product.shipping?.fullFulfilled && (
-                  <span className="bg-green-600 text-white font-black text-[9px] px-1 py-0.2 rounded-xs uppercase tracking-wider">
-                    FULL
-                  </span>
-                )}
+                <span className="bg-green-600 text-white font-black text-[9px] px-1 py-0.2 rounded-xs uppercase tracking-wider">
+                  FULL
+                </span>
               </div>
-            )}
-
-            {product.shipping?.arrivesTomorrow && !product.shipping?.isInternational && (
-              <p className="text-[11px] font-semibold text-green-700">
-                Chega amanhã
-              </p>
             )}
             {product.shipping?.isInternational && (
               <p className="text-[10px] font-medium text-indigo-700">

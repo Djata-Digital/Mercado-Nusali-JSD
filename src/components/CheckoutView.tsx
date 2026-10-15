@@ -41,6 +41,7 @@ import { resolveCheckoutPaymentTarget, resolveCheckoutConfirmationUrl, initiateC
 import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
 import { useCartCouponIntent } from '../context/CartCouponIntentContext';
 import { isOnlineCheckoutAvailable } from '../utils/checkoutAvailability';
+import { describeShippingLine, SHIPPING_LINE_LABEL } from '../utils/shippingDisplay';
 import { CheckoutComingSoon } from './CheckoutComingSoon';
 
 export const CheckoutView: React.FC = () => {
@@ -307,13 +308,16 @@ export const CheckoutView: React.FC = () => {
     shippingSellerSubsidy: number;
     available: boolean;
     loading: boolean;
+    /** false até o PRIMEIRO cálculo terminar: antes disso o frete nunca aparece como disponível nem como grátis */
+    ready: boolean;
     error?: string;
   }>({
     shippingCost: 0,
     shippingChargedToBuyer: 0,
     shippingSellerSubsidy: 0,
-    available: true,
+    available: false,
     loading: false,
+    ready: false,
   });
 
   const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || 'BR').toUpperCase();
@@ -336,7 +340,7 @@ export const CheckoutView: React.FC = () => {
     let isMounted = true;
     const fetchFreight = async () => {
       if (cart.length === 0) return;
-      setFreightQuote((prev) => ({ ...prev, loading: true, error: undefined }));
+      setFreightQuote((prev) => ({ ...prev, loading: true, ready: false, available: false, error: undefined }));
 
       if (!resolvedShippingSectorId) {
         if (isMounted) {
@@ -346,6 +350,7 @@ export const CheckoutView: React.FC = () => {
             shippingSellerSubsidy: 0,
             available: false,
             loading: false,
+            ready: true,
             error: 'Selecione/atualize seu endereço de entrega para calcular o frete.',
           });
         }
@@ -379,6 +384,7 @@ export const CheckoutView: React.FC = () => {
             shippingSellerSubsidy: data.shippingSellerSubsidy,
             available: true,
             loading: false,
+            ready: true,
           });
         } else {
           const unavailableMessage: string = data.message;
@@ -388,6 +394,7 @@ export const CheckoutView: React.FC = () => {
             shippingSellerSubsidy: 0,
             available: false,
             loading: false,
+            ready: true,
             error: unavailableMessage,
           });
         }
@@ -398,6 +405,7 @@ export const CheckoutView: React.FC = () => {
           shippingSellerSubsidy: 0,
           available: false,
           loading: false,
+            ready: true,
           error: res.error?.message || 'Frete não disponível para o endereço informado.',
         });
       }
@@ -1255,11 +1263,11 @@ export const CheckoutView: React.FC = () => {
                     <div className="flex justify-between">
                       <span>Frete Logística:</span>
                       <span className="font-semibold text-gray-900">
-                        {freightQuote.loading
-                          ? 'Calculando...'
-                          : freightQuote.shippingChargedToBuyer === 0
-                          ? 'GRÁTIS'
-                          : shippingFeeInfo.formatted}
+                        {(() => {
+                          // mesma regra do carrinho (utils/shippingDisplay): indisponível/calculando nunca viram "GRÁTIS"
+                          const kind = describeShippingLine(freightQuote);
+                          return kind === 'paid' ? shippingFeeInfo.formatted : SHIPPING_LINE_LABEL[kind];
+                        })()}
                       </span>
                     </div>
 
@@ -1274,9 +1282,15 @@ export const CheckoutView: React.FC = () => {
                   <div className="pt-3 border-t border-gray-200 space-y-1">
                     <div className="flex justify-between items-baseline">
                       <span className="text-sm font-bold text-gray-900">Total com Escrow:</span>
-                      <span className="text-2xl font-black text-emerald-800">
-                        {grandTotalInfo.formatted}
-                      </span>
+                      {freightQuote.ready && freightQuote.available && !freightQuote.loading ? (
+                        <span className="text-2xl font-black text-emerald-800" data-testid="checkout-grand-total">
+                          {grandTotalInfo.formatted}
+                        </span>
+                      ) : (
+                        <span className="text-xs font-bold text-gray-500" data-testid="checkout-grand-total-pending">
+                          {freightQuote.loading || !freightQuote.ready ? 'Calculando frete...' : 'Total definido após o frete'}
+                        </span>
+                      )}
                     </div>
                     {grandTotalInfo.isConverted && (
                       <div className="text-[10px] text-gray-500 font-medium text-right">

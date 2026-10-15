@@ -453,9 +453,7 @@ export const Header: React.FC = () => {
                             </p>
                             <p className="text-[11px] text-gray-500 flex items-center gap-2">
                               <span>{product.brand || product.category}</span>
-                              {product.shipping?.freeShipping && (
-                                <span className="text-emerald-600 font-bold text-[10px]">⚡ Frete Grátis</span>
-                              )}
+                              {/* O selo "Frete Grátis" por produto (flag legada shipping.freeShipping) foi removido: não refletia a política real de frete nem a tarifa da rota. */}
                             </p>
                           </div>
                           <div className="text-right shrink-0">

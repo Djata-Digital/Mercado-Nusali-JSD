@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { OrderService } from './orderService.js';
 import { requireAuth, AuthRequest } from '../auth/authMiddleware.js';
 import { z } from 'zod';
+import { mapOrderCreationError } from '../shipping/checkoutShippingErrors.js';
 
 export const orderRouter = Router();
 
@@ -60,27 +61,12 @@ orderRouter.post(['/', '/orders'], requireAuth, async (req: AuthRequest, res: Re
       data: order,
     });
   } catch (err: any) {
-    const msg = err?.message || 'Erro ao criar pedido.';
-    // FASE D16-F6.2 — conflito de concorrência real do smart fulfillment
-    // (F5 perdeu a disputa pela candidate entre o planejamento do F4 e a
-    // reserva): 409, MESMA convenção já usada neste projeto para conflitos
-    // retryable (ver ESCROW_STATE_CHANGED_CONCURRENTLY em
-    // /orders/:id/confirm-delivery). A transaction inteira já foi revertida
-    // (nenhum order/reserva parcial) — o caller pode tentar o checkout de
-    // novo do zero.
-    if (msg.includes('FULFILLMENT_RESERVATION_CONFLICT')) {
-      return res.status(409).json({
-        success: false,
-        error: { code: 'FULFILLMENT_RESERVATION_CONFLICT', message: msg },
-      });
-    }
-    const isStockError = msg.includes('INSUFFICIENT_STOCK') || msg.includes('Estoque insuficiente');
-    return res.status(400).json({
+    // Mensagem/código estáveis (checkoutShippingErrors.mapOrderCreationError): o comprador nunca vê "CODIGO: texto" interno. Conflito
+    // de reserva (FULFILLMENT_RESERVATION_CONFLICT, D16-F6.2) continua 409 — a transação inteira já foi revertida (nenhum pedido parcial).
+    const mapped = mapOrderCreationError(err);
+    return res.status(mapped.status).json({
       success: false,
-      error: {
-        code: isStockError ? 'INSUFFICIENT_STOCK' : 'ORDER_CREATION_FAILED',
-        message: msg,
-      },
+      error: { code: mapped.code, message: mapped.message, ...(mapped.details ? { details: mapped.details } : {}) },
     });
   }
 });

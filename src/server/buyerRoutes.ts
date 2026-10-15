@@ -54,6 +54,7 @@ import { postBuyerDisputeMessage, DisputeMessageValidationError } from './module
 // potencialmente divergente).
 import { ACTIVE_DISPUTE_STATUSES } from './adminRoutes.js';
 import { updateBuyerTaxId, BuyerProfileValidationError } from './modules/buyer/buyerProfileService.js';
+import { mapOrderCreationError } from './modules/shipping/checkoutShippingErrors.js';
 import { applyKycReverification, loadApprovedSellerIdentity, reverificationRequiredPayload } from './modules/seller/kycService.js';
 import { detectIdentityChanges, type IdentityChange } from '../utils/sellerAccountRules.js';
 import { isProductAvailableForCountry, eligibilityReason } from './modules/catalog/productEligibilityService.js';
@@ -1919,9 +1920,10 @@ buyerRouter.post('/orders', requireAuth, async (req: AuthRequest, res: Response)
       data: order,
     });
   } catch (err: any) {
-    return res.status(400).json({
+    const mapped = mapOrderCreationError(err);
+    return res.status(mapped.status).json({
       success: false,
-      error: { code: 'ORDER_CREATION_FAILED', message: err?.message || 'Erro ao criar pedido.' },
+      error: { code: mapped.code, message: mapped.message, ...(mapped.details ? { details: mapped.details } : {}) },
     });
   }
 });

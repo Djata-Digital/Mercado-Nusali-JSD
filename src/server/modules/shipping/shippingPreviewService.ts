@@ -27,6 +27,7 @@ import { products, productVariants, shippingSectors, sellers, categories, platfo
 import { eq, inArray } from 'drizzle-orm';
 import { resolveFulfillmentCandidates, type RejectedFulfillmentCandidate } from './fulfillmentCandidateResolverService.js';
 import { validateInventoryVariantConsistency } from '../logistics/fulfillmentLocationService.js';
+import { classifyRejectedCandidates, shippingFailureMessage, type ShippingFailureCode } from './checkoutShippingErrors.js';
 import {
   resolveShippingPayerPolicy,
   checkSellerNetForShippingShare,
@@ -80,7 +81,7 @@ export interface ShippingPreviewUnavailable {
   // aplicável" que resolveCartShippingPreview/checkout já usam
   // (ShippingPolicyNotApplicableCode) — mesma semântica de "checkout
   // bloqueado" nos dois lugares, nunca um código novo inventado aqui.
-  code: 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY' | 'DELIVERY_SECTOR_REQUIRED' | 'SHIPPING_ROUTE_NOT_AVAILABLE' | 'SHIPPING_RATE_NOT_AVAILABLE'
+  code: ShippingFailureCode
     | 'SELLER_SHIPPING_POLICY_INVALID' | 'SELLER_SUBSIDY_EXCEEDS_NET' | 'SHIPPING_FUNDING_INVARIANT_VIOLATION';
   message: string;
 }
@@ -111,18 +112,12 @@ interface ShippingPreviewLineAvailable extends ShippingPreviewRawShape {
 type ShippingPreviewLineResult = ShippingPreviewLineAvailable | ShippingPreviewUnavailable | ShippingPreviewInvalid;
 
 /**
- * Classifica o MOTIVO agregado de "nenhuma candidate disponível" a partir
- * dos rejectedCandidates do F4 — nunca expõe a lista completa ao público
- * (seção 7 do enunciado), só um dos 4 códigos distinguíveis da seção 8.
- * Prioridade: estoque (mais fundamental/comum) > rota ausente > tarifa
- * ausente > qualquer outro motivo de origem (fallback conservador).
+ * Motivo agregado de "nenhuma candidate disponível" — classificador ÚNICO (checkoutShippingErrors.ts), o MESMO usado na criação do
+ * pedido: estoque, setor de origem, peso, rota, serviço e tarifa são distinguidos; estoque só é o motivo quando todas as origens
+ * falharam por estoque.
  */
-function classifyUnavailableReason(rejected: RejectedFulfillmentCandidate[]): ShippingPreviewUnavailable['code'] {
-  const reasons = new Set(rejected.map((r) => r.reason));
-  if (reasons.has('INSUFFICIENT_AVAILABLE_STOCK')) return 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY';
-  if (reasons.has('ROUTE_NOT_AVAILABLE')) return 'SHIPPING_ROUTE_NOT_AVAILABLE';
-  if (reasons.has('SHIPPING_RATE_NOT_AVAILABLE') || reasons.has('WEIGHT_BAND_NOT_AVAILABLE') || reasons.has('SERVICE_NOT_AVAILABLE')) return 'SHIPPING_RATE_NOT_AVAILABLE';
-  return 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY';
+function classifyUnavailableReason(rejected: RejectedFulfillmentCandidate[]): ShippingFailureCode {
+  return classifyRejectedCandidates(rejected);
 }
 
 /**
@@ -207,12 +202,7 @@ async function resolveShippingPreviewLine(input: ShippingPreviewInput, db: any):
 
   if (!f4Result.bestCandidate) {
     const code = classifyUnavailableReason(f4Result.rejectedCandidates);
-    const message = code === 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY'
-      ? 'Nenhuma origem consegue atender a quantidade solicitada para este destino.'
-      : code === 'SHIPPING_ROUTE_NOT_AVAILABLE'
-      ? 'Não há rota de entrega cadastrada entre a origem deste produto e o destino selecionado.'
-      : 'Não há tarifa de frete cadastrada para esta rota e faixa de peso.';
-    return { ok: true, available: false, code, message };
+    return { ok: true, available: false, code, message: shippingFailureMessage(code) };
   }
 
   const bc = f4Result.bestCandidate;
@@ -317,7 +307,7 @@ export interface CartShippingPreviewUnavailable {
   // FASE D18-B1 — códigos de "política de frete não aplicável" (mesmos que o
   // checkout usa ao bloquear o pedido): o frontend já trata qualquer
   // available:false como "checkout bloqueado" e exibe `message`.
-  code: 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY' | 'DELIVERY_SECTOR_REQUIRED' | 'SHIPPING_ROUTE_NOT_AVAILABLE' | 'SHIPPING_RATE_NOT_AVAILABLE'
+  code: ShippingFailureCode
     | 'SELLER_SHIPPING_POLICY_INVALID' | 'SELLER_SUBSIDY_EXCEEDS_NET' | 'SHIPPING_FUNDING_INVARIANT_VIOLATION';
   message: string;
 }

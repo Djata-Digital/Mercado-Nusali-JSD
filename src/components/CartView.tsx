@@ -7,6 +7,7 @@ import { usePreferences } from '../context/PreferencesContext';
 import { useCountries } from '../hooks/useCountries';
 import { useAuth } from '../context/AuthContext';
 import { formatCurrency } from '../utils/currencyUtils';
+import { describeShippingLine, SHIPPING_LINE_LABEL } from '../utils/shippingDisplay';
 import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
 import { BuyerService } from '../services/buyerService';
 import { CartApi } from '../api/clients/CartApi';
@@ -296,6 +297,8 @@ export const CartView: React.FC = () => {
     loading: boolean;
     available: boolean;
     shippingChargedToBuyer: number;
+    /** custo logístico real (antes da política de quem paga) — distingue "grátis por política" de "sem custo" */
+    shippingCost?: number;
     currency: string;
     code?: string;
     errorMessage?: string;
@@ -345,7 +348,7 @@ export const CartView: React.FC = () => {
       if (res.success && res.data) {
         const data: CartShippingPreviewData = res.data;
         if (data.available === true) {
-          setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: data.shippingChargedToBuyer, currency: data.currency });
+          setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: data.shippingChargedToBuyer, shippingCost: data.shippingCost, currency: data.currency });
         } else {
           const unavailableCode: string = data.code;
           const unavailableMessage: string = data.message;
@@ -359,7 +362,8 @@ export const CartView: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shippingItemsKey, destinationShippingSectorId]);
 
-  const shippingFee = shippingQuote?.available ? shippingQuote.shippingChargedToBuyer : 0;
+  // enquanto recalcula (ou antes do primeiro cálculo) nenhum frete antigo conta como definitivo
+  const shippingFee = shippingQuote?.available && !shippingQuote.loading ? shippingQuote.shippingChargedToBuyer : 0;
   const finalTotal = cartTotal + shippingFee - couponDiscount;
 
   // Correção pré-piloto (race condition): "carregando" e "vazio" são estados
@@ -496,11 +500,8 @@ export const CartView: React.FC = () => {
                         )}
                       </div>
 
-                      {item.product.shipping?.freeShipping && (
-                        <span className="inline-block text-[10px] font-extrabold text-green-700 bg-green-50 px-1.5 py-0.5 rounded-xs border border-green-200 mt-1">
-                          ⚡ FRETE GRÁTIS
-                        </span>
-                      )}
+                      {/* O selo "FRETE GRÁTIS" por produto (flag legada shipping.freeShipping) foi removido: ele não refletia a política
+                          real de frete da loja nem a tarifa da rota. O frete real aparece no resumo, calculado pelo servidor. */}
 
                       {/* Melhoria pré-piloto (elegibilidade por país): item
                           nunca é removido silenciosamente quando o destino
@@ -690,14 +691,17 @@ export const CartView: React.FC = () => {
 
                     <div className="flex justify-between items-center">
                       <span>Frete:</span>
-                      {shippingQuote?.loading ? (
+                      {shippingQuote === null || shippingQuote.loading ? (
                         <span className="text-gray-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Calculando...</span>
                       ) : shippingQuote && !shippingQuote.available && shippingQuote.code === 'DELIVERY_SECTOR_REQUIRED' ? (
                         <span className="text-gray-500 font-semibold text-[11px]">{shippingQuote.errorMessage}</span>
                       ) : shippingQuote && !shippingQuote.available ? (
                         <span className="text-red-600 font-semibold text-[11px]">{shippingQuote.errorMessage || 'Indisponível'}</span>
                       ) : shippingFee === 0 ? (
-                        <span className="font-extrabold text-green-700">GRÁTIS</span>
+                        // "grátis" só quando a política cobre um custo real > 0; custo zero sem subsídio = "sem custo de frete"
+                        describeShippingLine({ loading: false, ready: true, available: true, shippingChargedToBuyer: 0, shippingCost: shippingQuote.shippingCost ?? 0 }) === 'free_by_policy'
+                          ? <span className="font-extrabold text-green-700">{SHIPPING_LINE_LABEL.free_by_policy}</span>
+                          : <span className="font-semibold text-gray-700">{SHIPPING_LINE_LABEL.no_cost}</span>
                       ) : (
                         <span className="font-semibold text-gray-900">
                           {shippingFeeInfo.formatted}

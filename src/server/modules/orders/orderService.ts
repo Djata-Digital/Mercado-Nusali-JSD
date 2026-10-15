@@ -55,6 +55,7 @@ import { validateAddressSectorAssignment, countryHasActiveShippingSectors } from
 import { classifyGroupPaymentsForExpiration, type ExternalChargeRef } from '../payments/externalChargeClassification.js';
 import { resolveFulfillmentCandidates } from '../shipping/fulfillmentCandidateResolverService.js';
 import { reserveFulfillmentInventory } from '../inventory/fulfillmentReservationService.js';
+import { CheckoutShippingError, classifyRejectedCandidates, shippingFailureMessage } from '../shipping/checkoutShippingErrors.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -633,9 +634,15 @@ export class OrderService {
         }
         const bestCandidate = f4Result.bestCandidate;
         if (!bestCandidate) {
-          throw new Error(
-            `INSUFFICIENT_AVAILABLE_STOCK: Nenhuma origem de estoque consegue sozinha atender a quantidade solicitada (${reqQty}) do produto "${prod.title}" para o destino selecionado (sem combinar origens nesta fase).`
-          );
+          // Motivo REAL (mesmo classificador do preview): estoque só quando todas as origens falharam por estoque; senão rota, tarifa,
+          // serviço, setor de origem ou peso — nunca "falta de estoque" quando o problema é a ausência de tarifa.
+          const failure = classifyRejectedCandidates(f4Result.rejectedCandidates);
+          if (failure === 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY') {
+            throw new Error(
+              `INSUFFICIENT_AVAILABLE_STOCK: Nenhuma origem de estoque consegue sozinha atender a quantidade solicitada (${reqQty}) do produto "${prod.title}" para o destino selecionado (sem combinar origens nesta fase).`
+            );
+          }
+          throw new CheckoutShippingError(failure, `${shippingFailureMessage(failure)} Produto: "${prod.title}".`, 409, { productId: prod.id });
         }
 
         const itemSubtotal = unitPrice * reqQty;
