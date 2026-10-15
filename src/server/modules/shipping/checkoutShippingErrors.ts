@@ -156,7 +156,7 @@ export function parseShippingSelection(body: any, opts: { required: boolean }): 
   const rawCode = body?.shippingServiceCode;
   const rawExpected = body?.expectedShippingChargedToBuyer;
   if (rawCode === undefined || rawCode === null || rawCode === '') {
-    if (opts.required) throw new CheckoutShippingError('SHIPPING_SERVICE_REQUIRED', 'Escolha o serviço de entrega antes de confirmar a compra.', 400);
+    if (opts.required) throw new CheckoutShippingError('SHIPPING_SERVICE_REQUIRED', 'Escolha o serviço de entrega antes de confirmar a compra. Se não encontra as opções de entrega, atualize a página (Ctrl+F5) para carregar a versão mais recente.', 400);
     return null;
   }
   const serviceCode = String(rawCode).trim().toUpperCase();
@@ -169,7 +169,7 @@ export function parseShippingSelection(body: any, opts: { required: boolean }): 
     if (!Number.isFinite(n) || n < 0) throw new CheckoutShippingError('SHIPPING_CONFIRMATION_INVALID', 'O valor de frete confirmado é inválido. Atualize a página e confirme novamente.', 400);
     expected = Math.round(n * 100) / 100;
   } else if (opts.required) {
-    throw new CheckoutShippingError('SHIPPING_CONFIRMATION_REQUIRED', 'Confirme o valor do frete apresentado antes de concluir a compra.', 400);
+    throw new CheckoutShippingError('SHIPPING_CONFIRMATION_REQUIRED', 'Confirme o valor do frete apresentado antes de concluir a compra. Se não vê as opções de entrega, atualize a página (Ctrl+F5) para carregar a versão mais recente.', 400);
   }
   return { serviceCode, expectedShippingChargedToBuyer: expected };
 }
