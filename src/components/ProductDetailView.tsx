@@ -48,7 +48,10 @@ import { usePreferences } from '../context/PreferencesContext';
 import { normalizeProduct } from '../utils/productUtils';
 import { getCountryFlag, getCountryName, formatCurrency } from '../utils/currencyUtils';
 import { useCountries } from '../hooks/useCountries';
-import { ShippingService, ShippingPreviewData } from '../services/shippingService';
+import { ShippingService } from '../services/shippingService';
+import { ProductDeliveryOptions } from './ProductDeliveryOptions';
+import { PRODUCT_DELIVERY_IDLE, deliveryStateFromQuote, deliveryBlocksPurchase, type ProductDeliveryState } from '../utils/productDeliveryState';
+import { isOnlineCheckoutAvailable } from '../utils/checkoutAvailability';
 import { useAuth } from '../context/AuthContext';
 import { BuyerService } from '../services/buyerService';
 import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
@@ -431,77 +434,45 @@ export const ProductDetailView: React.FC = () => {
   const destinationRegionDisplayName: string | null =
     deliveryDestinationIntent?.shippingRegionName || defaultDeliveryAddress?.shippingRegionName || null;
 
-  const [deliveryPreview, setDeliveryPreview] = useState<{
-    loading: boolean;
-    available: boolean;
-    // FASE D18-C2.10 — shippingAmount é o custo logístico REAL (nunca
-    // exibido diretamente ao comprador a partir de agora);
-    // shippingChargedToBuyer é o valor pós-política (SELLER_FREE_SHIPPING/
-    // SELLER_SUBSIDIZED/etc.) — o que a UI deve mostrar como "Frete".
-    shippingAmount: number;
-    shippingChargedToBuyer: number;
-    currency: string;
-    serviceCode?: string;
-    serviceName?: string;
-    code?: string;
-    message?: string;
-  } | null>(null);
+  // Prévia das opções de entrega (Economy, Standard, Express) — MESMA cotação por serviço do carrinho e do checkout (preview-cart, motor por setor).
+  // É só informação: a escolha do serviço é feita no checkout e o servidor revalida o preço ao criar o pedido.
+  const [deliveryState, setDeliveryState] = useState<ProductDeliveryState>(PRODUCT_DELIVERY_IDLE);
 
   useEffect(() => {
     let isMounted = true;
 
-    // Produto ainda não carregado (ou não encontrado) — este hook roda em
-    // TODO render (regra dos hooks), mas a lógica de negócio só decide algo
-    // depois que o produto real estiver disponível.
+    // Produto ainda não carregado (ou não encontrado) — este hook roda em TODO render (regra dos hooks).
     if (!product) {
-      setDeliveryPreview(null);
+      setDeliveryState(PRODUCT_DELIVERY_IDLE);
       return;
     }
 
-    // Seção 4 — não calcula uma cotação definitiva enquanto o produto
-    // exigir variante e nenhuma válida estiver selecionada ainda.
-    if (needsVariantSelection || isUnavailableForDestination || product.availableForCountry === false) {
-      setDeliveryPreview(null);
+    // Produto fora do país de entrega: a página já avisa e bloqueia a compra — não há cotação.
+    if (isUnavailableForDestination || product.availableForCountry === false) {
+      setDeliveryState(PRODUCT_DELIVERY_IDLE);
       return;
     }
 
-    // Seção 3 — setor ausente é um estado PRÓPRIO, nunca "sem tarifa".
-    // Backend também valida isto de forma independente (defesa em
-    // profundidade) — aqui só evita uma requisição desnecessária.
+    // Variação ainda não escolhida: o frete depende do peso/estoque da variação — "Frete a calcular", nunca um preço.
+    if (needsVariantSelection) {
+      setDeliveryState({ status: 'needs_variant', options: [] });
+      return;
+    }
+
+    // Setor ausente é um estado PRÓPRIO (nunca "sem tarifa"). O backend também valida isto de forma independente.
     if (!destinationShippingSectorId) {
-      setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, shippingChargedToBuyer: 0, currency: product.currency || 'XOF', code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
+      setDeliveryState({ status: 'needs_address', options: [], code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
       return;
     }
 
-    setDeliveryPreview((prev) => ({ ...(prev || { loading: true, available: false, shippingAmount: 0, shippingChargedToBuyer: 0, currency: product.currency || 'XOF' }), loading: true }));
+    setDeliveryState({ status: 'loading', options: [] });
 
-    ShippingService.getPreview({
-      productId: product.id,
-      variantId: activeVariant?.id || null,
-      quantity,
+    ShippingService.getCartPreview({
       destinationShippingSectorId,
+      items: [{ productId: product.id, variantId: activeVariant?.id || null, quantity }],
     }).then((res) => {
       if (!isMounted) return;
-      if (res.success && res.data) {
-        const data: ShippingPreviewData = res.data;
-        if (data.available === true) {
-          setDeliveryPreview({
-            loading: false,
-            available: true,
-            shippingAmount: data.shippingAmount,
-            shippingChargedToBuyer: data.shippingChargedToBuyer,
-            currency: data.currency,
-            serviceCode: data.serviceCode,
-            serviceName: data.serviceName,
-          });
-        } else {
-          const unavailableCode: string = data.code;
-          const unavailableMessage: string = data.message;
-          setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, shippingChargedToBuyer: 0, currency: product.currency || 'XOF', code: unavailableCode, message: unavailableMessage });
-        }
-      } else {
-        setDeliveryPreview({ loading: false, available: false, shippingAmount: 0, shippingChargedToBuyer: 0, currency: product.currency || 'XOF', code: res.error?.code, message: res.error?.message || 'Frete indisponível para este destino no momento.' });
-      }
+      setDeliveryState(deliveryStateFromQuote(res as any));
     });
 
     return () => { isMounted = false; };
@@ -1461,44 +1432,16 @@ export const ProductDetailView: React.FC = () => {
                 </p>
               )}
 
-              {!isUnavailableForDestination && needsVariantSelection && (
-                <p className="text-[11px] text-gray-600">Selecione as opções para calcular a entrega.</p>
+              {!isUnavailableForDestination && (
+                <ProductDeliveryOptions
+                  state={deliveryState}
+                  formatAmount={(amount) => formatCurrency(amount, (productCurrency || 'XOF') as any)}
+                />
               )}
 
-              {!isUnavailableForDestination && !needsVariantSelection && deliveryPreview?.loading && (
-                <p className="text-xs text-gray-500 flex items-center gap-1.5">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Calculando entrega...
-                </p>
-              )}
-
-              {!isUnavailableForDestination && !needsVariantSelection && !deliveryPreview?.loading && deliveryPreview?.available && (
-                <div className="text-xs flex items-center justify-between">
-                  <span className="text-gray-500">
-                    Frete{deliveryPreview.serviceCode ? ` (${deliveryPreview.serviceCode})` : ''}:
-                  </span>
-                  <span className="font-black text-emerald-700">
-                    {/* FASE D18-C2.10 — exibe o valor PÓS-política
-                        (shippingChargedToBuyer), nunca o custo logístico
-                        bruto (shippingAmount): um produto com frete grátis
-                        do vendedor (SELLER_FREE_SHIPPING) tem
-                        shippingAmount > 0 mas shippingChargedToBuyer === 0,
-                        e deve mostrar "GRÁTIS" aqui, nunca o custo real. */}
-                    {deliveryPreview.shippingChargedToBuyer > 0
-                      ? formatCurrency(deliveryPreview.shippingChargedToBuyer, deliveryPreview.currency as any)
-                      : 'GRÁTIS'}
-                  </span>
-                </div>
-              )}
-
-              {!isUnavailableForDestination && !needsVariantSelection && !deliveryPreview?.loading && deliveryPreview && deliveryPreview.available === false && deliveryPreview.code === 'DELIVERY_SECTOR_REQUIRED' && (
-                <p className="text-[11px] text-gray-600 bg-gray-100 border border-gray-200 rounded-lg p-2">
-                  {deliveryPreview.message || 'Selecione um endereço de entrega para calcular o frete.'}
-                </p>
-              )}
-
-              {!isUnavailableForDestination && !needsVariantSelection && !deliveryPreview?.loading && deliveryPreview && deliveryPreview.available === false && deliveryPreview.code !== 'DELIVERY_SECTOR_REQUIRED' && (
-                <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2">
-                  {deliveryPreview.message || 'Frete indisponível para este destino no momento.'}
+              {!isUnavailableForDestination && !isOnlineCheckoutAvailable(selectedCountry) && (
+                <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2 font-semibold" data-testid="product-checkout-not-available">
+                  As compras online ainda não estão liberadas para {getCountryName(selectedCountry) || selectedCountry}. Você pode montar o carrinho e finalizar quando forem liberadas.
                 </p>
               )}
             </div>
@@ -1589,8 +1532,8 @@ export const ProductDetailView: React.FC = () => {
               <button
                 disabled={
                   isMultiVariantMode
-                    ? !buyNowSingleLine || !product.weightKg || cartActionPending !== null || isUnavailableForDestination
-                    : needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination
+                    ? !buyNowSingleLine || !product.weightKg || cartActionPending !== null || isUnavailableForDestination || deliveryBlocksPurchase(deliveryState)
+                    : needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination || deliveryBlocksPurchase(deliveryState)
                 }
                 onClick={handleBuyNow}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-black py-3 px-4 rounded-xl shadow-xs transition transform active:scale-98 text-sm cursor-pointer"
@@ -1600,6 +1543,8 @@ export const ProductDetailView: React.FC = () => {
                     ? 'Preparando compra...'
                     : isUnavailableForDestination
                     ? 'Indisponível no seu país'
+                    : deliveryBlocksPurchase(deliveryState)
+                    ? 'Entrega indisponível'
                     : !product.weightKg
                     ? 'Indisponível (peso não cadastrado)'
                     : !buyNowSingleLine
@@ -1611,6 +1556,8 @@ export const ProductDetailView: React.FC = () => {
                   ? 'Preparando compra...'
                   : isUnavailableForDestination
                   ? 'Indisponível no seu país'
+                  : deliveryBlocksPurchase(deliveryState)
+                  ? 'Entrega indisponível'
                   : needsVariantSelection
                   ? 'Selecione as opções'
                   : isCurrentVariationOutOfStock
@@ -1626,7 +1573,7 @@ export const ProductDetailView: React.FC = () => {
                 disabled={
                   isMultiVariantMode
                     ? multiVariantSummary.totalUnits === 0 || !product.weightKg || cartActionPending !== null || isUnavailableForDestination
-                    : needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination
+                    : needsVariantSelection || isCurrentVariationOutOfStock || !product.weightKg || cartActionPending !== null || isUnavailableForDestination || deliveryBlocksPurchase(deliveryState)
                 }
                 onClick={handleAddToCart}
                 className="w-full bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed text-blue-700 font-extrabold py-3 px-4 rounded-xl transition text-sm border border-blue-200 cursor-pointer"

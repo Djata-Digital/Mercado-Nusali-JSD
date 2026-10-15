@@ -299,7 +299,7 @@ async function main() {
   // reconfirmando aqui via inspeção estrutural do arquivo real).
   // ===========================================================================
   const productDetailSrc = fs.readFileSync(path.join(ROOT, 'src/components/ProductDetailView.tsx'), 'utf8');
-  report('S2. ProductDetailView.tsx continua chamando ShippingService.getPreview (não getCartPreview, não motor legado)', /ShippingService\.getPreview\(/.test(productDetailSrc.replace(/\/\/.*$/gm, '')));
+  report('S2. ProductDetailView.tsx consulta a cotação do servidor pela API por serviço (getCartPreview — atualizado: antes getPreview de um só serviço), sem motor legado de frete', /ShippingService\.getCartPreview\(/.test(productDetailSrc.replace(/\/\/.*$/gm, '')) && !/calculateFreight|shippingRates/.test(productDetailSrc));
 
   // ===========================================================================
   // T — F6.2/orderService.ts permanece intocado (verificação estrutural:

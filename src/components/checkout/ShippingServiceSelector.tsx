@@ -2,6 +2,7 @@ import React from 'react';
 import { Truck, Loader2, AlertCircle } from 'lucide-react';
 import { shippingServiceLabel } from '../../utils/shippingServiceLabels';
 import { leadTimeLine, LEAD_TIME_DISCLAIMER } from '../../utils/shippingLeadTime';
+import { describeServiceOptionPrice } from '../../utils/shippingDisplay';
 import type { CartShippingServiceOption } from '../../services/shippingService';
 
 interface Props {
@@ -48,12 +49,10 @@ export const ShippingServiceSelector: React.FC<Props> = ({ options, selectedCode
             const label = shippingServiceLabel(o.code, o.name);
             const checked = o.available && selectedCode === o.code;
             const id = `shipping-service-${o.code}`;
-            const free = o.available && (o.shippingChargedToBuyer ?? 0) === 0;
-            const priceText = !o.available
-              ? 'Indisponível'
-              : free
-              ? ((o.shippingCost ?? 0) > 0 ? 'GRÁTIS' : 'Sem custo de frete')
-              : formatAmount(o.shippingChargedToBuyer ?? 0);
+            // mesma regra da página do produto: "GRÁTIS" só com custo real > 0 coberto por política (e dizendo quem custeia); valor ausente = "Frete a calcular"
+            const price = describeServiceOptionPrice(o, formatAmount);
+            const free = price.kind === 'free_by_policy';
+            const priceText = price.text;
             return (
               <label
                 key={o.code}
@@ -84,6 +83,9 @@ export const ShippingServiceSelector: React.FC<Props> = ({ options, selectedCode
                 <span id={`${id}-desc`} className={`text-sm font-black ${!o.available ? 'text-gray-500' : free ? 'text-emerald-700' : 'text-gray-900'}`} data-testid={`shipping-service-price-${o.code}`}>
                   {priceText}
                 </span>
+                {price.note && (
+                  <span className="text-[10px] text-emerald-800 font-semibold" data-testid={`shipping-service-payer-${o.code}`}>{price.note}</span>
+                )}
                 {o.available && (
                   <span className="text-[11px] text-gray-700 font-semibold" data-testid={`shipping-service-leadtime-${o.code}`}>{leadTimeLine(o.leadTime)}</span>
                 )}

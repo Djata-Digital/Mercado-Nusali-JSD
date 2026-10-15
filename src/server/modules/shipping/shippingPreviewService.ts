@@ -303,6 +303,10 @@ export interface CartShippingServiceOption {
   shippingChargedToBuyer?: number;
   shippingCost?: number;
   shippingSellerSubsidy?: number;
+  /** parcela do frete absorvida pela Nusali (política do marketplace); `shippingSellerSubsidy` acima continua somando vendedor + Nusali (compatibilidade) */
+  shippingMarketplaceSubsidy?: number;
+  /** quem custeia o frete que o comprador NÃO paga: null = o comprador paga (ou custo zero). Nunca se presume que seja o vendedor. */
+  shippingCoveredBy?: 'seller' | 'marketplace' | 'shared' | null;
   currency?: string;
   sellers?: CartShippingPreviewSellerBreakdown[];
   /** prazo ESTIMADO (dias) deste serviço para o carrinho; null = "Prazo a confirmar" (não configurado). Estimativa, não garantia; sem efeito financeiro. */
@@ -564,6 +568,8 @@ async function priceServiceOption(
   let shippingChargedToBuyer = 0;
   let shippingCost = 0;
   let shippingSellerSubsidy = 0;
+  let marketplaceOnly = 0;
+  let sellerOnly = 0;
 
   for (const [groupKey, { sellerId, commercialStoreId, lines: gLines, items: gItems }] of bySeller.entries()) {
     const groupRawShippingCost = rawByGroup.get(groupKey) ?? 0;
@@ -586,6 +592,8 @@ async function priceServiceOption(
     shippingChargedToBuyer = round2(shippingChargedToBuyer + policy.shippingChargedToBuyer);
     shippingCost = round2(shippingCost + groupRawShippingCost);
     shippingSellerSubsidy = round2(shippingSellerSubsidy + policy.shippingSellerSubsidy + policy.shippingMarketplaceSubsidy);
+    marketplaceOnly = round2(marketplaceOnly + policy.shippingMarketplaceSubsidy);
+    sellerOnly = round2(sellerOnly + policy.shippingSellerSubsidy);
     sellers.push({ sellerId, storeId: commercialStoreId, shippingAmount: policy.shippingChargedToBuyer, currency: gLines[0].currency });
   }
 
@@ -596,6 +604,8 @@ async function priceServiceOption(
     shippingChargedToBuyer,
     shippingCost,
     shippingSellerSubsidy,
+    shippingMarketplaceSubsidy: marketplaceOnly,
+    shippingCoveredBy: marketplaceOnly > 0 && sellerOnly > 0 ? 'shared' : marketplaceOnly > 0 ? 'marketplace' : sellerOnly > 0 ? 'seller' : null,
     currency: lines[0]?.currency || 'XOF',
     sellers,
     // só informação para o cliente: lido APÓS todo o cálculo financeiro e nunca o altera

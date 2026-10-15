@@ -700,9 +700,15 @@ export const CartView: React.FC = () => {
                         <span className="text-red-600 font-semibold text-[11px]">{shippingQuote.errorMessage || 'Indisponível'}</span>
                       ) : shippingFee === 0 ? (
                         // "grátis" só quando a política cobre um custo real > 0; custo zero sem subsídio = "sem custo de frete"
-                        describeShippingLine({ loading: false, ready: true, available: true, shippingChargedToBuyer: 0, shippingCost: shippingQuote.shippingCost ?? 0 }) === 'free_by_policy'
-                          ? <span className="font-extrabold text-green-700">{SHIPPING_LINE_LABEL.free_by_policy}</span>
-                          : <span className="font-semibold text-gray-700">{SHIPPING_LINE_LABEL.no_cost}</span>
+                        (() => {
+                          // valor de custo ausente/inválido = não dá para confirmar que é zero: "Frete a calcular", nunca "GRÁTIS" (mesma regra da página do produto e do checkout)
+                          const kind = describeShippingLine({ loading: false, ready: true, available: true, shippingChargedToBuyer: shippingQuote.shippingChargedToBuyer, shippingCost: shippingQuote.shippingCost as number });
+                          return kind === 'free_by_policy'
+                            ? <span className="font-extrabold text-green-700">{SHIPPING_LINE_LABEL.free_by_policy}</span>
+                            : kind === 'no_cost'
+                            ? <span className="font-semibold text-gray-700">{SHIPPING_LINE_LABEL.no_cost}</span>
+                            : <span className="font-semibold text-gray-600">{SHIPPING_LINE_LABEL.unconfirmed}</span>;
+                        })()
                       ) : (
                         <span className="font-semibold text-gray-900">
                           {shippingFeeInfo.formatted}

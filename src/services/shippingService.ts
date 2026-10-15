@@ -41,6 +41,9 @@ export interface CartShippingServiceOption {
   /** custo logístico real (pré-política): distingue "grátis por política" de "sem custo" */
   shippingCost?: number;
   shippingSellerSubsidy?: number;
+  shippingMarketplaceSubsidy?: number;
+  /** quem custeia o frete que o comprador não paga (nunca presumido): vendedor, Nusali ou ambos; null = o comprador paga / custo zero */
+  shippingCoveredBy?: 'seller' | 'marketplace' | 'shared' | null;
   currency?: string;
   sellers?: CartShippingPreviewSellerBreakdown[];
   /** prazo ESTIMADO em dias; null/ausente = "Prazo a confirmar". Estimativa, não garantia; sem efeito no preço. */
