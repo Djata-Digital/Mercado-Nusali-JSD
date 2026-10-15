@@ -1007,6 +1007,7 @@ export class OrderService {
           shippingMarketplaceSubsidy: policy.shippingMarketplaceSubsidy,
           shippingPayer: policy.shippingPayer,
           policyMode: policy.policyMode,
+          nusaliSubsidyPercent: policy.nusaliSubsidyPercent,
           estimatedMinDays: 0,
           estimatedMaxDays: 0,
           // Distinto de qualquer rateSource legado ('ZONE_SPECIFIC'/'INTERNAL_ZONE')
@@ -1050,6 +1051,8 @@ export class OrderService {
           shippingSellerSubsidy: String(financials.shippingSellerSubsidy),
           shippingMarketplaceSubsidy: String(financials.shippingMarketplaceSubsidy),
           shippingPayer: freightRes.shippingPayer,
+          // snapshot do que valeu NESTE pedido (modo + percentagem global da Nusali aplicada): editar a configuração depois nunca reescreve o histórico
+          shippingPolicyModeAtCheckout: `${freightRes.policyMode}${freightRes.nusaliSubsidyPercent > 0 ? `+NUSALI_${freightRes.nusaliSubsidyPercent}PCT` : ''}`.slice(0, 50),
           shippingRateSource: freightRes.rateSource,
           shippingRateId: freightRes.rateId || null,
           commissionRateSnapshot: String(financials.commissionRateSnapshot),

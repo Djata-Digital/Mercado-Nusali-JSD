@@ -57,6 +57,8 @@ export interface ServiceOptionPriceInput {
   shippingChargedToBuyer?: number;
   shippingCost?: number;
   shippingCoveredBy?: ShippingCoveredBy;
+  /** parcela do frete que a Nusali assume (>0 com cliente ainda pagando = subsídio parcial da Nusali) */
+  shippingMarketplaceSubsidy?: number;
 }
 
 /**
@@ -69,7 +71,11 @@ export function describeServiceOptionPrice(o: ServiceOptionPriceInput, formatAmo
     loading: false, ready: true, available: o.available,
     shippingChargedToBuyer: o.shippingChargedToBuyer as number, shippingCost: o.shippingCost as number,
   });
-  if (kind === 'paid') return { kind, text: formatAmount(o.shippingChargedToBuyer as number), note: null };
+  if (kind === 'paid') {
+    // subsídio PARCIAL da Nusali: o cliente paga um valor menor que o custo e a nota explica o motivo (nunca "grátis")
+    const partial = typeof o.shippingMarketplaceSubsidy === 'number' && o.shippingMarketplaceSubsidy > 0;
+    return { kind, text: formatAmount(o.shippingChargedToBuyer as number), note: partial ? 'Frete com subsídio da Nusali' : null };
+  }
   if (kind === 'free_by_policy') return { kind, text: SHIPPING_LINE_LABEL.free_by_policy, note: describeFreeShippingPayer(o.shippingCoveredBy) };
   return { kind, text: SHIPPING_LINE_LABEL[kind as Exclude<ShippingLineKind, 'paid'>], note: null };
 }

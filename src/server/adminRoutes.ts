@@ -95,6 +95,11 @@ import {
 import { ensureWarehouseFulfillmentLocation } from './modules/logistics/fulfillmentLocationService.js';
 import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shipping/shippingCalculatorService.js';
 import { validateShippingCampaignDefinition } from './modules/shipping/shippingCampaignService.js';
+import {
+  ShippingSubsidyAdminError, ALLOWED_DEFAULT_POLICY_MODES, readShippingSubsidyConfig, validateShippingSubsidyUpdate,
+  updateShippingSubsidyConfig, listShippingSubsidyHistory, describeEffectiveSubsidy,
+} from './modules/shipping/shippingSubsidyAdminService.js';
+import { NUSALI_SUBSIDY_SETTING_KEY } from './modules/shipping/shippingCalculatorService.js';
 
 import { bannersAdminRouter } from './modules/banners/bannersRoutes.js';
 
@@ -3665,6 +3670,15 @@ adminRouter.post('/settings', requireGlobalAdmin, async (req: AuthRequest, res: 
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
 
     const payload = req.body ?? {};
+    // Chaves do FRETE têm validação própria: o padrão da plataforma só aceita modos que NÃO impõem custo ao vendedor, e a percentagem da Nusali só se
+    // altera pelo endpoint dedicado (PUT /admin/shipping-subsidy: confirmação do impacto, histórico e auditoria atómica).
+    if (Object.prototype.hasOwnProperty.call(payload, 'defaultShippingPolicyMode')
+      && !(ALLOWED_DEFAULT_POLICY_MODES as readonly string[]).includes(String(payload.defaultShippingPolicyMode))) {
+      throw new AdminRequestError(400, `INVALID_DEFAULT_SHIPPING_POLICY_MODE: o padrão da plataforma aceita apenas ${ALLOWED_DEFAULT_POLICY_MODES.join(' ou ')}. Políticas do vendedor não podem ser impostas pelo padrão.`);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, NUSALI_SUBSIDY_SETTING_KEY)) {
+      throw new AdminRequestError(400, 'USE_SHIPPING_SUBSIDY_ENDPOINT: o subsídio de frete da Nusali é alterado em "Gestão de Subsídios de Frete" (PUT /admin/shipping-subsidy).');
+    }
     for (const [key, value] of Object.entries(payload)) {
       await db.insert(platformSettings).values({
         key,
@@ -5175,6 +5189,13 @@ adminRouter.post('/stores/:id/shipping-policy', requireGlobalAdmin, async (req: 
       if (!validateSubsidyPercent(marketplaceSubsidyPercent).ok) return res.status(400).json({ success: false, message: 'Teto de subsídio (percentual) deve estar entre 0 e 100.' });
     }
 
+    // Modelo atual do subsídio da Nusali: percentagem global sobre o saldo do cliente (Gestão de Subsídios de Frete). O modo legado por loja só existe
+    // SEM teto (a Nusali assume tudo); um teto empurraria o restante para o VENDEDOR, e a configuração administrativa não pode aumentar o custo dele.
+    const capProvided = (marketplaceSubsidyMaxAmount !== undefined && marketplaceSubsidyMaxAmount !== null) || (marketplaceSubsidyPercent !== undefined && marketplaceSubsidyPercent !== null);
+    if (mode === 'MARKETPLACE_FREE_SHIPPING' && capProvided) {
+      return res.status(400).json({ success: false, error: { code: 'MARKETPLACE_CAP_SHIFTS_COST_TO_SELLER', message: 'Um teto no frete grátis da Nusali passaria o restante ao vendedor. Use a percentagem global em "Gestão de Subsídios de Frete" (incide só sobre o saldo do cliente).' } });
+    }
+
     const updateFields: any = { updatedAt: new Date() };
     if (mode !== undefined) updateFields.mode = mode;
     if (marketplaceSubsidyMaxAmount !== undefined) updateFields.marketplaceSubsidyMaxAmount = marketplaceSubsidyMaxAmount === null ? null : String(Number(marketplaceSubsidyMaxAmount));
@@ -5202,6 +5223,71 @@ adminRouter.post('/stores/:id/shipping-policy', requireGlobalAdmin, async (req: 
     return res.json({ success: true, message: 'Política de frete da loja atualizada com sucesso!', data: updated });
   } catch (error: any) {
     return sendAdminError(res, error);
+  }
+});
+
+// ==========================================
+// GESTÃO DE SUBSÍDIOS DE FRETE — percentagem global da NUSALI (Super Admin)
+// ==========================================
+// A Nusali assume uma percentagem (0..100, padrão 0%) do valor que restaria ao CLIENTE depois da política do vendedor. O vendedor nunca paga mais
+// por causa disto. Valor em platform_settings['shippingNusaliSubsidy'], lido pelo mesmo motor de cotação/pedido; histórico = auditoria existente.
+export function requireGlobalAdminForShippingSubsidy(req: AuthRequest, res: Response, next: NextFunction) {
+  if ((req.user?.role || '').toUpperCase() !== 'GLOBAL_ADMIN') {
+    return res.status(403).json({
+      success: false,
+      error: { code: 'GLOBAL_ADMIN_REQUIRED', message: 'Somente o Administrador Geral pode gerir o subsídio de frete da Nusali.' },
+    });
+  }
+  return next();
+}
+
+function sendShippingSubsidyError(res: Response, error: unknown) {
+  if (error instanceof ShippingSubsidyAdminError) {
+    return res.status(error.status).json({ success: false, message: error.message, error: { code: error.code, message: error.message } });
+  }
+  return sendAdminError(res, error);
+}
+
+adminRouter.get('/shipping-subsidy', requireGlobalAdminForShippingSubsidy, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+    const config = await readShippingSubsidyConfig(db);
+    return res.json({ success: true, data: { ...config, effective: describeEffectiveSubsidy(config) } });
+  } catch (error) {
+    return sendShippingSubsidyError(res, error);
+  }
+});
+
+adminRouter.put('/shipping-subsidy', requireGlobalAdminForShippingSubsidy, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+    const input = validateShippingSubsidyUpdate(req.body);
+    const result = await updateShippingSubsidyConfig(db, input, {
+      id: req.user?.id || null,
+      countryCode: req.user?.countryCode || null,
+      ip: req.ip || req.socket.remoteAddress || null,
+      userAgent: (req.headers['user-agent'] as string) || null,
+    });
+    return res.json({
+      success: true,
+      message: 'Subsídio de frete da Nusali atualizado. Pedidos já criados não são recalculados.',
+      data: { ...result.after, legacyModeChanged: result.legacyModeChanged, previous: { enabled: result.before.enabled, percent: result.before.percent, legacyDefaultMode: result.before.legacyDefaultMode }, effective: describeEffectiveSubsidy(result.after) },
+    });
+  } catch (error) {
+    return sendShippingSubsidyError(res, error);
+  }
+});
+
+adminRouter.get('/shipping-subsidy/history', requireGlobalAdminForShippingSubsidy, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+    const limit = Number(req.query.limit);
+    return res.json({ success: true, data: await listShippingSubsidyHistory(db, Number.isFinite(limit) ? limit : 50) });
+  } catch (error) {
+    return sendShippingSubsidyError(res, error);
   }
 });
 

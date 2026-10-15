@@ -1,6 +1,7 @@
 import { getDb } from '../../../db/index.js';
 import { storeShippingPolicies, sellers, stores, platformSettings } from '../../../db/schema.js';
 import { eq, asc } from 'drizzle-orm';
+import { applyNusaliSubsidy, validateNusaliPercent } from '../../../utils/shippingSubsidyMath.js';
 
 // FASE D16-I5 — VOLUMETRIC_DIVISOR_SETTING_KEY/getVolumetricDivisor/
 // computeBillableWeightKg (peso volumétrico) removidos: existiam
@@ -20,6 +21,36 @@ async function getDefaultShippingPolicyMode(executor?: any): Promise<string | nu
     return mode || null;
   } catch {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// SUBSÍDIO GLOBAL DA NUSALI (percentagem) — platform_settings['shippingNusaliSubsidy'] = { enabled: boolean, percent: 0..100 }.
+// Padrão (chave ausente, inválida ou desativada) = 0%: NUNCA 100%. A percentagem incide só sobre o saldo que restaria ao cliente depois da política do
+// vendedor (shippingSubsidyMath.applyNusaliSubsidy), por isso o vendedor jamais paga mais por causa dela. Pensado para coexistir com campanhas futuras
+// (shipping_subsidy_campaigns, também "só o saldo do comprador"): uma campanha poderá substituir esta percentagem na mesma camada.
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+export const NUSALI_SUBSIDY_SETTING_KEY = 'shippingNusaliSubsidy';
+
+export interface NusaliSubsidySetting { enabled: boolean; percent: number }
+export const NUSALI_SUBSIDY_OFF: NusaliSubsidySetting = { enabled: false, percent: 0 };
+
+/** Interpreta o valor guardado; qualquer coisa inválida vira "desligado, 0%" (falha para o lado seguro: o cliente paga o saldo). */
+export function parseNusaliSubsidySetting(raw: unknown): NusaliSubsidySetting {
+  if (!raw || typeof raw !== 'object') return NUSALI_SUBSIDY_OFF;
+  const o = raw as Record<string, unknown>;
+  const pct = validateNusaliPercent(o.percent);
+  return { enabled: o.enabled === true && pct.ok, percent: pct.ok ? pct.value : 0 };
+}
+
+export async function readNusaliSubsidySetting(executor?: any): Promise<NusaliSubsidySetting> {
+  const db = executor ?? getDb();
+  if (!db) return NUSALI_SUBSIDY_OFF;
+  try {
+    const rows = await db.select().from(platformSettings).where(eq(platformSettings.key, NUSALI_SUBSIDY_SETTING_KEY)).limit(1);
+    return rows.length === 0 ? NUSALI_SUBSIDY_OFF : parseNusaliSubsidySetting(rows[0].valueJson);
+  } catch {
+    return NUSALI_SUBSIDY_OFF;
   }
 }
 
@@ -144,6 +175,8 @@ export interface ShippingPayerPolicyResult {
   shippingMarketplaceSubsidy: number;
   shippingPayer: 'buyer' | 'seller' | 'marketplace' | 'shared';
   policyMode: string;
+  /** percentagem global da Nusali efetivamente aplicada ao saldo do cliente (0 quando não houve subsídio percentual) */
+  nusaliSubsidyPercent: number;
 }
 
 /**
@@ -289,6 +322,22 @@ export async function resolveShippingPayerPolicy(
     shippingPayer = 'buyer';
   }
 
+  // Camada da NUSALI (percentagem global): só sobre o SALDO do cliente depois da política do vendedor. Não se aplica ao modo legado
+  // MARKETPLACE_FREE_SHIPPING (o cliente já paga 0 e a Nusali já assume tudo — somar aqui duplicaria o subsídio).
+  let nusaliSubsidyPercent = 0;
+  if (policyMode !== 'MARKETPLACE_FREE_SHIPPING' && shippingChargedToBuyer > 0) {
+    const setting = await readNusaliSubsidySetting(executor);
+    if (setting.enabled && setting.percent > 0) {
+      const layer = applyNusaliSubsidy(shippingChargedToBuyer, setting.percent);
+      if (layer.nusaliShare > 0) {
+        shippingChargedToBuyer = layer.buyerPays;
+        shippingMarketplaceSubsidy = round2(shippingMarketplaceSubsidy + layer.nusaliShare);
+        nusaliSubsidyPercent = setting.percent;
+        shippingPayer = shippingChargedToBuyer > 0 || shippingSellerSubsidy > 0 ? 'shared' : 'marketplace';
+      }
+    }
+  }
+
   // FASE D18-B1 — invariante final, independente do ramo acima:
   // comprador + seller + marketplace === custo real (em centavos), nenhuma
   // parcela negativa nem acima do custo.
@@ -298,7 +347,7 @@ export async function resolveShippingPayerPolicy(
     marketplace: shippingMarketplaceSubsidy,
   });
 
-  return { shippingChargedToBuyer, shippingSellerSubsidy, shippingMarketplaceSubsidy, shippingPayer, policyMode };
+  return { shippingChargedToBuyer, shippingSellerSubsidy, shippingMarketplaceSubsidy, shippingPayer, policyMode, nusaliSubsidyPercent };
 }
 
 export class ShippingCalculatorService {

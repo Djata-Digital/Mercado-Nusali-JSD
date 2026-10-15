@@ -1312,6 +1312,20 @@ sellerRouter.post('/shipping-policy', async (req: AuthRequest, res: Response) =>
 
     const finalMode = mode || 'CUSTOMER_PAYS';
 
+    // Loja cuja política foi definida pelo ADMINISTRADOR (modo legado MARKETPLACE_FREE_SHIPPING): a tela do vendedor reenvia esse mesmo modo a cada
+    // "Salvar", o que antes dava 400 e impedia salvar QUALQUER configuração. Reenviar o modo que já está gravado é um no-op (nada é escrito); o vendedor
+    // continua livre para mudar para qualquer modo dele, e continua sem poder ESCOLHER esse modo (validação abaixo).
+    if (finalMode === 'MARKETPLACE_FREE_SHIPPING') {
+      const [currentPolicy] = await db.select().from(storeShippingPolicies).where(eq(storeShippingPolicies.storeId, targetStoreId)).limit(1);
+      if (currentPolicy && currentPolicy.mode === 'MARKETPLACE_FREE_SHIPPING') {
+        return res.json({
+          success: true,
+          message: 'Política de frete da loja mantida (definida pela Nusali).',
+          data: { mode: currentPolicy.mode, sellerSubsidyMaxAmount: Number(currentPolicy.sellerSubsidyMaxAmount) || 0, sellerSubsidyPercent: Number(currentPolicy.sellerSubsidyPercent) || 0 },
+        });
+      }
+    }
+
     // Requirement 12: Protect MARKETPLACE_FREE_SHIPPING from being selected by sellers
     const ALLOWED_SELLER_MODES = ['CUSTOMER_PAYS', 'SELLER_FREE_SHIPPING', 'SELLER_SUBSIDIZED', 'PICKUP'];
     if (!ALLOWED_SELLER_MODES.includes(finalMode)) {
