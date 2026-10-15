@@ -355,6 +355,21 @@ export class AdminApi {
     return apiClient.patch(`/admin/shipping/rates/${id}`, data);
   }
 
+  /** Gestão de Subsídios de Frete (Super Admin): percentagem global da Nusali sobre o saldo do cliente. */
+  static async getShippingSubsidy(): Promise<ApiResponse<any>> {
+    return apiClient.get('/admin/shipping-subsidy');
+  }
+
+  static async updateShippingSubsidy(data: {
+    enabled: boolean; percent: number; confirmImpact: true; disableLegacyFreeMode?: boolean; expected?: { enabled: boolean; percent: number };
+  }): Promise<ApiResponse<any>> {
+    return apiClient.put('/admin/shipping-subsidy', data);
+  }
+
+  static async getShippingSubsidyHistory(limit = 50): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/admin/shipping-subsidy/history', { params: { limit } });
+  }
+
   /** Prazo ESTIMADO de entrega (dias) de uma rota+serviço — independente das faixas de peso. */
   static async setShippingLeadTime(routeId: string, serviceId: string, data: { minDays: number; maxDays: number }): Promise<ApiResponse<any>> {
     return apiClient.put(`/admin/shipping/routes/${routeId}/lead-times/${serviceId}`, data);

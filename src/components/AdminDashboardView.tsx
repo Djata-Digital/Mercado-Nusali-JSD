@@ -4,7 +4,7 @@ import {
   Warehouse, DollarSign, Users, PackageCheck, MapPin, UserCheck, Store, Package,
   Layers, Tag, ShoppingBag, CreditCard, ArrowUpRight, ArrowDownRight, RotateCcw,
   Truck, LifeBuoy, AlertOctagon, ShieldAlert, Megaphone, Bell, BarChart3, History,
-  Settings, Shield, Database, Search, Menu, X, ChevronRight, Check, Route
+  Settings, Shield, Database, Search, Menu, X, ChevronRight, Check, Route, Percent
 } from 'lucide-react';
 
 import { AdminCountriesManager } from './admin/AdminCountriesManager';
@@ -40,6 +40,7 @@ import { AdminReportsDashboard } from './admin/AdminReportsDashboard';
 import { AdminAuditLogs } from './admin/AdminAuditLogs';
 import { AdminRolesPermissions } from './admin/AdminRolesPermissions';
 import { AdminPlatformSettings } from './admin/AdminPlatformSettings';
+import { AdminShippingSubsidyManager } from './admin/AdminShippingSubsidyManager';
 import { AdminSecurityCenter } from './admin/AdminSecurityCenter';
 import { RegionalOperationsView } from './admin/RegionalOperationsView';
 import { AdminDatabaseMonitor } from './admin/AdminDatabaseMonitor';
@@ -105,6 +106,7 @@ export const AdminDashboardView: React.FC = () => {
       items: [
         { id: 'logistics', label: 'Expedição & Entregas', icon: Truck },
         { id: 'shipping_geography', label: 'Rotas & Tarifas por Setor', icon: Route },
+        { id: 'shipping_subsidy', label: 'Gestão de Subsídios de Frete', icon: Percent },
         { id: 'warehouses', label: 'HUBs & Armazéns', icon: Warehouse },
         { id: 'carriers', label: 'Transportadoras & Frotas', icon: Truck },
         { id: 'customs', label: 'Alfândega & DTA', icon: Shield },
@@ -408,6 +410,7 @@ export const AdminDashboardView: React.FC = () => {
             {activeTab === 'returns' && <AdminReturnsManager showToast={showToast} />}
             {activeTab === 'logistics' && <AdminLogisticsDashboard showToast={showToast} />}
             {activeTab === 'shipping_geography' && <AdminShippingGeographyManager showToast={showToast} />}
+            {activeTab === 'shipping_subsidy' && <AdminShippingSubsidyManager showToast={showToast} />}
             {activeTab === 'warehouses' && <AdminWarehousesManager showToast={showToast} />}
             {activeTab === 'carriers' && <AdminCarriersManager showToast={showToast} />}
             {activeTab === 'customs' && <AdminCustomsManager showToast={showToast} />}
