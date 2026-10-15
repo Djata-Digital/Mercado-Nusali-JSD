@@ -8,7 +8,9 @@ import { useCountries } from '../hooks/useCountries';
 import { useAuth } from '../context/AuthContext';
 import { formatCurrency } from '../utils/currencyUtils';
 import { describeShippingLine, SHIPPING_LINE_LABEL } from '../utils/shippingDisplay';
-import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
+import { readStoredServiceCode, findSelectedOption } from '../utils/shippingServiceSelection';
+import { shippingServiceLabel } from '../utils/shippingServiceLabels';
+import { ShippingService, CartShippingPreviewData, CartShippingServiceOption } from '../services/shippingService';
 import { BuyerService } from '../services/buyerService';
 import { CartApi } from '../api/clients/CartApi';
 import { sanitizeQuantityDigits, resolveQuantityInputValue, getCartItemAvailableStock } from '../utils/quantityInput';
@@ -299,6 +301,8 @@ export const CartView: React.FC = () => {
     shippingChargedToBuyer: number;
     /** custo logístico real (antes da política de quem paga) — distingue "grátis por política" de "sem custo" */
     shippingCost?: number;
+    /** nome do serviço escolhido na página do produto (ex.: "Standard"); ausente = cotação "a partir de" (mais barato) */
+    selectedServiceTitle?: string;
     currency: string;
     code?: string;
     errorMessage?: string;
@@ -348,7 +352,15 @@ export const CartView: React.FC = () => {
       if (res.success && res.data) {
         const data: CartShippingPreviewData = res.data;
         if (data.available === true) {
-          setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: data.shippingChargedToBuyer, shippingCost: data.shippingCost, currency: data.currency });
+          // Se a pessoa já escolheu um serviço (página do produto/checkout) e ele AINDA está disponível para este carrinho, mostramos o valor DELE (vindo do
+          // mesmo preview do servidor); senão continua "a partir de" (serviço mais barato) e o checkout pede/revalida a escolha. Nada é calculado aqui.
+          const services: CartShippingServiceOption[] = Array.isArray((data as any).services) ? (data as any).services : [];
+          const chosen = findSelectedOption(services, readStoredServiceCode());
+          if (chosen && typeof chosen.shippingChargedToBuyer === 'number' && typeof chosen.shippingCost === 'number') {
+            setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: chosen.shippingChargedToBuyer, shippingCost: chosen.shippingCost, selectedServiceTitle: shippingServiceLabel(chosen.code, chosen.name).title, currency: data.currency });
+          } else {
+            setShippingQuote({ loading: false, available: true, shippingChargedToBuyer: data.shippingChargedToBuyer, shippingCost: data.shippingCost, currency: data.currency });
+          }
         } else {
           const unavailableCode: string = data.code;
           const unavailableMessage: string = data.message;
@@ -691,7 +703,7 @@ export const CartView: React.FC = () => {
 
                     <div className="flex justify-between items-center">
                       {/* no carrinho o frete é "a partir de" (serviço mais barato disponível); o cliente escolhe o serviço no checkout */}
-                      <span>{shippingQuote?.available && !shippingQuote.loading ? 'Frete (a partir de):' : 'Frete:'}</span>
+                      <span data-testid="cart-shipping-label">{shippingQuote?.available && !shippingQuote.loading ? (shippingQuote.selectedServiceTitle ? `Frete (${shippingQuote.selectedServiceTitle}):` : 'Frete (a partir de):') : 'Frete:'}</span>
                       {shippingQuote === null || shippingQuote.loading ? (
                         <span className="text-gray-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Calculando...</span>
                       ) : shippingQuote && !shippingQuote.available && shippingQuote.code === 'DELIVERY_SECTOR_REQUIRED' ? (
@@ -715,6 +727,10 @@ export const CartView: React.FC = () => {
                         </span>
                       )}
                     </div>
+
+                    {shippingQuote?.available && !shippingQuote.loading && shippingQuote.selectedServiceTitle && (
+                      <p className="text-[10px] text-gray-500 text-right" data-testid="cart-shipping-selected-hint">Serviço escolhido: {shippingQuote.selectedServiceTitle}. Você pode alterá-lo no checkout.</p>
+                    )}
 
                     {couponDiscount > 0 && (
                       <div className="flex justify-between text-green-700 font-bold">

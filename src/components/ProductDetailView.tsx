@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useParams, useNavigate } from 'react-router-dom';
 import { usePageSeo } from '../hooks/usePageSeo';
@@ -51,6 +51,7 @@ import { useCountries } from '../hooks/useCountries';
 import { ShippingService } from '../services/shippingService';
 import { ProductDeliveryOptions } from './ProductDeliveryOptions';
 import { PRODUCT_DELIVERY_IDLE, deliveryStateFromQuote, deliveryBlocksPurchase, type ProductDeliveryState } from '../utils/productDeliveryState';
+import { readStoredServiceCode, writeStoredServiceCode, reconcileServiceSelection, findSelectedOption, estimateTotalWithShipping } from '../utils/shippingServiceSelection';
 import { isOnlineCheckoutAvailable } from '../utils/checkoutAvailability';
 import { useAuth } from '../context/AuthContext';
 import { BuyerService } from '../services/buyerService';
@@ -434,9 +435,43 @@ export const ProductDetailView: React.FC = () => {
   const destinationRegionDisplayName: string | null =
     deliveryDestinationIntent?.shippingRegionName || defaultDeliveryAddress?.shippingRegionName || null;
 
-  // Prévia das opções de entrega (Economy, Standard, Express) — MESMA cotação por serviço do carrinho e do checkout (preview-cart, motor por setor).
-  // É só informação: a escolha do serviço é feita no checkout e o servidor revalida o preço ao criar o pedido.
+  // Opções de entrega (Economy, Standard, Express) — MESMA cotação por serviço do carrinho e do checkout (preview-cart, motor por setor). A pessoa
+  // pode ESCOLHER o serviço aqui mesmo com o checkout desligado: guardamos só o código (sessionStorage, a mesma chave do checkout) e o servidor
+  // revalida preço, prazo, disponibilidade e subsídios a cada cotação e de novo ao criar o pedido.
   const [deliveryState, setDeliveryState] = useState<ProductDeliveryState>(PRODUCT_DELIVERY_IDLE);
+  const [selectedServiceCode, setSelectedServiceCode] = useState<string | null>(readStoredServiceCode);
+  const selectedServiceRef = useRef<string | null>(selectedServiceCode);
+  const [serviceNotice, setServiceNotice] = useState<string | null>(null);
+
+  const chooseService = (code: string) => {
+    selectedServiceRef.current = code;
+    setSelectedServiceCode(code);
+    setServiceNotice(null);
+    writeStoredServiceCode(code);
+  };
+
+  // Reafirma a escolha (só o código) antes de ir ao carrinho/checkout: é ela que o carrinho e o checkout encontram e revalidam.
+  const persistServiceChoice = () => { if (selectedServiceRef.current) writeStoredServiceCode(selectedServiceRef.current); };
+
+  // Publica o novo estado da cotação e invalida/atualiza a escolha: some (com aviso) se o serviço deixou de existir, o destino mudou ou a entrega
+  // ficou indisponível; é mantida enquanto se calcula ou se escolhe a variação.
+  const publishDelivery = (next: ProductDeliveryState) => {
+    setDeliveryState(next);
+    const outcome = reconcileServiceSelection(selectedServiceRef.current, next);
+    if (outcome.code !== selectedServiceRef.current) {
+      selectedServiceRef.current = outcome.code;
+      setSelectedServiceCode(outcome.code);
+      writeStoredServiceCode(outcome.code);
+    }
+    if (outcome.notice) setServiceNotice(outcome.notice);
+  };
+
+  // O que está sendo cotado: as linhas reais (variação + quantidade) — várias variações no modo multi-variante, o kit escolhido ou a quantidade.
+  const previewLines: Array<{ variantId: string | null; quantity: number }> = isMultiVariantMode
+    ? multiVariantSummary.lines.map((l) => ({ variantId: l.variantId, quantity: l.quantity }))
+    : [{ variantId: activeVariant?.id || null, quantity: selectedKit ? selectedKit.quantity : quantity }];
+  const previewKey = previewLines.map((l) => `${l.variantId ?? ''}:${l.quantity}`).join('|');
+  const previewNeedsVariant = isMultiVariantMode ? multiVariantSummary.totalUnits === 0 : needsVariantSelection;
 
   useEffect(() => {
     let isMounted = true;
@@ -447,21 +482,21 @@ export const ProductDetailView: React.FC = () => {
       return;
     }
 
-    // Produto fora do país de entrega: a página já avisa e bloqueia a compra — não há cotação.
+    // Produto fora do país de entrega: a página já avisa e bloqueia a compra — não há cotação (e a escolha deixa de valer).
     if (isUnavailableForDestination || product.availableForCountry === false) {
-      setDeliveryState(PRODUCT_DELIVERY_IDLE);
+      publishDelivery(PRODUCT_DELIVERY_IDLE);
       return;
     }
 
     // Variação ainda não escolhida: o frete depende do peso/estoque da variação — "Frete a calcular", nunca um preço.
-    if (needsVariantSelection) {
-      setDeliveryState({ status: 'needs_variant', options: [] });
+    if (previewNeedsVariant) {
+      publishDelivery({ status: 'needs_variant', options: [] });
       return;
     }
 
     // Setor ausente é um estado PRÓPRIO (nunca "sem tarifa"). O backend também valida isto de forma independente.
     if (!destinationShippingSectorId) {
-      setDeliveryState({ status: 'needs_address', options: [], code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
+      publishDelivery({ status: 'needs_address', options: [], code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega para calcular o frete.' });
       return;
     }
 
@@ -469,15 +504,15 @@ export const ProductDetailView: React.FC = () => {
 
     ShippingService.getCartPreview({
       destinationShippingSectorId,
-      items: [{ productId: product.id, variantId: activeVariant?.id || null, quantity }],
+      items: previewLines.map((l) => ({ productId: product.id, variantId: l.variantId, quantity: l.quantity })),
     }).then((res) => {
       if (!isMounted) return;
-      setDeliveryState(deliveryStateFromQuote(res as any));
+      publishDelivery(deliveryStateFromQuote(res as any));
     });
 
     return () => { isMounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [product?.id, activeVariant?.id, quantity, destinationShippingSectorId, needsVariantSelection, isUnavailableForDestination]);
+  }, [product?.id, previewKey, destinationShippingSectorId, previewNeedsVariant, isUnavailableForDestination]);
 
   if (!isValidId) {
     return (
@@ -560,6 +595,11 @@ export const ProductDetailView: React.FC = () => {
   const instMax = product.installmentsMax || 1;
   const productCurrency = product.currency || 'XOF';
 
+  // Total estimado = produto + frete DO SERVIDOR para o serviço escolhido (nenhum cálculo de frete aqui; sem escolha/cotação válida não há total).
+  const selectedServiceOption = deliveryState.status === 'ready' ? findSelectedOption(deliveryState.options, selectedServiceCode) : null;
+  const estimatedTotal = estimateTotalWithShipping(isMultiVariantMode ? multiVariantSummary.subtotal : effectiveTotalOrderPrice, selectedServiceOption, productCurrency);
+  const estimatedTotalText = estimatedTotal === null ? null : formatCurrency(estimatedTotal, productCurrency as any);
+
   const effectiveTotalInfo = formatPrice(effectiveTotalOrderPrice, productCurrency);
   const effectiveUnitInfo = formatPrice(effectiveUnitPrice, productCurrency);
   const basePriceInfo = formatPrice(activeVariantPrice, productCurrency);
@@ -632,7 +672,8 @@ export const ProductDetailView: React.FC = () => {
           selectedVariantSku: buyNowSingleLine.variant.sku,
           selectedVariantImage: buyNowSingleLine.variant.imageUrl || product.image,
         });
-        navigate('/checkout');
+      persistServiceChoice();
+      navigate('/checkout');
         window.scrollTo({ top: 0, behavior: 'smooth' });
       } catch (err: any) {
         showToast(err?.message || 'Não foi possível preparar a compra. Tente novamente.');
@@ -668,6 +709,7 @@ export const ProductDetailView: React.FC = () => {
       });
       // Só navega depois que o item está confirmado no backend — o checkout
       // vai buscar o carrinho real (GET /cart) e já vai encontrá-lo lá.
+      persistServiceChoice();
       navigate('/checkout');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err: any) {
@@ -693,6 +735,7 @@ export const ProductDetailView: React.FC = () => {
           ...cartSelectionFor(l.variant, buyerAxes),
         }))
       );
+      persistServiceChoice();
       navigate('/cart');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err: any) {
@@ -726,6 +769,7 @@ export const ProductDetailView: React.FC = () => {
         selectedVariantSku: activeVariant?.sku,
         selectedVariantImage: selectedColorGroup?.imageUrl || activeVariant?.imageUrl || product.image,
       });
+      persistServiceChoice();
       navigate('/cart');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err: any) {
@@ -1436,6 +1480,10 @@ export const ProductDetailView: React.FC = () => {
                 <ProductDeliveryOptions
                   state={deliveryState}
                   formatAmount={(amount) => formatCurrency(amount, (productCurrency || 'XOF') as any)}
+                  selectedCode={selectedServiceOption ? selectedServiceCode : null}
+                  onSelect={chooseService}
+                  notice={serviceNotice}
+                  estimatedTotalText={estimatedTotalText}
                 />
               )}
 
