@@ -6,6 +6,7 @@ import { ProductCard } from '../components/ProductCard';
 import { useProducts } from '../hooks/useProducts';
 import { usePreferences } from '../context/PreferencesContext';
 import { countriesConfig } from '../utils/currencyUtils';
+import { noDeliverableProductsMessage, DELIVERY_SCOPE_HINT } from '../utils/deliveryScopeCopy';
 import { ChevronRight, Globe, PackageOpen } from 'lucide-react';
 
 const EmptyShowcase: React.FC<{ message: string; hint?: string }> = ({ message, hint }) => (
@@ -90,7 +91,7 @@ export const HomePage: React.FC = () => {
             </div>
           ) : catalogEmpty ? (
             <EmptyShowcase
-              message={isError ? 'Não foi possível carregar as ofertas agora. Tente novamente em instantes.' : 'Novas ofertas serão publicadas em breve.'}
+              message={isError ? 'Não foi possível carregar as ofertas agora. Tente novamente em instantes.' : noDeliverableProductsMessage(currentCountry.name)}
             />
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
@@ -144,8 +145,8 @@ export const HomePage: React.FC = () => {
             </div>
           ) : catalogEmpty ? (
             <EmptyShowcase
-              message={isError ? 'Não foi possível carregar o catálogo agora. Tente novamente em instantes.' : 'Os primeiros produtos do Mercado Nusali serão publicados em breve.'}
-              hint={isError ? undefined : 'Vendedores já podem criar a conta e publicar seus produtos.'}
+              message={isError ? 'Não foi possível carregar o catálogo agora. Tente novamente em instantes.' : noDeliverableProductsMessage(currentCountry.name)}
+              hint={isError ? undefined : DELIVERY_SCOPE_HINT}
             />
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">

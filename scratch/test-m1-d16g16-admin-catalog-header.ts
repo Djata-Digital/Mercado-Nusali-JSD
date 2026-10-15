@@ -174,7 +174,7 @@ async function main() {
   report('H2. getOptionalAuthUser lê SOMENTE req.headers.authorization — nunca req.query nem req.body', /req\.headers\.authorization/.test(optionalAuthBody) && !/req\.query/.test(optionalAuthBody) && !/req\.body/.test(optionalAuthBody));
 
   const catalogRoutesSrc = fs.readFileSync(path.join(ROOT, 'src/server/modules/catalog/catalogRoutes.ts'), 'utf8');
-  const handlerStartIdx = catalogRoutesSrc.indexOf('export function parsePublicCatalogFilters(req: Request) {'); // P3: a leitura dos filtros (admin/destino/origem) foi extraida para este helper, usado por getProductsHandler e pelos facets
+  const handlerStartIdx = catalogRoutesSrc.indexOf('export function resolvePublicCatalogScope('); // catálogo por país de entrega: a decisão admin/destino vive em resolvePublicCatalogScope (usado por parsePublicCatalogFilters) // P3: a leitura dos filtros (admin/destino/origem) foi extraida para este helper, usado por getProductsHandler e pelos facets
   const handlerEndIdx = catalogRoutesSrc.indexOf('\nexport async function getProductByIdHandler');
   const handlerMatch = handlerStartIdx >= 0 && handlerEndIdx > handlerStartIdx;
   const handlerBody = handlerMatch ? catalogRoutesSrc.slice(handlerStartIdx, handlerEndIdx) : '';
@@ -209,7 +209,7 @@ async function main() {
   // admin, `country` continua resolvido normalmente (resolveDestinationCountryFromRequest),
   // nunca influenciado por originCountryFilter.
   // ===========================================================================
-  report('L. Para usuário não-admin, `country` é resolvido por resolveDestinationCountryFromRequest, nunca por originCountryFilter', /country: isAdminCatalogView \? undefined : resolveDestinationCountryFromRequest\(req, country as string\)/.test(handlerBody));
+  report('L. Para usuário não-admin, `country` é resolvido por resolveDestinationCountryFromRequest, nunca por originCountryFilter', /const country = adminOriginView \? undefined : resolveDestinationCountryFromRequest\(req, explicitCountry\)/.test(handlerBody) && /country: scope\.country/.test(handlerBody));
 
   // ===========================================================================
   // M — origin ALL para usuário normal continua = "todos ELEGÍVEIS para o

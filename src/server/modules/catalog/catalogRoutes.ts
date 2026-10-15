@@ -51,6 +51,26 @@ export function parseOptionalBooleanQuery(v: unknown): boolean | undefined {
   return undefined;
 }
 
+/**
+ * Escopo de destino do catálogo PÚBLICO (lista, busca, categorias, facets, recomendações): a ÚNICA fonte da regra "o cliente só vê o que
+ * pode ser entregue no país selecionado". O destino vem do parâmetro explícito ou do header X-Country-Code (nunca de dados do vendedor).
+ *
+ *  - Sem destino conhecido => `destinationMissing`: a API NÃO devolve produtos (nunca presume disponibilidade por omissão — mesma regra de
+ *    isProductAvailableForCountry). O frontend sempre envia o país (padrão GW), então isto só afeta chamadas sem país.
+ *  - Contas ADMIN/GLOBAL_ADMIN navegando o catálogo público veem o MESMO que o cliente (a visão de comprador), para poderem conferir a
+ *    experiência real. A visão administrativa por origem (D16-G1.6) continua existindo, mas só quando o administrador escolhe de forma
+ *    EXPLÍCITA uma origem (originCountryFilter diferente de ALL); a listagem completa do administrador é GET /admin/products.
+ *  A identidade administrativa vem só do JWT verificado (getOptionalAuthUser), nunca de query/body/header.
+ */
+export function resolvePublicCatalogScope(req: Request, explicitCountry?: string): { country?: string; adminOriginView: boolean; destinationMissing: boolean } {
+  const rawOrigin = typeof req.query.originCountryFilter === 'string' ? req.query.originCountryFilter.trim().toUpperCase() : '';
+  const adminOriginView = isGlobalCatalogAdmin(getOptionalAuthUser(req)) && rawOrigin !== '' && rawOrigin !== 'ALL';
+  const country = adminOriginView ? undefined : resolveDestinationCountryFromRequest(req, explicitCountry)?.trim().toUpperCase() || undefined;
+  return { country, adminOriginView, destinationMissing: !adminOriginView && !country };
+}
+
+const EMPTY_FACETS = { total: 0, brands: [], conditions: [], price: null, attributes: [], ignoredAttributes: [] };
+
 const CATALOG_SORTS = new Set(['relevance', 'price_asc', 'price_desc', 'rating_desc', 'sales_desc', 'newest']);
 
 /** P3 — filtros públicos do catálogo (listagem e facets): mesma leitura da querystring e a mesma resolução de destino/origem/admin. */
@@ -72,24 +92,8 @@ export function parsePublicCatalogFilters(req: Request) {
     sort,
   } = req.query;
 
-    // FASE D16-G1.6 — visão administrativa por origem para GLOBAL_ADMIN
-    // navegando pelo catálogo público (Home/Search/Category/Header/
-    // Favorites/AIAssistant/StorePublicView — todas passam por este mesmo
-    // handler). Identidade vem EXCLUSIVAMENTE do JWT verificado
-    // (getOptionalAuthUser nunca lê query/body/header customizado — só o
-    // Authorization Bearer padrão que o apiClient já envia quando o usuário
-    // está logado) — nunca de um parâmetro como ?adminMode=true. Buyer,
-    // seller e guest continuam exatamente com o comportamento anterior:
-    // isGlobalCatalogAdmin(undefined) e isGlobalCatalogAdmin({role:'BUYER'|
-    // 'SELLER'}) são sempre false. Quando true, a elegibilidade de destino é
-    // pulada por completo (mesma técnica já usada em GET /admin/products —
-    // CatalogService.getProducts trata `country` ausente como "sem filtro
-    // de destino"), e originCountryFilter passa a ser a ÚNICA restrição —
-    // exatamente a "visão administrativa por origem" pedida. Isto NUNCA
-    // altera elegibilidade de COMPRA: GET /products/:id e o checkout
-    // (F6.2/orderService) continuam calculando availableForCountry/
-    // elegibilidade real do jeito que sempre calcularam, intocados.
-    const isAdminCatalogView = isGlobalCatalogAdmin(getOptionalAuthUser(req));
+    // Destino/visão administrativa: ver resolvePublicCatalogScope (admin só tem visão por origem quando escolhe uma origem explícita).
+    const scope = resolvePublicCatalogScope(req, country as string);
 
     return {
       q: typeof q === 'string' ? q : undefined,
@@ -98,7 +102,7 @@ export function parsePublicCatalogFilters(req: Request) {
       condition: typeof condition === 'string' ? condition : undefined,
       // filtros por característica: JSON compacto; inválido/excedente é ignorado (nunca derruba a listagem)
       attrs: typeof attrs === 'string' || (attrs && typeof attrs === 'object') ? parseAttributeFilters(attrs).filters : undefined,
-      country: isAdminCatalogView ? undefined : resolveDestinationCountryFromRequest(req, country as string),
+      country: scope.country,
       // FASE D16-G1 — filtro de origem é INDEPENDENTE do destino: nunca lido
       // do header X-Country-Code (que representa exclusivamente o destino do
       // comprador — ver resolveDestinationCountryFromRequest acima), sempre
@@ -117,6 +121,9 @@ export function parsePublicCatalogFilters(req: Request) {
 /** GET /products/facets — opções de filtro (marca, condição, preço e características da categoria) para a busca atual. */
 export async function getProductFacetsHandler(req: Request, res: Response) {
   try {
+    if (resolvePublicCatalogScope(req, typeof req.query.country === 'string' ? req.query.country : undefined).destinationMissing) {
+      return res.json({ success: true, data: EMPTY_FACETS, meta: { destinationRequired: true } });
+    }
     const facets = await CatalogService.getFacets(parsePublicCatalogFilters(req));
     return res.json({ success: true, data: facets });
   } catch (err: any) {
@@ -127,6 +134,15 @@ export async function getProductFacetsHandler(req: Request, res: Response) {
 export async function getProductsHandler(req: Request, res: Response) {
   try {
     const { page, limit } = req.query;
+    if (resolvePublicCatalogScope(req, typeof req.query.country === 'string' ? req.query.country : undefined).destinationMissing) {
+      // sem país de entrega conhecido nada é listado (nunca "tudo"): o cliente precisa escolher o país
+      return res.json({
+        success: true,
+        data: [],
+        pagination: { total: 0, page: Number(page) || 1, limit: Number(limit) || 24, totalPages: 0 },
+        meta: { destinationRequired: true },
+      });
+    }
     const result = await CatalogService.getProducts({
       ...parsePublicCatalogFilters(req),
       page: page ? Number(page) : 1,
@@ -213,10 +229,13 @@ export async function getProductRecommendationsHandler(req: Request, res: Respon
     // acima — nunca uma segunda regra. isGlobalCatalogAdmin deriva SOMENTE do
     // JWT já verificado (getOptionalAuthUser nunca lê query/body/header
     // customizado), nunca de um parâmetro do cliente.
-    const isAdminCatalogView = isGlobalCatalogAdmin(getOptionalAuthUser(req));
     const explicitDestination = typeof req.query.destinationCountry === 'string' ? req.query.destinationCountry : undefined;
-    const destinationCountry = isAdminCatalogView ? undefined : resolveDestinationCountryFromRequest(req, explicitDestination);
+    const scope = resolvePublicCatalogScope(req, explicitDestination);
+    const destinationCountry = scope.country;
     const originCountryFilter = typeof req.query.originCountryFilter === 'string' ? req.query.originCountryFilter : undefined;
+    if (scope.destinationMissing) {
+      return res.json({ success: true, data: { productId: id, relatedProducts: [], sameStoreProducts: [], youMayAlsoLike: [] }, meta: { destinationRequired: true } });
+    }
 
     const SECTION_LIMIT = 12;
     // Pequena folga: cobre a deduplicação entre seções sem precisar de uma

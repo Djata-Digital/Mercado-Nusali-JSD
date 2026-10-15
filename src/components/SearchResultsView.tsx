@@ -1,6 +1,8 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { useSearchParams, useNavigate, useParams, Link } from 'react-router-dom';
 import { useCategories, useCatalogSearch, useCatalogFacets } from '../hooks/useProducts';
+import { countriesConfig } from '../utils/currencyUtils';
+import { noDeliverableProductsMessage, DELIVERY_SCOPE_HINT } from '../utils/deliveryScopeCopy';
 import { CatalogFacetsPanel } from './CatalogFacetsPanel';
 import { countActiveAttributeFilters, type AttributeFilters } from '../utils/attributeFilters';
 import { buildCatalogParams, buildFacetParams, hasActiveCatalogFilters, type CatalogUiState } from '../utils/catalogQuery';
@@ -409,9 +411,9 @@ export const SearchResultsView: React.FC = () => {
               </div>
               <h3 className="text-base font-bold text-gray-800">
                 {categoryMode && totalFound === 0 && !activeFilters && !filterState.query
-                  ? `Ainda não há produtos em ${categoryName}`
+                  ? `Ainda não há produtos de ${categoryName} com entrega para ${countriesConfig[selectedCountry]?.name || selectedCountry}`
                   : !categoryMode && totalFound === 0 && !activeFilters && !filterState.query
-                    ? 'Ainda não há produtos publicados'
+                    ? noDeliverableProductsMessage(countriesConfig[selectedCountry]?.name || selectedCountry)
                     : filterState.query
                       ? `Nenhum produto encontrado para "${filterState.query}"`
                       : 'Nenhum produto corresponde aos filtros selecionados'}
@@ -420,9 +422,9 @@ export const SearchResultsView: React.FC = () => {
                 {activeFilters
                   ? 'Remova alguns filtros ou limpe todos para ver mais produtos.'
                   : categoryMode && !filterState.query
-                  ? 'Volte em breve ou explore os outros produtos do catálogo.'
+                  ? DELIVERY_SCOPE_HINT
                   : !categoryMode && totalFound === 0 && !filterState.query
-                    ? 'Os primeiros produtos do Mercado Nusali serão publicados em breve.'
+                    ? DELIVERY_SCOPE_HINT
                     : 'Tente buscar por outro produto, categoria ou palavra-chave.'}
               </p>
               {activeFilters ? (

@@ -89,7 +89,8 @@ export const ProductDetailView: React.FC = () => {
   // catálogo filtrado (seção 7): o backend continua mostrando os dados do
   // produto, só marca availableForCountry=false para travar a compra.
   const { data: fetchedProduct, isLoading, isError } = useProduct(isValidId ? id! : '', selectedCountry);
-  const { data: allProducts = [] } = useProducts();
+  // mesmo destino do detalhe: o fallback da lista nunca traz produto fora do país de entrega selecionado (nem de cache de outro país)
+  const { data: allProducts = [] } = useProducts({ country: selectedCountry });
   // FASE D17-C4 — Perguntas e Respostas reais (GET público, independente do
   // produto já ter carregado — só precisa do id da URL).
   const { data: productQuestions = [] } = useProductQuestions(isValidId ? id! : '');
@@ -1453,7 +1454,10 @@ export const ProductDetailView: React.FC = () => {
 
               {isUnavailableForDestination && (
                 <p className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold">
-                  {product.unavailabilityReason || 'Este produto não está disponível para entrega no seu país.'}
+                  <span data-testid="product-unavailable-for-destination">
+                    {`Este produto não pode ser entregue em ${getCountryName(selectedCountry) || selectedCountry}. `}
+                  </span>
+                  {product.unavailabilityReason}
                 </p>
               )}
 
