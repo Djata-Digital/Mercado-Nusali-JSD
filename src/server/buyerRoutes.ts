@@ -1904,7 +1904,7 @@ buyerRouter.get('/orders/:id', requireAuth, async (req: AuthRequest, res: Respon
 buyerRouter.post('/orders', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { shippingAddress, addressId, paymentMethod, notes, currency, countryCode } = req.body ?? {};
-    const shippingSelection = parseShippingSelection(req.body, { required: false });
+    const shippingSelection = parseShippingSelection(req.body, { required: true });
     const order = await OrderService.createOrderFromCart({
       userId: req.user!.id,
       shippingSelection,

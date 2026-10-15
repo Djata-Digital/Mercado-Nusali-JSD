@@ -44,7 +44,7 @@ orderRouter.post(['/', '/orders'], requireAuth, async (req: AuthRequest, res: Re
     // tudo contra o grupo real do pedido, dentro da transação de checkout.
     const { shippingAddress, addressId, recipientOverride, paymentMethod, notes, currency, countryCode, storeCoupons } = req.body ?? {};
     // serviço de entrega escolhido (+ o total de frete que o cliente viu): só identificam a escolha; o servidor recalcula o preço
-    const shippingSelection = parseShippingSelection(req.body, { required: false });
+    const shippingSelection = parseShippingSelection(req.body, { required: true });
     const order = await OrderService.createOrderFromCart({
       userId: req.user!.id,
       shippingSelection,

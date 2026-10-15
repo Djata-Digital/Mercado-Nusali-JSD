@@ -56,6 +56,7 @@ import { classifyGroupPaymentsForExpiration, type ExternalChargeRef } from '../p
 import { resolveFulfillmentCandidates } from '../shipping/fulfillmentCandidateResolverService.js';
 import { reserveFulfillmentInventory } from '../inventory/fulfillmentReservationService.js';
 import { CheckoutShippingError, classifyRejectedCandidates, shippingFailureMessage } from '../shipping/checkoutShippingErrors.js';
+import { lockAndVerifyRates, assertShippingQuoteMatches } from '../shipping/shippingQuoteGuard.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -330,7 +331,9 @@ export class OrderService {
     // 2. Execute Atomic Transaction
     return await db.transaction(async (tx: any) => {
       // Fetch active user cart
-      const userCarts = await tx.select().from(carts).where(eq(carts.userId, userId)).limit(1);
+      // Etapa C — trava a linha do carrinho do comprador até o fim da transação: dois envios simultâneos (duplo clique, retry) são
+      // serializados; o segundo só lê o carrinho DEPOIS do commit do primeiro (já esvaziado) e não cria pedido/cobrança duplicados.
+      const userCarts = await tx.select().from(carts).where(eq(carts.userId, userId)).limit(1).for('update');
       if (userCarts.length === 0) {
         throw new Error('Carrinho de compras não encontrado.');
       }
@@ -1240,6 +1243,34 @@ export class OrderService {
           const { financials, freightRes, storeId } = await computeGroupFinancials(items, sellerId, smartFreightRes, commercialStoreId, couponConsumption?.discountAmount ?? 0);
           groupComputations.push({ sellerId, items, storeId, financials, freightRes, couponConsumption });
         }
+
+        // Etapa C — proteção financeira do frete, ANTES de qualquer escrita (nenhum pedido/grupo/reserva existe ainda):
+        //  1. consistência: todas as linhas usam o serviço que o cliente escolheu (nunca um serviço diferente em silêncio);
+        //  2. as tarifas usadas são travadas (FOR SHARE) e reconferidas — editar/desativar uma tarifa não consegue mais mudar o valor
+        //     cobrado enquanto este pedido é criado; tarifa que deixou de valer → serviço indisponível;
+        //  3. o total de frete que o cliente viu e confirmou tem de ser IGUAL ao que o servidor acabou de calcular; senão 409 e o
+        //     cliente confirma de novo. O valor do cliente nunca é usado como preço — só comparado.
+        if (selectedServiceCode) {
+          const divergent = verifiedItems.find((i) => String(i.shippingServiceCode || '').toUpperCase() !== selectedServiceCode);
+          if (divergent) {
+            throw new CheckoutShippingError(
+              'SHIPPING_SERVICE_UNAVAILABLE',
+              `O serviço de entrega escolhido (${selectedServiceCode}) não pôde ser aplicado a "${divergent.productTitle}". Escolha o serviço novamente.`,
+              409,
+              { serviceCode: selectedServiceCode, productId: divergent.productId, reason: 'SERVICE_MISMATCH' },
+            );
+          }
+        }
+        await lockAndVerifyRates(
+          tx,
+          verifiedItems.map((i) => ({ rateId: String(i.shippingRateId || ''), amount: Number(i.shippingAmount) || 0, weightKg: Number(i.totalWeightKg) || 0, currency })),
+          selectedServiceCode,
+        );
+        assertShippingQuoteMatches(
+          data.shippingSelection?.expectedShippingChargedToBuyer,
+          groupComputations.reduce((s, g) => s + g.freightRes.shippingChargedToBuyer, 0),
+          { serviceCode: selectedServiceCode, currency },
+        );
 
         // SUM(order.totalAmount) = purchase_group.totalAmount por construção
         // (soma dos MESMOS valores já arredondados que viram cada order) —

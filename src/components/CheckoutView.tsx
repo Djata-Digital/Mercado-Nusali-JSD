@@ -630,6 +630,10 @@ export const CheckoutView: React.FC = () => {
         // o serviço escolhido deixou de valer: limpa a escolha, recota e pede nova escolha (nunca troca por outro)
         chooseService(null);
         setQuoteVersion((v) => v + 1);
+      } else if (code === 'SHIPPING_QUOTE_CHANGED') {
+        // o valor do frete mudou: a escolha do serviço é mantida, mas o valor antigo deixa de ser definitivo — recota (o botão fica
+        // desabilitado enquanto calcula) e o cliente confere o novo total e confirma DE NOVO; nada é cobrado sem essa confirmação
+        setQuoteVersion((v) => v + 1);
       }
       setErrorMessage(msg);
       setIsProcessing(false);

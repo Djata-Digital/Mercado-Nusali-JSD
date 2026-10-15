@@ -157,10 +157,10 @@ async function main() {
   };
   s = await scenario('http', { originSector: bafata.id });
   const before = await counts();
-  const h1 = await post('/orders', s.buyer.buyerId, { addressId: s.buyer.addressId, paymentMethod: 'pix', currency: 'XOF', countryCode: 'GW' });
-  const h2 = await post('/buyer/orders', s.buyer.buyerId, { addressId: s.buyer.addressId, paymentMethod: 'pix', currency: 'XOF', countryCode: 'GW' });
-  report('B13 POST /orders sem tarifa: 409, código SHIPPING_RATE_NOT_AVAILABLE e mensagem limpa', h1.status === 409 && h1.json?.error?.code === 'SHIPPING_RATE_NOT_AVAILABLE' && !/^[A-Z_]{6,}:/.test(h1.json?.error?.message || ''), h1);
-  report('B14 POST /buyer/orders (outra entrada) devolve o mesmo código/status; nenhum pedido criado em nenhuma', h2.status === 409 && h2.json?.error?.code === 'SHIPPING_RATE_NOT_AVAILABLE' && JSON.stringify(before) === JSON.stringify(await counts()), h2);
+  const h1 = await post('/orders', s.buyer.buyerId, { addressId: s.buyer.addressId, paymentMethod: 'pix', currency: 'XOF', countryCode: 'GW', shippingServiceCode: 'STANDARD', expectedShippingChargedToBuyer: 1500 });
+  const h2 = await post('/buyer/orders', s.buyer.buyerId, { addressId: s.buyer.addressId, paymentMethod: 'pix', currency: 'XOF', countryCode: 'GW', shippingServiceCode: 'STANDARD', expectedShippingChargedToBuyer: 1500 });
+  report('B13 POST /orders sem tarifa (serviço escolhido sem tarifa): 409, código SHIPPING_SERVICE_UNAVAILABLE e mensagem limpa', h1.status === 409 && h1.json?.error?.code === 'SHIPPING_SERVICE_UNAVAILABLE' && !/^[A-Z_]{6,}:/.test(h1.json?.error?.message || ''), h1);
+  report('B14 POST /buyer/orders (outra entrada) devolve o mesmo código/status; nenhum pedido criado em nenhuma', h2.status === 409 && h2.json?.error?.code === 'SHIPPING_SERVICE_UNAVAILABLE' && JSON.stringify(before) === JSON.stringify(await counts()), h2);
 
   console.log(`\n${passed}/${total} passaram`);
   server.close(); await pool.end();
