@@ -26,8 +26,9 @@ import {
  * peso) — mas para o modelo novo de setor/rota, em paralelo ao sistema
  * país↔país antigo (que este arquivo nunca lê nem escreve).
  *
- * NÃO integra ao checkout — só administração/configuração da nova
- * arquitetura (D15-B). Todas as validações financeiras (overlap, peso,
+ * Administração/configuração da arquitetura de frete por setor (D15-B). Desde
+ * o checkout com serviços de entrega, as tarifas e os prazos configurados aqui
+ * SÃO usados pelo checkout (cotação, escolha do serviço e prazo estimado). Todas as validações financeiras (overlap, peso,
  * moeda, país) são de autoridade EXCLUSIVA do backend
  * (validateShippingRouteRateInput, D15-A) — este arquivo nunca duplica essa
  * lógica, só exibe o erro exato que a API devolve.
@@ -108,7 +109,7 @@ export const AdminShippingGeographyManager: React.FC<AdminShippingGeographyManag
             Rotas & Tarifas de Frete por Setor
           </h1>
           <p className="text-xs text-gray-500 mt-1">
-            Fundação D15-A (região → setor → rota → serviço → tarifa) — sistema paralelo ao de "Tarifas de Frete" (país↔país). Ainda não conectado ao checkout.
+            Região → setor → rota → serviço. Aqui você configura as tarifas por faixa de peso e os prazos estimados de entrega de cada serviço, que o checkout usa para calcular o frete e mostrar o prazo ao cliente.
           </p>
         </div>
         <select

@@ -51,5 +51,14 @@ report('P17 o payload do pedido NÃO envia prazo (informativo): o servidor lê o
 const svc = src('src/server/modules/orders/orderService.ts');
 report('P18 no pedido o prazo é só copiado para order_items: não participa de preço, frete, comissão, política nem da conferência do valor', svc.includes('loadLeadTimes(tx, shipmentPlan.shipments)') && svc.includes('deliveryEstimateMinDays: item.deliveryEstimateMinDays ?? null') && !/assertShippingQuoteMatches\([^)]*lead/i.test(svc) && !/lead/i.test(src('src/server/modules/shipping/shippingQuoteGuard.ts')));
 
+report('P19 cabeçalho do painel: o aviso antigo "Ainda não conectado ao checkout" foi removido e o texto diz que tarifas e prazos são usados pelo checkout', !/Ainda não conectado ao checkout/i.test(dr) && !/NÃO integra ao checkout/.test(dr) && /prazos estimados de entrega de cada serviço, que o checkout usa/.test(dr));
+report('P20 o editor de prazo é renderizado DENTRO do laço de serviços do drawer, logo abaixo do cabeçalho do serviço e antes das faixas — sem condição que o oculte', (() => {
+  const i = dr.indexOf('(detail.services || []).map(');
+  const j = dr.indexOf('<ShippingLeadTimeEditor', i);
+  const k = dr.indexOf('svcRates.length === 0 && addingForService', i);
+  const before = dr.slice(dr.lastIndexOf('return (', j), j);
+  return i > 0 && j > i && j < k && !/&&\s*$|\?\s*$|if \(/.test(before.trim());
+})());
+
 console.log(`\nRESULTADO: ${pass} PASS, ${fail} FAIL`);
 process.exit(fail ? 1 : 0);
