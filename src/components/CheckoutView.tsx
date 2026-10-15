@@ -44,6 +44,7 @@ import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
 import { useCartCouponIntent } from '../context/CartCouponIntentContext';
 import { isOnlineCheckoutAvailable } from '../utils/checkoutAvailability';
 import { describeShippingLine, SHIPPING_LINE_LABEL } from '../utils/shippingDisplay';
+import { leadTimeLine } from '../utils/shippingLeadTime';
 import { CheckoutComingSoon } from './CheckoutComingSoon';
 
 export const CheckoutView: React.FC = () => {
@@ -1292,6 +1293,13 @@ export const CheckoutView: React.FC = () => {
                         })()}
                       </span>
                     </div>
+
+                    {selectedOption && (
+                      <div className="flex justify-between gap-3" data-testid="checkout-lead-time">
+                        <span>Entrega:</span>
+                        <span className="font-semibold text-gray-900 text-right">{leadTimeLine(selectedOption.leadTime)}</span>
+                      </div>
+                    )}
 
                     {isCrossBorder && (
                       <div className="flex justify-between text-amber-800 font-medium">

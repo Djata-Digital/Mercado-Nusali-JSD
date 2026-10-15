@@ -267,6 +267,13 @@
       "when": 1791483151540,
       "tag": "0037_attributes_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1792078942635,
+      "tag": "0038_shipping_lead_times",
+      "breakpoints": true
     }
   ]
 }

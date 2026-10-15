@@ -27,6 +27,7 @@ import { products, productVariants, shippingSectors, shippingServices, sellers, 
 import { and, eq, inArray } from 'drizzle-orm';
 import { resolveFulfillmentCandidates, type FulfillmentCandidate, type RejectedFulfillmentCandidate } from './fulfillmentCandidateResolverService.js';
 import { planShipments, rawCostByGroup } from './shipmentPlannerService.js';
+import { loadLeadTimes, aggregateLeadTime, type LeadTime } from './shippingLeadTimeService.js';
 import { compareShippingServices } from '../../../utils/shippingServiceLabels.js';
 import { validateInventoryVariantConsistency } from '../logistics/fulfillmentLocationService.js';
 import { classifyRejectedCandidates, mostActionableFailureCode, shippingFailureMessage, type ShippingFailureCode } from './checkoutShippingErrors.js';
@@ -304,6 +305,8 @@ export interface CartShippingServiceOption {
   shippingSellerSubsidy?: number;
   currency?: string;
   sellers?: CartShippingPreviewSellerBreakdown[];
+  /** prazo ESTIMADO (dias) deste serviço para o carrinho; null = "Prazo a confirmar" (não configurado). Estimativa, não garantia; sem efeito financeiro. */
+  leadTime?: LeadTime | null;
   unavailableCode?: ShippingPreviewUnavailable['code'];
   unavailableMessage?: string;
 }
@@ -318,6 +321,7 @@ export interface CartShippingPreviewAvailable {
   shippingSellerSubsidy: number;
   currency: string;
   sellers: CartShippingPreviewSellerBreakdown[];
+  leadTime: LeadTime | null;
   services: CartShippingServiceOption[];
 }
 
@@ -500,6 +504,15 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
   return summarize(cheapest, options);
 }
 
+/** O prazo é só informação: se não puder ser lido, o serviço continua com o preço correto e o prazo fica "a confirmar" (nunca derruba a cotação). */
+async function safeLeadTime(db: any, shipments: Array<{ routeId: string; serviceId: string }>): Promise<LeadTime | null> {
+  try {
+    return aggregateLeadTime(shipments, await loadLeadTimes(db, shipments));
+  } catch {
+    return null;
+  }
+}
+
 function summarize(o: CartShippingServiceOption, options: CartShippingServiceOption[]): CartShippingPreviewAvailable {
   return {
     ok: true,
@@ -510,6 +523,7 @@ function summarize(o: CartShippingServiceOption, options: CartShippingServiceOpt
     shippingSellerSubsidy: o.shippingSellerSubsidy!,
     currency: o.currency!,
     sellers: o.sellers!,
+    leadTime: o.leadTime ?? null,
     services: options,
   };
 }
@@ -584,5 +598,7 @@ async function priceServiceOption(
     shippingSellerSubsidy,
     currency: lines[0]?.currency || 'XOF',
     sellers,
+    // só informação para o cliente: lido APÓS todo o cálculo financeiro e nunca o altera
+    leadTime: await safeLeadTime(db, planned.plan.shipments),
   };
 }

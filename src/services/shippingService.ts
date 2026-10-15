@@ -43,6 +43,8 @@ export interface CartShippingServiceOption {
   shippingSellerSubsidy?: number;
   currency?: string;
   sellers?: CartShippingPreviewSellerBreakdown[];
+  /** prazo ESTIMADO em dias; null/ausente = "Prazo a confirmar". Estimativa, não garantia; sem efeito no preço. */
+  leadTime?: { minDays: number; maxDays: number } | null;
   unavailableCode?: string;
   unavailableMessage?: string;
 }

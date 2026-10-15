@@ -5,6 +5,8 @@ import {
 import { AdminApi } from '../../api/clients/AdminApi';
 import { useCountries } from '../../hooks/useCountries';
 import { ShippingRateForm } from './ShippingRateForm';
+import { ShippingLeadTimeEditor } from './ShippingLeadTimeEditor';
+import { leadTimeErrorMessage } from '../../utils/shippingLeadTime';
 import {
   RateFormValues, emptyRateForm, rateToForm, buildRatePayload, rateErrorMessage, describeValidity, describeRateEdit,
 } from '../../utils/shippingRateForm';
@@ -470,6 +472,7 @@ const RouteManageDrawer: React.FC<{
   const [editingRateId, setEditingRateId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [togglingRateId, setTogglingRateId] = useState<string | null>(null);
+  const [savingLeadServiceId, setSavingLeadServiceId] = useState<string | null>(null);
 
   const loadDetail = async () => {
     setIsLoading(true);
@@ -553,6 +556,37 @@ const RouteManageDrawer: React.FC<{
     }
   };
 
+  // Prazo estimado por rota+serviço: independente das faixas de peso e sem efeito financeiro.
+  const handleSaveLeadTime = async (serviceId: string, minDays: number, maxDays: number): Promise<string | null> => {
+    setSavingLeadServiceId(serviceId);
+    try {
+      const res = await AdminApi.setShippingLeadTime(routeId, serviceId, { minDays, maxDays });
+      if (!res.success) return leadTimeErrorMessage(res.error?.message || res.message);
+      showToast('Prazo estimado salvo. O checkout já mostra o novo prazo; pedidos já feitos não mudam.');
+      await loadDetail();
+      return null;
+    } catch (err: any) {
+      return leadTimeErrorMessage(err?.response?.data?.error?.message || err?.message);
+    } finally {
+      setSavingLeadServiceId(null);
+    }
+  };
+
+  const handleRemoveLeadTime = async (serviceId: string): Promise<string | null> => {
+    setSavingLeadServiceId(serviceId);
+    try {
+      const res = await AdminApi.removeShippingLeadTime(routeId, serviceId);
+      if (!res.success) return leadTimeErrorMessage(res.error?.message || res.message);
+      showToast('Prazo removido. O checkout mostrará "Prazo a confirmar" para este serviço.');
+      await loadDetail();
+      return null;
+    } catch (err: any) {
+      return leadTimeErrorMessage(err?.response?.data?.error?.message || err?.message);
+    } finally {
+      setSavingLeadServiceId(null);
+    }
+  };
+
   const handleToggleRate = async (rate: any) => {
     setTogglingRateId(rate.id);
     try {
@@ -618,6 +652,14 @@ const RouteManageDrawer: React.FC<{
                       <Plus className="w-3.5 h-3.5" /> Adicionar faixa
                     </button>
                   </div>
+
+                  <ShippingLeadTimeEditor
+                    serviceName={svc.name}
+                    current={(detail.leadTimes || []).find((l: any) => l.serviceId === svc.id) || null}
+                    isBusy={savingLeadServiceId === svc.id}
+                    onSave={(min, max) => handleSaveLeadTime(svc.id, min, max)}
+                    onRemove={() => handleRemoveLeadTime(svc.id)}
+                  />
 
                   {svcRates.length === 0 && addingForService !== svc.id ? (
                     <div className="px-4 py-3 text-xs text-gray-400">Não configurado — entrega ficará indisponível para este serviço nesta rota.</div>

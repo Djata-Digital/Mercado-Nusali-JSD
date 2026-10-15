@@ -1132,6 +1132,10 @@ export const orderItems = pgTable('order_items', {
   unitWeightKg: numeric('unit_weight_kg', { precision: 8, scale: 3 }),
   totalWeightKg: numeric('total_weight_kg', { precision: 8, scale: 3 }),
   shippingAmount: numeric('shipping_amount', { precision: 12, scale: 2 }),
+  // Snapshot do PRAZO ESTIMADO (dias) mostrado ao cliente no momento da compra, copiado de shipping_route_service_lead_times — é uma
+  // estimativa, nunca uma garantia, e não entra em nenhum cálculo financeiro. NULL = "Prazo a confirmar" (não configurado na época).
+  deliveryEstimateMinDays: integer('delivery_estimate_min_days'),
+  deliveryEstimateMaxDays: integer('delivery_estimate_max_days'),
   fulfillmentMode: varchar('fulfillment_mode', { length: 50 }).notNull().default('SELLER_FULFILLMENT'), // NUSALI_FULFILLMENT, SELLER_FULFILLMENT
   status: varchar('status', { length: 50 }).notNull().default('pending_preparation'), // pending_preparation, preparing, ready_to_ship, shipped, cancelled
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -2341,6 +2345,24 @@ export const shippingRouteRates = pgTable('shipping_route_rates', {
   shipping_route_rates_min_weight_check: check('shipping_route_rates_min_weight_check', sql`${table.minWeightKg} >= 0`),
   shipping_route_rates_max_gt_min_check: check('shipping_route_rates_max_gt_min_check', sql`${table.maxWeightKg} > ${table.minWeightKg}`),
   shipping_route_rates_amount_check: check('shipping_route_rates_amount_check', sql`${table.amount} >= 0`),
+}));
+
+// Prazo ESTIMADO de entrega por ROTA + SERVIÇO, independente das faixas de peso (shipping_route_rates). Dias inteiros, mínimo e máximo.
+// É informação para o cliente — nunca entra em preço, pagamento, Escrow ou reembolso, e não gera datas (sem regra de dias úteis/feriados).
+// Sem linha = "Prazo a confirmar". Pedidos guardam o prazo mostrado em order_items (snapshot), então editar/remover aqui não muda histórico.
+export const shippingRouteServiceLeadTimes = pgTable('shipping_route_service_lead_times', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  routeId: varchar('route_id', { length: 255 }).notNull().references(() => shippingRoutes.id, { onDelete: 'restrict' }),
+  serviceId: varchar('service_id', { length: 255 }).notNull().references(() => shippingServices.id, { onDelete: 'restrict' }),
+  minDays: integer('min_days').notNull(),
+  maxDays: integer('max_days').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  shipping_lead_times_route_service_uq: uniqueIndex('shipping_lead_times_route_service_uq').on(table.routeId, table.serviceId),
+  shipping_lead_times_service_idx: index('shipping_lead_times_service_idx').on(table.serviceId),
+  shipping_lead_times_min_check: check('shipping_lead_times_min_check', sql`${table.minDays} >= 1`),
+  shipping_lead_times_max_check: check('shipping_lead_times_max_check', sql`${table.maxDays} >= ${table.minDays} AND ${table.maxDays} <= 365`),
 }));
 
 export const platformSettings = pgTable('platform_settings', {

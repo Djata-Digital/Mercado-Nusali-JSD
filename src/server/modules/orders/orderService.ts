@@ -58,6 +58,7 @@ import { reserveFulfillmentInventory } from '../inventory/fulfillmentReservation
 import { CheckoutShippingError, classifyRejectedCandidates, shippingFailureMessage } from '../shipping/checkoutShippingErrors.js';
 import { lockAndVerifyRates, assertShippingQuoteMatches } from '../shipping/shippingQuoteGuard.js';
 import { planShipments } from '../shipping/shipmentPlannerService.js';
+import { loadLeadTimes, leadTimeKey } from '../shipping/shippingLeadTimeService.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -526,6 +527,9 @@ export class OrderService {
         unitWeightKg?: number | null;
         totalWeightKg?: number | null;
         shippingAmount?: number | null;
+        /** snapshot do prazo ESTIMADO mostrado ao cliente (dias); null = "Prazo a confirmar". Informativo: nunca entra em cálculo financeiro. */
+        deliveryEstimateMinDays?: number | null;
+        deliveryEstimateMaxDays?: number | null;
         /** candidate F4 escolhido para a linha (entrada do planejador de expedições — Etapa D); nunca persistido */
         candidateForPlan?: any;
       }> = [];
@@ -1119,6 +1123,8 @@ export class OrderService {
             unitWeightKg: item.unitWeightKg != null ? String(item.unitWeightKg) : null,
             totalWeightKg: item.totalWeightKg != null ? String(item.totalWeightKg) : null,
             shippingAmount: item.shippingAmount != null ? String(item.shippingAmount) : null,
+            deliveryEstimateMinDays: item.deliveryEstimateMinDays ?? null,
+            deliveryEstimateMaxDays: item.deliveryEstimateMaxDays ?? null,
           } as any);
         }
       }
@@ -1230,10 +1236,15 @@ export class OrderService {
           throw new CheckoutShippingError(shipmentPlanResult.code as any, shipmentPlanResult.message, 409);
         }
         const shipmentPlan = shipmentPlanResult.plan;
+        // prazo estimado vigente por rota+serviço (informativo): copiado para cada item como snapshot do que foi apresentado
+        const leadTimes = await loadLeadTimes(tx, shipmentPlan.shipments);
         verifiedItems.forEach((item, idx) => {
           const shipment = shipmentPlan.shipmentByItemKey.get(String(idx))!;
           item.shippingAmount = shipmentPlan.amountByItemKey.get(String(idx))!;
           item.shippingRateId = shipment.rateId;
+          const lead = leadTimes.get(leadTimeKey(shipment.routeId, shipment.serviceId));
+          item.deliveryEstimateMinDays = lead ? lead.minDays : null;
+          item.deliveryEstimateMaxDays = lead ? lead.maxDays : null;
         });
 
         // Fase 1: calcula (somente leitura) o financeiro de CADA vendedor

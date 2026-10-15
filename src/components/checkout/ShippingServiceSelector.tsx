@@ -1,6 +1,7 @@
 import React from 'react';
 import { Truck, Loader2, AlertCircle } from 'lucide-react';
 import { shippingServiceLabel } from '../../utils/shippingServiceLabels';
+import { leadTimeLine, LEAD_TIME_DISCLAIMER } from '../../utils/shippingLeadTime';
 import type { CartShippingServiceOption } from '../../services/shippingService';
 
 interface Props {
@@ -18,7 +19,8 @@ interface Props {
 
 /**
  * Escolha do serviço de entrega (Economy / Standard / Express): cada opção mostra o preço REAL calculado pelo servidor ou o motivo de não
- * estar disponível. Sem prazos (não existem no cadastro de tarifas) e sem serviço pré-selecionado: a pessoa escolhe antes de confirmar.
+ * estar disponível. O prazo estimado vem do cadastro da rota+serviço ("Prazo a confirmar" quando não configurado — nunca inventado). Sem
+ * serviço pré-selecionado: a pessoa escolhe antes de confirmar.
  */
 export const ShippingServiceSelector: React.FC<Props> = ({ options, selectedCode, onSelect, loading, unavailableMessage, notice, formatAmount }) => {
   const anyAvailable = options.some((o) => o.available);
@@ -82,6 +84,9 @@ export const ShippingServiceSelector: React.FC<Props> = ({ options, selectedCode
                 <span id={`${id}-desc`} className={`text-sm font-black ${!o.available ? 'text-gray-500' : free ? 'text-emerald-700' : 'text-gray-900'}`} data-testid={`shipping-service-price-${o.code}`}>
                   {priceText}
                 </span>
+                {o.available && (
+                  <span className="text-[11px] text-gray-700 font-semibold" data-testid={`shipping-service-leadtime-${o.code}`}>{leadTimeLine(o.leadTime)}</span>
+                )}
                 {!o.available && o.unavailableMessage && (
                   <span className="text-[10px] text-gray-500 font-medium leading-snug" data-testid={`shipping-service-reason-${o.code}`}>{o.unavailableMessage}</span>
                 )}
@@ -89,6 +94,9 @@ export const ShippingServiceSelector: React.FC<Props> = ({ options, selectedCode
             );
           })}
         </div>
+      )}
+      {!loading && anyAvailable && (
+        <p className="text-[10px] text-gray-500" data-testid="shipping-service-leadtime-disclaimer">{LEAD_TIME_DISCLAIMER}</p>
       )}
       {!loading && options.length > 0 && !anyAvailable && (
         <p role="alert" data-testid="shipping-service-none-available" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-2.5 font-semibold">

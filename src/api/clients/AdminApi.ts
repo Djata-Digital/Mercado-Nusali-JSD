@@ -354,4 +354,13 @@ export class AdminApi {
   static async updateShippingRouteRate(id: string, data: any): Promise<ApiResponse<any>> {
     return apiClient.patch(`/admin/shipping/rates/${id}`, data);
   }
+
+  /** Prazo ESTIMADO de entrega (dias) de uma rota+serviço — independente das faixas de peso. */
+  static async setShippingLeadTime(routeId: string, serviceId: string, data: { minDays: number; maxDays: number }): Promise<ApiResponse<any>> {
+    return apiClient.put(`/admin/shipping/routes/${routeId}/lead-times/${serviceId}`, data);
+  }
+
+  static async removeShippingLeadTime(routeId: string, serviceId: string): Promise<ApiResponse<any>> {
+    return apiClient.delete(`/admin/shipping/routes/${routeId}/lead-times/${serviceId}`);
+  }
 }

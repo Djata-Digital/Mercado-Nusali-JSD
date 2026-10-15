@@ -52,10 +52,12 @@ import {
   shippingRoutes,
   shippingServices,
   shippingRouteRates,
+  shippingRouteServiceLeadTimes,
   fulfillmentLocations,
 } from '../db/schema.js';
 import { getCache, setCache, delCache } from '../db/redis.js';
 import { eq, desc, asc, sql, count, and, or, inArray } from 'drizzle-orm';
+import { validateLeadTimeInput } from './modules/shipping/shippingLeadTimeService.js';
 import { AuthRequest, requireAuth } from './modules/auth/authMiddleware.js';
 import { CatalogService } from './modules/catalog/catalogService.js';
 import { parseOptionalBooleanQuery } from './modules/catalog/catalogRoutes.js';
@@ -4896,8 +4898,10 @@ adminRouter.get('/shipping/routes/:id', requireLogisticsStaff, async (req: Reque
       serviceCode: serviceMap.get(r.serviceId)?.code || null,
       serviceName: serviceMap.get(r.serviceId)?.name || null,
     }));
+    // prazos estimados por serviço desta rota (independentes das faixas de peso); serviço sem linha = "Prazo a confirmar"
+    const leadTimes = await db.select().from(shippingRouteServiceLeadTimes).where(eq(shippingRouteServiceLeadTimes.routeId, id));
 
-    return res.json({ success: true, data: { ...route, originSector, destinationSector, services, rates } });
+    return res.json({ success: true, data: { ...route, originSector, destinationSector, services, rates, leadTimes } });
   } catch (error) {
     return sendAdminError(res, error);
   }
@@ -5050,6 +5054,73 @@ adminRouter.patch('/shipping/rates/:id', requireShippingRateManager, async (req:
 
     await writeRealAudit(req, 'admin.shipping_route_rate.updated', 'shipping_route_rates', id, { before, after });
     return res.json({ success: true, message: 'Tarifa atualizada com sucesso.', data: after });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// PUT /admin/shipping/routes/:id/lead-times/:serviceId — define (cria ou atualiza) o prazo ESTIMADO de entrega, em dias, de uma rota+serviço.
+// Independente das faixas de peso. É só informação para o cliente: não toca em preço, pagamento, Escrow nem reembolso, e os pedidos já feitos
+// guardam o prazo que foi mostrado (order_items) — editar aqui não muda o histórico. O registro (id) é preservado numa atualização.
+adminRouter.put('/shipping/routes/:id/lead-times/:serviceId', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+    const { id: routeId, serviceId } = req.params;
+    const { minDays, maxDays } = req.body ?? {};
+
+    const invalid = validateLeadTimeInput(minDays, maxDays);
+    if (invalid) throw new AdminRequestError(400, invalid);
+
+    const { before, after } = await db.transaction(async (tx: any) => {
+      const [route] = await tx.select().from(shippingRoutes).where(eq(shippingRoutes.id, routeId)).limit(1);
+      if (!route) throw new AdminRequestError(404, 'Rota não encontrada.');
+      const [service] = await tx.select().from(shippingServices).where(eq(shippingServices.id, serviceId)).limit(1);
+      if (!service) throw new AdminRequestError(404, 'Serviço não encontrado.');
+      if (service.countryCode !== route.countryCode) {
+        throw new AdminRequestError(400, 'SERVICE_COUNTRY_MISMATCH: o serviço e a rota pertencem a países diferentes.');
+      }
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'shipping_lead_time:' + routeId + ':' + serviceId}))`);
+      const [existing] = await tx.select().from(shippingRouteServiceLeadTimes)
+        .where(and(eq(shippingRouteServiceLeadTimes.routeId, routeId), eq(shippingRouteServiceLeadTimes.serviceId, serviceId))).limit(1);
+      if (existing) {
+        await tx.update(shippingRouteServiceLeadTimes)
+          .set({ minDays: Number(minDays), maxDays: Number(maxDays), updatedAt: new Date() })
+          .where(eq(shippingRouteServiceLeadTimes.id, existing.id));
+      } else {
+        await tx.insert(shippingRouteServiceLeadTimes).values({
+          id: `shplt_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+          routeId, serviceId, minDays: Number(minDays), maxDays: Number(maxDays), createdAt: new Date(), updatedAt: new Date(),
+        });
+      }
+      const [row] = await tx.select().from(shippingRouteServiceLeadTimes)
+        .where(and(eq(shippingRouteServiceLeadTimes.routeId, routeId), eq(shippingRouteServiceLeadTimes.serviceId, serviceId))).limit(1);
+      return { before: existing || null, after: row };
+    });
+
+    await writeRealAudit(req, 'admin.shipping_lead_time.upserted', 'shipping_route_service_lead_times', after.id, { before, after });
+    return res.json({ success: true, message: 'Prazo estimado salvo com sucesso.', data: after });
+  } catch (error) {
+    return sendAdminError(res, error);
+  }
+});
+
+// DELETE /admin/shipping/routes/:id/lead-times/:serviceId — remove o prazo configurado: o checkout volta a mostrar "Prazo a confirmar".
+adminRouter.delete('/shipping/routes/:id/lead-times/:serviceId', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
+    const { id: routeId, serviceId } = req.params;
+    const removed = await db.transaction(async (tx: any) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'shipping_lead_time:' + routeId + ':' + serviceId}))`);
+      const [existing] = await tx.select().from(shippingRouteServiceLeadTimes)
+        .where(and(eq(shippingRouteServiceLeadTimes.routeId, routeId), eq(shippingRouteServiceLeadTimes.serviceId, serviceId))).limit(1);
+      if (!existing) throw new AdminRequestError(404, 'Não há prazo configurado para este serviço nesta rota.');
+      await tx.delete(shippingRouteServiceLeadTimes).where(eq(shippingRouteServiceLeadTimes.id, existing.id));
+      return existing;
+    });
+    await writeRealAudit(req, 'admin.shipping_lead_time.removed', 'shipping_route_service_lead_times', removed.id, { before: removed });
+    return res.json({ success: true, message: 'Prazo estimado removido. O checkout mostrará "Prazo a confirmar".', data: { id: removed.id } });
   } catch (error) {
     return sendAdminError(res, error);
   }
