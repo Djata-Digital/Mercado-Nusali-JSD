@@ -1,9 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Route, MapPinned, Layers, Truck, Search, X, Check, Loader2, Power, ChevronLeft, ChevronRight, Plus, AlertTriangle,
+  Route, MapPinned, Layers, Truck, Search, X, Check, Loader2, Power, ChevronLeft, ChevronRight, Plus, AlertTriangle, Pencil,
 } from 'lucide-react';
 import { AdminApi } from '../../api/clients/AdminApi';
 import { useCountries } from '../../hooks/useCountries';
+import { ShippingRateForm } from './ShippingRateForm';
+import {
+  RateFormValues, emptyRateForm, rateToForm, buildRatePayload, rateErrorMessage, describeValidity, describeRateEdit,
+} from '../../utils/shippingRateForm';
 
 /**
  * FASE D15-B — painel administrativo real da fundação de frete por setor
@@ -463,10 +467,7 @@ const RouteManageDrawer: React.FC<{
   const [isLoading, setIsLoading] = useState(true);
   const [isTogglingRoute, setIsTogglingRoute] = useState(false);
   const [addingForService, setAddingForService] = useState<string | null>(null);
-  const [formMin, setFormMin] = useState('');
-  const [formMax, setFormMax] = useState('');
-  const [formAmount, setFormAmount] = useState('');
-  const [formError, setFormError] = useState<string | null>(null);
+  const [editingRateId, setEditingRateId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [togglingRateId, setTogglingRateId] = useState<string | null>(null);
 
@@ -506,45 +507,47 @@ const RouteManageDrawer: React.FC<{
   };
 
   const handleOpenAdd = (serviceId: string) => {
+    setEditingRateId(null);
     setAddingForService(serviceId);
-    setFormMin('');
-    setFormMax('');
-    setFormAmount('');
-    setFormError(null);
   };
 
-  const handleSubmitRate = async (e: React.FormEvent, serviceId: string) => {
-    e.preventDefault();
-    setFormError(null);
+  const handleOpenEdit = (rate: any) => {
+    setAddingForService(null);
+    setEditingRateId(rate.id);
+  };
 
-    // Checagens mínimas de presença/tipo — a AUTORIDADE de validação
-    // financeira (overlap, faixa, moeda, país) é do backend
-    // (validateShippingRouteRateInput, D15-A). Nunca duplicada aqui.
-    if (formMin.trim() === '' || formMax.trim() === '' || formAmount.trim() === '') {
-      setFormError('Preencha peso mínimo, peso máximo e valor.');
-      return;
-    }
-
+  // A AUTORIDADE de validação financeira (sobreposição de faixas, faixa, moeda, país, vigência) é do backend
+  // (validateShippingRouteRateInput, D15-A). O formulário só confere presença/formato; o erro do backend volta traduzido.
+  const handleSubmitCreate = async (serviceId: string, values: RateFormValues): Promise<string | null> => {
     setIsSaving(true);
     try {
-      const res = await AdminApi.createShippingRouteRate({
-        routeId,
-        serviceId,
-        minWeightKg: Number(formMin),
-        maxWeightKg: Number(formMax),
-        amount: Number(formAmount),
-        currency,
-      });
-      if (!res.success) {
-        setFormError(res.error?.message || res.message || 'Erro ao salvar tarifa.');
-        return;
-      }
+      const res = await AdminApi.createShippingRouteRate({ routeId, serviceId, currency, ...buildRatePayload(values) });
+      if (!res.success) return rateErrorMessage(res.error?.message || res.message);
       showToast('Tarifa criada com sucesso.');
       setAddingForService(null);
       await loadDetail();
       onChanged();
+      return null;
     } catch (err: any) {
-      setFormError(err?.message || 'Erro ao salvar tarifa.');
+      return rateErrorMessage(err?.response?.data?.error?.message || err?.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Editar = PATCH do MESMO registro (id preservado). Só preço, faixa de peso e vigência; rota/serviço/moeda não mudam.
+  const handleSubmitEdit = async (rate: any, values: RateFormValues): Promise<string | null> => {
+    setIsSaving(true);
+    try {
+      const res = await AdminApi.updateShippingRouteRate(rate.id, buildRatePayload(values));
+      if (!res.success) return rateErrorMessage(res.error?.message || res.message);
+      showToast(describeRateEdit(rate, res.data || rate, rate.currency || currency));
+      setEditingRateId(null);
+      await loadDetail();
+      onChanged();
+      return null;
+    } catch (err: any) {
+      return rateErrorMessage(err?.response?.data?.error?.message || err?.message);
     } finally {
       setIsSaving(false);
     }
@@ -620,21 +623,44 @@ const RouteManageDrawer: React.FC<{
                     <div className="px-4 py-3 text-xs text-gray-400">Não configurado — entrega ficará indisponível para este serviço nesta rota.</div>
                   ) : (
                     <div className="divide-y divide-gray-100">
-                      {svcRates.map((r: any) => (
-                        <div key={r.id} className="px-4 py-2.5 flex items-center justify-between text-xs">
-                          <span className="font-mono text-gray-700">
-                            {Number(r.minWeightKg)} kg &lt;= peso &lt; {Number(r.maxWeightKg)} kg
-                          </span>
-                          <div className="flex items-center gap-3">
+                      {svcRates.map((r: any) => editingRateId === r.id ? (
+                        <ShippingRateForm
+                          key={r.id}
+                          mode="edit"
+                          currency={r.currency || currency}
+                          initial={rateToForm(r)}
+                          isSaving={isSaving}
+                          onSubmit={(values) => handleSubmitEdit(r, values)}
+                          onCancel={() => setEditingRateId(null)}
+                        />
+                      ) : (
+                        <div key={r.id} data-testid={`shipping-rate-row-${r.id}`} className="px-4 py-2.5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5 text-xs">
+                          <div className="min-w-0">
+                            <span className="font-mono text-gray-700 block">
+                              {Number(r.minWeightKg)} kg &lt;= peso &lt; {Number(r.maxWeightKg)} kg
+                            </span>
+                            {describeValidity(r) && <span className="text-[10px] text-gray-500 block" data-testid={`shipping-rate-validity-${r.id}`}>{describeValidity(r)}</span>}
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-black text-gray-900">{Number(r.amount).toFixed(2)} {r.currency}</span>
                             <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${r.isActive ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-500'}`}>
                               {r.isActive ? 'Ativa' : 'Inativa'}
                             </span>
                             <button
+                              onClick={() => handleOpenEdit(r)}
+                              data-testid={`shipping-rate-edit-${r.id}`}
+                              className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 p-2 sm:p-1 flex items-center justify-center text-purple-600 hover:text-purple-800 cursor-pointer"
+                              title="Editar tarifa"
+                              aria-label={`Editar tarifa ${Number(r.minWeightKg)} a ${Number(r.maxWeightKg)} kg`}
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
                               disabled={togglingRateId === r.id}
                               onClick={() => handleToggleRate(r)}
-                              className="p-1 text-gray-500 hover:text-gray-800 cursor-pointer disabled:opacity-40"
+                              className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0 p-2 sm:p-1 flex items-center justify-center text-gray-500 hover:text-gray-800 cursor-pointer disabled:opacity-40"
                               title={r.isActive ? 'Desativar tarifa' : 'Ativar tarifa'}
+                              aria-label={r.isActive ? 'Desativar tarifa' : 'Ativar tarifa'}
                             >
                               <Power className="w-3.5 h-3.5" />
                             </button>
@@ -645,33 +671,14 @@ const RouteManageDrawer: React.FC<{
                   )}
 
                   {addingForService === svc.id && (
-                    <form onSubmit={(e) => handleSubmitRate(e, svc.id)} className="p-4 bg-purple-50/50 space-y-2.5 text-xs border-t border-gray-200">
-                      {formError && (
-                        <p className="text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold flex items-start gap-1.5">
-                          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" /> {formError}
-                        </p>
-                      )}
-                      <div className="grid grid-cols-3 gap-2">
-                        <div>
-                          <label className="block font-bold text-gray-700 mb-1">Peso mín. (kg)</label>
-                          <input type="number" min="0" step="0.001" value={formMin} onChange={(e) => setFormMin(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg font-bold" />
-                        </div>
-                        <div>
-                          <label className="block font-bold text-gray-700 mb-1">Peso máx. (kg)</label>
-                          <input type="number" min="0" step="0.001" value={formMax} onChange={(e) => setFormMax(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg font-bold" />
-                        </div>
-                        <div>
-                          <label className="block font-bold text-gray-700 mb-1">Valor ({currency || 'moeda do país'})</label>
-                          <input type="number" min="0" step="0.01" value={formAmount} onChange={(e) => setFormAmount(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg font-bold" />
-                        </div>
-                      </div>
-                      <div className="flex justify-end gap-2 pt-1">
-                        <button type="button" onClick={() => setAddingForService(null)} className="px-3 py-1.5 border border-gray-300 rounded-lg font-bold text-gray-700 cursor-pointer">Cancelar</button>
-                        <button type="submit" disabled={isSaving} className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white font-extrabold rounded-lg flex items-center gap-1 cursor-pointer disabled:opacity-50">
-                          <Check className="w-3.5 h-3.5" /> Salvar
-                        </button>
-                      </div>
-                    </form>
+                    <ShippingRateForm
+                      mode="create"
+                      currency={currency}
+                      initial={emptyRateForm()}
+                      isSaving={isSaving}
+                      onSubmit={(values) => handleSubmitCreate(svc.id, values)}
+                      onCancel={() => setAddingForService(null)}
+                    />
                   )}
                 </div>
               );

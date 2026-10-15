@@ -4946,6 +4946,8 @@ adminRouter.post('/shipping/rates', requireShippingRateManager, async (req: Auth
     const { routeId, serviceId, minWeightKg, maxWeightKg, amount, currency, isActive, validFrom, validUntil } = req.body ?? {};
 
     const created = await db.transaction(async (tx: any) => {
+      // serializa criação/edição de faixas da MESMA rota+serviço: fecha a corrida de sobreposição entre duas gravações simultâneas
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'shipping_rate:' + String(routeId || '') + ':' + String(serviceId || '')}))`);
       const validation = await validateShippingRouteRateInput(tx, {
         routeId: String(routeId || ''),
         serviceId: String(serviceId || ''),
@@ -4985,8 +4987,10 @@ adminRouter.post('/shipping/rates', requireShippingRateManager, async (req: Auth
   }
 });
 
-// PATCH /admin/shipping/rates/:id — atualização parcial, revalidando tudo
-// (exclui a própria tarifa da checagem de overlap).
+// PATCH /admin/shipping/rates/:id — editar tarifa (preço, faixa de peso, vigência, ativa/inativa). Atualiza o MESMO registro (id preservado),
+// revalidando tudo (a própria tarifa fica fora da checagem de sobreposição). A identidade (rota, serviço, moeda) é imutável: pedidos já
+// criados guardam o valor cobrado como snapshot e referenciam a tarifa pelo id — mudar o que ela representa reescreveria o histórico.
+// A linha é travada (FOR UPDATE): serializa com o checkout (que trava a tarifa FOR SHARE ao criar o pedido) e com outro admin editando.
 adminRouter.patch('/shipping/rates/:id', requireShippingRateManager, async (req: AuthRequest, res: Response) => {
   try {
     const db = getDb();
@@ -4995,46 +4999,57 @@ adminRouter.patch('/shipping/rates/:id', requireShippingRateManager, async (req:
     const { id } = req.params;
     const body = req.body ?? {};
 
-    const updated = await db.transaction(async (tx: any) => {
-      const [existing] = await tx.select().from(shippingRouteRates).where(eq(shippingRouteRates.id, id)).limit(1);
+    const { before, after } = await db.transaction(async (tx: any) => {
+      const [peek] = await tx.select().from(shippingRouteRates).where(eq(shippingRouteRates.id, id)).limit(1);
+      if (!peek) throw new AdminRequestError(404, 'Tarifa não encontrada.');
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'shipping_rate:' + peek.routeId + ':' + peek.serviceId}))`);
+      const [existing] = await tx.select().from(shippingRouteRates).where(eq(shippingRouteRates.id, id)).limit(1).for('update');
       if (!existing) throw new AdminRequestError(404, 'Tarifa não encontrada.');
 
+      if (body.routeId !== undefined && String(body.routeId) !== existing.routeId) {
+        throw new AdminRequestError(400, 'RATE_IDENTITY_IMMUTABLE: a rota de uma tarifa não pode ser alterada. Crie uma nova tarifa na rota desejada.');
+      }
+      if (body.serviceId !== undefined && String(body.serviceId) !== existing.serviceId) {
+        throw new AdminRequestError(400, 'RATE_IDENTITY_IMMUTABLE: o serviço de uma tarifa não pode ser alterado. Crie uma nova tarifa para o serviço desejado.');
+      }
+      if (body.currency !== undefined && String(body.currency).trim().toUpperCase() !== String(existing.currency).toUpperCase()) {
+        throw new AdminRequestError(400, 'RATE_IDENTITY_IMMUTABLE: a moeda de uma tarifa não pode ser alterada.');
+      }
+
       const merged = {
-        routeId: body.routeId !== undefined ? String(body.routeId) : existing.routeId,
-        serviceId: body.serviceId !== undefined ? String(body.serviceId) : existing.serviceId,
+        routeId: existing.routeId,
+        serviceId: existing.serviceId,
         minWeightKg: body.minWeightKg !== undefined ? Number(body.minWeightKg) : Number(existing.minWeightKg),
         maxWeightKg: body.maxWeightKg !== undefined ? Number(body.maxWeightKg) : Number(existing.maxWeightKg),
         amount: body.amount !== undefined ? Number(body.amount) : Number(existing.amount),
-        currency: body.currency !== undefined ? String(body.currency) : existing.currency,
+        currency: existing.currency,
         validFrom: body.validFrom !== undefined ? (body.validFrom || null) : existing.validFrom,
         validUntil: body.validUntil !== undefined ? (body.validUntil || null) : existing.validUntil,
       };
+      const nextActive = body.isActive !== undefined ? Boolean(body.isActive) : existing.isActive;
 
-      const validation = await validateShippingRouteRateInput(tx, merged, { excludeRateId: id });
+      const validation = await validateShippingRouteRateInput(tx, merged, { excludeRateId: id, isActive: nextActive });
       if (!('ok' in validation)) {
         throw new AdminRequestError(400, validation.error);
       }
 
       const updateData: any = {
-        routeId: merged.routeId,
-        serviceId: merged.serviceId,
         minWeightKg: String(merged.minWeightKg),
         maxWeightKg: String(merged.maxWeightKg),
         amount: String(merged.amount),
-        currency: merged.currency.trim().toUpperCase(),
         validFrom: merged.validFrom ? new Date(merged.validFrom) : null,
         validUntil: merged.validUntil ? new Date(merged.validUntil) : null,
+        isActive: nextActive,
         updatedAt: new Date(),
       };
-      if (body.isActive !== undefined) updateData.isActive = Boolean(body.isActive);
 
       await tx.update(shippingRouteRates).set(updateData).where(eq(shippingRouteRates.id, id));
       const [row] = await tx.select().from(shippingRouteRates).where(eq(shippingRouteRates.id, id)).limit(1);
-      return row;
+      return { before: existing, after: row };
     });
 
-    await writeRealAudit(req, 'admin.shipping_route_rate.updated', 'shipping_route_rates', id, updated);
-    return res.json({ success: true, message: 'Tarifa atualizada com sucesso.', data: updated });
+    await writeRealAudit(req, 'admin.shipping_route_rate.updated', 'shipping_route_rates', id, { before, after });
+    return res.json({ success: true, message: 'Tarifa atualizada com sucesso.', data: after });
   } catch (error) {
     return sendAdminError(res, error);
   }

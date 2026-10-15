@@ -384,14 +384,27 @@ export type ShippingRouteRateValidationResult =
 export async function validateShippingRouteRateInput(
   executor: any,
   input: ShippingRouteRateInput,
-  opts?: { excludeRateId?: string }
+  opts?: { excludeRateId?: string; isActive?: boolean }
 ): Promise<ShippingRouteRateValidationResult> {
   const weightError = validateWeightRange(input);
   if (weightError) return { error: weightError };
+  // limites das colunas numeric(8,3) / numeric(12,2): nunca deixar estourar para um erro 500 do banco
+  if (Number(input.maxWeightKg) > 99999) return { error: 'MAX_WEIGHT_INVALID: maxWeightKg deve ser no máximo 99999 kg.' };
 
   const amount = Number(input.amount);
   if (input.amount === undefined || input.amount === null || isNaN(amount) || amount < 0) {
     return { error: 'AMOUNT_INVALID: amount deve ser um número maior ou igual a 0.' };
+  }
+  if (amount > 9999999999) return { error: 'AMOUNT_INVALID: amount excede o valor máximo permitido.' };
+
+  // vigência: datas válidas e o fim estritamente depois do início (validUntil é exclusivo: a tarifa vale para t < validUntil)
+  const from = input.validFrom ? new Date(input.validFrom) : null;
+  const until = input.validUntil ? new Date(input.validUntil) : null;
+  if ((from && isNaN(from.getTime())) || (until && isNaN(until.getTime()))) {
+    return { error: 'VALIDITY_INVALID: validFrom/validUntil devem ser datas válidas.' };
+  }
+  if (from && until && until.getTime() <= from.getTime()) {
+    return { error: 'VALIDITY_INVALID: validUntil deve ser posterior a validFrom.' };
   }
 
   if (!input.currency || !String(input.currency).trim()) {
@@ -416,6 +429,9 @@ export async function validateShippingRouteRateInput(
       error: `CURRENCY_MISMATCH: a moeda "${input.currency}" não corresponde à moeda do mercado ${route.countryCode} (${countryRow.currency}).`,
     };
   }
+
+  // uma tarifa que fica INATIVA não participa de nenhuma cotação: não há sobreposição a validar (guardar uma tarifa inativa é livre)
+  if (opts?.isActive === false) return { ok: true, route, service };
 
   const existingActiveRates = await executor
     .select()
