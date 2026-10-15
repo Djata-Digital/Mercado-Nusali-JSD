@@ -177,8 +177,9 @@ async function main() {
   report('B. qty maior (peso total cruza para faixa 1-5kg) -> preview 400 (faixa correta segundo F3)', resultB.ok === true && (resultB as any).available === true && (resultB as any).shippingChargedToBuyer === 400, resultB);
 
   // ===========================================================================
-  // C — 2 linhas do MESMO seller -> soma aditiva (mesma semântica de
-  // computeSmartFulfillmentFreightRes/F6.2: nunca consolidação de pacote).
+  // C — 2 linhas do MESMO seller/origem -> UMA expedição (Etapa D do checkout:
+  // consolidação de peso): 0,2 + 0,2 = 0,4 kg, faixa [0,1) = 200 (antes: soma
+  // aditiva 200+200 = 400, que cobrava duas vezes o mesmo volume).
   // ===========================================================================
   const productA2: any = await makeProduct(sellerA, storeA.storeId, 'Produto A2', 0.2);
   await insertInventory({ sellerId: sellerA.sellerId, productId: productA2.id, locationType: 'SELLER_LOCATION', fulfillmentLocationId: storeA.floc.id, quantityOnHand: 100 });
@@ -186,7 +187,7 @@ async function main() {
     destinationShippingSectorId: bissauSector.id,
     items: [{ productId: productA.id, quantity: 1 }, { productId: productA2.id, quantity: 1 }],
   }, db);
-  report('C. 2 linhas mesmo seller (200+200) -> soma aditiva 400, sem consolidação de pacote', resultC.ok === true && (resultC as any).available === true && (resultC as any).shippingChargedToBuyer === 400, resultC);
+  report('C. 2 linhas mesmo seller/origem (0,2+0,2 kg) -> UMA expedição consolidada: faixa do peso total = 200', resultC.ok === true && (resultC as any).available === true && (resultC as any).shippingChargedToBuyer === 200, resultC);
   report('C2. 2 linhas mesmo seller -> UM único grupo em `sellers` (mesmo sellerId)', resultC.ok === true && (resultC as any).sellers.length === 1);
 
   // ===========================================================================

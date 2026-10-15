@@ -57,6 +57,7 @@ import { resolveFulfillmentCandidates } from '../shipping/fulfillmentCandidateRe
 import { reserveFulfillmentInventory } from '../inventory/fulfillmentReservationService.js';
 import { CheckoutShippingError, classifyRejectedCandidates, shippingFailureMessage } from '../shipping/checkoutShippingErrors.js';
 import { lockAndVerifyRates, assertShippingQuoteMatches } from '../shipping/shippingQuoteGuard.js';
+import { planShipments } from '../shipping/shipmentPlannerService.js';
 
 export interface CreateOrderRequestDTO {
   userId: string;
@@ -525,6 +526,8 @@ export class OrderService {
         unitWeightKg?: number | null;
         totalWeightKg?: number | null;
         shippingAmount?: number | null;
+        /** candidate F4 escolhido para a linha (entrada do planejador de expedições — Etapa D); nunca persistido */
+        candidateForPlan?: any;
       }> = [];
 
       let primarySellerId: string | null = null;
@@ -704,6 +707,7 @@ export class OrderService {
           unitWeightKg: bestCandidate.unitWeightKg,
           totalWeightKg: bestCandidate.totalWeightKg,
           shippingAmount: bestCandidate.shippingAmount,
+          candidateForPlan: bestCandidate,
         });
       }
 
@@ -1206,6 +1210,32 @@ export class OrderService {
           else bySeller.set(key, { sellerId, commercialStoreId, items: [item] });
         }
 
+        // Etapa D — CONSOLIDAÇÃO DE PESO por expedição (mesmo planejador do preview): linhas do mesmo grupo (vendedor + loja comercial)
+        // que saem do MESMO local de expedição para o mesmo destino/serviço formam um volume; a tarifa é a da faixa do peso TOTAL e o
+        // valor é repartido por peso entre as linhas (a soma por linha == valor da expedição). Escrita ainda não houve: só leitura (F3).
+        const shipmentPlanResult = await planShipments(tx, {
+          countryCode: destinationCountry,
+          destinationSectorId: destinationShippingSectorId as string,
+          serviceCode: selectedServiceCode,
+          items: verifiedItems.map((item, idx) => ({
+            key: String(idx),
+            groupKey: String(item.sellerId) + '::' + (item.commercialStoreId ?? LEGACY_NO_STORE_GROUP_KEY),
+            candidate: item.candidateForPlan as any,
+          })),
+        });
+        if (shipmentPlanResult.ok === false) {
+          if (selectedServiceCode) {
+            throw new CheckoutShippingError('SHIPPING_SERVICE_UNAVAILABLE', `O serviço de entrega escolhido (${selectedServiceCode}) não está disponível: ${shipmentPlanResult.message}`, 409, { serviceCode: selectedServiceCode, reason: shipmentPlanResult.code });
+          }
+          throw new CheckoutShippingError(shipmentPlanResult.code as any, shipmentPlanResult.message, 409);
+        }
+        const shipmentPlan = shipmentPlanResult.plan;
+        verifiedItems.forEach((item, idx) => {
+          const shipment = shipmentPlan.shipmentByItemKey.get(String(idx))!;
+          item.shippingAmount = shipmentPlan.amountByItemKey.get(String(idx))!;
+          item.shippingRateId = shipment.rateId;
+        });
+
         // Fase 1: calcula (somente leitura) o financeiro de CADA vendedor
         // ANTES de qualquer escrita — precisamos da soma para criar o
         // purchase_group já com o total certo. FASE D16-F6.2: quando o
@@ -1263,7 +1293,7 @@ export class OrderService {
         }
         await lockAndVerifyRates(
           tx,
-          verifiedItems.map((i) => ({ rateId: String(i.shippingRateId || ''), amount: Number(i.shippingAmount) || 0, weightKg: Number(i.totalWeightKg) || 0, currency })),
+          shipmentPlan.shipments.map((sh) => ({ rateId: sh.rateId, amount: sh.amount, weightKg: sh.totalWeightKg, currency })),
           selectedServiceCode,
         );
         assertShippingQuoteMatches(
