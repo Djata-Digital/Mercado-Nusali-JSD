@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import { OrderService } from './orderService.js';
 import { requireAuth, AuthRequest } from '../auth/authMiddleware.js';
 import { z } from 'zod';
-import { mapOrderCreationError } from '../shipping/checkoutShippingErrors.js';
+import { mapOrderCreationError, parseShippingSelection } from '../shipping/checkoutShippingErrors.js';
 
 export const orderRouter = Router();
 
@@ -43,8 +43,11 @@ orderRouter.post(['/', '/orders'], requireAuth, async (req: AuthRequest, res: Re
     // sellerId do cliente. orderService.ts é quem resolve/trava/revalida
     // tudo contra o grupo real do pedido, dentro da transação de checkout.
     const { shippingAddress, addressId, recipientOverride, paymentMethod, notes, currency, countryCode, storeCoupons } = req.body ?? {};
+    // serviço de entrega escolhido (+ o total de frete que o cliente viu): só identificam a escolha; o servidor recalcula o preço
+    const shippingSelection = parseShippingSelection(req.body, { required: false });
     const order = await OrderService.createOrderFromCart({
       userId: req.user!.id,
+      shippingSelection,
       shippingAddress,
       addressId,
       recipientOverride,

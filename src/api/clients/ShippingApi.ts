@@ -32,6 +32,7 @@ export class ShippingApi {
   static async previewCart(payload: {
     destinationShippingSectorId?: string | null;
     items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
+    serviceCode?: string | null;
   }): Promise<ApiResponse<any>> {
     return apiClient.post('/shipping/preview-cart', payload);
   }

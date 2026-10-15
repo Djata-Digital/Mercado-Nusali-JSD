@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCart } from '../hooks/useCart';
 import { useCreateOrder } from '../hooks/useOrders';
@@ -25,7 +25,9 @@ import { useCountries } from '../hooks/useCountries';
 import { useAuth } from '../context/AuthContext';
 import { PixPaymentModal } from './PixPaymentModal';
 import { convertToBRL } from '../utils/pixEngine';
-import { ShippingService, CartShippingPreviewData } from '../services/shippingService';
+import { ShippingService, CartShippingPreviewData, CartShippingServiceOption } from '../services/shippingService';
+import { ShippingServiceSelector } from './checkout/ShippingServiceSelector';
+import { shippingServiceLabel } from '../utils/shippingServiceLabels';
 import {
   resolveCheckoutAddress,
   SavedAddressLike,
@@ -302,23 +304,45 @@ export const CheckoutView: React.FC = () => {
       ? { mode: 'purchase_group', purchaseGroupId: confirmedOrder.purchaseGroup.id }
       : { mode: 'legacy', orderId: confirmedOrder?.id || '' };
 
-  const [freightQuote, setFreightQuote] = useState<{
-    shippingCost: number;
-    shippingChargedToBuyer: number;
-    shippingSellerSubsidy: number;
-    available: boolean;
-    loading: boolean;
+  // Serviços de entrega (Economy/Standard/Express...): o SERVIDOR calcula o preço real de cada um; aqui só se guarda a escolha (o código do
+  // serviço) — nunca um preço. A escolha sobrevive à navegação do checkout (sessionStorage) mas é SEMPRE revalidada a cada cotação.
+  const SERVICE_STORAGE_KEY = 'nusali_checkout_shipping_service';
+  const readStoredService = (): string | null => {
+    try { return typeof window !== 'undefined' ? window.sessionStorage.getItem(SERVICE_STORAGE_KEY) : null; } catch { return null; }
+  };
+  const writeStoredService = (code: string | null) => {
+    try {
+      if (typeof window === 'undefined') return;
+      if (code) window.sessionStorage.setItem(SERVICE_STORAGE_KEY, code); else window.sessionStorage.removeItem(SERVICE_STORAGE_KEY);
+    } catch { /* sem armazenamento: a escolha só vale nesta tela */ }
+  };
+  const [freightRaw, setFreightRaw] = useState<{ loading: boolean; ready: boolean; options: CartShippingServiceOption[]; error?: string }>({ loading: false, ready: false, options: [] });
+  const [selectedServiceCode, setSelectedServiceCode] = useState<string | null>(readStoredService);
+  const selectedServiceRef = useRef<string | null>(selectedServiceCode);
+  const [serviceNotice, setServiceNotice] = useState<string | null>(null);
+  const chooseService = (code: string | null) => {
+    selectedServiceRef.current = code;
+    setSelectedServiceCode(code);
+    setServiceNotice(null);
+    writeStoredService(code);
+  };
+  const selectedOption = useMemo(
+    () => freightRaw.options.find((o) => o.code === selectedServiceCode && o.available) ?? null,
+    [freightRaw.options, selectedServiceCode],
+  );
+  const freightQuote = {
+    loading: freightRaw.loading,
     /** false até o PRIMEIRO cálculo terminar: antes disso o frete nunca aparece como disponível nem como grátis */
-    ready: boolean;
-    error?: string;
-  }>({
-    shippingCost: 0,
-    shippingChargedToBuyer: 0,
-    shippingSellerSubsidy: 0,
-    available: false,
-    loading: false,
-    ready: false,
-  });
+    ready: freightRaw.ready,
+    /** há um serviço ESCOLHIDO e disponível (o frete do resumo é o dele) */
+    available: !!selectedOption,
+    /** há serviços disponíveis, mas a pessoa ainda não escolheu (ou a escolha deixou de valer) */
+    needsSelection: freightRaw.ready && !freightRaw.loading && !selectedOption && freightRaw.options.some((o) => o.available),
+    shippingCost: selectedOption?.shippingCost ?? 0,
+    shippingChargedToBuyer: selectedOption?.shippingChargedToBuyer ?? 0,
+    shippingSellerSubsidy: selectedOption?.shippingSellerSubsidy ?? 0,
+    error: freightRaw.error as string | undefined,
+  };
 
   const originCountry = (cart[0]?.product?.originCountry || cart[0]?.product?.countryCode || 'BR').toUpperCase();
   // FASE D16-H1 — `destCountry` é SOMENTE o `country` do topo do checkout
@@ -336,34 +360,21 @@ export const CheckoutView: React.FC = () => {
   // selecionado (cadastrado OU outro endereço) — nunca inferido de
   // country/texto, e recalcula sempre que o setor efetivo muda (trocar de
   // endereço, trocar de setor no formulário de outro endereço, etc.).
+  const [quoteVersion, setQuoteVersion] = useState(0);
   React.useEffect(() => {
     let isMounted = true;
     const fetchFreight = async () => {
       if (cart.length === 0) return;
-      setFreightQuote((prev) => ({ ...prev, loading: true, ready: false, available: false, error: undefined }));
+      setFreightRaw((prev) => ({ ...prev, loading: true, ready: false, error: undefined }));
 
       if (!resolvedShippingSectorId) {
-        if (isMounted) {
-          setFreightQuote({
-            shippingCost: 0,
-            shippingChargedToBuyer: 0,
-            shippingSellerSubsidy: 0,
-            available: false,
-            loading: false,
-            ready: true,
-            error: 'Selecione/atualize seu endereço de entrega para calcular o frete.',
-          });
-        }
+        if (isMounted) setFreightRaw({ loading: false, ready: true, options: [], error: 'Selecione/atualize seu endereço de entrega para calcular o frete.' });
         return;
       }
 
-      // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um
-      // vendedor; cada vendedor é uma entrega/child order independente no
-      // backend (orderService.createOrderFromCart), com seu PRÓPRIO frete.
-      // getCartPreview agrupa por sellerId (F4/F3) e soma 1 cotação por
-      // grupo — NUNCA 1 cotação para o carrinho inteiro. Fail-closed: se
-      // qualquer grupo falhar, o resultado inteiro vem available:false
-      // (nunca um total parcial/subestimado).
+      // Fix (diagnóstico "R$45 -> R$60") — o carrinho pode ter mais de um vendedor; cada vendedor é uma entrega/child order
+      // independente no backend. A cotação devolve, POR SERVIÇO, o total do carrinho inteiro (fail-closed: um serviço só aparece
+      // disponível se todas as expedições têm tarifa válida para ele).
       const res = await ShippingService.getCartPreview({
         destinationShippingSectorId: resolvedShippingSectorId,
         items: cart.map((item) => ({
@@ -377,37 +388,17 @@ export const CheckoutView: React.FC = () => {
 
       if (res.success && res.data) {
         const data: CartShippingPreviewData = res.data;
-        if (data.available === true) {
-          setFreightQuote({
-            shippingCost: data.shippingCost,
-            shippingChargedToBuyer: data.shippingChargedToBuyer,
-            shippingSellerSubsidy: data.shippingSellerSubsidy,
-            available: true,
-            loading: false,
-            ready: true,
-          });
-        } else {
-          const unavailableMessage: string = data.message;
-          setFreightQuote({
-            shippingCost: 0,
-            shippingChargedToBuyer: 0,
-            shippingSellerSubsidy: 0,
-            available: false,
-            loading: false,
-            ready: true,
-            error: unavailableMessage,
-          });
+        const options: CartShippingServiceOption[] = Array.isArray((data as any).services) ? (data as any).services : [];
+        // a escolha só continua valendo se o serviço AINDA está disponível — nunca é trocada por outro em silêncio
+        const kept = selectedServiceRef.current;
+        if (kept && !options.some((o) => o.code === kept && o.available)) {
+          const label = shippingServiceLabel(kept, options.find((o) => o.code === kept)?.name).title;
+          chooseService(null);
+          setServiceNotice(`O serviço ${label} deixou de estar disponível para este carrinho e destino. Escolha outro serviço para continuar.`);
         }
+        setFreightRaw({ loading: false, ready: true, options, error: data.available === true ? undefined : (data as any).message });
       } else {
-        setFreightQuote({
-          shippingCost: 0,
-          shippingChargedToBuyer: 0,
-          shippingSellerSubsidy: 0,
-          available: false,
-          loading: false,
-            ready: true,
-          error: res.error?.message || 'Frete não disponível para o endereço informado.',
-        });
+        setFreightRaw({ loading: false, ready: true, options: [], error: res.error?.message || 'Frete não disponível para o endereço informado.' });
       }
     };
 
@@ -416,7 +407,7 @@ export const CheckoutView: React.FC = () => {
       isMounted = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedShippingSectorId, cart.length, cartTotal]);
+  }, [resolvedShippingSectorId, cart.length, cartTotal, quoteVersion]);
 
   const customsDuty = 0; // Removed 8% fake tax - national is 0, international is pending
   const shippingFee = freightQuote.shippingChargedToBuyer;
@@ -489,6 +480,9 @@ export const CheckoutView: React.FC = () => {
           paymentMethod: paymentMethod,
           currency: orderCurrency,
           countryCode: country,
+          // Escolha do cliente: identifica o serviço e o frete que ele viu — NUNCA define o preço (o servidor recalcula e confere)
+          shippingServiceCode: selectedServiceCode,
+          expectedShippingChargedToBuyer: freightQuote.shippingChargedToBuyer,
           // FASE D18-C3.4 — só a intenção {storeId, code}; o backend resolve
           // seller/store reais do grupo e revalida/recalcula tudo do zero.
           storeCoupons: toStoreCouponsPayload(),
@@ -524,6 +518,7 @@ export const CheckoutView: React.FC = () => {
         // carrinho, que o backend já apagou) é a fonte de verdade para o
         // restante desta tentativa.
         setConfirmedOrder(createdOrder);
+        writeStoredService(null); // compra concluída: a escolha de serviço não vale para a próxima
       }
 
       // Fase M1-D2 — resolveCheckoutPaymentTarget é a ÚNICA função que lê
@@ -628,7 +623,14 @@ export const CheckoutView: React.FC = () => {
       setIsProcessing(false);
     } catch (err: any) {
       console.error('Checkout failed:', err);
-      const msg = err?.response?.data?.error?.message || err?.message || 'Erro ao finalizar pedido.';
+      const apiError = err?.response?.data?.error;
+      const msg = apiError?.message || err?.message || 'Erro ao finalizar pedido.';
+      const code: string = apiError?.code || '';
+      if (code === 'SHIPPING_SERVICE_UNAVAILABLE' || code === 'SHIPPING_SERVICE_NOT_AVAILABLE' || code === 'SHIPPING_RATE_NOT_AVAILABLE') {
+        // o serviço escolhido deixou de valer: limpa a escolha, recota e pede nova escolha (nunca troca por outro)
+        chooseService(null);
+        setQuoteVersion((v) => v + 1);
+      }
       setErrorMessage(msg);
       setIsProcessing(false);
     }
@@ -1034,10 +1036,26 @@ export const CheckoutView: React.FC = () => {
             </div>
           </div>
 
-          {/* Step 2: Payment Methods */}
+          {/* Step 2: Serviço de entrega — o cliente escolhe Economy/Standard/Express antes de confirmar; preços calculados pelo servidor */}
+          <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xs space-y-4" data-testid="checkout-shipping-section">
+            <h2 className="text-sm font-bold text-gray-900 flex items-center gap-2 uppercase tracking-wider">
+              <Truck className="w-5 h-5 text-emerald-600" /> 2. Serviço de Entrega
+            </h2>
+            <ShippingServiceSelector
+              options={freightRaw.options}
+              selectedCode={selectedServiceCode}
+              onSelect={(code) => chooseService(code)}
+              loading={freightRaw.loading || !freightRaw.ready}
+              unavailableMessage={freightRaw.error || null}
+              notice={serviceNotice}
+              formatAmount={(amount) => formatPrice(amount, orderCurrency).formatted}
+            />
+          </div>
+
+          {/* Step 3: Payment Methods */}
           <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-xs space-y-4">
             <h2 className="text-sm font-bold text-gray-900 flex items-center gap-2 uppercase tracking-wider">
-              <CreditCard className="w-5 h-5 text-emerald-600" /> 2. Método de Pagamento ({countriesConfig[country].name})
+              <CreditCard className="w-5 h-5 text-emerald-600" /> 3. Método de Pagamento ({countriesConfig[country].name})
             </h2>
 
             {/* Payment Method Selector Grid */}

@@ -136,3 +136,40 @@ export function mapOrderCreationError(err: any): MappedOrderError {
   if (msg.includes('INSUFFICIENT_STOCK') || msg.includes('Estoque insuficiente')) return { status: 400, code: 'INSUFFICIENT_STOCK', message: msg };
   return { status: 400, code: 'ORDER_CREATION_FAILED', message: msg };
 }
+
+/**
+ * Entre vários motivos de indisponibilidade (um por serviço), o mais acionável: problemas de política de frete (valem para qualquer
+ * serviço) primeiro; depois a mesma prioridade do classificador (rota > tarifa > serviço > setor de origem > peso > origem > estoque).
+ */
+export function mostActionableFailureCode(codes: string[]): string {
+  if (codes.length === 0) return 'SHIPPING_RATE_NOT_AVAILABLE';
+  const policy = codes.find((c) => !(PRIORITY as string[]).includes(c));
+  if (policy) return policy;
+  return PRIORITY.find((c) => codes.includes(c)) ?? codes[0];
+}
+
+/**
+ * Escolha de frete enviada pelo cliente no corpo do pedido: SÓ o código do serviço e o total de frete que ele viu na tela.
+ * Nenhum preço é aceito como autoridade — o servidor recalcula e compara.
+ */
+export function parseShippingSelection(body: any, opts: { required: boolean }): { serviceCode: string; expectedShippingChargedToBuyer: number | null } | null {
+  const rawCode = body?.shippingServiceCode;
+  const rawExpected = body?.expectedShippingChargedToBuyer;
+  if (rawCode === undefined || rawCode === null || rawCode === '') {
+    if (opts.required) throw new CheckoutShippingError('SHIPPING_SERVICE_REQUIRED', 'Escolha o serviço de entrega antes de confirmar a compra.', 400);
+    return null;
+  }
+  const serviceCode = String(rawCode).trim().toUpperCase();
+  if (!/^[A-Z0-9_]{2,50}$/.test(serviceCode)) {
+    throw new CheckoutShippingError('SHIPPING_SERVICE_INVALID', 'Serviço de entrega inválido. Escolha um dos serviços apresentados.', 400);
+  }
+  let expected: number | null = null;
+  if (rawExpected !== undefined && rawExpected !== null && rawExpected !== '') {
+    const n = Number(rawExpected);
+    if (!Number.isFinite(n) || n < 0) throw new CheckoutShippingError('SHIPPING_CONFIRMATION_INVALID', 'O valor de frete confirmado é inválido. Atualize a página e confirme novamente.', 400);
+    expected = Math.round(n * 100) / 100;
+  } else if (opts.required) {
+    throw new CheckoutShippingError('SHIPPING_CONFIRMATION_REQUIRED', 'Confirme o valor do frete apresentado antes de concluir a compra.', 400);
+  }
+  return { serviceCode, expectedShippingChargedToBuyer: expected };
+}

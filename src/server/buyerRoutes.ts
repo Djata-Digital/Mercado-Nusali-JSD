@@ -54,7 +54,7 @@ import { postBuyerDisputeMessage, DisputeMessageValidationError } from './module
 // potencialmente divergente).
 import { ACTIVE_DISPUTE_STATUSES } from './adminRoutes.js';
 import { updateBuyerTaxId, BuyerProfileValidationError } from './modules/buyer/buyerProfileService.js';
-import { mapOrderCreationError } from './modules/shipping/checkoutShippingErrors.js';
+import { mapOrderCreationError, parseShippingSelection } from './modules/shipping/checkoutShippingErrors.js';
 import { applyKycReverification, loadApprovedSellerIdentity, reverificationRequiredPayload } from './modules/seller/kycService.js';
 import { detectIdentityChanges, type IdentityChange } from '../utils/sellerAccountRules.js';
 import { isProductAvailableForCountry, eligibilityReason } from './modules/catalog/productEligibilityService.js';
@@ -1904,8 +1904,10 @@ buyerRouter.get('/orders/:id', requireAuth, async (req: AuthRequest, res: Respon
 buyerRouter.post('/orders', requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const { shippingAddress, addressId, paymentMethod, notes, currency, countryCode } = req.body ?? {};
+    const shippingSelection = parseShippingSelection(req.body, { required: false });
     const order = await OrderService.createOrderFromCart({
       userId: req.user!.id,
+      shippingSelection,
       shippingAddress,
       addressId,
       paymentMethod: paymentMethod || null,

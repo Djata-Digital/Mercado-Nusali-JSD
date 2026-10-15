@@ -146,7 +146,7 @@ apiRouter.get('/shipping/preview', async (req: Request, res: Response) => {
 // removidos por zero-consumer audit (D16-I1/D16-I4).
 apiRouter.post('/shipping/preview-cart', async (req: Request, res: Response) => {
   try {
-    const { destinationShippingSectorId, items } = req.body ?? {};
+    const { destinationShippingSectorId, items, serviceCode } = req.body ?? {};
 
     if (!Array.isArray(items)) {
       return res.status(400).json({
@@ -157,6 +157,7 @@ apiRouter.post('/shipping/preview-cart', async (req: Request, res: Response) => 
 
     const result = await resolveCartShippingPreview({
       destinationShippingSectorId: destinationShippingSectorId || null,
+      serviceCode: typeof serviceCode === 'string' && serviceCode.trim() ? serviceCode.trim().toUpperCase() : null,
       items: items.map((item: any) => ({
         productId: item?.productId,
         variantId: item?.variantId || null,
@@ -176,19 +177,23 @@ apiRouter.post('/shipping/preview-cart', async (req: Request, res: Response) => 
       const unavailableMessage = result.message;
       return res.json({
         success: true,
-        data: { available: false, code: unavailableCode, message: unavailableMessage },
+        data: { available: false, code: unavailableCode, message: unavailableMessage, services: result.services ?? [] },
       });
     }
 
+    // Campos de topo = o serviço pedido (ou o mais barato, "a partir de"); `services` traz TODOS os serviços ativos com o preço
+    // real calculado pelo servidor ou o motivo de indisponibilidade — o cliente escolhe um, nunca define o preço.
     return res.json({
       success: true,
       data: {
         available: true,
+        serviceCode: result.serviceCode,
         shippingChargedToBuyer: result.shippingChargedToBuyer,
         shippingCost: result.shippingCost,
         shippingSellerSubsidy: result.shippingSellerSubsidy,
         currency: result.currency,
         sellers: result.sellers,
+        services: result.services,
       },
     });
   } catch (err: any) {

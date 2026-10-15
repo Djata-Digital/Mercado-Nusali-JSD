@@ -23,11 +23,13 @@
  * o `bestCandidate` que F4 já escolhe por custo real de frete.
  */
 import { getDb } from '../../../db/index.js';
-import { products, productVariants, shippingSectors, sellers, categories, platformSettings } from '../../../db/schema.js';
-import { eq, inArray } from 'drizzle-orm';
-import { resolveFulfillmentCandidates, type RejectedFulfillmentCandidate } from './fulfillmentCandidateResolverService.js';
+import { products, productVariants, shippingSectors, shippingServices, sellers, categories, platformSettings } from '../../../db/schema.js';
+import { and, eq, inArray } from 'drizzle-orm';
+import { resolveFulfillmentCandidates, type FulfillmentCandidate, type RejectedFulfillmentCandidate } from './fulfillmentCandidateResolverService.js';
+import { planShipments, rawCostByGroup } from './shipmentPlannerService.js';
+import { compareShippingServices } from '../../../utils/shippingServiceLabels.js';
 import { validateInventoryVariantConsistency } from '../logistics/fulfillmentLocationService.js';
-import { classifyRejectedCandidates, shippingFailureMessage, type ShippingFailureCode } from './checkoutShippingErrors.js';
+import { classifyRejectedCandidates, mostActionableFailureCode, shippingFailureMessage, type ShippingFailureCode } from './checkoutShippingErrors.js';
 import {
   resolveShippingPayerPolicy,
   checkSellerNetForShippingShare,
@@ -101,6 +103,8 @@ export type ShippingPreviewResult = ShippingPreviewAvailable | ShippingPreviewUn
 // único permanece idêntico ao de D16-G2) para permitir agrupar por
 // vendedor no preview de carrinho (D16-G3) sem duplicar a resolução F4/F3.
 interface ShippingPreviewLineAvailable extends ShippingPreviewRawShape {
+  /** origem escolhida pelo F4 para esta linha (e para o serviço pedido) — usada pelo planejamento das expedições */
+  candidate: FulfillmentCandidate;
   sellerId: string;
   // FASE D18-B2.2 - storeId aqui e a FULFILLMENT store (bc.storeId, null em
   // fulfillment por HUB). commercialStoreId e a loja a qual o produto
@@ -128,7 +132,7 @@ function classifyUnavailableReason(rejected: RejectedFulfillmentCandidate[]): Sh
  * carrinho/checkout, D16-G3) — uma única implementação da resolução de
  * fulfillment, nunca duplicada.
  */
-async function resolveShippingPreviewLine(input: ShippingPreviewInput, db: any): Promise<ShippingPreviewLineResult> {
+async function resolveShippingPreviewLine(input: ShippingPreviewInput, db: any, serviceCode?: string | null): Promise<ShippingPreviewLineResult> {
   if (!input.productId) {
     return { ok: false, httpStatus: 400, code: 'PRODUCT_ID_REQUIRED', message: 'productId é obrigatório.' };
   }
@@ -184,6 +188,7 @@ async function resolveShippingPreviewLine(input: ShippingPreviewInput, db: any):
     quantity,
     destinationShippingSectorId: input.destinationShippingSectorId,
     countryCode: sectorRow.countryCode,
+    serviceCode: serviceCode || undefined,
   }, db);
 
   if (f4Result.ok === false) {
@@ -214,6 +219,7 @@ async function resolveShippingPreviewLine(input: ShippingPreviewInput, db: any):
     serviceCode: bc.serviceCode,
     serviceName: bc.serviceName,
     fulfillmentType: bc.locationType,
+    candidate: bc,
     sellerId: product.sellerId,
     storeId: bc.storeId || null,
     commercialStoreId: product.storeId || null,
@@ -253,7 +259,7 @@ export async function resolveShippingPreview(input: ShippingPreviewInput, execut
   // commercialStoreId (só usados internamente aqui e pelo preview de
   // carrinho, D16-G3, para agrupar por vendedor) — só adiciona os campos
   // pós-política (D18-C2.10).
-  const { sellerId, storeId, commercialStoreId, ...rawPublicShape } = line;
+  const { sellerId, storeId, commercialStoreId, candidate, ...rawPublicShape } = line;
   return {
     ...rawPublicShape,
     shippingChargedToBuyer: policy.shippingChargedToBuyer,
@@ -277,6 +283,8 @@ export interface CartShippingPreviewLineInput {
 export interface CartShippingPreviewInput {
   destinationShippingSectorId?: string | null;
   items: CartShippingPreviewLineInput[];
+  /** serviço escolhido (Economy/Standard/Express...); ausente = campos de topo do serviço mais barato ("a partir de") */
+  serviceCode?: string | null;
 }
 
 export interface CartShippingPreviewSellerBreakdown {
@@ -286,30 +294,39 @@ export interface CartShippingPreviewSellerBreakdown {
   currency: string;
 }
 
+/** Um serviço de entrega do carrinho: preço real calculado pelo servidor (XOF) ou o motivo de não estar disponível. */
+export interface CartShippingServiceOption {
+  code: string;
+  name: string;
+  available: boolean;
+  shippingChargedToBuyer?: number;
+  shippingCost?: number;
+  shippingSellerSubsidy?: number;
+  currency?: string;
+  sellers?: CartShippingPreviewSellerBreakdown[];
+  unavailableCode?: ShippingPreviewUnavailable['code'];
+  unavailableMessage?: string;
+}
+
 export interface CartShippingPreviewAvailable {
   ok: true;
   available: true;
-  // Valor efetivamente cobrado do comprador (soma por vendedor, já com
-  // resolveShippingPayerPolicy aplicada por grupo — MESMA função e MESMA
-  // semântica que orderService.ts/F6.2 usa).
+  /** serviço a que os campos abaixo se referem (o pedido, ou o mais barato quando nenhum foi pedido) */
+  serviceCode: string;
   shippingChargedToBuyer: number;
-  // Soma bruta das cotações F3/F4 (antes da política de pagador) — útil
-  // para depuração/exibição de subsídio, nunca o valor cobrado em si.
   shippingCost: number;
   shippingSellerSubsidy: number;
   currency: string;
   sellers: CartShippingPreviewSellerBreakdown[];
+  services: CartShippingServiceOption[];
 }
 
 export interface CartShippingPreviewUnavailable {
   ok: true;
   available: false;
-  // FASE D18-B1 — códigos de "política de frete não aplicável" (mesmos que o
-  // checkout usa ao bloquear o pedido): o frontend já trata qualquer
-  // available:false como "checkout bloqueado" e exibe `message`.
-  code: ShippingFailureCode
-    | 'SELLER_SHIPPING_POLICY_INVALID' | 'SELLER_SUBSIDY_EXCEEDS_NET' | 'SHIPPING_FUNDING_INVARIANT_VIOLATION';
+  code: ShippingPreviewUnavailable['code'];
   message: string;
+  services?: CartShippingServiceOption[];
 }
 
 export interface CartShippingPreviewInvalid {
@@ -388,26 +405,17 @@ async function resolveSellerGroupNetInputs(
 }
 
 /**
- * Preview agregado de frete para carrinho/checkout — reaproveita
- * resolveShippingPreviewLine (mesmo núcleo F4/F3 do preview de produto
- * único) uma vez POR LINHA do carrinho, exatamente como orderService.ts
- * (F6.2, multiSellerCheckoutEnabled=true) faz: 1 chamada F4 por linha
- * (productId+variantId+quantity), NUNCA consolidação/split entre linhas.
- * Agrupa por sellerId (mesma chave de child order do F6.2), soma
- * shippingAmount aditivamente por grupo (sem otimização de pacote nesta
- * fase) e aplica resolveShippingPayerPolicy por grupo — a MESMA função que
- * F6.2 usa, garantindo que o valor mostrado aqui seja idêntico ao que
- * seria realmente cobrado na confirmação.
+ * Preview agregado de frete para carrinho/checkout, POR SERVIÇO DE ENTREGA (Economy/Standard/Express...). Para cada serviço ATIVO do
+ * país de destino, resolve F4/F3 uma vez por linha do carrinho (sempre pelo MESMO serviço: a escolha do cliente vale para todas as
+ * expedições do carrinho), planeja as expedições (shipmentPlannerService — o mesmo planejamento que a criação do pedido usa) e aplica
+ * a política de pagador por grupo (vendedor + loja comercial) — a MESMA resolveShippingPayerPolicy do pedido. Resultado: o valor mostrado
+ * para cada serviço é exatamente o que seria cobrado.
  *
- * Fail-closed: qualquer linha indisponível (produto/variante/estoque/rota/
- * tarifa) torna o resultado inteiro indisponível — nunca uma soma parcial
- * que subestime o frete real (mesmo espírito de
- * calculateMultiSellerFreight, o motor legado que este preview substitui).
+ * Um serviço só fica "disponível" se TODAS as linhas têm origem com estoque e tarifa válida (rota, faixa de peso, vigência, ativa) para
+ * ele; senão aparece como indisponível com o motivo — nunca com preço inventado e nunca trocado por outro serviço.
  *
- * NUNCA chama F5. NUNCA reserva estoque. NUNCA cria
- * order/inventory_movement/stock_reservation. Sellers são resolvidos
- * INTEIRAMENTE a partir do banco (product.sellerId) — nunca confiados a um
- * campo do payload do cliente.
+ * NUNCA chama F5. NUNCA reserva estoque. NUNCA cria order/inventory_movement/stock_reservation. Sellers são resolvidos INTEIRAMENTE
+ * a partir do banco (product.sellerId).
  */
 export async function resolveCartShippingPreview(input: CartShippingPreviewInput, executor?: any): Promise<CartShippingPreviewResult> {
   const db = executor ?? getDb();
@@ -417,80 +425,139 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
     return { ok: false, httpStatus: 400, code: 'CART_ITEMS_REQUIRED', message: 'O carrinho está vazio.' };
   }
 
-  // Setor de destino é checado ANTES de resolver qualquer linha — nunca uma
-  // tarifa parcial/adivinhada quando o setor nem está definido (seção
-  // "DESTINO" do enunciado — nunca cai silenciosamente no motor legado).
   if (!input.destinationShippingSectorId) {
-    return { ok: true, available: false, code: 'DELIVERY_SECTOR_REQUIRED', message: 'Selecione um endereço de entrega com setor definido para calcular o frete.' };
+    return { ok: true, available: false, code: 'DELIVERY_SECTOR_REQUIRED', message: shippingFailureMessage('DELIVERY_SECTOR_REQUIRED'), services: [] };
   }
 
-  const lineResults = await Promise.all(
-    input.items.map((item) => resolveShippingPreviewLine({
-      productId: item.productId,
-      variantId: item.variantId,
-      quantity: item.quantity,
-      destinationShippingSectorId: input.destinationShippingSectorId,
-    }, db))
-  );
-
-  // Qualquer linha estruturalmente inválida (produto/variante/quantidade
-  // malformados) é um erro imediato — nunca escondida numa soma parcial.
-  const invalid = lineResults.find((r): r is ShippingPreviewInvalid => r.ok === false);
-  if (invalid) return invalid;
-
-  // Fail-closed: qualquer linha indisponível -> resultado inteiro
-  // indisponível (mesma semântica de calculateMultiSellerFreight — nunca
-  // uma soma que ignore silenciosamente o grupo que falhou).
-  const unavailable = lineResults.find((r): r is ShippingPreviewUnavailable => r.ok === true && r.available === false);
-  if (unavailable) {
-    return { ok: true, available: false, code: unavailable.code, message: unavailable.message };
+  const [sectorRow] = await db.select({ countryCode: shippingSectors.countryCode, isActive: shippingSectors.isActive })
+    .from(shippingSectors)
+    .where(eq(shippingSectors.id, input.destinationShippingSectorId))
+    .limit(1);
+  if (!sectorRow || sectorRow.isActive === false) {
+    return { ok: true, available: false, code: 'DELIVERY_SECTOR_REQUIRED', message: 'O setor de entrega selecionado não é válido. Selecione um endereço de entrega novamente.', services: [] };
   }
 
-  const resolvedLines = lineResults as ShippingPreviewLineAvailable[];
+  const activeServices: Array<{ id: string; code: string; name: string }> = (await db
+    .select({ id: shippingServices.id, code: shippingServices.code, name: shippingServices.name })
+    .from(shippingServices)
+    .where(and(eq(shippingServices.countryCode, sectorRow.countryCode), eq(shippingServices.isActive, true))))
+    .sort(compareShippingServices);
+  if (activeServices.length === 0) {
+    return { ok: true, available: false, code: 'SHIPPING_SERVICE_NOT_AVAILABLE', message: 'Nenhum serviço de entrega ativo para este destino.', services: [] };
+  }
 
-  // FASE D18-B2.2 - agrupa por (sellerId, commercialStoreId) - MESMA chave
-  // que orderService.ts usa para separar child orders (bySeller, F6.2/B2.2)
-  // - nunca por sellerId sozinho (um seller pode ter varias lojas, cada uma
-  // com politica propria) e nunca por um valor vindo do frontend. Grupo
-  // legado (commercialStoreId null) usa o mesmo sentinel conceitual do
-  // checkout - nunca se mistura com um grupo de loja real do mesmo seller.
+  const options: CartShippingServiceOption[] = [];
+  for (const svc of activeServices) {
+    const lineResults = await Promise.all(
+      input.items.map((item) => resolveShippingPreviewLine({
+        productId: item.productId,
+        variantId: item.variantId,
+        quantity: item.quantity,
+        destinationShippingSectorId: input.destinationShippingSectorId,
+      }, db, svc.code))
+    );
+
+    const invalid = lineResults.find((r): r is ShippingPreviewInvalid => r.ok === false);
+    if (invalid) return invalid;
+
+    const unavailableLines = lineResults.filter((r): r is ShippingPreviewUnavailable => r.ok === true && r.available === false);
+    if (unavailableLines.length > 0) {
+      const code = mostActionableFailureCode(unavailableLines.map((u) => u.code));
+      const message = unavailableLines.find((u) => u.code === code)!.message;
+      options.push({ code: svc.code, name: svc.name, available: false, unavailableCode: code as any, unavailableMessage: message });
+      continue;
+    }
+
+    const priced = await priceServiceOption(db, svc, lineResults as ShippingPreviewLineAvailable[], input.items, sectorRow.countryCode, input.destinationShippingSectorId);
+    options.push(priced);
+  }
+
+  const availableOptions = options.filter((o) => o.available);
+  const failureSummary = () => {
+    const code = mostActionableFailureCode(options.map((o) => o.unavailableCode as string).filter(Boolean));
+    const message = options.find((o) => o.unavailableCode === code)?.unavailableMessage || shippingFailureMessage('SHIPPING_RATE_NOT_AVAILABLE');
+    return { code: code as any, message };
+  };
+
+  // serviço pedido explicitamente: vale SÓ ele — se não estiver disponível, nunca há substituição por outro
+  if (input.serviceCode) {
+    const wanted = options.find((o) => o.code === String(input.serviceCode).toUpperCase());
+    if (!wanted) {
+      return { ok: true, available: false, code: 'SHIPPING_SERVICE_NOT_AVAILABLE', message: shippingFailureMessage('SHIPPING_SERVICE_NOT_AVAILABLE'), services: options };
+    }
+    if (!wanted.available) {
+      return { ok: true, available: false, code: wanted.unavailableCode as any, message: wanted.unavailableMessage || shippingFailureMessage('SHIPPING_SERVICE_NOT_AVAILABLE'), services: options };
+    }
+    return summarize(wanted, options);
+  }
+
+  if (availableOptions.length === 0) {
+    const f = failureSummary();
+    return { ok: true, available: false, code: f.code, message: f.message, services: options };
+  }
+  // sem serviço pedido (carrinho/produto): campos de topo = o serviço MAIS BARATO disponível ("a partir de"), nunca uma escolha do cliente
+  const cheapest = [...availableOptions].sort((a, b) => (a.shippingChargedToBuyer! - b.shippingChargedToBuyer!) || (a.shippingCost! - b.shippingCost!) || compareShippingServices(a, b))[0];
+  return summarize(cheapest, options);
+}
+
+function summarize(o: CartShippingServiceOption, options: CartShippingServiceOption[]): CartShippingPreviewAvailable {
+  return {
+    ok: true,
+    available: true,
+    serviceCode: o.code,
+    shippingChargedToBuyer: o.shippingChargedToBuyer!,
+    shippingCost: o.shippingCost!,
+    shippingSellerSubsidy: o.shippingSellerSubsidy!,
+    currency: o.currency!,
+    sellers: o.sellers!,
+    services: options,
+  };
+}
+
+/** Preço de UM serviço para o carrinho inteiro: expedições (planner) + política de pagador por grupo + checagem do líquido do vendedor. */
+async function priceServiceOption(
+  db: any,
+  svc: { id: string; code: string; name: string },
+  lines: ShippingPreviewLineAvailable[],
+  items: CartShippingPreviewLineInput[],
+  countryCode: string,
+  destinationSectorId: string,
+): Promise<CartShippingServiceOption> {
   const LEGACY_NO_STORE_GROUP_KEY = '__LEGACY_NO_STORE__';
-  const bySeller = new Map<string, { sellerId: string; commercialStoreId: string | null; lines: ShippingPreviewLineAvailable[] }>();
-  const itemsByGroup = new Map<string, CartShippingPreviewLineInput[]>();
-  resolvedLines.forEach((line, idx) => {
-    const key = line.sellerId + '::' + (line.commercialStoreId ?? LEGACY_NO_STORE_GROUP_KEY);
-    const existing = bySeller.get(key);
-    if (existing) existing.lines.push(line);
-    else bySeller.set(key, { sellerId: line.sellerId, commercialStoreId: line.commercialStoreId, lines: [line] });
-    const existingItems = itemsByGroup.get(key);
-    if (existingItems) existingItems.push(input.items[idx]);
-    else itemsByGroup.set(key, [input.items[idx]]);
+  const groupOf = (l: ShippingPreviewLineAvailable) => l.sellerId + '::' + (l.commercialStoreId ?? LEGACY_NO_STORE_GROUP_KEY);
+
+  const planned = await planShipments(db, {
+    countryCode,
+    destinationSectorId,
+    serviceCode: svc.code,
+    items: lines.map((l, idx) => ({ key: String(idx), groupKey: groupOf(l), candidate: l.candidate })),
   });
+  if (planned.ok === false) {
+    return { code: svc.code, name: svc.name, available: false, unavailableCode: (planned.code as any), unavailableMessage: planned.message };
+  }
+
+  const bySeller = new Map<string, { sellerId: string; commercialStoreId: string | null; lines: ShippingPreviewLineAvailable[]; items: CartShippingPreviewLineInput[] }>();
+  lines.forEach((l, idx) => {
+    const key = groupOf(l);
+    const g = bySeller.get(key);
+    if (g) { g.lines.push(l); g.items.push(items[idx]); }
+    else bySeller.set(key, { sellerId: l.sellerId, commercialStoreId: l.commercialStoreId, lines: [l], items: [items[idx]] });
+  });
+  const rawByGroup = rawCostByGroup(planned.plan);
 
   const round2 = (n: number) => Math.round(n * 100) / 100;
-  const currency = resolvedLines[0]?.currency || 'XOF';
   const sellers: CartShippingPreviewSellerBreakdown[] = [];
   let shippingChargedToBuyer = 0;
   let shippingCost = 0;
   let shippingSellerSubsidy = 0;
 
-  for (const { sellerId, commercialStoreId, lines } of bySeller.values()) {
-    const groupKey = sellerId + '::' + (commercialStoreId ?? LEGACY_NO_STORE_GROUP_KEY);
-    // Soma ADITIVA por linha dentro do grupo — mesma regra de
-    // computeSmartFulfillmentFreightRes (F6.2): nunca consolidação de
-    // pacote nesta fase, mesmo que no futuro isso possa ser otimizado.
-    const groupRawShippingCost = round2(lines.reduce((s, l) => s + l.shippingAmount, 0));
-    // FASE D18-B2.2 - politica resolvida SEMPRE pela loja comercial do
-    // grupo, nunca pela fulfillment store (identico ao checkout).
-    const storeId = commercialStoreId;
-    // FASE D18-B1 — política inválida / seller net <= 0 => available:false
-    // explícito (mesmos códigos do checkout), nunca uma cotação que o
-    // checkout depois recusaria.
+  for (const [groupKey, { sellerId, commercialStoreId, lines: gLines, items: gItems }] of bySeller.entries()) {
+    const groupRawShippingCost = rawByGroup.get(groupKey) ?? 0;
     let policy;
     try {
-      policy = await resolveShippingPayerPolicy(groupRawShippingCost, { storeId, sellerId }, db);
+      policy = await resolveShippingPayerPolicy(groupRawShippingCost, { storeId: commercialStoreId, sellerId }, db);
       if (policy.shippingSellerSubsidy > 0) {
-        const netInputs = await resolveSellerGroupNetInputs(db, sellerId, itemsByGroup.get(groupKey) || []);
+        const netInputs = await resolveSellerGroupNetInputs(db, sellerId, gItems);
         if (netInputs) {
           const netCheck = checkSellerNetForShippingShare({ ...netInputs, shippingSellerSubsidy: policy.shippingSellerSubsidy });
           if (!netCheck.ok) throw sellerSubsidyExceedsNetError(netCheck.sellerNetAmount, policy.shippingSellerSubsidy);
@@ -498,30 +565,24 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
       }
     } catch (err) {
       if (err instanceof ShippingPolicyNotApplicableError) {
-        return { ok: true, available: false, code: err.code, message: err.message.replace(/^[A-Z_]+: /, '') };
+        return { code: svc.code, name: svc.name, available: false, unavailableCode: err.code as any, unavailableMessage: err.message.replace(/^[A-Z_]+: /, '') };
       }
       throw err;
     }
-
     shippingChargedToBuyer = round2(shippingChargedToBuyer + policy.shippingChargedToBuyer);
     shippingCost = round2(shippingCost + groupRawShippingCost);
     shippingSellerSubsidy = round2(shippingSellerSubsidy + policy.shippingSellerSubsidy + policy.shippingMarketplaceSubsidy);
-
-    sellers.push({
-      sellerId,
-      storeId,
-      shippingAmount: policy.shippingChargedToBuyer,
-      currency: lines[0].currency,
-    });
+    sellers.push({ sellerId, storeId: commercialStoreId, shippingAmount: policy.shippingChargedToBuyer, currency: gLines[0].currency });
   }
 
   return {
-    ok: true,
+    code: svc.code,
+    name: svc.name,
     available: true,
     shippingChargedToBuyer,
     shippingCost,
     shippingSellerSubsidy,
-    currency,
+    currency: lines[0]?.currency || 'XOF',
     sellers,
   };
 }

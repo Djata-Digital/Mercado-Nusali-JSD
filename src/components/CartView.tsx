@@ -690,7 +690,8 @@ export const CartView: React.FC = () => {
                     </div>
 
                     <div className="flex justify-between items-center">
-                      <span>Frete:</span>
+                      {/* no carrinho o frete é "a partir de" (serviço mais barato disponível); o cliente escolhe o serviço no checkout */}
+                      <span>{shippingQuote?.available && !shippingQuote.loading ? 'Frete (a partir de):' : 'Frete:'}</span>
                       {shippingQuote === null || shippingQuote.loading ? (
                         <span className="text-gray-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Calculando...</span>
                       ) : shippingQuote && !shippingQuote.available && shippingQuote.code === 'DELIVERY_SECTOR_REQUIRED' ? (

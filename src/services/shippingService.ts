@@ -31,18 +31,37 @@ export interface CartShippingPreviewSellerBreakdown {
   shippingAmount: number;
   currency: string;
 }
+/** Um serviço de entrega do carrinho: preço real calculado pelo servidor, ou o motivo de não estar disponível. */
+export interface CartShippingServiceOption {
+  code: string;
+  name: string;
+  available: boolean;
+  /** o que o comprador paga por este serviço (pós-política de frete) */
+  shippingChargedToBuyer?: number;
+  /** custo logístico real (pré-política): distingue "grátis por política" de "sem custo" */
+  shippingCost?: number;
+  shippingSellerSubsidy?: number;
+  currency?: string;
+  sellers?: CartShippingPreviewSellerBreakdown[];
+  unavailableCode?: string;
+  unavailableMessage?: string;
+}
 export interface CartShippingPreviewAvailable {
   available: true;
+  /** serviço a que os campos abaixo se referem (o pedido, ou o mais barato — "a partir de" — quando nenhum foi pedido) */
+  serviceCode: string;
   shippingChargedToBuyer: number;
   shippingCost: number;
   shippingSellerSubsidy: number;
   currency: string;
   sellers: CartShippingPreviewSellerBreakdown[];
+  services: CartShippingServiceOption[];
 }
 export interface CartShippingPreviewUnavailable {
   available: false;
   code: string;
   message: string;
+  services?: CartShippingServiceOption[];
 }
 export type CartShippingPreviewData = CartShippingPreviewAvailable | CartShippingPreviewUnavailable;
 
@@ -92,6 +111,7 @@ export const ShippingService = {
   async getCartPreview(payload: {
     destinationShippingSectorId?: string | null;
     items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
+    serviceCode?: string | null;
   }): Promise<ApiResponse<CartShippingPreviewData>> {
     try {
       const res = await ShippingApi.previewCart(payload);

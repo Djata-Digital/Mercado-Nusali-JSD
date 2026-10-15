@@ -81,6 +81,10 @@ export interface CreateOrderRequestDTO {
   // normalizado; tudo o mais é recalculado do zero, dentro da MESMA
   // transação de criação do pedido.
   storeCoupons?: Array<{ storeId: string; code: string }>;
+  // Escolha do cliente: SÓ identifica o serviço (Economy/Standard/Express...) e o total de frete que ele viu. O preço NUNCA vem daqui:
+  // o servidor recalcula tudo dentro da transação (ver createOrderFromCart). Ausente = comportamento interno anterior (cada linha com o
+  // seu melhor serviço); as rotas HTTP do checkout exigem a escolha.
+  shippingSelection?: { serviceCode: string; expectedShippingChargedToBuyer?: number | null } | null;
 }
 
 // Fase M1-D1 — contrato explícito de createOrderFromCart. `CreatedOrder` é
@@ -198,6 +202,14 @@ export class OrderService {
     }
 
     const { userId, paymentMethod, notes } = data;
+
+    // Serviço de entrega escolhido (só o código; nunca preço). Formato inválido nunca chega às consultas.
+    const selectedServiceCode: string | null = data.shippingSelection?.serviceCode
+      ? String(data.shippingSelection.serviceCode).trim().toUpperCase()
+      : null;
+    if (data.shippingSelection && (!selectedServiceCode || !/^[A-Z0-9_]{2,50}$/.test(selectedServiceCode))) {
+      throw new CheckoutShippingError('SHIPPING_SERVICE_INVALID', 'Serviço de entrega inválido. Escolha um dos serviços apresentados.', 400);
+    }
 
     // FASE D18-C3.4 — intenção de cupom por loja comercial (storeId real,
     // nunca sellerId do cliente). Código já normalizado aqui (trim+uppercase)
@@ -625,6 +637,8 @@ export class OrderService {
           quantity: reqQty,
           destinationShippingSectorId: destinationShippingSectorId as string,
           countryCode: destinationCountry,
+          // serviço escolhido pelo cliente: o F4 só considera tarifas DELE — nunca há troca silenciosa por outro (ex.: mais barato)
+          serviceCode: selectedServiceCode || undefined,
         }, tx);
 
         if (f4Result.ok === false) {
@@ -640,6 +654,14 @@ export class OrderService {
           if (failure === 'PRODUCT_NOT_AVAILABLE_FOR_QUANTITY') {
             throw new Error(
               `INSUFFICIENT_AVAILABLE_STOCK: Nenhuma origem de estoque consegue sozinha atender a quantidade solicitada (${reqQty}) do produto "${prod.title}" para o destino selecionado (sem combinar origens nesta fase).`
+            );
+          }
+          if (selectedServiceCode) {
+            throw new CheckoutShippingError(
+              'SHIPPING_SERVICE_UNAVAILABLE',
+              `O serviço de entrega escolhido (${selectedServiceCode}) não está disponível para "${prod.title}". ${shippingFailureMessage(failure)} Escolha outro serviço ou revise o carrinho.`,
+              409,
+              { serviceCode: selectedServiceCode, productId: prod.id, reason: failure },
             );
           }
           throw new CheckoutShippingError(failure, `${shippingFailureMessage(failure)} Produto: "${prod.title}".`, 409, { productId: prod.id });
