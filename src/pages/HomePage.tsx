@@ -58,25 +58,25 @@ export const HomePage: React.FC = () => {
       <BannerSlider />
 
       {/* Content Container */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8 mt-4">
+      <div className="max-w-7xl mx-auto px-2 sm:px-6 lg:px-8 space-y-5 sm:space-y-8 mt-3 sm:mt-4">
         {/* Category Carousel */}
         <CategoryCarousel />
 
         {/* Ofertas do Dia Section */}
         {showOffersSection && (
-        <section className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <h2 className="text-xl sm:text-2xl font-black text-gray-900 tracking-tight">
+        <section className="space-y-2 sm:space-y-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <h2 className="text-base sm:text-2xl font-black text-gray-900 tracking-tight">
                 Ofertas do Dia • {currentCountry.name} {currentCountry.flag}
               </h2>
-              <span className="bg-emerald-600 text-white font-extrabold text-[10px] px-2 py-0.5 rounded-xs uppercase tracking-wider animate-pulse">
+              <span className="hidden sm:inline bg-emerald-600 text-white font-extrabold text-[10px] px-2 py-0.5 rounded-xs uppercase tracking-wider animate-pulse">
                 Ofertas no Mercado Nusali
               </span>
             </div>
             <Link
               to="/products"
-              className="text-xs text-blue-800 font-bold hover:underline flex items-center gap-1"
+              className="text-xs text-blue-800 font-bold hover:underline flex items-center gap-1 shrink-0"
             >
               Ver todas as ofertas <ChevronRight className="w-4 h-4" />
             </Link>
@@ -84,9 +84,9 @@ export const HomePage: React.FC = () => {
 
           {/* Products Grid */}
           {isLoading ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-4">
               {[1, 2, 3, 4].map((n) => (
-                <div key={n} className="bg-white rounded-lg h-72 animate-pulse border border-gray-200" />
+                <div key={n} className="bg-white rounded-lg h-56 sm:h-72 animate-pulse border border-gray-200" />
               ))}
             </div>
           ) : catalogEmpty ? (
@@ -94,7 +94,7 @@ export const HomePage: React.FC = () => {
               message={isError ? 'Não foi possível carregar as ofertas agora. Tente novamente em instantes.' : noDeliverableProductsMessage(currentCountry.name)}
             />
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-4">
               {featuredProducts.map((product) => (
                 <ProductCard key={product.id} product={product} />
               ))}
@@ -104,7 +104,7 @@ export const HomePage: React.FC = () => {
         )}
 
         {/* Nusali+ Promotional Callout Card */}
-        <section className="bg-gradient-to-r from-emerald-900 via-teal-950 to-blue-950 text-white rounded-2xl p-6 sm:p-8 shadow-md flex flex-col sm:flex-row items-center justify-between gap-6">
+        <section className="bg-gradient-to-r from-emerald-900 via-teal-950 to-blue-950 text-white rounded-2xl p-4 sm:p-8 shadow-md flex flex-col sm:flex-row items-center justify-between gap-6">
           <div className="space-y-2 max-w-xl">
             <div className="flex items-center gap-2">
               <span className="bg-yellow-400 text-blue-950 font-black text-xs px-2.5 py-0.5 rounded-xs uppercase">
@@ -129,18 +129,18 @@ export const HomePage: React.FC = () => {
         </section>
 
         {/* Todos os Produtos Catalog */}
-        <section className="space-y-4">
-          <div className="flex items-center justify-between border-b border-gray-200 pb-3">
-            <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+        <section className="space-y-2 sm:space-y-4">
+          <div className="flex items-center justify-between border-b border-gray-200 pb-2 sm:pb-3">
+            <h2 className="text-base sm:text-xl font-bold text-gray-900 flex items-center gap-2">
               <Globe className="w-5 h-5 text-emerald-600" /> Catálogo de Produtos Nacionais e Importados
             </h2>
-            <span className="text-xs text-gray-500 font-medium">Compre e venda no Mercado Nusali</span>
+            <span className="hidden sm:inline text-xs text-gray-500 font-medium">Compre e venda no Mercado Nusali</span>
           </div>
 
           {isLoading ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-4">
               {[1, 2, 3, 4, 5, 6, 7, 8].map((n) => (
-                <div key={n} className="bg-white rounded-lg h-72 animate-pulse border border-gray-200" />
+                <div key={n} className="bg-white rounded-lg h-56 sm:h-72 animate-pulse border border-gray-200" />
               ))}
             </div>
           ) : catalogEmpty ? (
@@ -149,7 +149,7 @@ export const HomePage: React.FC = () => {
               hint={isError ? undefined : DELIVERY_SCOPE_HINT}
             />
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-4">
               {products.map((product) => (
                 <ProductCard key={product.id} product={product} />
               ))}

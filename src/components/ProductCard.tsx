@@ -1,22 +1,29 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Heart, Star, ShoppingCart, ShieldCheck, Film, Image as ImageIcon, ZoomIn, Share2, Globe, Layers, Palette } from 'lucide-react';
+import { Heart, Star, ShoppingCart, ShieldCheck, Film, Image as ImageIcon, Share2, Globe, Layers, Palette, Truck } from 'lucide-react';
 import { Product } from '../types';
 import { useCart } from '../hooks/useCart';
 import { useFavorites } from '../hooks/useFavorites';
 import { usePreferences } from '../context/PreferencesContext';
 import { ProductShareModal } from './ProductShareModal';
 import { getCountryFlag, getCountryName, formatCurrency } from '../utils/currencyUtils';
+import { cardDiscountPercent, cardDeliveryLine, hasRealReviews } from '../utils/productCardInfo';
 
 interface ProductCardProps {
   product: Product;
 }
 
+/**
+ * Cartão de produto das listagens. No celular é COMPACTO (grade de 2 colunas, ~4 cartões por tela de conteúdo): imagem quadrada sem corte, nome em até
+ * 2 linhas, preço, desconto real e uma linha curta de entrega, com o botão de compra em ícone. Elementos secundários (parcelas, kits, cores, selos,
+ * reputação, avaliações) só aparecem a partir de `sm`. Nada é inventado: avaliação só com avaliações reais, desconto calculado dos preços reais, e a
+ * entrega mostra apenas o que é verdade (o catálogo já só lista produtos entregáveis ao país escolhido) — nunca "frete grátis" nem prazo fictício.
+ */
 export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   const navigate = useNavigate();
   const { addItem } = useCart();
   const { toggleFavorite, isFavorite } = useFavorites();
-  const { formatPrice } = usePreferences();
+  const { formatPrice, selectedCountry } = usePreferences();
   const favorited = isFavorite(product.id);
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
 
@@ -39,6 +46,8 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
 
   const priceInfo = formatPrice(priceValue, productCurrency);
   const origPriceInfo = origPriceValue ? formatPrice(origPriceValue, productCurrency) : null;
+  const discount = cardDiscountPercent(priceValue, origPriceValue);
+  const deliveryLine = cardDeliveryLine(getCountryName(selectedCountry) || selectedCountry);
 
   // FASE D16-C2.1 — produto com variantes reais ativas nunca é adicionado
   // direto daqui: o cartão não tem como saber cor/tamanho, e escolher a
@@ -46,207 +55,193 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   // corrigido no D16-C2. Leva ao detalhe para o comprador selecionar antes
   // de comprar.
   const isVariableProduct = Boolean(product.hasVariants);
+  const buyLabel = isVariableProduct ? 'Ver opções' : 'Adicionar';
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 hover:shadow-xl transition-all duration-200 flex flex-col justify-between overflow-hidden group relative">
-      {/* Top badges: Favorite button + Share button + Offer tag */}
-      <div className="absolute top-2 left-2 right-2 flex items-center justify-between z-10 pointer-events-none">
-        {product.offerOfDay ? (
-          <span className="bg-[#fff159] text-blue-950 font-black text-[10px] px-2 py-0.5 rounded-xs tracking-wider shadow-xs uppercase pointer-events-auto">
-            Oferta do dia
-          </span>
+    <div data-testid="product-card" className="bg-white rounded-lg border border-gray-200 sm:hover:shadow-xl transition-all duration-200 flex flex-col overflow-hidden group relative h-full">
+      {/* Imagem quadrada (object-contain: nunca corta o produto) com favorito/partilha e selo de oferta sobre ela */}
+      <div className="relative w-full aspect-square bg-gray-50 flex items-center justify-center cursor-pointer" onClick={() => openProductDetail(product.id)}>
+        {product.image ? (
+          <img
+            src={product.image}
+            alt={product.title}
+            loading="lazy"
+            className="w-full h-full object-contain sm:group-hover:scale-105 transition-transform duration-300"
+          />
         ) : (
-          <span />
+          <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-400">
+            <ImageIcon className="w-8 h-8" />
+          </div>
         )}
 
-        <div className="flex items-center gap-1.5 pointer-events-auto">
-          {/* Quick Copy / Share Button */}
-          <button
-            onClick={handleOpenShare}
-            className="p-1.5 bg-white/90 hover:bg-white rounded-full shadow-md text-gray-500 hover:text-blue-600 transition cursor-pointer"
-            title="Partilhar ou copiar link do produto"
-          >
-            <Share2 className="w-3.5 h-3.5" />
-          </button>
+        <div className="absolute top-1.5 left-1.5 right-1.5 flex items-start justify-between pointer-events-none">
+          {product.offerOfDay ? (
+            <span className="bg-[#fff159] text-blue-950 font-black text-[10px] px-1.5 py-0.5 rounded-xs tracking-wide shadow-xs uppercase pointer-events-auto">
+              Oferta do dia
+            </span>
+          ) : (
+            <span />
+          )}
+          <div className="flex items-center gap-1 pointer-events-auto">
+            {/* Partilhar: só a partir de `sm` (no celular o cartão fica enxuto; a página do produto continua com Partilhar) */}
+            <button
+              onClick={handleOpenShare}
+              className="hidden sm:inline-flex p-1.5 bg-white/90 hover:bg-white rounded-full shadow-md text-gray-500 hover:text-blue-600 transition cursor-pointer"
+              title="Partilhar ou copiar link do produto"
+              aria-label="Partilhar produto"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleFavorite(product.id);
+              }}
+              className="inline-flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:p-1.5 bg-white/90 hover:bg-white rounded-full shadow-md text-gray-400 hover:text-red-500 transition cursor-pointer"
+              title={favorited ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
+              aria-label={favorited ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
+              aria-pressed={favorited}
+            >
+              <Heart className={`w-4 h-4 sm:w-3.5 sm:h-3.5 ${favorited ? 'fill-red-500 text-red-500' : ''}`} />
+            </button>
+          </div>
+        </div>
 
-          {/* Favorite Button */}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleFavorite(product.id);
-            }}
-            className="p-1.5 bg-white/90 hover:bg-white rounded-full shadow-md text-gray-400 hover:text-red-500 transition cursor-pointer"
-            title={favorited ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
-          >
-            <Heart
-              className={`w-3.5 h-3.5 ${favorited ? 'fill-red-500 text-red-500' : ''}`}
-            />
-          </button>
+        {/* Selos de mídia: só a partir de `sm` */}
+        <div className="hidden sm:flex absolute bottom-1.5 left-1.5 items-center gap-1">
+          {hasVideo && (
+            <span className="bg-slate-900/90 text-amber-400 text-[10px] font-black px-1.5 py-0.5 rounded flex items-center gap-1 backdrop-blur-xs">
+              <Film className="w-3 h-3 text-amber-400" />
+              <span>VÍDEO</span>
+            </span>
+          )}
+          {imagesCount > 1 && (
+            <span className="bg-slate-900/80 text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1 backdrop-blur-xs">
+              <ImageIcon className="w-3 h-3 text-gray-300" />
+              <span>{imagesCount}</span>
+            </span>
+          )}
         </div>
       </div>
 
-      <div className="p-3 flex-1 flex flex-col justify-between cursor-pointer" onClick={() => openProductDetail(product.id)}>
-        <div>
-          {/* Main Image View */}
-          <div className="relative w-full aspect-square mb-3 bg-gray-50 rounded-md overflow-hidden flex items-center justify-center">
-            {product.image ? (
-              <img
-                src={product.image}
-                alt={product.title}
-                className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
-              />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-400">
-                <ImageIcon className="w-8 h-8" />
+      <div className="p-1.5 sm:p-3 flex-1 flex flex-col gap-1 cursor-pointer" onClick={() => openProductDetail(product.id)}>
+        {/* Nome: no máximo 2 linhas */}
+        <h3 className="text-[13px] sm:text-sm font-normal text-gray-800 hover:text-blue-600 line-clamp-2 leading-snug">
+          {/* C3.2 — link HTML real (rastreável). O clique no restante do cartão continua abrindo o produto via onClick do contêiner;
+              stopPropagation evita navegar duas vezes quando o clique é no próprio link. */}
+          <Link
+            to={`/products/${encodeURIComponent(product.id)}`}
+            title={product.title}
+            onClick={(e) => e.stopPropagation()}
+            className="block"
+          >
+            {product.title}
+          </Link>
+        </h3>
+
+        {/* Preço + botão de compra (ícone no celular; texto a partir de `sm`) */}
+        {/* mt-auto: o preço fica sempre no mesmo nível entre cartões da mesma linha (nomes de 1 ou 2 linhas) */}
+        <div className="mt-auto flex items-end justify-between gap-1.5">
+          <div className="min-w-0">
+            {/* Desconto REAL (calculado dos preços; nunca inventado) — na mesma coluna do preço, sem linha extra */}
+            {origPriceInfo && discount !== null && (
+              <div className="flex items-center gap-1.5 text-[11px] leading-none mb-0.5" data-testid="product-card-discount">
+                <span className="text-gray-400 line-through truncate">{origPriceInfo.formatted}</span>
+                <span className="font-semibold text-green-600 whitespace-nowrap">{discount}% OFF</span>
               </div>
             )}
-
-            {/* Media badges overlay */}
-            <div className="absolute bottom-1.5 left-1.5 flex items-center gap-1">
-              {hasVideo && (
-                <span className="bg-slate-900/90 text-amber-400 text-[10px] font-black px-1.5 py-0.5 rounded flex items-center gap-1 backdrop-blur-xs">
-                  <Film className="w-3 h-3 text-amber-400" />
-                  <span>VÍDEO</span>
-                </span>
-              )}
-              {imagesCount > 1 && (
-                <span className="bg-slate-900/80 text-white text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1 backdrop-blur-xs">
-                  <ImageIcon className="w-3 h-3 text-gray-300" />
-                  <span>{imagesCount}</span>
-                </span>
-              )}
-            </div>
+            <span className="block text-base sm:text-xl font-semibold text-gray-900 tracking-tight leading-tight" data-testid="product-card-price">
+              {priceInfo.formatted}
+            </span>
+            {priceInfo.isConverted && (
+              <span className="hidden sm:block text-[10px] text-gray-400 font-medium">Preço original: {priceInfo.originalFormatted}</span>
+            )}
           </div>
+          <button
+            onClick={() => (isVariableProduct ? openProductDetail(product.id) : addItem(product, 1))}
+            className="shrink-0 inline-flex items-center justify-center gap-1.5 w-9 h-9 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white rounded-full sm:rounded-md text-xs font-semibold transition"
+            title={buyLabel}
+            aria-label={`${buyLabel}: ${product.title}`}
+            data-testid="product-card-buy"
+          >
+            <ShoppingCart className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
+            <span className="hidden sm:inline">{buyLabel}</span>
+          </button>
+        </div>
 
-          <h3 className="text-xs sm:text-sm font-normal text-gray-800 hover:text-blue-600 line-clamp-2 cursor-pointer mb-2 leading-snug">
-            {/* C3.2 — link HTML real (rastreável). O clique no restante do cartão continua abrindo o produto via onClick do contêiner;
-                stopPropagation evita navegar duas vezes quando o clique é no próprio link. */}
-            <Link
-              to={`/products/${encodeURIComponent(product.id)}`}
-              title={product.title}
-              onClick={(e) => e.stopPropagation()}
-              className="block"
-            >
-              {product.title}
-            </Link>
-          </h3>
+        {/* Entrega: uma linha curta e verdadeira */}
+        <p className="flex items-center gap-1 text-[11px] text-gray-500 leading-tight truncate" data-testid="product-card-delivery">
+          <Truck className="w-3 h-3 shrink-0 text-gray-400" aria-hidden="true" />
+          <span className="truncate">{deliveryLine}</span>
+        </p>
 
-          {/* Price Block */}
-          <div className="space-y-0.5">
-            {origPriceInfo && origPriceValue && origPriceValue > priceValue && (
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-400 line-through">
-                  {origPriceInfo.formatted}
-                </span>
-                {product.discountPercentage && (
-                  <span className="text-xs font-semibold text-green-600">
-                    {product.discountPercentage}% OFF
-                  </span>
-                )}
-              </div>
-            )}
+        {/* ===== Secundário: só a partir de `sm` ===== */}
+        <div className="hidden sm:block space-y-1">
+          {installmentsMax > 1 && (
+            <p className="text-[11px] text-green-700 font-medium">
+              em {installmentsMax}x de {formatCurrency(priceInfo.convertedAmount / installmentsMax, priceInfo.displayCurrency)}{' '}
+              {product.installmentsInterestFree && 'sem juros'}
+            </p>
+          )}
 
-            <div className="flex flex-col">
-              <span className="text-xl sm:text-2xl font-semibold text-gray-900 tracking-tight">
-                {priceInfo.formatted}
+          {product.shipping?.isInternational && (
+            <div className="flex items-center gap-1 text-[10px] font-bold text-indigo-700 bg-indigo-50/90 px-1.5 py-0.5 rounded-md border border-indigo-200">
+              <Globe className="w-3 h-3 text-indigo-600 shrink-0" />
+              <span>
+                Internacional • {getCountryFlag(product.shipping?.originCountry || product.originCountry)}{' '}
+                {getCountryName(product.shipping?.originCountry || product.originCountry)}
               </span>
-              {priceInfo.isConverted && (
-                <span className="text-[10px] text-gray-400 font-medium">
-                  Preço original: {priceInfo.originalFormatted}
-                </span>
-              )}
             </div>
+          )}
 
-            {/* Installment Badge */}
-            {installmentsMax > 1 && (
-              <p className="text-[11px] text-green-700 font-medium">
-                em {installmentsMax}x de {formatCurrency(priceInfo.convertedAmount / installmentsMax, priceInfo.displayCurrency)}{' '}
-                {product.installmentsInterestFree && 'sem juros'}
-              </p>
-            )}
-          </div>
+          {product.productKits && product.productKits.length > 0 && (
+            <div className="flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded-md border border-amber-200">
+              <Layers className="w-3 h-3 text-amber-600 shrink-0" />
+              <span>Kits disponíveis (até {Math.max(...product.productKits.map(k => k.quantity))}x)</span>
+            </div>
+          )}
 
-          {/* Shipping & International Badges */}
-          <div className="mt-2 space-y-1">
-            {/* International Origin Badge */}
-            {product.shipping?.isInternational && (
-              <div className="flex items-center gap-1 text-[10px] font-bold text-indigo-700 bg-indigo-50/90 px-1.5 py-0.5 rounded-md border border-indigo-200">
-                <Globe className="w-3 h-3 text-indigo-600 shrink-0" />
-                <span>
-                  Internacional • {getCountryFlag(product.shipping?.originCountry || product.originCountry)}{' '}
-                  {getCountryName(product.shipping?.originCountry || product.originCountry)}
-                </span>
-              </div>
-            )}
+          {product.availableColors && product.availableColors.length > 0 && (
+            <div className="flex items-center gap-1 text-[10px] text-gray-500 font-medium">
+              <Palette className="w-3 h-3 text-gray-400 shrink-0" />
+              <span>{product.availableColors.length} cores disponíveis</span>
+            </div>
+          )}
 
-            {/* Kits / Multi-pack badge if available */}
-            {product.productKits && product.productKits.length > 0 && (
-              <div className="flex items-center gap-1 text-[10px] font-bold text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded-md border border-amber-200">
-                <Layers className="w-3 h-3 text-amber-600 shrink-0" />
-                <span>Kits disponíveis (até {Math.max(...product.productKits.map(k => k.quantity))}x)</span>
-              </div>
-            )}
+          {/* O selo "Frete Grátis" por produto, a promessa "Chega amanhã" e o prazo fictício "8 a 12 dias" foram removidos: não refletem a política real de
+              frete nem a tarifa/prazo da rota (o prazo real aparece na página do produto). */}
+          {product.shipping?.fullFulfilled && (
+            <div className="flex items-center gap-1.5 text-[11px] font-bold text-green-700">
+              <span className="bg-green-600 text-white font-black text-[9px] px-1 py-0.2 rounded-xs uppercase tracking-wider">
+                FULL
+              </span>
+            </div>
+          )}
 
-            {/* Color variations indicator */}
-            {product.availableColors && product.availableColors.length > 0 && (
-              <div className="flex items-center gap-1 text-[10px] text-gray-500 font-medium">
-                <Palette className="w-3 h-3 text-gray-400 shrink-0" />
-                <span>{product.availableColors.length} cores disponíveis</span>
-              </div>
-            )}
-
-            {/* O selo "Frete Grátis" por produto (flag legada shipping.freeShipping) foi removido: não refletia a política real de frete nem a tarifa da rota. A promessa "Chega amanhã" também saiu: não há prazo de entrega configurado no sistema de frete por setor. */}
-            {product.shipping?.fullFulfilled && (
-              <div className="flex items-center gap-1.5 text-[11px] font-bold text-green-700">
-                <span className="bg-green-600 text-white font-black text-[9px] px-1 py-0.2 rounded-xs uppercase tracking-wider">
-                  FULL
-                </span>
-              </div>
-            )}
-            {product.shipping?.isInternational && (
-              <p className="text-[10px] font-medium text-indigo-700">
-                Entrega CPLP Global • {product.shipping?.estimatedDays || 8} a {(product.shipping?.estimatedDays || 8) + 4} dias
-              </p>
-            )}
-          </div>
-
-          {/* Seller reputation badge */}
           {product.seller?.isOfficialStore && (
-            <p className="mt-2 text-[10px] text-gray-500 flex items-center gap-1">
+            <p className="text-[10px] text-gray-500 flex items-center gap-1">
               <ShieldCheck className="w-3 h-3 text-blue-600" />
               Por {product.seller?.name || 'Vendedor Oficial'}
             </p>
           )}
 
-          {/* Star Rating */}
-          {/* FASE D17-C3 — "|| 4.8" era uma nota falsa para produto sem
-              nenhuma review real (0 é falsy em JS, então um produto com
-              rating=0 real mostrava 4.8 inventado). ?? só cai no fallback
-              para null/undefined, nunca para um 0 real. */}
-          <div className="mt-2 flex items-center gap-1 text-[11px] text-gray-500">
-            <div className="flex items-center text-amber-400">
-              <Star className="w-3 h-3 fill-amber-400" />
-              <span className="ml-1 font-bold text-gray-800">{product.rating ?? 0}</span>
+          {/* Avaliações: SÓ com avaliações reais (antes mostrava "0 (0)" em todo produto novo). */}
+          {hasRealReviews(product.rating, product.reviewsCount) && (
+            <div className="flex items-center gap-1 text-[11px] text-gray-500" data-testid="product-card-rating">
+              <div className="flex items-center text-amber-400">
+                <Star className="w-3 h-3 fill-amber-400" />
+                <span className="ml-1 font-bold text-gray-800">{product.rating}</span>
+              </div>
+              <span>({product.reviewsCount})</span>
             </div>
-            <span>({product.reviewsCount || 0})</span>
-          </div>
-        </div>
+          )}
 
-        {/* Quick Add to Cart Button */}
-        <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
-          {/* Correção pré-piloto (condição opcional): sem condition real
-              (ex.: Manga, Banana), não inventa nem "Novo" nem "Usado" — o
-              espaço fica simplesmente vazio. */}
-          <span className="text-[10px] font-medium text-gray-400 uppercase">
-            {product.condition === 'novo' ? 'Novo' : product.condition === 'usado' ? 'Usado' : product.condition === 'recondicionado' ? 'Recondicionado' : ''}
-          </span>
-          <button
-            onClick={() => (isVariableProduct ? openProductDetail(product.id) : addItem(product, 1))}
-            className="flex items-center gap-1.5 bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white px-3 py-1.5 rounded-md text-xs font-semibold transition"
-          >
-            <ShoppingCart className="w-3.5 h-3.5" />
-            <span>{isVariableProduct ? 'Ver opções' : 'Adicionar'}</span>
-          </button>
+          {/* Correção pré-piloto (condição opcional): sem condition real, não inventa "Novo"/"Usado". */}
+          {(product.condition === 'novo' || product.condition === 'usado' || product.condition === 'recondicionado') && (
+            <span className="block text-[10px] font-medium text-gray-400 uppercase">
+              {product.condition === 'novo' ? 'Novo' : product.condition === 'usado' ? 'Usado' : 'Recondicionado'}
+            </span>
+          )}
         </div>
       </div>
 

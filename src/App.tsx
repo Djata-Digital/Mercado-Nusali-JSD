@@ -1,4 +1,5 @@
 import { SeoManager } from './components/SeoManager';
+import { ScrollToTop } from './components/ScrollToTop';
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -75,6 +76,8 @@ export default function App() {
             <BrowserRouter>
               {/* C3.2 — título/meta/robots por rota (antes do <Routes>: ver SeoManager) */}
               <SeoManager />
+              {/* Cada página nova abre no topo (ex.: produto aberto do meio de uma listagem) — regra em utils/scrollToTopRule */}
+              <ScrollToTop />
               <Routes>
                 {/* Guest Auth Routes */}
                 <Route

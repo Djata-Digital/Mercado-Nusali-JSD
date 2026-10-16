@@ -24,13 +24,15 @@ import {
 } from 'lucide-react';
 import { Product, CurrencyCode } from '../../types';
 import { formatCurrency } from '../../utils/currencyUtils';
+import { planQuickStockChange } from '../../utils/sellerQuickStock';
 
 interface SellerProductsListProps {
   products: Product[];
   selectedCurrency: CurrencyCode;
   onNavigateCreateProduct: () => void;
   onOpenProductDetail: (id: string) => void;
-  onUpdateProduct: (product: Product) => void;
+  // Ajuste rápido de estoque (+/−): grava o FÍSICO pelo endpoint dedicado (PATCH /seller/products/:id/stock) e devolve o resultado real.
+  onQuickStockChange: (productId: string, newOnHand: number) => Promise<{ ok: boolean; message?: string }>;
   onEditProduct?: (product: Product) => void;
   onDeleteProduct?: (id: string) => void;
   // C2.2 — publicar/pausar de verdade (PATCH /seller/products/:id/status). Devolve quantos foram alterados.
@@ -46,7 +48,7 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
   selectedCurrency,
   onNavigateCreateProduct,
   onOpenProductDetail,
-  onUpdateProduct,
+  onQuickStockChange,
   onEditProduct,
   onDeleteProduct,
   onSetProductsPublished,
@@ -56,6 +58,7 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
     'todos' | 'publicados' | 'pausados' | 'sem_estoque'
   >('todos');
   const [busyIds, setBusyIds] = useState<string[]>([]);
+  const [stockBusyIds, setStockBusyIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -142,10 +145,24 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
     onOpenProductDetail(p.id);
   };
 
-  const handleQuickStockUpdate = (p: Product, delta: number) => {
-    const updated = { ...p, stock: Math.max(0, p.stock + delta) };
-    onUpdateProduct(updated);
-    showToast(`Estoque de "${p.title.substring(0, 20)}..." alterado para ${updated.stock}`);
+  // Correção: o novo estoque parte do FÍSICO real (a coluna mostra o disponível), nunca fica abaixo do reservado, é gravado pelo endpoint dedicado
+  // e a mensagem só confirma depois que o servidor respondeu (antes dava "alterado" na hora, mesmo quando falhava ou era ignorado).
+  const handleQuickStockUpdate = async (p: Product, delta: number) => {
+    if (stockBusyIds.includes(p.id)) return;
+    const plan = planQuickStockChange(p as any, delta);
+    if (plan.ok === false) {
+      showToast(plan.message);
+      return;
+    }
+    setStockBusyIds((ids) => [...ids, p.id]);
+    try {
+      const result = await onQuickStockChange(p.id, plan.newOnHand);
+      showToast(result.ok
+        ? `Estoque de "${p.title.substring(0, 20)}..." atualizado: ${plan.newOnHand} un. em estoque.`
+        : (result.message || 'Não foi possível alterar o estoque. Tente novamente.'));
+    } finally {
+      setStockBusyIds((ids) => ids.filter((id) => id !== p.id));
+    }
   };
 
   return (
@@ -348,6 +365,7 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
                     <td className="p-3">
                       <div className="flex items-center gap-2">
                         <span
+                          title={`Disponível: ${p.stock} · Reservado: ${(p as any).quantityReserved ?? 0} · Em estoque: ${(p as any).quantityOnHand ?? p.stock}`}
                           className={`font-black ${
                             p.stock === 0 ? 'text-red-600' : p.stock < 5 ? 'text-amber-600' : 'text-emerald-800'
                           }`}
@@ -357,15 +375,19 @@ export const SellerProductsList: React.FC<SellerProductsListProps> = ({
                         <div className="flex items-center gap-0.5">
                           <button
                             onClick={() => handleQuickStockUpdate(p, -1)}
-                            className="p-1 bg-gray-100 hover:bg-gray-200 rounded-md font-bold text-gray-700 text-[10px]"
-                            title="Diminuir estoque"
+                            disabled={stockBusyIds.includes(p.id)}
+                            className="p-1 min-w-6 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 rounded-md font-bold text-gray-700 text-[10px]"
+                            title="Diminuir estoque em 1 unidade"
+                            aria-label={`Diminuir o estoque de ${p.title}`}
                           >
                             -
                           </button>
                           <button
                             onClick={() => handleQuickStockUpdate(p, 1)}
-                            className="p-1 bg-gray-100 hover:bg-gray-200 rounded-md font-bold text-gray-700 text-[10px]"
-                            title="Aumentar estoque"
+                            disabled={stockBusyIds.includes(p.id)}
+                            className="p-1 min-w-6 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 rounded-md font-bold text-gray-700 text-[10px]"
+                            title="Aumentar estoque em 1 unidade"
+                            aria-label={`Aumentar o estoque de ${p.title}`}
                           >
                             +
                           </button>

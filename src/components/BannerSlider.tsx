@@ -47,9 +47,11 @@ export const BannerSlideView: React.FC<BannerSlideViewProps> = ({ banner, onCta,
 
   return (
     <div
-      className={`w-full shrink-0 bg-gradient-to-r ${preset.bgClass} text-white py-10 ${
-        forced ? (mobileLayout ? 'px-6' : 'px-16') : 'px-6 md:px-16'
-      } min-h-[260px] flex items-center justify-between relative`}
+      className={`w-full shrink-0 bg-gradient-to-r ${preset.bgClass} text-white ${
+        forced ? 'py-10 min-h-[260px]' : 'py-4 min-h-[132px] sm:py-10 sm:min-h-[260px]'
+      } ${
+        forced ? (mobileLayout ? 'px-6' : 'px-16') : 'px-4 sm:px-6 md:px-16'
+      } flex items-center justify-between relative`}
     >
       {hasImage && (
         <>
@@ -70,7 +72,7 @@ export const BannerSlideView: React.FC<BannerSlideViewProps> = ({ banner, onCta,
         </>
       )}
 
-      <div className="max-w-2xl z-10 space-y-3">
+      <div className={`max-w-2xl z-10 ${forced ? 'space-y-3' : 'space-y-1.5 sm:space-y-3'}`}>
         {(banner.tag || banner.badge) && (
           <div className="flex items-center gap-2">
             {banner.tag && (
@@ -79,7 +81,7 @@ export const BannerSlideView: React.FC<BannerSlideViewProps> = ({ banner, onCta,
               </span>
             )}
             {banner.badge && (
-              <span className="bg-white/10 text-white/90 text-xs px-2.5 py-0.5 rounded-full backdrop-blur-xs font-medium">
+              <span className={`${forced ? '' : 'hidden sm:inline-block '}bg-white/10 text-white/90 text-xs px-2.5 py-0.5 rounded-full backdrop-blur-xs font-medium`}>
                 {banner.badge}
               </span>
             )}
@@ -87,21 +89,21 @@ export const BannerSlideView: React.FC<BannerSlideViewProps> = ({ banner, onCta,
         )}
         <h2
           className={`${
-            forced ? (mobileLayout ? 'text-2xl' : 'text-4xl') : 'text-2xl sm:text-3xl lg:text-4xl'
-          } font-extrabold tracking-tight text-white leading-tight`}
+            forced ? (mobileLayout ? 'text-2xl' : 'text-4xl') : 'text-xl sm:text-3xl lg:text-4xl'
+          } font-extrabold tracking-tight text-white leading-tight ${forced ? '' : 'line-clamp-2 sm:line-clamp-none'}`}
         >
           {banner.title}
         </h2>
         {banner.subtitle && (
-          <p className={`${forced ? 'text-sm' : 'text-sm sm:text-base'} text-gray-300 font-normal leading-relaxed`}>
+          <p className={`${forced ? 'text-sm' : 'hidden sm:block sm:text-base'} text-gray-300 font-normal leading-relaxed`}>
             {banner.subtitle}
           </p>
         )}
         {banner.cta && (
-          <div className="pt-2">
+          <div className={forced ? 'pt-2' : 'pt-1 sm:pt-2'}>
             <button
               onClick={() => onCta?.(banner.cta!)}
-              className="bg-[#fff159] hover:bg-yellow-400 text-blue-950 font-extrabold px-6 py-2.5 rounded-md shadow-md hover:shadow-lg transition transform active:scale-95 text-sm"
+              className="bg-[#fff159] hover:bg-yellow-400 text-blue-950 font-extrabold px-5 sm:px-6 py-2 sm:py-2.5 rounded-md shadow-md hover:shadow-lg transition transform active:scale-95 text-sm"
             >
               {banner.cta.label}
             </button>
@@ -171,21 +173,21 @@ export const BannerCarousel: React.FC<BannerCarouselProps> = ({ slides = FALLBAC
           {/* Navigation Arrows */}
           <button
             onClick={() => setCurrentSlide((prev) => (prev - 1 + count) % count)}
-            className="absolute left-3 top-1/2 -translate-y-1/2 bg-black/40 hover:bg-black/70 text-white p-2 rounded-full backdrop-blur-xs transition"
+            className="hidden sm:block absolute left-3 top-1/2 -translate-y-1/2 bg-black/40 hover:bg-black/70 text-white p-2 rounded-full backdrop-blur-xs transition"
             title="Slide Anterior"
           >
             <ChevronLeft className="w-5 h-5" />
           </button>
           <button
             onClick={() => setCurrentSlide((prev) => (prev + 1) % count)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 bg-black/40 hover:bg-black/70 text-white p-2 rounded-full backdrop-blur-xs transition"
+            className="hidden sm:block absolute right-3 top-1/2 -translate-y-1/2 bg-black/40 hover:bg-black/70 text-white p-2 rounded-full backdrop-blur-xs transition"
             title="Próximo Slide"
           >
             <ChevronRight className="w-5 h-5" />
           </button>
 
           {/* Slide Indicators */}
-          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-2">
+          <div className="absolute bottom-1.5 sm:bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-2">
             {slides.map((_, idx) => (
               <button
                 key={idx}
@@ -200,7 +202,8 @@ export const BannerCarousel: React.FC<BannerCarouselProps> = ({ slides = FALLBAC
       )}
 
       {/* Trust Badges Strip Under Banner */}
-      <div className="bg-white border-b border-gray-200 py-3 px-4 shadow-xs">
+      {/* Celular: faixa de confiança escondida (informação secundária que empurrava os produtos ~150px para baixo) */}
+      <div data-testid="banner-trust-strip" className="hidden sm:block bg-white border-b border-gray-200 py-3 px-4 shadow-xs">
         <div className="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-4 text-xs text-gray-700">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-blue-50 text-blue-600 rounded-full">

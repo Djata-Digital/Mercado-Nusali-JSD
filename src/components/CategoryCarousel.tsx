@@ -5,6 +5,8 @@ import { Smartphone, Tv, Laptop, Zap, Activity, Wrench, Home, ShoppingBag, Chevr
 
 /** Quantas categorias PRINCIPAIS a Home mostra; as demais ficam em "Ver todas as categorias" (/categories). */
 const HOME_CATEGORY_LIMIT = 16;
+/** No celular a Home mostra uma FAIXA compacta (rolagem horizontal) com as primeiras categorias e o atalho "Ver todas". */
+const HOME_CATEGORY_LIMIT_MOBILE = 8;
 
 export const CategoryCarousel: React.FC = () => {
   const { data: realCategories = [] } = useCategories();
@@ -14,6 +16,7 @@ export const CategoryCarousel: React.FC = () => {
   const roots = activeCategories.filter((c: any) => !c.parentId);
   const departments = roots.length > 0 ? roots : activeCategories;
   const visible = departments.slice(0, HOME_CATEGORY_LIMIT);
+  const visibleMobile = departments.slice(0, HOME_CATEGORY_LIMIT_MOBILE);
 
   const getIcon = (iconName?: string) => {
     switch (iconName) {
@@ -33,15 +36,37 @@ export const CategoryCarousel: React.FC = () => {
   }
 
   return (
-    <div className="my-6">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-bold text-gray-800 tracking-tight">Categorias Populares</h2>
+    <div className="my-3 sm:my-6">
+      <div className="flex items-center justify-between mb-2 sm:mb-4">
+        <h2 className="text-base sm:text-xl font-bold text-gray-800 tracking-tight">Categorias Populares</h2>
         <Link to="/categories" className="text-xs text-blue-800 font-bold hover:underline flex items-center gap-1">
-          Ver todas as categorias <ChevronRight className="w-4 h-4" />
+          Ver todas<span className="hidden sm:inline"> as categorias</span> <ChevronRight className="w-4 h-4" />
         </Link>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+      {/* Celular: faixa compacta de uma linha (rolagem horizontal) + atalho "Ver todas" — em vez de uma grade alta de blocos */}
+      <div data-testid="category-strip" className="sm:hidden flex gap-3 overflow-x-auto pb-1 -mx-2 px-2 snap-x [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {visibleMobile.map((cat: any) => (
+          <Link
+            key={cat.id}
+            to={`/categories/${cat.slug || cat.id}`}
+            className="snap-start shrink-0 w-[68px] flex flex-col items-center gap-1 text-center"
+          >
+            <span className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center">{getIcon(cat.icon)}</span>
+            <span className="text-[11px] font-semibold text-gray-800 line-clamp-2 leading-tight">{cat.name}</span>
+          </Link>
+        ))}
+        <Link
+          to="/categories"
+          data-testid="category-strip-all"
+          className="snap-start shrink-0 w-[68px] flex flex-col items-center gap-1 text-center"
+        >
+          <span className="w-12 h-12 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center"><ChevronRight className="w-6 h-6 text-emerald-700" aria-hidden="true" /></span>
+          <span className="text-[11px] font-bold text-emerald-800 leading-tight">Ver todas</span>
+        </Link>
+      </div>
+
+      <div className="hidden sm:grid grid-cols-4 lg:grid-cols-8 gap-3">
         {visible.map((cat: any) => (
           <Link
             key={cat.id}

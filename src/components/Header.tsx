@@ -258,12 +258,13 @@ export const Header: React.FC = () => {
   const curTheme = themeConfig[headerTheme] || themeConfig.green;
 
   return (
-    <header className={`sticky top-0 z-40 transition-colors duration-300 ${curTheme.bg}`}>
+    // Celular: o cabeçalho (3 linhas) NÃO fica fixo — rola com a página para não ocupar uma fatia grande da tela; fixo só a partir de md.
+    <header data-testid="site-header" className={`relative md:sticky md:top-0 z-40 transition-colors duration-300 ${curTheme.bg}`}>
       {/* Container */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-1.5 sm:py-2">
         {/* Top Row: Logo, Country Selector, Search, Header Color Switcher, Nusali+ Promo */}
         {/* Responsivo: no celular a linha quebra (logo + país + menu; a busca ocupa a linha de baixo) em vez de estourar a largura. */}
-        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 md:flex-nowrap">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 sm:gap-y-2 md:flex-nowrap">
           {/* Logo oficial Mercado Nusali sobre uma pílula branca rente ao logo (o texto azul some no fundo verde sem ela) */}
           <Link
             to="/"
@@ -919,7 +920,7 @@ export const Header: React.FC = () => {
                   to="/login"
                   className="flex items-center gap-1 py-1 px-2.5 rounded-md bg-white/90 hover:bg-white text-blue-950 font-black text-xs shadow-2xs transition"
                 >
-                  <LogIn className="w-3.5 h-3.5" /> Entrar
+                  <LogIn className="w-3.5 h-3.5" aria-hidden="true" /> <span className="hidden min-[420px]:inline">Entrar</span><span className="sr-only min-[420px]:hidden">Entrar</span>
                 </Link>
                 <Link
                   to="/register"

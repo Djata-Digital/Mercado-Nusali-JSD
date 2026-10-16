@@ -14,6 +14,7 @@ import { SellerKyc } from './seller/SellerKyc';
 import { SellerMultiStore } from './seller/SellerMultiStore';
 import { SellerTeam } from './seller/SellerTeam';
 import { SellerProductsList } from './seller/SellerProductsList';
+import { quickStockErrorMessage } from '../utils/sellerQuickStock';
 import { SellerProductWizard } from './seller/SellerProductWizard';
 import { SellerStockManager } from './seller/SellerStockManager';
 import { SellerOrdersManager } from './seller/SellerOrdersManager';
@@ -322,6 +323,19 @@ export const SellerHubView: React.FC = () => {
     }
   };
 
+  // Ajuste rápido de estoque da lista: grava o FÍSICO pelo endpoint dedicado e relê a lista; o resultado é o do servidor (nunca otimista).
+  const handleQuickStockChange = async (id: string, newOnHand: number): Promise<{ ok: boolean; message?: string }> => {
+    try {
+      const res: any = await SellerService.updateStock(id, newOnHand);
+      if (res && res.success === false) return { ok: false, message: quickStockErrorMessage(res?.error?.message || res?.message) };
+      await fetchSellerProducts();
+      if (refetch) refetch();
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, message: quickStockErrorMessage(err?.response?.data?.message || err?.response?.data?.error?.message || err?.message) };
+    }
+  };
+
   const handleUpdateProduct = async (p: any) => {
     try {
       const res = await SellerService.updateProduct(p.id, p);
@@ -540,7 +554,7 @@ export const SellerHubView: React.FC = () => {
               setActiveSection('product_create');
             }}
             onOpenProductDetail={openProductDetail}
-            onUpdateProduct={handleUpdateProduct}
+            onQuickStockChange={handleQuickStockChange}
             onEditProduct={async (p) => {
               // Fase 6: a edição parte dos valores TIPADOS atuais (detalhe do vendedor), não do espelho legado da listagem.
               // P1: se o detalhe não carregar, a edição NÃO abre com os dados parciais da listagem (sem variações nem valores tipados, salvar poderia

@@ -90,6 +90,8 @@ export const SearchResultsView: React.FC = () => {
   const [brand, setBrand] = useState<string | undefined>(undefined);
   const [attrs, setAttrs] = useState<AttributeFilters>({});
   const [page, setPage] = useState(1);
+  // Celular: os filtros ficam recolhidos atrás do botão "Filtros" (antes empilhavam acima dos produtos e empurravam a lista para baixo)
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const updateFilterState = (patch: Partial<FilterState>) => {
     setFilterState((prev) => ({ ...prev, ...patch }));
     setPage(1);
@@ -228,12 +230,12 @@ export const SearchResultsView: React.FC = () => {
   const categoryName: string | null = categoryScope?.category?.name || null;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+    <div className="max-w-7xl mx-auto px-2 sm:px-4 py-2 sm:py-6 space-y-2 sm:space-y-6">
       {/* Search Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-200 shadow-xs">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 sm:gap-4 bg-white p-2.5 sm:p-4 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs">
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-lg font-bold text-gray-900">
+            <h1 className="text-base sm:text-lg font-bold text-gray-900 leading-tight">
               {filterState.query
                 ? `Resultados para "${filterState.query}"${categoryName ? ` em ${categoryName}` : ''}`
                 : (categoryName || 'Todos os Produtos e Ofertas')}
@@ -244,20 +246,32 @@ export const SearchResultsView: React.FC = () => {
               </span>
             )}
           </div>
-          <p className="text-xs text-gray-500 mt-0.5">
+          <p className="text-xs text-gray-500 mt-0.5 leading-none">
             {totalFound} {totalFound === 1 ? 'produto encontrado' : 'produtos encontrados'}
           </p>
         </div>
 
-        {/* Sort Controls */}
+        {/* Sort Controls (+ botão Filtros no celular) */}
         <div className="flex items-center gap-2">
-          <label className="text-xs font-semibold text-gray-700 flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setFiltersOpen((o) => !o)}
+            aria-expanded={filtersOpen}
+            aria-controls="catalog-filters-panel"
+            data-testid="filters-toggle"
+            className="lg:hidden inline-flex items-center gap-1.5 min-h-[36px] px-3 rounded-lg border border-gray-300 bg-white text-xs font-bold text-gray-800 cursor-pointer"
+          >
+            <SlidersHorizontal className="w-4 h-4 text-emerald-600" aria-hidden="true" /> Filtros{activeFilters ? ' •' : ''}
+          </button>
+          <label htmlFor="catalog-sort" className="hidden sm:flex text-xs font-semibold text-gray-700 items-center gap-1">
             <ArrowUpDown className="w-3.5 h-3.5" /> Ordenar por:
           </label>
           <select
+            id="catalog-sort"
+            aria-label="Ordenar por"
             value={filterState.sortBy}
             onChange={(e) => updateFilterState({ sortBy: e.target.value as any })}
-            className="bg-gray-50 border border-gray-300 text-gray-800 text-xs rounded-lg px-3 py-1.5 font-medium focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+            className="flex-1 sm:flex-none min-h-[36px] sm:min-h-0 bg-gray-50 border border-gray-300 text-gray-800 text-xs rounded-lg px-3 py-1.5 font-medium focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
           >
             <option value="relevance">Mais relevantes</option>
             <option value="price_asc">Menor preço</option>
@@ -274,7 +288,7 @@ export const SearchResultsView: React.FC = () => {
         const children = getDirectChildren(categoryScope.category.id, categoryScope.all);
         if (path.length <= 1 && children.length === 0) return null;
         return (
-          <nav aria-label="Navegação de categorias" className="bg-white p-4 rounded-2xl border border-gray-200 shadow-xs space-y-3">
+          <nav aria-label="Navegação de categorias" className="bg-white p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-gray-200 shadow-xs space-y-2 sm:space-y-3">
             {path.length > 1 && (
               <ol className="flex flex-wrap items-center gap-1.5 text-xs text-gray-500">
                 <li><Link to="/categories" className="hover:text-emerald-700 hover:underline">Categorias</Link></li>
@@ -293,12 +307,12 @@ export const SearchResultsView: React.FC = () => {
             {children.length > 0 && (
               <div>
                 <h2 className="text-[11px] font-bold text-gray-700 uppercase tracking-wider mb-2">Subcategorias de {categoryScope.category.name}</h2>
-                <ul className="flex flex-wrap gap-2">
+                <ul className="flex gap-2 overflow-x-auto sm:flex-wrap sm:overflow-visible pb-1 sm:pb-0">
                   {children.map((c: any) => (
                     <li key={c.id}>
                       <Link
                         to={`/categories/${c.slug || c.id}`}
-                        className="inline-block px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 hover:bg-emerald-50 hover:border-emerald-300 text-xs font-semibold text-gray-800 hover:text-emerald-800 transition"
+                        className="inline-block whitespace-nowrap px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50 hover:bg-emerald-50 hover:border-emerald-300 text-xs font-semibold text-gray-800 hover:text-emerald-800 transition"
                       >
                         {c.name}
                       </Link>
@@ -357,9 +371,9 @@ export const SearchResultsView: React.FC = () => {
       )}
 
       {/* Grid Layout: Left Sidebar Filters + Right Product Results */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Sidebar Filters (3 cols) */}
-        <div className="lg:col-span-3 space-y-6 bg-white p-5 rounded-2xl border border-gray-200 shadow-xs h-fit">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 lg:gap-6">
+        {/* Sidebar Filters (3 cols) — recolhido no celular até tocar em "Filtros" */}
+        <div id="catalog-filters-panel" className={`${filtersOpen ? 'block' : 'hidden'} lg:block lg:col-span-3 space-y-6 bg-white p-4 sm:p-5 rounded-2xl border border-gray-200 shadow-xs h-fit`}>
           <div className="flex items-center justify-between border-b border-gray-100 pb-3">
             <h2 className="text-sm font-bold text-gray-900 flex items-center gap-2">
               <SlidersHorizontal className="w-4 h-4 text-emerald-600" /> Filtros
@@ -451,8 +465,8 @@ export const SearchResultsView: React.FC = () => {
               )}
             </div>
           ) : (
-            <div className="space-y-6">
-              <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 transition-opacity ${catalog.isFetching ? 'opacity-60' : ''}`} aria-busy={catalog.isFetching ? 'true' : undefined}>
+            <div className="space-y-4 sm:space-y-6">
+              <div data-testid="catalog-grid" className={`grid grid-cols-2 md:grid-cols-3 gap-2 sm:gap-4 transition-opacity ${catalog.isFetching ? 'opacity-60' : ''}`} aria-busy={catalog.isFetching ? 'true' : undefined}>
                 {displayProducts.map((product) => (
                   <ProductCard key={product.id} product={product} />
                 ))}
