@@ -1518,7 +1518,50 @@ export class PaymentService {
       return { success: true, message: 'Pagamento de purchase_group confirmado com sucesso — escrow ativo para todos os pedidos.', settlementRole: 'primary', alreadyProcessed: false, childCount: children.length };
     });
 
+    // ------------------------------------------------------------------------
+    // SHADOW LEDGER (E1) — PAYMENT_RECEIVED por pedido filho. Só depois que o fluxo
+    // real JÁ commitou (nunca afeta o resultado), e também na reentrega idempotente
+    // ('primary' já confirmado): se um processamento anterior caiu entre o commit e
+    // o ledger, esta repetição completa o que faltou — a chave de idempotência
+    // (`payment_received:{orderId}`) garante um único lançamento por pedido.
+    // surplus nunca financia pedido algum e portanto nunca entra aqui.
+    // ------------------------------------------------------------------------
+    if ((result as any)?.settlementRole === 'primary') {
+      await PaymentService.recordGroupPaymentReceivedShadow(purchaseGroupId);
+    }
+
     return result;
+  }
+
+  /**
+   * E1 — lança PAYMENT_RECEIVED (Dr PAYMENT_CLEARING / Cr BUYER_ESCROW, valor = orders.totalAmount do filho) para CADA pedido filho já pago de um
+   * purchase_group. Isolamento por vendedor: uma transação por pedido; a falha de um nunca impede os demais nem afeta o fluxo real.
+   * Best-effort por desenho (shadow): nunca lança.
+   */
+  static async recordGroupPaymentReceivedShadow(purchaseGroupId: string): Promise<void> {
+    try {
+      const db = getDb();
+      if (!db) return;
+      const children = await db
+        .select({ id: orders.id, paymentStatus: orders.paymentStatus })
+        .from(orders)
+        .where(eq(orders.purchaseGroupId, purchaseGroupId));
+      for (const child of [...children].sort((a, b) => a.id.localeCompare(b.id))) {
+        if (child.paymentStatus !== 'paid') continue;
+        try {
+          const shadow = await FinancialLedgerService.recordPaymentReceived({ orderId: child.id, source: 'payment_service_group' });
+          if (shadow.skipped) {
+            logger.info({ orderId: child.id, purchaseGroupId, reason: shadow.reason, detail: shadow.detail }, '[ShadowLedger] recordPaymentReceived (group) pulado (esperado para pedidos legados/sem snapshot ou ledger desligado)');
+          } else {
+            logger.info({ orderId: child.id, purchaseGroupId, transactionId: shadow.transactionId, replay: !!shadow.idempotentReplay }, '[ShadowLedger] recordPaymentReceived (group) postado');
+          }
+        } catch (childErr: any) {
+          logger.error({ orderId: child.id, purchaseGroupId, error: childErr?.message }, '[ShadowLedger] recordPaymentReceived (group) falhou — fluxo real não afetado; repetível (idempotente)');
+        }
+      }
+    } catch (shadowErr: any) {
+      logger.error({ purchaseGroupId, error: shadowErr?.message }, '[ShadowLedger] recordGroupPaymentReceivedShadow falhou — fluxo real não afetado');
+    }
   }
 
   /**
@@ -2321,6 +2364,11 @@ export class PaymentService {
     // diagnóstico; nunca bloqueia nem reverte o fluxo real, que já commitou.
     // ------------------------------------------------------------------------
     try {
+      // E1 — garante (idempotente) que o PAYMENT_RECEIVED do pedido existe ANTES da entrega: sem ele BUYER_ESCROW ficaria negativo. Normalmente já foi
+      // postado na confirmação do pagamento; aqui só completa se aquele passo falhou. Chave `payment_received:{orderId}` ⇒ nunca duplica.
+      await FinancialLedgerService.recordPaymentReceived({ orderId, source: 'payment_service_release_ensure' }).catch((e: any) => {
+        logger.error({ orderId, error: e?.message }, '[ShadowLedger] recordPaymentReceived (garantia antes da entrega) falhou — fluxo real não afetado');
+      });
       const shadow = await FinancialLedgerService.recordDeliveryConfirmed({
         orderId,
         performedBy: options?.performedBy ?? null,

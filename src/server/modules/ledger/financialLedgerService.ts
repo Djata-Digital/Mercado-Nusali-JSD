@@ -402,7 +402,7 @@ export class FinancialLedgerService {
       reason: 'Entrega confirmada — escrow decomposto em comissão, frete e valor líquido do vendedor.',
       correlationId: input.correlationId ?? null,
       requestId: input.requestId ?? null,
-      metadata: { shadowPhase: '5A', commissionRateSnapshot: order.commissionRateSnapshot, commissionBase: order.commissionBase },
+      metadata: { shadowPhase: '5A', commissionRateSnapshot: order.commissionRateSnapshot, commissionBase: order.commissionBase, sellerCouponDiscount: order.discountAmount ?? null },
       entries: built.entries as unknown as DraftEntry[],
     });
   }
