@@ -184,10 +184,37 @@ export function validateVariantEntry(variant: ProductVariant): VariantFieldError
   if (variant.stock !== undefined && variant.stock !== null) {
     if (!Number.isInteger(variant.stock) || variant.stock < 0) {
       errors.stock = 'Estoque deve ser um número inteiro maior ou igual a 0.';
+    } else if (variant.stockBaseline !== undefined && typeof variant.stockFloor === 'number' && variant.stock < variant.stockFloor) {
+      // variação já cadastrada: o físico nunca fica abaixo do que já está comprometido (pedidos em andamento + transferências pendentes)
+      errors.stock = `Mínimo ${variant.stockFloor}: ${variant.stockReserved ?? 0} reservada(s) por pedidos${(variant.stockPending ?? 0) > 0 ? ` e ${variant.stockPending} em transferência` : ''}.`;
     }
   }
 
   return errors;
+}
+
+/**
+ * Variação JÁ cadastrada (carregada com o estoque físico do vendedor): o payload leva o novo físico (`stockOnHand`) e o valor visto ao abrir
+ * (`expectedStockOnHand`) para o servidor detectar alteração concorrente. Variação nova segue com `stock` inicial, como sempre. Os campos auxiliares
+ * de leitura não vão no payload.
+ */
+export function withVariantStockAdjustments(variants: ProductVariant[]): ProductVariant[] {
+  // sem nenhuma variação já cadastrada com estoque físico carregado (criação, produto sem variações): o payload é EXATAMENTE o mesmo array de sempre
+  if (!variants.some((v) => v.stockBaseline !== undefined)) return variants;
+  return variants.map((v) => {
+    const { stockBaseline, stockReserved, stockPending, stockFloor, stockEditable, ...rest } = v;
+    if (stockBaseline === undefined || stockEditable === false) return rest as ProductVariant;
+    return { ...rest, stockOnHand: v.stock, expectedStockOnHand: stockBaseline } as ProductVariant;
+  });
+}
+
+/** Primeiro erro de estoque entre as variações (bloqueia o salvamento antes de chamar a API). */
+export function firstVariantStockError(variants: ProductVariant[]): string | null {
+  for (const v of variants) {
+    const e = validateVariantEntry(v).stock;
+    if (e) return `${[v.color, v.size, v.capacity].filter(Boolean).join(' / ') || v.sku || 'Variação'}: ${e}`;
+  }
+  return null;
 }
 
 /**
@@ -204,6 +231,6 @@ export function buildVariantsPayloadForSubmit(
   variantsMatrix: ProductVariant[],
   hadRealVariantsOnLoad: boolean
 ): ProductVariant[] | undefined {
-  if (mode === 'variable') return variantsMatrix;
+  if (mode === 'variable') return withVariantStockAdjustments(variantsMatrix);
   return hadRealVariantsOnLoad ? [] : undefined;
 }

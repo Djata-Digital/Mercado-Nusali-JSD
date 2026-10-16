@@ -4,6 +4,7 @@ import { ProductAttributeValidationError } from './modules/catalog/attributeVali
 import { loadProductAttributeValues, composeProductSpecs } from './modules/catalog/attributeValueService.js';
 import { planAttributeUpdate, applyAttributePlan, writeAttributeAudit, ProductAttributeUpdateError } from './modules/catalog/productAttributeUpdateService.js';
 import { InventoryService } from './modules/inventory/inventoryService.js';
+import { parseVariantStockChanges, applyVariantStockChanges, loadVariantStockSnapshots, VariantStockError } from './modules/inventory/variantStockService.js';
 import { syncVariantsForProduct, VariantAxisValidationError, assertExistingVariantsFitCategory } from './modules/catalog/variantService.js';
 import { compareCommission, type CommissionChange } from './modules/catalog/commissionPreview.js';
 import { computeLiveVariantStock } from './modules/catalog/catalogService.js';
@@ -2260,7 +2261,20 @@ sellerRouter.get('/products/:id', async (req: AuthRequest, res: Response) => {
         const variantRowsRaw = await db.select().from(productVariants).where(eq(productVariants.productId, id));
         // Fase 7: estoque AO VIVO por variante (inventory) junto das linhas — o assistente de edição mostra o estoque real, nunca product_variants.stock
         const liveVariantStock = variantRowsRaw.length > 0 ? await computeLiveVariantStock(variantRowsRaw.map((v: any) => v.id), db) : new Map<string, number>();
-        const variants = variantRowsRaw.map((v: any) => ({ ...v, availableStock: liveVariantStock.get(v.id) ?? 0 }));
+        // Estoque FÍSICO do vendedor por variação (o que o formulário edita) com o reservado e o piso permitido; `availableStock` continua sendo o disponível total.
+        const variantStockSnap = variantRowsRaw.length > 0 ? await loadVariantStockSnapshots(db, seller.id, variantRowsRaw.map((v: any) => v.id)) : new Map();
+        const variants = variantRowsRaw.map((v: any) => {
+          const snap = variantStockSnap.get(v.id);
+          return {
+            ...v,
+            availableStock: liveVariantStock.get(v.id) ?? 0,
+            stockOnHand: snap?.onHand ?? 0,
+            stockReserved: snap?.reserved ?? 0,
+            stockPendingTransfer: snap?.pendingTransfer ?? 0,
+            stockFloor: snap?.floor ?? 0,
+            stockEditable: snap?.editable ?? true,
+          };
+        });
         const images = await db.select().from(productImages).where(eq(productImages.productId, id));
         const attrs = await db.select().from(productAttributes).where(eq(productAttributes.productId, id));
         // Fase 3: valores tipados (fonte principal) sobre a visão legada; `attributes` segue com as linhas legadas como antes.
@@ -2607,12 +2621,17 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
         // (eixos da categoria, combinação única, SKU) — qualquer falha desfaz tudo.
         if (hasVariantsPayload) {
           const variantsArray = Array.isArray(updates.variants) ? updates.variants : [];
+          // Ajustes de estoque de variações JÁ cadastradas (stockOnHand + expectedStockOnHand): validados antes de gravar qualquer coisa...
+          const stockChanges = parseVariantStockChanges(variantsArray);
           await syncVariantsForProduct(tx, {
             sellerId: check.seller.id,
             productId: id,
             variants: variantsArray,
             performedBy: req.user!.id,
           });
+          // ...e aplicados na MESMA transação, com a linha de estoque travada: se a quantidade mudou entretanto ou ficaria abaixo do reservado, o
+          // salvamento INTEIRO é desfeito (409) e nada é gravado.
+          await applyVariantStockChanges(tx, { productId: id, sellerId: check.seller.id, actingUserId: req.user!.id, changes: stockChanges });
         }
       });
     }
@@ -2634,6 +2653,9 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
     await CatalogService.invalidateCatalogCaches([id]);
     return res.json({ success: true, message: 'Produto atualizado com sucesso!', ...(commissionChange ? { commission: commissionChange } : {}) });
   } catch (err: any) {
+    if (err instanceof VariantStockError) {
+      return res.status(err.status).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
+    }
     if (err instanceof VariantAxisValidationError) {
       return res.status(err.status).json({ success: false, message: err.message, error: { code: err.code, message: err.message, details: err.details } });
     }

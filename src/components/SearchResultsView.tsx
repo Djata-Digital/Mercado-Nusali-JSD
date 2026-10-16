@@ -259,7 +259,7 @@ export const SearchResultsView: React.FC = () => {
             aria-expanded={filtersOpen}
             aria-controls="catalog-filters-panel"
             data-testid="filters-toggle"
-            className="lg:hidden inline-flex items-center gap-1.5 min-h-[36px] px-3 rounded-lg border border-gray-300 bg-white text-xs font-bold text-gray-800 cursor-pointer"
+            className="lg:hidden inline-flex items-center gap-1.5 min-h-[40px] px-3 rounded-lg border border-gray-300 bg-white text-xs font-bold text-gray-800 cursor-pointer"
           >
             <SlidersHorizontal className="w-4 h-4 text-emerald-600" aria-hidden="true" /> Filtros{activeFilters ? ' •' : ''}
           </button>
@@ -271,7 +271,7 @@ export const SearchResultsView: React.FC = () => {
             aria-label="Ordenar por"
             value={filterState.sortBy}
             onChange={(e) => updateFilterState({ sortBy: e.target.value as any })}
-            className="flex-1 sm:flex-none min-h-[36px] sm:min-h-0 bg-gray-50 border border-gray-300 text-gray-800 text-xs rounded-lg px-3 py-1.5 font-medium focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
+            className="flex-1 sm:flex-none min-h-[40px] sm:min-h-0 bg-gray-50 border border-gray-300 text-gray-800 text-xs rounded-lg px-3 py-1.5 font-medium focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
           >
             <option value="relevance">Mais relevantes</option>
             <option value="price_asc">Menor preço</option>

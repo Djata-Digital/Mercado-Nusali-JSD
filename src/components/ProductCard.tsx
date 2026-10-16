@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Heart, Star, ShoppingCart, ShieldCheck, Film, Image as ImageIcon, Share2, Globe, Layers, Palette, Truck } from 'lucide-react';
+import { Heart, Star, ShoppingCart, ShieldCheck, Film, Image as ImageIcon, Share2, Globe, Layers, Palette, Truck, ListChecks, Loader2, Check } from 'lucide-react';
 import { Product } from '../types';
-import { useCart } from '../hooks/useCart';
+import { CartService } from '../services/cartService';
+import { emitCartUpdated } from '../services/cartEvents';
 import { useFavorites } from '../hooks/useFavorites';
 import { usePreferences } from '../context/PreferencesContext';
 import { ProductShareModal } from './ProductShareModal';
@@ -21,11 +22,12 @@ interface ProductCardProps {
  */
 export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   const navigate = useNavigate();
-  const { addItem } = useCart();
   const { toggleFavorite, isFavorite } = useFavorites();
-  const { formatPrice, selectedCountry } = usePreferences();
+  const { formatPrice, selectedCountry, showToast } = usePreferences();
   const favorited = isFavorite(product.id);
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [justAdded, setJustAdded] = useState(false);
 
   const openProductDetail = (id: string) => {
     navigate(`/products/${id}`);
@@ -56,6 +58,30 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   // de comprar.
   const isVariableProduct = Boolean(product.hasVariants);
   const buyLabel = isVariableProduct ? 'Ver opções' : 'Adicionar';
+
+  // O clique do botão NÃO sobe para o cartão (antes, "Adicionar" também abria a página do produto). Produto com variações obrigatórias nunca é adicionado
+  // daqui: leva à página do produto (no topo), onde cor/tamanho/etc. são escolhidos e validados antes de comprar. Produto simples: adiciona 1 unidade,
+  // mostra o resultado real (sucesso ou a mensagem do servidor) e continua na listagem; o contador do cabeçalho se atualiza.
+  const handleBuyClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isVariableProduct) {
+      openProductDetail(product.id);
+      return;
+    }
+    if (adding) return;
+    setAdding(true);
+    try {
+      const updated = await CartService.addItem(product, 1);
+      emitCartUpdated(updated);
+      showToast('Produto adicionado ao carrinho.');
+      setJustAdded(true);
+      setTimeout(() => setJustAdded(false), 2000);
+    } catch (err: any) {
+      showToast(err?.message || 'Não foi possível adicionar ao carrinho. Tente novamente.');
+    } finally {
+      setAdding(false);
+    }
+  };
 
   return (
     <div data-testid="product-card" className="bg-white rounded-lg border border-gray-200 sm:hover:shadow-xl transition-all duration-200 flex flex-col overflow-hidden group relative h-full">
@@ -97,7 +123,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
                 e.stopPropagation();
                 toggleFavorite(product.id);
               }}
-              className="inline-flex items-center justify-center w-7 h-7 sm:w-auto sm:h-auto sm:p-1.5 bg-white/90 hover:bg-white rounded-full shadow-md text-gray-400 hover:text-red-500 transition cursor-pointer"
+              className="inline-flex items-center justify-center w-8 h-8 sm:w-auto sm:h-auto sm:p-1.5 bg-white/90 hover:bg-white rounded-full shadow-md text-gray-400 hover:text-red-500 transition cursor-pointer"
               title={favorited ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
               aria-label={favorited ? 'Remover dos favoritos' : 'Adicionar aos favoritos'}
               aria-pressed={favorited}
@@ -158,14 +184,16 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             )}
           </div>
           <button
-            onClick={() => (isVariableProduct ? openProductDetail(product.id) : addItem(product, 1))}
-            className="shrink-0 inline-flex items-center justify-center gap-1.5 w-9 h-9 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white rounded-full sm:rounded-md text-xs font-semibold transition"
-            title={buyLabel}
-            aria-label={`${buyLabel}: ${product.title}`}
+            onClick={handleBuyClick}
+            disabled={adding}
+            className="shrink-0 inline-flex items-center justify-center gap-1.5 w-10 h-10 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white disabled:opacity-60 rounded-full sm:rounded-md text-xs font-semibold transition cursor-pointer"
+            title={isVariableProduct ? 'Escolher opções (cor, tamanho...) na página do produto' : 'Adicionar ao carrinho'}
+            aria-label={`${isVariableProduct ? 'Escolher opções' : 'Adicionar ao carrinho'}: ${product.title}`}
             data-testid="product-card-buy"
+            data-variable={isVariableProduct ? 'true' : 'false'}
           >
-            <ShoppingCart className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
-            <span className="hidden sm:inline">{buyLabel}</span>
+            {adding ? <Loader2 className="w-4 h-4 sm:w-3.5 sm:h-3.5 animate-spin" aria-hidden="true" /> : justAdded ? <Check className="w-4 h-4 sm:w-3.5 sm:h-3.5" aria-hidden="true" /> : isVariableProduct ? <ListChecks className="w-4 h-4 sm:w-3.5 sm:h-3.5" aria-hidden="true" /> : <ShoppingCart className="w-4 h-4 sm:w-3.5 sm:h-3.5" aria-hidden="true" />}
+            <span className="hidden sm:inline">{justAdded ? 'Adicionado' : buyLabel}</span>
           </button>
         </div>
 

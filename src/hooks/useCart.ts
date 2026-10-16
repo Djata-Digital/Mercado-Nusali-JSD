@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { CartService } from '../services/cartService';
 import { storageService } from '../services/storage/storageService';
+import { subscribeCartUpdates, emitCartUpdated } from '../services/cartEvents';
 import { CartItem, Product } from '../types';
 
 export const useCart = () => {
@@ -35,6 +36,9 @@ export const useCart = () => {
     loadCart();
   }, []);
 
+  // outro lugar da tela (ex.: botão "Adicionar" de um cartão de produto) mudou o carrinho: mantém esta cópia (contador do cabeçalho etc.) em dia
+  useEffect(() => subscribeCartUpdates((updated) => setItems([...updated])), []);
+
   // addItem/updateQuantity/removeItem/clearCart retornam o carrinho real
   // atualizado (resposta do backend) — o chamador pode usar isso como fonte
   // imediata de verdade, sem depender de um novo render para ler `items`.
@@ -63,6 +67,7 @@ export const useCart = () => {
   ) => {
     const updated = await CartService.addItem(product, quantity, options);
     setItems([...updated]);
+    emitCartUpdated(updated);
     return updated;
   };
 
@@ -75,24 +80,28 @@ export const useCart = () => {
   ) => {
     const updated = await CartService.addItemsBatch(product, lines);
     setItems([...updated]);
+    emitCartUpdated(updated);
     return updated;
   };
 
   const updateQuantity = async (productId: string, quantity: number) => {
     const updated = await CartService.updateQuantity(productId, quantity);
     setItems([...updated]);
+    emitCartUpdated(updated);
     return updated;
   };
 
   const removeItem = async (productId: string) => {
     const updated = await CartService.removeItem(productId);
     setItems([...updated]);
+    emitCartUpdated(updated);
     return updated;
   };
 
   const clearCart = async () => {
     const updated = await CartService.clearCart();
     setItems([...updated]);
+    emitCartUpdated(updated);
     return updated;
   };
 

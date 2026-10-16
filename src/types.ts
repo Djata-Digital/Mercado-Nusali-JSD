@@ -156,6 +156,14 @@ export interface ProductVariant {
   // enriquecimento; nesse caso trate como indisponível, nunca como "sem
   // limite".
   availableStock?: number;
+  // Edição do estoque FÍSICO do vendedor (formulário do vendedor, variação já cadastrada): `stock` passa a ser o físico editável e estes campos
+  // trazem o que foi lido ao abrir (baseline, para detectar alteração concorrente), o reservado, as transferências pendentes e o piso permitido.
+  stockBaseline?: number;
+  stockReserved?: number;
+  stockPending?: number;
+  stockFloor?: number;
+  /** false = o SKU tem estoque em mais de um local do vendedor: mostra o valor mas não permite editar direto */
+  stockEditable?: boolean;
   // Campo real vindo do backend (product_variants.imageUrl) — usar este,
   // nunca `image` (que só existe nos dados de mock/demo do frontend).
   imageUrl?: string;

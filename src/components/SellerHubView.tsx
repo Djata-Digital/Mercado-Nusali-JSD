@@ -570,7 +570,7 @@ export const SellerHubView: React.FC = () => {
                   const liveVariants = Array.isArray(detail.data.variants)
                     ? detail.data.variants
                         .filter((v: any) => v.isActive !== false)
-                        .map((v: any) => ({ ...v, price: Number(v.price), originalPrice: v.originalPrice ? Number(v.originalPrice) : undefined, stock: Number(v.availableStock ?? 0), image: v.imageUrl || undefined }))
+                        .map((v: any) => ({ ...v, price: Number(v.price), originalPrice: v.originalPrice ? Number(v.originalPrice) : undefined, stock: Number(v.stockOnHand ?? v.availableStock ?? 0), stockBaseline: v.stockOnHand !== undefined ? Number(v.stockOnHand) : undefined, stockReserved: Number(v.stockReserved ?? 0), stockPending: Number(v.stockPendingTransfer ?? 0), stockFloor: Number(v.stockFloor ?? 0), stockEditable: v.stockEditable !== false, image: v.imageUrl || undefined }))
                     : undefined;
                   editable = { ...p, attributeValues: detail.data.attributeValues, specs: detail.data.specs ?? (p as any).specs, ...(liveVariants && liveVariants.length > 0 ? { variants: liveVariants } : {}) };
                 }

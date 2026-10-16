@@ -88,6 +88,7 @@ import {
   deriveProductLevelPricing,
   validateVariantEntry,
   buildVariantsPayloadForSubmit,
+  firstVariantStockError,
 } from '../../utils/productVariantWizard';
 
 // Fase M1-D2.6 — payload de escrita (create/update). NÃO é um Product
@@ -445,8 +446,7 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
   const secondJson = effectiveSecondJson(axes, initialProduct?.variants as any);
   const secondName = axisUi.secondAxis?.name || (secondJson ? humanizeAttributeKey(secondJson) : '');
   const secondHeading = secondName || 'Tamanhos / Capacidades';
-  // Fase 7 (edição): combinações que JÁ existem — o estoque delas se ajusta em Estoque & Armazéns (o salvamento do anúncio não o altera).
-  const existingVariantKeys = React.useMemo(() => new Set((initialProduct?.variants ?? []).map((v: any) => buildVariantKey({ color: v.color, size: v.size, capacity: v.capacity, attributesJson: v.attributesJson })).filter(Boolean) as string[]), [initialProduct]);
+  // Fase 7 (edição): combinações que JÁ existem. O estoque FÍSICO de cada uma é editável aqui (o servidor grava com a linha travada, respeitando reservas e transferências).
   const [extraAxisValues, setExtraAxisValues] = useState<Record<string, string>>({});
   const extraAxisLoadedRef = useRef(false);
   const [variantProblems, setVariantProblems] = useState<string[]>([]);
@@ -1177,6 +1177,16 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
         setVariantProblems(msgs);
         setWizardStep(3);
         showToast(msgs[0]);
+        return;
+      }
+    }
+
+    // Estoque das variações: inteiro e nunca abaixo do que já está reservado/em transferência (o servidor valida de novo, com o estoque travado)
+    if (productMode === 'variable') {
+      const stockProblem = firstVariantStockError(variantsMatrix);
+      if (stockProblem) {
+        setWizardStep(3);
+        showToast(stockProblem);
         return;
       }
     }
@@ -2386,16 +2396,26 @@ export const SellerProductWizard: React.FC<SellerProductWizardProps> = ({
                                         <label className="block text-[10px] font-bold text-gray-500 mb-0.5">Estoque</label>
                                         <input
                                           type="number"
-                                          min="0"
                                           value={item.stock}
-                                          disabled={isEditing && existingVariantKeys.has(buildVariantKey(buildAxisPayload([item], { secondColumn, secondJson, extraAxes: axisUi.extraAxes, extraValues: extraAxisValues })[0] as any) ?? '')}
-                                          title={isEditing && existingVariantKeys.size > 0 ? 'O estoque de uma variação já cadastrada se ajusta em Estoque & Armazéns.' : undefined}
+                                          min={item.stockBaseline !== undefined ? item.stockFloor ?? 0 : 0}
+                                          step="1"
+                                          inputMode="numeric"
+                                          data-testid={`variant-stock-${item.id || idx}`}
+                                          aria-label={`Estoque de ${[item.color, item.size].filter(Boolean).join(' / ') || 'variação'}`}
+                                          aria-invalid={!!errors.stock}
+                                          disabled={item.stockBaseline !== undefined && item.stockEditable === false}
+                                          title={item.stockBaseline !== undefined && item.stockEditable === false ? 'Este SKU tem estoque em mais de um local; o ajuste direto não é seguro.' : undefined}
                                           onChange={(e) => handleUpdateVariantStock(idx, parseInt(e.target.value) || 0)}
                                           className={`w-full p-1.5 border rounded-lg font-bold text-xs text-center bg-white ${
                                             errors.stock ? 'border-red-400' : 'border-gray-300'
                                           }`}
                                         />
-                                        {errors.stock && <p className="text-[10px] text-red-600 mt-0.5">{errors.stock}</p>}
+                                        {errors.stock && <p className="text-[10px] text-red-600 mt-0.5" role="alert">{errors.stock}</p>}
+                                        {item.stockBaseline !== undefined && !errors.stock && (item.stockReserved ?? 0) + (item.stockPending ?? 0) > 0 && (
+                                          <p className="text-[10px] text-gray-500 mt-0.5" data-testid={`variant-stock-hint-${item.id || idx}`}>
+                                            Reservadas: {item.stockReserved ?? 0}{(item.stockPending ?? 0) > 0 ? ` · Em transferência: ${item.stockPending}` : ''} · Disponível: {Math.max(0, (item.stock || 0) - (item.stockReserved ?? 0) - (item.stockPending ?? 0))}
+                                          </p>
+                                        )}
                                       </div>
                                       <div>
                                         <label className="block text-[10px] font-bold text-gray-500 mb-0.5">SKU</label>

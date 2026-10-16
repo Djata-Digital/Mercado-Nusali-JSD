@@ -142,7 +142,7 @@ report('H9 servico do carrinho: envia o retrato ao servidor, le de volta e usa o
 const cv = fs.readFileSync('src/components/CartView.tsx', 'utf8');
 report('H10 CartView usa o componente de opcoes (nome real do eixo)', /<CartItemOptionChips item=\{item\} \/>/.test(cv));
 const wiz = fs.readFileSync('src/components/seller/SellerProductWizard.tsx', 'utf8');
-report('H11 assistente do vendedor: 2a dimensao com o nome real (sem "Tamanhos / Capacidades" fixo quando ha eixo), sem grades de Tamanho para Voltagem e payload com secondJson', /2\. \{secondHeading\}/.test(wiz) && /\{!secondJson && \(/.test(wiz) && (wiz.match(/secondJson, extraAxes: axisUi\.extraAxes/g) || []).length === 2);
+report('H11 assistente do vendedor: 2a dimensao com o nome real (sem "Tamanhos / Capacidades" fixo quando ha eixo), sem grades de Tamanho para Voltagem e payload com secondJson', /2\. \{secondHeading\}/.test(wiz) && /\{!secondJson && \(/.test(wiz) && (wiz.match(/secondJson, extraAxes: axisUi\.extraAxes/g) || []).length === 1 /* só o payload; o 'disabled' do estoque de variação existente foi removido: agora é editável */ && !/existingVariantKeys\.has\(/.test(wiz));
 report('H12 assistente: produto simples bloqueado quando a categoria tem eixo obrigatorio (so em criacao ou ao remover variacoes), com aviso na tela', /requiredAxesBlockingSimple\(axes\)/.test(wiz) && /\(!isEditing \|\| hadRealVariantsOnLoadRef\.current\)/.test(wiz) && /data-testid="simple-mode-axes-note"/.test(wiz));
 const mgr = fs.readFileSync('src/components/seller/SellerOrdersManager.tsx', 'utf8');
 report('H13 pedidos do vendedor mostram a variacao comprada (titulo da variacao, que inclui a voltagem)', /data-testid="order-variant-title"/.test(mgr) && /ord\.variantTitle/.test(mgr));
