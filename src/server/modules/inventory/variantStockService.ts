@@ -12,6 +12,10 @@
  *     existentes nunca são comprometidos);
  *   - cada ajuste gera um movimento ADJUSTMENT auditável (quem, quando, quanto) e o resumo `products.stock` é recalculado.
  * Só o estoque do PRÓPRIO vendedor (SELLER_LOCATION) é editável aqui; estoque em HUB pertence à operação do armazém.
+ *
+ * ORDEM DE LOCKS (evita deadlock): os fluxos existentes (transferência para o HUB, retirada/expedição, aposentadoria de estoque) travam a linha de
+ * `inventory` e DEPOIS atualizam `products` (resumo de estoque). O salvamento do anúncio atualiza `products` cedo; por isso as linhas de estoque a ajustar
+ * são travadas NO INÍCIO da transação (`lockVariantInventoryRows`), antes de qualquer UPDATE em `products` — mesma ordem inventory → products de todos os outros.
  */
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { inventory, inventoryMovements, inventoryTransfers, productVariants } from '../../../db/schema.js';
@@ -87,6 +91,18 @@ async function pendingTransferQuantity(executor: any, inventoryId: string): Prom
     .from(inventoryTransfers)
     .where(and(eq(inventoryTransfers.fromInventoryId, inventoryId), eq(inventoryTransfers.status, 'PENDING')));
   return rows.reduce((s: number, r: any) => s + (Number(r.qty) || 0), 0);
+}
+
+/**
+ * Trava (FOR UPDATE) as linhas de estoque do vendedor das variações que serão ajustadas, em ordem determinística. Chamar como PRIMEIRA operação da
+ * transação do salvamento (antes de qualquer UPDATE em `products`). Sem ajustes, não faz nada.
+ */
+export async function lockVariantInventoryRows(tx: any, params: { productId: string; sellerId: string; changes: VariantStockChange[] }): Promise<void> {
+  for (const change of [...params.changes].sort((a, b) => a.variantId.localeCompare(b.variantId))) {
+    await tx.select({ id: inventory.id }).from(inventory)
+      .where(and(eq(inventory.productId, params.productId), eq(inventory.variantId, change.variantId), eq(inventory.locationType, 'SELLER_LOCATION'), eq(inventory.sellerId, params.sellerId)))
+      .for('update');
+  }
 }
 
 /** Leitura (sem travar) do estoque FÍSICO do vendedor por variação, para o formulário de edição. */

@@ -4,7 +4,7 @@
  * Postgres 17 DESCARTAVEL (HTTP real: PATCH/GET /seller/products). Nunca produção.
  */
 process.env.REDIS_URL = '';
-import { assertLedgerTestDatabaseGuard } from './ledgerTestDbGuard.js';
+import { assertLedgerTestDatabaseGuard } from './support/ledgerTestDbGuard.js';
 const testDbUrl = assertLedgerTestDatabaseGuard();
 process.env.DATABASE_URL = testDbUrl;
 process.env.NODE_ENV = 'test';
@@ -24,8 +24,9 @@ import { inventory, inventoryMovements, inventoryTransfers, products, productVar
 import { apiRouter } from '../src/server/api.js';
 import { getJwtAccessSecret } from '../src/server/modules/auth/jwtConfig.js';
 import { parseVariantStockChanges, VariantStockError, MAX_VARIANT_STOCK } from '../src/server/modules/inventory/variantStockService.js';
+import { InventoryService } from '../src/server/modules/inventory/inventoryService.js';
 import { validateVariantEntry, withVariantStockAdjustments, firstVariantStockError, buildVariantsPayloadForSubmit } from '../src/utils/productVariantWizard.js';
-import { setupCheckoutKit } from './checkoutTestKit.js';
+import { setupCheckoutKit } from './support/checkoutTestKit.js';
 
 if (!['localhost', '127.0.0.1'].includes(new URL(testDbUrl).hostname)) throw new Error('Somente banco local descartavel.');
 let passed = 0, total = 0;
@@ -210,6 +211,75 @@ async function main() {
   const simpleInv = (await db.select().from(inventory).where(and(eq(inventory.productId, simple.id), eq(inventory.locationType, 'SELLER_LOCATION'))))[0];
   const quickVar = await call('PATCH', `/seller/products/${product.id}/stock`, tok, { stock: 99 });
   report('V16 produto SEM variações continua editando o estoque como antes (12 → 20) e o ajuste rápido num produto COM variações segue recusado com a mensagem de "estoque por variação" (400 VARIANT_REQUIRED)', simpleEdit.status === 200 && simpleInv.quantityOnHand === 20 && quickVar.status === 400 && /VARIANT_REQUIRED/.test(quickVar.json?.message || ''));
+
+  // ================= 6b. INTERFERÊNCIA com outros fluxos de estoque (locks, transferências reais, livro de movimentos)
+  // I1 — ordem de locks: um fluxo existente (transferência/expedição) trava a linha de estoque e DEPOIS atualiza products; o salvamento do anúncio
+  // atualiza products cedo. Sem travar o estoque no início da transação haveria deadlock. Determinístico: o "fluxo existente" segura a linha e só
+  // atualiza products 600 ms depois, com o salvamento já em andamento.
+  const dlProduct = await kit.makeProduct(seller, store.storeId, 'Produto deadlock', 0.4, 500);
+  await call('PATCH', `/seller/products/${dlProduct.id}`, tok, { variants: [mk('Verde', 'M', 10, 'DL-VD-M'), mk('Verde', 'G', 5, 'DL-VD-G')] });
+  const dlVars: any[] = (await call('GET', `/seller/products/${dlProduct.id}`, tok)).json.data.variants;
+  const dlM = bySku(dlVars, 'DL-VD-M');
+  const dlInv = await invOf(dlM.id);
+  const holder2 = await pool.connect();
+  await holder2.query('BEGIN');
+  await holder2.query('SELECT id FROM inventory WHERE id = $1 FOR UPDATE', [dlInv.id]);
+  const dlPatch = call('PATCH', `/seller/products/${dlProduct.id}`, tok, { description: 'Descrição nova do produto', variants: editPayload(dlVars, { 'DL-VD-M': 14 }) });
+  await new Promise((r) => setTimeout(r, 700));
+  let holderErr: string | null = null;
+  try { await holder2.query('UPDATE products SET stock = stock WHERE id = $1', [dlProduct.id]); await holder2.query('COMMIT'); } catch (e: any) { holderErr = e?.code || String(e?.message).slice(0, 60); await holder2.query('ROLLBACK').catch(() => {}); }
+  holder2.release();
+  const dlRes = await dlPatch;
+  const dlRow = (await db.select().from(products).where(eq(products.id, dlProduct.id)))[0];
+  report('I1 NÃO HÁ DEADLOCK com os fluxos que travam estoque e depois atualizam products (transferência/expedição): ambos concluem — o salvamento espera a linha, grava descrição + estoque (10 → 14) e o fluxo concorrente também confirma', holderErr === null && dlRes.status === 200 && (await invOf(dlM.id)).quantityOnHand === 14 && dlRow.description === 'Descrição nova do produto', { holderErr, status: dlRes.status, body: dlRes.json });
+
+  // I2 — corrida com TRANSFERÊNCIA REAL para o HUB: nunca fica físico < reservado + transferências pendentes, qualquer que seja a ordem
+  const wh2 = await kit.makeWarehouse('hubrace', bissau.id);
+  let invariantOk = true; const outcomes: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    const cur: any[] = (await call('GET', `/seller/products/${dlProduct.id}`, tok)).json.data.variants;
+    const g = bySku(cur, 'DL-VD-G'); const gInv = await invOf(g.id);
+    await db.update(inventory).set({ quantityOnHand: 10, quantityReserved: 2 } as any).where(eq(inventory.id, gInv.id));
+    await db.delete(inventoryTransfers).where(eq(inventoryTransfers.fromInventoryId, gInv.id));
+    const fresh: any[] = (await call('GET', `/seller/products/${dlProduct.id}`, tok)).json.data.variants;
+    const [edit, trf] = await Promise.allSettled([
+      call('PATCH', `/seller/products/${dlProduct.id}`, tok, { variants: editPayload(fresh, { 'DL-VD-G': 4 }) }),
+      InventoryService.requestTransferToHub(seller.sellerId, gInv.id, wh2.warehouseId, 6, 'SELLER_DROPOFF'),
+    ]);
+    const after = await invOf(g.id);
+    const pending = (await db.select().from(inventoryTransfers).where(eq(inventoryTransfers.fromInventoryId, gInv.id))).filter((t: any) => t.status === 'PENDING').reduce((a: number, t: any) => a + t.quantity, 0);
+    const editStatus = edit.status === 'fulfilled' ? (edit.value as any).status : 'ERR';
+    outcomes.push(`${editStatus}/${trf.status}`);
+    if (after.quantityOnHand < after.quantityReserved + pending || after.quantityReserved !== 2 || editStatus === 500 || editStatus === 'ERR') invariantOk = false;
+  }
+  report('I2 corrida editar estoque × transferência REAL para o HUB (6 rodadas): em qualquer ordem o físico nunca fica abaixo de reservado + pendente, a reserva continua 2 e não há erro 500/deadlock (um dos dois é recusado de forma limpa)', invariantOk, outcomes);
+
+  // I3 — livro de movimentos coerente: entrada inicial + ajustes = físico atual, com quem fez cada ajuste
+  const ledProduct = await kit.makeProduct(seller, store.storeId, 'Produto livro', 0.3, 300);
+  await call('PATCH', `/seller/products/${ledProduct.id}`, tok, { variants: [mk('Rosa', 'P', 10, 'LV-RS-P')] });
+  let lv: any[] = (await call('GET', `/seller/products/${ledProduct.id}`, tok)).json.data.variants;
+  for (const target of [4, 12, 0, 7]) {
+    const r = await call('PATCH', `/seller/products/${ledProduct.id}`, tok, { variants: editPayload(lv, { 'LV-RS-P': target }) });
+    lv = (await call('GET', `/seller/products/${ledProduct.id}`, tok)).json.data.variants;
+    if (r.status !== 200) break;
+  }
+  const lvId = lv[0].id;
+  const lvMovs = await db.select().from(inventoryMovements).where(eq(inventoryMovements.variantId, lvId));
+  const lvSum = lvMovs.filter((m: any) => m.type === 'IN' || m.type === 'ADJUSTMENT').reduce((a: number, m: any) => a + Number(m.quantity), 0);
+  report('I3 LIVRO DE MOVIMENTOS: entrada inicial (+10) e 4 ajustes (−6, +8, −12, +7) somam exatamente o físico atual (7); todos os ajustes registam o vendedor; zerar (0) é aceito', lvSum === 7 && (await invOf(lvId)).quantityOnHand === 7 && lvMovs.filter((m: any) => m.type === 'ADJUSTMENT').length === 4 && lvMovs.filter((m: any) => m.type === 'ADJUSTMENT').every((m: any) => m.performedBy === seller.userId), { lvSum, movs: lvMovs.map((m: any) => [m.type, m.quantity]) });
+
+  // I4 — salvamento conjunto: se o estoque é recusado, NADA do anúncio é gravado (preço/descrição incluídos); se passa, tudo é gravado junto
+  const jt = await kit.makeProduct(seller, store.storeId, 'Produto conjunto', 0.3, 800);
+  await call('PATCH', `/seller/products/${jt.id}`, tok, { variants: [mk('Cinza', 'M', 6, 'JT-CZ-M')] });
+  const jtv: any[] = (await call('GET', `/seller/products/${jt.id}`, tok)).json.data.variants;
+  await db.update(inventory).set({ quantityReserved: 5 } as any).where(eq(inventory.id, (await invOf(jtv[0].id)).id));
+  const jtFail = await call('PATCH', `/seller/products/${jt.id}`, tok, { description: 'NÃO deve gravar', variants: editPayload(jtv, { 'JT-CZ-M': 2 }, { 'JT-CZ-M': { price: 1234 } }) });
+  const jtAfterFail = (await db.select().from(products).where(eq(products.id, jt.id)))[0];
+  const jtVarAfterFail = (await db.select().from(productVariants).where(eq(productVariants.id, jtv[0].id)))[0];
+  const jtOk = await call('PATCH', `/seller/products/${jt.id}`, tok, { description: 'Gravado junto', variants: editPayload(jtv, { 'JT-CZ-M': 9 }, { 'JT-CZ-M': { price: 1234 } }) });
+  const jtAfterOk = (await db.select().from(products).where(eq(products.id, jt.id)))[0];
+  const jtVarAfterOk = (await db.select().from(productVariants).where(eq(productVariants.id, jtv[0].id)))[0];
+  report('I4 ATUALIZAÇÃO CONJUNTA dados + estoque: recusada (409) → NADA gravado (descrição e preço da variação intactos, reserva 5 intacta); aceita → descrição, preço da variação e estoque (6 → 9) gravados na mesma transação', jtFail.status === 409 && jtAfterFail.description !== 'NÃO deve gravar' && Number(jtVarAfterFail.price) === 7000 && jtOk.status === 200 && jtAfterOk.description === 'Gravado junto' && Number(jtVarAfterOk.price) === 1234 && (await invOf(jtv[0].id)).quantityOnHand === 9 && (await invOf(jtv[0].id)).quantityReserved === 5, { fail: jtFail.status, ok: jtOk.status });
 
   // ================= 7. código do formulário
   const wiz = src('src/components/seller/SellerProductWizard.tsx'), hub = src('src/components/SellerHubView.tsx'), svc = src('src/server/modules/catalog/variantService.ts');

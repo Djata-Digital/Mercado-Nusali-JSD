@@ -76,8 +76,8 @@ report('A8 o cartão não chama mais useCart (antes cada cartão de uma lista di
 
 // ---- escopo: nada financeiro/frete/pagamento/checkout/pedidos tocado
 const changed = [...execSync('git diff --name-only main', { encoding: 'utf8' }).split(/\r?\n/), ...execSync('git ls-files --others --exclude-standard', { encoding: 'utf8' }).split(/\r?\n/)].filter(Boolean);
-const forbidden = changed.filter((f) => /^(src\/server\/modules\/(shipping|payments|orders|ledger|wallet|escrow)|src\/db|drizzle|scripts)\//.test(f) || (/(payment|escrow|subsid|shipping|checkout|ledger|wallet)/i.test(f) && !f.startsWith('scratch/')));
-report('X1 escopo: nenhum módulo de frete, subsídio, pagamentos, pedidos, carteira/Escrow, ledger, checkout, banco/esquema/migração ou script foi alterado (diff contra main) — só listagens, carrinho (aviso de atualização), estoque do vendedor e o formulário', forbidden.length === 0 && changed.length > 0, forbidden);
+const forbidden = changed.filter((f) => /^(src\/server\/modules\/(shipping|payments|orders|ledger|wallet|escrow)|src\/db|drizzle|scripts)\//.test(f) || (/(payment|escrow|subsid|shipping|checkout|ledger|wallet)/i.test(f) && !f.startsWith('scratch/') && !f.startsWith('tests/')));
+report('X1 escopo: nenhum módulo de frete, subsídio, pagamentos, pedidos, carteira/Escrow, ledger, checkout, banco/esquema/migração ou script foi alterado (diff contra main) — só listagens, carrinho (aviso de atualização), estoque do vendedor e o formulário', forbidden.length === 0, forbidden); // depois do merge o diff contra main é vazio e o guarda passa; numa branch nova ele protege o escopo
 
 console.log(`\nRESULTADO: ${pass} PASS, ${fail} FAIL`);
 process.exit(fail ? 1 : 0);

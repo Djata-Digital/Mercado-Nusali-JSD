@@ -23,7 +23,10 @@
     "asaas:test-webhook": "tsx scripts/test-asaas-webhook.ts",
     "asaas:test-e2e-public": "tsx scripts/test-asaas-e2e-public.ts",
     "test:redis": "tsx scripts/test-redis-optimization.ts",
-    "test:logistics-db": "tsx scratch/diag-db-errors.ts"
+    "test:logistics-db": "tsx scratch/diag-db-errors.ts",
+    "test:essential": "tsx tests/mobile-compact-listing.test.ts && tsx tests/seller-variant-stock.test.ts",
+    "test:mobile": "tsx tests/mobile-compact-listing.test.ts",
+    "test:variant-stock": "tsx tests/seller-variant-stock.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1111.0",

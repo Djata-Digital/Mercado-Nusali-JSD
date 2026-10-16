@@ -4,7 +4,7 @@ import { ProductAttributeValidationError } from './modules/catalog/attributeVali
 import { loadProductAttributeValues, composeProductSpecs } from './modules/catalog/attributeValueService.js';
 import { planAttributeUpdate, applyAttributePlan, writeAttributeAudit, ProductAttributeUpdateError } from './modules/catalog/productAttributeUpdateService.js';
 import { InventoryService } from './modules/inventory/inventoryService.js';
-import { parseVariantStockChanges, applyVariantStockChanges, loadVariantStockSnapshots, VariantStockError } from './modules/inventory/variantStockService.js';
+import { parseVariantStockChanges, applyVariantStockChanges, lockVariantInventoryRows, loadVariantStockSnapshots, VariantStockError } from './modules/inventory/variantStockService.js';
 import { syncVariantsForProduct, VariantAxisValidationError, assertExistingVariantsFitCategory } from './modules/catalog/variantService.js';
 import { compareCommission, type CommissionChange } from './modules/catalog/commissionPreview.js';
 import { computeLiveVariantStock } from './modules/catalog/catalogService.js';
@@ -2590,9 +2590,13 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
 
     let commissionChange: CommissionChange | null = null;
     const hasVariantsPayload = updates.variants !== undefined;
+    // Ajustes de estoque de variações JÁ cadastradas (stockOnHand + expectedStockOnHand): validados ANTES de abrir a transação (400 sem tocar no banco)
+    const stockChanges = hasVariantsPayload ? parseVariantStockChanges(Array.isArray(updates.variants) ? updates.variants : []) : [];
 
     if (needsAttributePlan || Object.keys(fieldsToUpdate).length > 1 || hasVariantsPayload) {
       await db.transaction(async (tx: any) => {
+        // 1ª operação: trava as linhas de estoque a ajustar (ordem inventory → products, a mesma dos fluxos de transferência/expedição) — sem deadlock
+        await lockVariantInventoryRows(tx, { productId: id, sellerId: check.seller.id, changes: stockChanges });
         if (needsAttributePlan) {
           const [locked] = await tx.select().from(products).where(eq(products.id, id)).for('update').limit(1);
           const plan = await planAttributeUpdate(tx, {
@@ -2621,15 +2625,13 @@ sellerRouter.patch('/products/:id', async (req: AuthRequest, res: Response) => {
         // (eixos da categoria, combinação única, SKU) — qualquer falha desfaz tudo.
         if (hasVariantsPayload) {
           const variantsArray = Array.isArray(updates.variants) ? updates.variants : [];
-          // Ajustes de estoque de variações JÁ cadastradas (stockOnHand + expectedStockOnHand): validados antes de gravar qualquer coisa...
-          const stockChanges = parseVariantStockChanges(variantsArray);
           await syncVariantsForProduct(tx, {
             sellerId: check.seller.id,
             productId: id,
             variants: variantsArray,
             performedBy: req.user!.id,
           });
-          // ...e aplicados na MESMA transação, com a linha de estoque travada: se a quantidade mudou entretanto ou ficaria abaixo do reservado, o
+          // Aplicados na MESMA transação, com a linha de estoque já travada: se a quantidade mudou entretanto ou ficaria abaixo do reservado, o
           // salvamento INTEIRO é desfeito (409) e nada é gravado.
           await applyVariantStockChanges(tx, { productId: id, sellerId: check.seller.id, actingUserId: req.user!.id, changes: stockChanges });
         }
