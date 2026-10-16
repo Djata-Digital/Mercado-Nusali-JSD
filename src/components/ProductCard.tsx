@@ -86,16 +86,18 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   return (
     <div data-testid="product-card" className="bg-white rounded-lg border border-gray-200 sm:hover:shadow-xl transition-all duration-200 flex flex-col overflow-hidden group relative h-full">
       {/* Imagem quadrada (object-contain: nunca corta o produto) com favorito/partilha e selo de oferta sobre ela */}
-      <div className="relative w-full aspect-square bg-gray-50 flex items-center justify-center cursor-pointer" onClick={() => openProductDetail(product.id)}>
+      {/* Quadrado FIXO: a imagem é posicionada DENTRO dele (absolute + object-contain). Sem isso, uma foto em retrato (ex.: 607×1080) esticava o contêiner
+          (aspect-ratio cede a conteúdo maior) e o cartão chegava a 430 px — fora do quadrado e da grade compacta. */}
+      <div className="relative w-full aspect-square overflow-hidden bg-gray-50 flex items-center justify-center cursor-pointer" onClick={() => openProductDetail(product.id)}>
         {product.image ? (
           <img
             src={product.image}
             alt={product.title}
             loading="lazy"
-            className="w-full h-full object-contain sm:group-hover:scale-105 transition-transform duration-300"
+            className="absolute inset-0 w-full h-full object-contain sm:group-hover:scale-105 transition-transform duration-300"
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center bg-gray-100 text-gray-400">
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-100 text-gray-400">
             <ImageIcon className="w-8 h-8" />
           </div>
         )}
