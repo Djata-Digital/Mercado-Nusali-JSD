@@ -27,6 +27,7 @@ import { logger } from '../../infra/logger.js';
 import { netBalanceByCurrency, isZeroMicros } from './decimal.js';
 import { ACCOUNT_DEFINITIONS, PLATFORM_POOLED_ACCOUNTS, ledgerAccountId, type LedgerAccountCode, type LedgerOwnerType } from './accounts.js';
 import { buildDeliveryConfirmedEntries } from './deliveryConfirmedEntries.js';
+import { isUniqueViolationOf } from './pgErrors.js';
 import type { LedgerSkipReason, LedgerResult } from './types.js';
 
 export type { LedgerSkipReason, LedgerResult } from './types.js';
@@ -257,7 +258,9 @@ export class FinancialLedgerService {
       // Corrida genuína: duas chamadas concorrentes com a MESMA idempotencyKey nova.
       // Uma delas ganha o INSERT; a outra esbarra no índice único e cai aqui — em vez
       // de propagar o erro cru, devolve o resultado já commitado pela vencedora.
-      if (err?.code === '23505' && String(err?.constraint || '').includes('ledger_transactions_idempotency_uq')) {
+      // O erro do Postgres chega embrulhado (DrizzleQueryError: SQLSTATE e constraint em err.cause). Só a violação do índice ÚNICO de idempotência
+      // desta transação é "replay"; qualquer outro erro (outra constraint, deadlock, conexão, tabela inexistente…) é propagado intacto.
+      if (isUniqueViolationOf(err, 'ledger_transactions_idempotency_uq')) {
         const winner = await db.select().from(ledgerTransactions).where(eq(ledgerTransactions.idempotencyKey, input.idempotencyKey)).limit(1);
         if (winner.length > 0) {
           logger.info({ idempotencyKey: input.idempotencyKey, transactionId: winner[0].id }, '[FinancialLedgerService] corrida concorrente resolvida como idempotent replay');
