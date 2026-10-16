@@ -24,11 +24,12 @@
     "asaas:test-e2e-public": "tsx scripts/test-asaas-e2e-public.ts",
     "test:redis": "tsx scripts/test-redis-optimization.ts",
     "test:logistics-db": "tsx scratch/diag-db-errors.ts",
-    "test:essential": "tsx tests/mobile-compact-listing.test.ts && tsx tests/seller-variant-stock.test.ts && tsx tests/ledger-e1-coupon-and-group-payment.test.ts && tsx tests/ledger-idempotency-race.test.ts",
+    "test:essential": "tsx tests/mobile-compact-listing.test.ts && tsx tests/test-db-safety.test.ts && node scripts/with-test-env.cjs tsx tests/seller-variant-stock.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e1-coupon-and-group-payment.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-idempotency-race.test.ts",
     "test:mobile": "tsx tests/mobile-compact-listing.test.ts",
-    "test:variant-stock": "tsx tests/seller-variant-stock.test.ts",
-    "test:ledger-e1": "tsx tests/ledger-e1-coupon-and-group-payment.test.ts",
-    "test:ledger-race": "tsx tests/ledger-idempotency-race.test.ts"
+    "test:variant-stock": "node scripts/with-test-env.cjs tsx tests/seller-variant-stock.test.ts",
+    "test:ledger-e1": "node scripts/with-test-env.cjs tsx tests/ledger-e1-coupon-and-group-payment.test.ts",
+    "test:ledger-race": "node scripts/with-test-env.cjs tsx tests/ledger-idempotency-race.test.ts",
+    "test:db-safety": "tsx tests/test-db-safety.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1111.0",

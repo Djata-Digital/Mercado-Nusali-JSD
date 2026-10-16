@@ -31,6 +31,8 @@
  * preparar a configuração/script, mas não criar infraestrutura externa").
  */
 
+import { classifyTestDatabaseUrl } from '../../src/db/testDatabaseSafety.js';
+
 export class LedgerTestDatabaseGuardError extends Error {
   constructor(message: string) {
     super(message);
@@ -42,6 +44,8 @@ export interface GuardEnv {
   NODE_ENV?: string;
   LEDGER_TEST_DATABASE_URL?: string;
   DATABASE_URL?: string;
+  /** definida pelo executor seguro / pelo próprio guarda quando DATABASE_URL foi TRAVADA no banco de teste validado */
+  NUSALI_TEST_DB_ALLOWED_URL?: string;
 }
 
 /**
@@ -62,8 +66,17 @@ export function checkLedgerTestDatabaseGuard(env: GuardEnv): { status: 'OK'; url
   if (!testUrl) {
     return { status: 'REJECTED', reason: 'LEDGER_TEST_DATABASE_URL não configurada. Configure-a apontando para o Postgres de teste isolado (docker-compose.dev.yml) antes de rodar testes financeiros destrutivos/imutáveis.' };
   }
-  if (testUrl === env.DATABASE_URL) {
+  // Igualdade com DATABASE_URL só é aceitável quando ela foi TRAVADA de propósito no banco de teste validado (executor seguro / chamada anterior do guarda).
+  if (testUrl === env.DATABASE_URL && env.NUSALI_TEST_DB_ALLOWED_URL !== testUrl) {
     return { status: 'REJECTED', reason: 'LEDGER_TEST_DATABASE_URL é idêntica a DATABASE_URL — isso apontaria os testes destrutivos para o banco operacional. Configure um banco de teste realmente separado.' };
+  }
+  // Incidente 2026-10-16: "diferente de DATABASE_URL" não bastava. A URL precisa ser PROVADAMENTE um Postgres descartável local (loopback + nome
+  // descartável + fora da lista de nomes protegidos + diferente de qualquer URL de produção do ambiente).
+  const envForClassify: Record<string, string | undefined> = { ...(env as Record<string, string | undefined>) };
+  if (env.NUSALI_TEST_DB_ALLOWED_URL === testUrl) delete envForClassify.DATABASE_URL; // travada de propósito no próprio banco de teste: não é uma URL de produção
+  const verdict = classifyTestDatabaseUrl(testUrl, envForClassify);
+  if (verdict.status === 'REJECTED') {
+    return { status: 'REJECTED', reason: `LEDGER_TEST_DATABASE_URL recusada — ${verdict.reason}` };
   }
   return { status: 'OK', url: testUrl };
 }
@@ -81,6 +94,15 @@ export function assertLedgerTestDatabaseGuard(env: GuardEnv = process.env as Gua
   // de `process.env`; chamadas com `env` injetado (testes unitários do guard) não são afetadas.
   if (env === (process.env as GuardEnv)) {
     process.env.REDIS_URL = '';
+    // TRAVA DO AMBIENTE (incidente 2026-10-16): getDb()/dotenv leem DATABASE_URL (do `.env` = PRODUÇÃO). Um teste que só "assertava" o guarda mas deixava
+    // DATABASE_URL apontar para o `.env` escrevia na produção. Agora a própria chamada do guarda fixa DATABASE_URL no banco de teste validado, zera as outras
+    // URLs de produção (dotenv nunca sobrescreve variável já definida) e marca o processo como teste (ativa a recusa em getDbPool).
+    process.env.DATABASE_URL = result.url;
+    process.env.PRODUCTION_DATABASE_URL = '';
+    process.env.DIRECT_URL = '';
+    process.env.SUPABASE_DB_URL = '';
+    process.env.NUSALI_TEST_RUN = '1';
+    process.env.NUSALI_TEST_DB_ALLOWED_URL = result.url;
   }
   return result.url;
 }

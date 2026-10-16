@@ -1,6 +1,7 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
 import * as schema from './schema.js';
+import { assertDatabaseAllowedForProcess } from './testDatabaseSafety.js';
 
 const { Pool } = pg;
 
@@ -23,6 +24,9 @@ export function getDbPool(): pg.Pool | null {
     if (!connectionString) {
       return null;
     }
+    // Falha segura (incidente 2026-10-16): um processo de teste/diagnóstico só pode abrir conexão com um Postgres descartável LOCAL. Lança ANTES de criar o
+    // pool (nada é conectado nem escrito). Inerte no servidor em produção (dist/server.cjs não é processo de teste).
+    assertDatabaseAllowedForProcess(connectionString, process.env, process.argv[1]);
     try {
       poolInstance = new Pool({
         connectionString,
