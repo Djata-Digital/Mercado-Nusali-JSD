@@ -4,6 +4,8 @@
  * contratos da API. Sem rede/banco. A interação real foi verificada no navegador com uma API simulada (ver relatório).
  */
 import fs from 'fs';
+import { buildEffectiveRows, rulesToDraft } from '../src/utils/shippingSubsidyForm.js';
+import { buildEffectiveRows, rulesToDraft } from '../src/utils/shippingSubsidyForm.js';
 
 let pass = 0, fail = 0;
 const report = (n: string, ok: boolean, d?: unknown) => { ok ? pass++ : fail++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${ok ? '' : '  => ' + JSON.stringify(d ?? null).slice(0, 300)}`); };
@@ -31,6 +33,15 @@ report('S3 o servidor NUNCA aceita a percentagem/serviço vindos do cliente de c
 report('S4 compatibilidade e rigor: configuração antiga continua válida; escrita valida regras/alvos; leitura nunca aplica regra inválida', rules.includes('Tolerante ao formato antigo') && admin.includes('assertRuleTargetsExist') && rules.includes("source: 'INVALID_RULE'") && admin.includes('STORED_RULES_INVALID'));
 report('S5 transição e reversão preservam as regras (instantâneo com rules)', src('src/server/modules/shipping/shippingSubsidyTransition.ts').includes('rules: plan.current.rules') && src('scripts/transition-shipping-subsidy.ts').includes('rules: plan.current.rules'));
 report('S6 políticas de vendedor, cupons e o gate do checkout da Guiné-Bissau não foram tocados', !/storeShippingPolicies/.test(admin) && /CHECKOUT_ENABLED_COUNTRIES[^=]*=\s*\[\s*\]/.test(src('src/utils/checkoutAvailability.ts')));
+
+const cat = [{ countryCode: 'GW', countryName: 'Guiné-Bissau', serviceCode: 'STANDARD', serviceName: 'Standard', isActive: true }, { countryCode: 'GW', countryName: 'Guiné-Bissau', serviceCode: 'ECONOMY', serviceName: 'Economy', isActive: true }];
+const simIn = { cost: 1000, sellerPercent: 0 };
+const inv = buildEffectiveRows(cat, { enabled: true, percent: 80 }, {}, simIn, { invalidKeys: ['GW:STANDARD'], corrupt: false });
+const corrupt = buildEffectiveRows(cat, { enabled: true, percent: 80 }, {}, simIn, { invalidKeys: [], corrupt: true });
+const fixed = buildEffectiveRows(cat, { enabled: true, percent: 80 }, rulesToDraft({ 'GW:STANDARD': { enabled: true, percent: 40 } }), simIn, { invalidKeys: ['GW:STANDARD'], corrupt: false });
+const rowOf = (rows: typeof inv, code: string) => rows.find((r) => r.serviceCode === code)!;
+report('UI13 tabela do painel = motor também com configuração inválida: regra guardada inválida → 0% (INVALID_RULE, cliente paga tudo), as outras seguem a global; contêiner corrompido → todas 0%; ao substituir a regra no rascunho passa a valer a nova',
+  rowOf(inv, 'STANDARD').percent === 0 && rowOf(inv, 'STANDARD').source === 'INVALID_RULE' && rowOf(inv, 'STANDARD').split!.buyer === 1000 && rowOf(inv, 'ECONOMY').percent === 80 && corrupt.every((r) => r.percent === 0 && r.source === 'INVALID_RULE') && rowOf(fixed, 'STANDARD').percent === 40);
 
 console.log(`\nRESULTADO: ${pass} PASS, ${fail} FAIL`);
 process.exit(fail ? 1 : 0);

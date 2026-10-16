@@ -107,12 +107,17 @@ export function buildEffectiveRows(
   global: { enabled: boolean; percent: number },
   draft: DraftRules,
   sim: { cost: number; sellerPercent: number } | null,
+  /** regras guardadas inválidas (o servidor aplica 0% a elas até serem corrigidas/removidas ao guardar) */
+  stored: { invalidKeys: string[]; corrupt: boolean } = { invalidKeys: [], corrupt: false },
 ): EffectiveRow[] {
-  const { rules, invalidKeys } = draftRulesLenient(draft);
+  const lenient = draftRulesLenient(draft);
+  const rules = lenient.rules;
+  // uma chave inválida guardada só deixa de valer quando o rascunho a substitui; o contêiner corrompido vale até guardar
+  const invalidKeys = [...lenient.invalidKeys, ...stored.invalidKeys.filter((k) => !(k in draft))];
   return [...catalog]
     .sort((a, b) => a.countryCode.localeCompare(b.countryCode) || a.serviceCode.localeCompare(b.serviceCode))
     .map((c) => {
-      const r = resolveNusaliPercent({ enabled: global.enabled, percent: global.percent, rules, invalidRuleKeys: invalidKeys, rulesCorrupt: false }, { countryCode: c.countryCode, serviceCode: c.serviceCode });
+      const r = resolveNusaliPercent({ enabled: global.enabled, percent: global.percent, rules, invalidRuleKeys: invalidKeys, rulesCorrupt: stored.corrupt }, { countryCode: c.countryCode, serviceCode: c.serviceCode });
       return {
         countryCode: c.countryCode, countryName: c.countryName, serviceCode: c.serviceCode, serviceName: c.serviceName,
         percent: r.percent, source: r.source, sourceLabel: describeSubsidySource(r.source, r.ruleKey),

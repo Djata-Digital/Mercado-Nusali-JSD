@@ -18,7 +18,7 @@ import {
 interface Props { showToast: (msg: string) => void }
 
 interface Config {
-  enabled: boolean; percent: number; rules: ServiceRules; problems?: string[]; legacyDefaultMode: string | null; updatedAt: string | null;
+  enabled: boolean; percent: number; rules: ServiceRules; problems?: string[]; invalidRuleKeys?: string[]; rulesCorrupt?: boolean; legacyDefaultMode: string | null; updatedAt: string | null;
   effective?: { kind: string; description: string }; services?: SubsidyCatalogRow[];
 }
 interface HistoryItem { id: string; createdAt: string; user: { name: string | null; email: string | null }; before: any; after: any; legacyModeChanged: boolean; rulesChanged?: boolean; note: string | null }
@@ -86,8 +86,8 @@ export const AdminShippingSubsidyManager: React.FC<Props> = ({ showToast }) => {
 
   const catalog: SubsidyCatalogRow[] = config?.services || [];
   const effectiveRows = useMemo(
-    () => buildEffectiveRows(catalog, { enabled, percent: draftPercent }, draftRules, simInputs),
-    [catalog, enabled, draftPercent, draftRules, simInputs],
+    () => buildEffectiveRows(catalog, { enabled, percent: draftPercent }, draftRules, simInputs, { invalidKeys: config?.invalidRuleKeys ?? [], corrupt: !!config?.rulesCorrupt }),
+    [catalog, enabled, draftPercent, draftRules, simInputs, config?.invalidRuleKeys, config?.rulesCorrupt],
   );
   const serviceCodes = useMemo(() => Array.from(new Set(catalog.map((c) => c.serviceCode))).sort(), [catalog]);
 

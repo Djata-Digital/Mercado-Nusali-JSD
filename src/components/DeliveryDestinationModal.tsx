@@ -80,13 +80,13 @@ export const DeliveryDestinationModal: React.FC<DeliveryDestinationModalProps> =
           setRegionsError(res.data.length === 0 ? geographyLoadMessage('regions', 'empty') : null);
         } else {
           setRegions([]);
-          setRegionsError(geographyLoadMessage('regions', 'error', (res as any)?.error?.message));
+          setRegionsError(geographyLoadMessage('regions', 'error', (res as any)?.error?.code));
         }
       })
       .catch((err: any) => {
         if (cancelled) return;
         setRegions([]);
-        setRegionsError(geographyLoadMessage('regions', 'error', err?.response?.data?.error?.message));
+        setRegionsError(geographyLoadMessage('regions', 'error', err?.response?.data?.error?.code));
       })
       .finally(() => { if (!cancelled) setIsLoadingRegions(false); });
     return () => { cancelled = true; };
@@ -109,13 +109,13 @@ export const DeliveryDestinationModal: React.FC<DeliveryDestinationModalProps> =
           setSectorsError(res.data.length === 0 ? geographyLoadMessage('sectors', 'empty') : null);
         } else {
           setSectors([]);
-          setSectorsError(geographyLoadMessage('sectors', 'error', (res as any)?.error?.message));
+          setSectorsError(geographyLoadMessage('sectors', 'error', (res as any)?.error?.code));
         }
       })
       .catch((err: any) => {
         if (cancelled) return;
         setSectors([]);
-        setSectorsError(geographyLoadMessage('sectors', 'error', err?.response?.data?.error?.message));
+        setSectorsError(geographyLoadMessage('sectors', 'error', err?.response?.data?.error?.code));
       })
       .finally(() => { if (!cancelled) setIsLoadingSectors(false); });
     return () => { cancelled = true; };

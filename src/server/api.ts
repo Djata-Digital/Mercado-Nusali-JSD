@@ -21,6 +21,7 @@ import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { resolveShippingPreview, resolveCartShippingPreview } from './modules/shipping/shippingPreviewService.js';
 import { listPublicRegions, listPublicSectors, PublicGeographyError } from './modules/shipping/shippingGeographyPublic.js';
+import { createRateLimiter } from './infra/rateLimiter.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 import { internalJobsRouter } from './modules/jobs/internalJobsRoutes.js';
 import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
@@ -82,7 +83,17 @@ function sendPublicGeography(res: Response, error: unknown) {
   return res.status(500).json({ success: false, error: { code: 'GEOGRAPHY_UNAVAILABLE', message: 'Não foi possível carregar as opções de entrega agora. Tente novamente.' } });
 }
 
-apiRouter.get('/shipping/regions', async (req: Request, res: Response) => {
+// Rate limit POR IP (req.ip já é o cliente real: configureTrustProxy em server.ts), mesma infraestrutura das rotas de autenticação (Redis, com fallback em
+// memória). Sem autenticação por desenho (é o visitante que escolhe o destino); o teto é folgado porque operadoras móveis compartilham IP, e a resposta
+// é pública e cacheável (5 min), então um uso normal (abrir o modal + trocar de região) fica muito abaixo do limite.
+export const PUBLIC_GEOGRAPHY_RATE_LIMIT = { windowMs: 60_000, maxRequests: 120 };
+const publicGeographyLimiter = createRateLimiter({
+  ...PUBLIC_GEOGRAPHY_RATE_LIMIT,
+  message: 'Muitas consultas seguidas. Aguarde um instante e tente novamente.',
+  keyPrefix: 'rl:shipping:geo:',
+});
+
+apiRouter.get('/shipping/regions', publicGeographyLimiter, async (req: Request, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Serviço indisponível no momento.' } });
@@ -93,7 +104,7 @@ apiRouter.get('/shipping/regions', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.get('/shipping/sectors', async (req: Request, res: Response) => {
+apiRouter.get('/shipping/sectors', publicGeographyLimiter, async (req: Request, res: Response) => {
   try {
     const db = getDb();
     if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Serviço indisponível no momento.' } });

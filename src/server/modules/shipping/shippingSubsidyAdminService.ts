@@ -29,6 +29,9 @@ export interface ShippingSubsidyConfig {
   rules: ServiceRules;
   /** problemas encontrados na configuração guardada (regras inválidas nunca são aplicadas) */
   problems: string[];
+  /** chaves de regra guardadas que estão inválidas (o motor resolve 0% para elas) e se o contêiner inteiro está corrompido */
+  invalidRuleKeys: string[];
+  rulesCorrupt: boolean;
   /** modo padrão legado da plataforma (null = não configurado = o cliente paga) */
   legacyDefaultMode: string | null;
   updatedAt: string | null;
@@ -61,6 +64,8 @@ export async function readShippingSubsidyConfig(executor: any): Promise<Shipping
     percent: parsed.percent,
     rules: parsed.rules,
     problems: parsed.problems,
+    invalidRuleKeys: parsed.invalidRuleKeys,
+    rulesCorrupt: parsed.rulesCorrupt,
     legacyDefaultMode: mode || null,
     updatedAt: rows[0]?.updatedAt ? new Date(rows[0].updatedAt).toISOString() : null,
   };
@@ -301,12 +306,13 @@ export interface SubsidyServiceRow {
 }
 
 /** Catálogo de serviços (país + código) com a regra efetiva de cada um — alimenta a tabela do painel; só leitura. */
-export async function listSubsidyServiceRows(executor: any, config: Pick<ShippingSubsidyConfig, 'enabled' | 'percent' | 'rules'>): Promise<SubsidyServiceRow[]> {
+export async function listSubsidyServiceRows(executor: any, config: Pick<ShippingSubsidyConfig, 'enabled' | 'percent' | 'rules'> & Partial<Pick<ShippingSubsidyConfig, 'invalidRuleKeys' | 'rulesCorrupt'>>): Promise<SubsidyServiceRow[]> {
   const rows: any[] = await executor
     .select({ countryCode: shippingServices.countryCode, code: shippingServices.code, name: shippingServices.name, isActive: shippingServices.isActive, countryName: countries.name })
     .from(shippingServices)
     .leftJoin(countries, eq(countries.code, shippingServices.countryCode));
-  const setting = { enabled: config.enabled, percent: config.percent, rules: config.rules, invalidRuleKeys: [] as string[], rulesCorrupt: false };
+  // MESMA entrada do motor: regra inválida guardada resolve 0% (INVALID_RULE) — a tabela nunca mostra um valor que o servidor não aplica
+  const setting = { enabled: config.enabled, percent: config.percent, rules: config.rules, invalidRuleKeys: config.invalidRuleKeys ?? [], rulesCorrupt: config.rulesCorrupt ?? false };
   return rows
     .map((r) => {
       const eff = resolveNusaliPercent(setting, { countryCode: r.countryCode, serviceCode: r.code });
