@@ -37,6 +37,16 @@ export class ShippingApi {
     return apiClient.post('/shipping/preview-cart', payload);
   }
 
+  // Geografia de frete PÚBLICA (somente leitura, sem login): regiões e setores ATIVOS de um país, para o visitante escolher o destino na página do
+  // produto. Só id/nome/código — nunca tarifas nem dados de pessoas. O formulário de endereço do comprador logado continua em /buyer/shipping/*.
+  static async getRegions(country: string): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/shipping/regions', { params: { country } });
+  }
+
+  static async getSectors(country: string, regionId?: string | null): Promise<ApiResponse<any[]>> {
+    return apiClient.get('/shipping/sectors', { params: regionId ? { country, region: regionId } : { country } });
+  }
+
   static async update(id: string, data: any): Promise<ApiResponse<any>> {
     return apiClient.patch(`/shipping/${id}`, data);
   }

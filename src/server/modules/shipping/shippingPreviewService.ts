@@ -33,6 +33,8 @@ import { validateInventoryVariantConsistency } from '../logistics/fulfillmentLoc
 import { classifyRejectedCandidates, mostActionableFailureCode, shippingFailureMessage, type ShippingFailureCode } from './checkoutShippingErrors.js';
 import {
   resolveShippingPayerPolicy,
+  readNusaliSubsidySetting,
+  type NusaliSubsidySetting,
   checkSellerNetForShippingShare,
   sellerSubsidyExceedsNetError,
   ShippingPolicyNotApplicableError,
@@ -247,7 +249,11 @@ export async function resolveShippingPreview(input: ShippingPreviewInput, execut
   // já usam, HUB ou não).
   let policy;
   try {
-    policy = await resolveShippingPayerPolicy(line.shippingAmount, { storeId: line.commercialStoreId, sellerId: line.sellerId }, db);
+    // país de destino derivado do próprio setor (a regra do subsídio é por país + serviço, como na cotação do carrinho e no pedido)
+    const [destSector] = input.destinationShippingSectorId
+      ? await db.select({ countryCode: shippingSectors.countryCode }).from(shippingSectors).where(eq(shippingSectors.id, input.destinationShippingSectorId)).limit(1)
+      : [];
+    policy = await resolveShippingPayerPolicy(line.shippingAmount, { storeId: line.commercialStoreId, sellerId: line.sellerId, countryCode: destSector?.countryCode ?? null, serviceCode: line.serviceCode }, db);
   } catch (err) {
     if (err instanceof ShippingPolicyNotApplicableError) {
       return { ok: true, available: false, code: err.code, message: err.message.replace(/^[A-Z_]+: /, '') };
@@ -454,6 +460,9 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
     return { ok: true, available: false, code: 'SHIPPING_SERVICE_NOT_AVAILABLE', message: 'Nenhum serviço de entrega ativo para este destino.', services: [] };
   }
 
+  // A configuração do subsídio é lida UMA vez por cotação: todos os serviços e grupos de vendedor usam exatamente a mesma (nunca valores de momentos diferentes).
+  const nusaliSetting = await readNusaliSubsidySetting(db);
+
   const options: CartShippingServiceOption[] = [];
   for (const svc of activeServices) {
     const lineResults = await Promise.all(
@@ -476,7 +485,7 @@ export async function resolveCartShippingPreview(input: CartShippingPreviewInput
       continue;
     }
 
-    const priced = await priceServiceOption(db, svc, lineResults as ShippingPreviewLineAvailable[], input.items, sectorRow.countryCode, input.destinationShippingSectorId);
+    const priced = await priceServiceOption(db, svc, lineResults as ShippingPreviewLineAvailable[], input.items, sectorRow.countryCode, input.destinationShippingSectorId, nusaliSetting);
     options.push(priced);
   }
 
@@ -540,6 +549,7 @@ async function priceServiceOption(
   items: CartShippingPreviewLineInput[],
   countryCode: string,
   destinationSectorId: string,
+  nusaliSetting: NusaliSubsidySetting,
 ): Promise<CartShippingServiceOption> {
   const LEGACY_NO_STORE_GROUP_KEY = '__LEGACY_NO_STORE__';
   const groupOf = (l: ShippingPreviewLineAvailable) => l.sellerId + '::' + (l.commercialStoreId ?? LEGACY_NO_STORE_GROUP_KEY);
@@ -575,7 +585,7 @@ async function priceServiceOption(
     const groupRawShippingCost = rawByGroup.get(groupKey) ?? 0;
     let policy;
     try {
-      policy = await resolveShippingPayerPolicy(groupRawShippingCost, { storeId: commercialStoreId, sellerId }, db);
+      policy = await resolveShippingPayerPolicy(groupRawShippingCost, { storeId: commercialStoreId, sellerId, countryCode, serviceCode: svc.code }, db, nusaliSetting);
       if (policy.shippingSellerSubsidy > 0) {
         const netInputs = await resolveSellerGroupNetInputs(db, sellerId, gItems);
         if (netInputs) {

@@ -33,7 +33,8 @@ import { logger } from '../../infra/logger.js';
 import { broadcastToUser } from '../../infra/websocket.js';
 import { ShipmentService } from '../logistics/shipmentService.js';
 import { InventoryService } from '../inventory/inventoryService.js';
-import { ShippingCalculatorService, resolveShippingPayerPolicy } from '../shipping/shippingCalculatorService.js';
+import { ShippingCalculatorService, resolveShippingPayerPolicy, readNusaliSubsidySetting, NUSALI_SUBSIDY_LOCK_KEY, type NusaliSubsidySetting } from '../shipping/shippingCalculatorService.js';
+import { snapshotSourceSuffix } from '../../../utils/shippingSubsidyRules.js';
 import { categories, platformSettings, countries } from '../../../db/schema.js';
 import { isProductAvailableForCountry, eligibilityReason } from '../catalog/productEligibilityService.js';
 import { userProfiles } from '../../../db/schema.js';
@@ -996,10 +997,13 @@ export class OrderService {
       async function computeSmartFulfillmentFreightRes(
         items: typeof verifiedItems,
         groupStoreId: string | null,
-        groupSellerId: string | null
+        groupSellerId: string | null,
+        nusaliSetting: NusaliSubsidySetting
       ) {
         const shippingCost = Math.round(items.reduce((s, i) => s + (Number(i.shippingAmount) || 0), 0) * 100) / 100;
-        const policy = await resolveShippingPayerPolicy(shippingCost, { storeId: groupStoreId, sellerId: groupSellerId }, tx);
+        // país de DESTINO + serviço escolhido selecionam a regra do subsídio da Nusali (a mesma resolução da cotação do carrinho)
+        const groupServiceCode = selectedServiceCode || items.find((i) => i.shippingServiceCode)?.shippingServiceCode || null;
+        const policy = await resolveShippingPayerPolicy(shippingCost, { storeId: groupStoreId, sellerId: groupSellerId, countryCode: destinationCountry, serviceCode: groupServiceCode }, tx, nusaliSetting);
         return {
           shippingCost,
           shippingChargedToBuyer: policy.shippingChargedToBuyer,
@@ -1008,6 +1012,7 @@ export class OrderService {
           shippingPayer: policy.shippingPayer,
           policyMode: policy.policyMode,
           nusaliSubsidyPercent: policy.nusaliSubsidyPercent,
+          nusaliSubsidySource: policy.nusaliSubsidySource,
           estimatedMinDays: 0,
           estimatedMaxDays: 0,
           // Distinto de qualquer rateSource legado ('ZONE_SPECIFIC'/'INTERNAL_ZONE')
@@ -1052,7 +1057,7 @@ export class OrderService {
           shippingMarketplaceSubsidy: String(financials.shippingMarketplaceSubsidy),
           shippingPayer: freightRes.shippingPayer,
           // snapshot do que valeu NESTE pedido (modo + percentagem global da Nusali aplicada): editar a configuração depois nunca reescreve o histórico
-          shippingPolicyModeAtCheckout: `${freightRes.policyMode}${freightRes.nusaliSubsidyPercent > 0 ? `+NUSALI_${freightRes.nusaliSubsidyPercent}PCT` : ''}`.slice(0, 50),
+          shippingPolicyModeAtCheckout: `${freightRes.policyMode}${freightRes.nusaliSubsidyPercent > 0 ? `+NUSALI_${freightRes.nusaliSubsidyPercent}PCT${snapshotSourceSuffix(freightRes.nusaliSubsidySource)}` : ''}`.slice(0, 50),
           shippingRateSource: freightRes.rateSource,
           shippingRateId: freightRes.rateId || null,
           commissionRateSnapshot: String(financials.commissionRateSnapshot),
@@ -1264,13 +1269,17 @@ export class OrderService {
           freightRes: Awaited<ReturnType<typeof computeSmartFulfillmentFreightRes>>;
           couponConsumption: { couponId: string; discountAmount: number } | null;
         }> = [];
+        // Subsídio da Nusali: a configuração é lida UMA vez nesta transação, sob lock consultivo COMPARTILHADO — uma gravação do painel (lock exclusivo)
+        // espera este pedido terminar, e todos os grupos do pedido usam exatamente a mesma configuração (nunca percentagens diferentes por grupo).
+        await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(hashtext(${NUSALI_SUBSIDY_LOCK_KEY}))`);
+        const nusaliSettingForOrder = await readNusaliSubsidySetting(tx);
         for (const { sellerId, commercialStoreId, items } of bySeller.values()) {
           // FASE D18-B2.2 - a politica de frete e SEMPRE resolvida pela loja
           // comercial do grupo, nunca pela fulfillment store do candidate F4
           // (que e null em fulfillment por HUB). Grupo legado (commercialStoreId
           // null) cai no fallback por seller_id ja existente em
           // resolveShippingPayerPolicy - nunca inventa uma loja.
-          const smartFreightRes = await computeSmartFulfillmentFreightRes(items, commercialStoreId, sellerId);
+          const smartFreightRes = await computeSmartFulfillmentFreightRes(items, commercialStoreId, sellerId, nusaliSettingForOrder);
 
           // FASE D18-C3.4 — resolve/trava/revalida o cupom (se houver
           // intenção para a loja deste grupo) ANTES de calcular os

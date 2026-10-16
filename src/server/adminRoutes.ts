@@ -97,7 +97,7 @@ import { validateSubsidyPercent, validateSubsidyAmount } from './modules/shippin
 import { validateShippingCampaignDefinition } from './modules/shipping/shippingCampaignService.js';
 import {
   ShippingSubsidyAdminError, ALLOWED_DEFAULT_POLICY_MODES, readShippingSubsidyConfig, validateShippingSubsidyUpdate,
-  updateShippingSubsidyConfig, listShippingSubsidyHistory, describeEffectiveSubsidy,
+  updateShippingSubsidyConfig, listShippingSubsidyHistory, describeEffectiveSubsidy, listSubsidyServiceRows,
 } from './modules/shipping/shippingSubsidyAdminService.js';
 import { NUSALI_SUBSIDY_SETTING_KEY } from './modules/shipping/shippingCalculatorService.js';
 
@@ -5253,7 +5253,9 @@ adminRouter.get('/shipping-subsidy', requireGlobalAdminForShippingSubsidy, async
     const db = getDb();
     if (!db) throw new AdminRequestError(503, 'Banco de dados indisponível.');
     const config = await readShippingSubsidyConfig(db);
-    return res.json({ success: true, data: { ...config, effective: describeEffectiveSubsidy(config) } });
+    // `services`: cada serviço (país + código) com a regra EFETIVA e a origem dela — a mesma resolução que o servidor aplica nas cotações e pedidos
+    const services = await listSubsidyServiceRows(db, config);
+    return res.json({ success: true, data: { ...config, effective: describeEffectiveSubsidy(config), services } });
   } catch (error) {
     return sendShippingSubsidyError(res, error);
   }
@@ -5273,7 +5275,7 @@ adminRouter.put('/shipping-subsidy', requireGlobalAdminForShippingSubsidy, async
     return res.json({
       success: true,
       message: 'Subsídio de frete da Nusali atualizado. Pedidos já criados não são recalculados.',
-      data: { ...result.after, legacyModeChanged: result.legacyModeChanged, previous: { enabled: result.before.enabled, percent: result.before.percent, legacyDefaultMode: result.before.legacyDefaultMode }, effective: describeEffectiveSubsidy(result.after) },
+      data: { ...result.after, legacyModeChanged: result.legacyModeChanged, previous: { enabled: result.before.enabled, percent: result.before.percent, rules: result.before.rules, legacyDefaultMode: result.before.legacyDefaultMode }, effective: describeEffectiveSubsidy(result.after), services: await listSubsidyServiceRows(db, result.after) },
     });
   } catch (error) {
     return sendShippingSubsidyError(res, error);

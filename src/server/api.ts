@@ -20,6 +20,7 @@ import { desc } from 'drizzle-orm';
 import { uploadRouter } from './uploadRoutes.js';
 import { ShipmentService } from './modules/logistics/shipmentService.js';
 import { resolveShippingPreview, resolveCartShippingPreview } from './modules/shipping/shippingPreviewService.js';
+import { listPublicRegions, listPublicSectors, PublicGeographyError } from './modules/shipping/shippingGeographyPublic.js';
 import { asaasWebhookRouter } from './modules/payments/asaasWebhookRoutes.js';
 import { internalJobsRouter } from './modules/jobs/internalJobsRoutes.js';
 import { countriesPublicRouter } from './modules/countries/countriesRoutes.js';
@@ -71,6 +72,37 @@ apiRouter.use('/banners', bannersPublicRouter);
 // fora do escopo desta fase) e referenciada por tipos em orderService.ts
 // (branch legado, código morto desde D16-I2, remoção física fica para
 // D16-I5). Nenhum fluxo real de comprador dependia desta rota.
+
+// GEOGRAFIA DE FRETE PÚBLICA (somente leitura) — regiões e setores ATIVOS para o visitante escolher o destino. Só id/nome/código; nunca tarifas, rotas
+// ou dados de pessoas. O endpoint autenticado /buyer/shipping/* continua existindo para o formulário de endereço do comprador.
+function sendPublicGeography(res: Response, error: unknown) {
+  if (error instanceof PublicGeographyError) {
+    return res.status(error.status).json({ success: false, error: { code: error.code, message: error.message } });
+  }
+  return res.status(500).json({ success: false, error: { code: 'GEOGRAPHY_UNAVAILABLE', message: 'Não foi possível carregar as opções de entrega agora. Tente novamente.' } });
+}
+
+apiRouter.get('/shipping/regions', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Serviço indisponível no momento.' } });
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.json({ success: true, data: await listPublicRegions(db, req.query.country) });
+  } catch (error) {
+    return sendPublicGeography(res, error);
+  }
+});
+
+apiRouter.get('/shipping/sectors', async (req: Request, res: Response) => {
+  try {
+    const db = getDb();
+    if (!db) return res.status(503).json({ success: false, error: { code: 'DB_UNAVAILABLE', message: 'Serviço indisponível no momento.' } });
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.json({ success: true, data: await listPublicSectors(db, req.query.country, req.query.region) });
+  } catch (error) {
+    return sendPublicGeography(res, error);
+  }
+});
 
 // FASE D16-G2 — preview de entrega READ-ONLY via F4/F3 (smart fulfillment),
 // para a página de produto (e futuramente checkout). NUNCA chama F5 —

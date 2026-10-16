@@ -63,7 +63,7 @@ async function main() {
     if (plan.noop) { console.log('[subsidy-transition] nada a mudar.'); return; }
 
     const file = arg('rollback-file') || `shipping-subsidy-rollback-${Date.now()}.json`;
-    const snapshot = { enabled: plan.current.enabled, percent: plan.current.percent, legacyDefaultMode: plan.current.legacyDefaultMode, takenAt: new Date().toISOString() };
+    const snapshot = { enabled: plan.current.enabled, percent: plan.current.percent, legacyDefaultMode: plan.current.legacyDefaultMode, rules: plan.current.rules, takenAt: new Date().toISOString() };
     fs.writeFileSync(file, JSON.stringify(snapshot, null, 2), { flag: 'wx' });
     console.log(`[subsidy-transition] ficheiro de reversão gravado: ${file}`);
     const r = await applySubsidyTransition(db, target);

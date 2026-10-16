@@ -45,3 +45,95 @@ export function subsidyErrorMessage(code: string | undefined, message: string | 
     default: return message || 'Não foi possível guardar. Tente novamente.';
   }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// REGRAS POR SERVIÇO / PAÍS+SERVIÇO (rascunho do painel). A precedência e a conta são as do servidor (shippingSubsidyRules/shippingSubsidyMath), importadas.
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+import { resolveNusaliPercent, ruleKey, describeSubsidySource, type ServiceRules, type SubsidySource } from './shippingSubsidyRules';
+import { simulateShippingSplit, type ShippingSplit } from './shippingSubsidyMath';
+
+/** Linha do catálogo devolvida por GET /admin/shipping-subsidy (serviço de um país + regra efetiva atual). */
+export interface SubsidyCatalogRow { countryCode: string; countryName: string | null; serviceCode: string; serviceName: string; isActive: boolean }
+
+/** "ativa" aplica a percentagem; "desativada" fica guardada mas é ignorada (herda o nível seguinte). Chave ausente = sem regra (herda). */
+export interface DraftRule { state: 'active' | 'disabled'; percentText: string }
+export type DraftRules = Record<string, DraftRule>;
+
+export function rulesToDraft(rules: ServiceRules | null | undefined): DraftRules {
+  const d: DraftRules = {};
+  for (const [k, r] of Object.entries(rules || {})) d[k] = { state: r.enabled ? 'active' : 'disabled', percentText: String(r.percent) };
+  return d;
+}
+
+export interface DraftConversion { ok: boolean; rules: ServiceRules; error: string; key: string | null }
+
+/** Rascunho → regras para enviar. A primeira percentagem inválida bloqueia (nada é corrigido em silêncio). */
+export function draftToRules(draft: DraftRules): DraftConversion {
+  const rules: ServiceRules = {};
+  for (const key of Object.keys(draft).sort()) {
+    const p = parsePercentInput(draft[key].percentText);
+    if (!p.ok) return { ok: false, rules: {}, error: `Regra ${key}: ${p.error}`, key };
+    rules[key] = { enabled: draft[key].state === 'active', percent: p.value };
+  }
+  return { ok: true, rules, error: '', key: null };
+}
+
+/** Regras do rascunho SEM as inválidas (só para pré-visualizar a regra efetiva enquanto se digita). */
+export function draftRulesLenient(draft: DraftRules): { rules: ServiceRules; invalidKeys: string[] } {
+  const rules: ServiceRules = {};
+  const invalidKeys: string[] = [];
+  for (const [key, d] of Object.entries(draft)) {
+    const p = parsePercentInput(d.percentText);
+    if (p.ok) rules[key] = { enabled: d.state === 'active', percent: p.value };
+    else invalidKeys.push(key);
+  }
+  return { rules, invalidKeys };
+}
+
+export interface EffectiveRow {
+  countryCode: string;
+  countryName: string | null;
+  serviceCode: string;
+  serviceName: string;
+  percent: number;
+  source: SubsidySource;
+  sourceLabel: string;
+  split: ShippingSplit | null;
+}
+
+/** Regra efetiva + simulação financeira (custo e parte do vendedor informados) por país+serviço, usando o rascunho atual. */
+export function buildEffectiveRows(
+  catalog: SubsidyCatalogRow[],
+  global: { enabled: boolean; percent: number },
+  draft: DraftRules,
+  sim: { cost: number; sellerPercent: number } | null,
+): EffectiveRow[] {
+  const { rules, invalidKeys } = draftRulesLenient(draft);
+  return [...catalog]
+    .sort((a, b) => a.countryCode.localeCompare(b.countryCode) || a.serviceCode.localeCompare(b.serviceCode))
+    .map((c) => {
+      const r = resolveNusaliPercent({ enabled: global.enabled, percent: global.percent, rules, invalidRuleKeys: invalidKeys, rulesCorrupt: false }, { countryCode: c.countryCode, serviceCode: c.serviceCode });
+      return {
+        countryCode: c.countryCode, countryName: c.countryName, serviceCode: c.serviceCode, serviceName: c.serviceName,
+        percent: r.percent, source: r.source, sourceLabel: describeSubsidySource(r.source, r.ruleKey),
+        split: sim ? simulateShippingSplit(sim.cost, sim.sellerPercent, r.percent) : null,
+      };
+    });
+}
+
+/** Linhas legíveis das regras que mudaram ("GW:ECONOMY: sem regra → ativa 100%"). */
+export function describeRulesDiff(before: ServiceRules | null | undefined, after: ServiceRules | null | undefined): string[] {
+  const b = before || {}, a = after || {};
+  const label = (r?: { enabled: boolean; percent: number }) => (!r ? 'sem regra' : r.enabled ? `ativa ${r.percent}%` : `desativada (${r.percent}%)`);
+  const keys = Array.from(new Set([...Object.keys(b), ...Object.keys(a)])).sort();
+  const out: string[] = [];
+  for (const k of keys) {
+    const x = b[k], y = a[k];
+    if (!x && !y) continue;
+    if (x && y && x.enabled === y.enabled && x.percent === y.percent) continue;
+    out.push(`${k}: ${label(x)} → ${label(y)}`);
+  }
+  return out;
+}
+
+export { ruleKey };

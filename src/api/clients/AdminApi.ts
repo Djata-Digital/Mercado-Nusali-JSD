@@ -361,7 +361,8 @@ export class AdminApi {
   }
 
   static async updateShippingSubsidy(data: {
-    enabled: boolean; percent: number; confirmImpact: true; disableLegacyFreeMode?: boolean; expected?: { enabled: boolean; percent: number };
+    enabled: boolean; percent: number; rules?: Record<string, { enabled: boolean; percent: number }>; confirmImpact: true; disableLegacyFreeMode?: boolean;
+    expected?: { enabled: boolean; percent: number; rules?: Record<string, { enabled: boolean; percent: number }> };
   }): Promise<ApiResponse<any>> {
     return apiClient.put('/admin/shipping-subsidy', data);
   }

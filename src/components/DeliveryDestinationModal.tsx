@@ -7,8 +7,10 @@
  *   - "Meu endereço cadastrado": um dos endereços reais do comprador (só os
  *     que já têm shippingSectorId — nunca um sem setor, que não serviria
  *     pra nada aqui).
- *   - "Outro destino": Região + Setor (D16-F2, mesmos endpoints já usados
- *     pelo Checkout). NUNCA rua/número/bairro/referência/destinatário/
+ *   - "Outro destino": Região + Setor, lidos dos endpoints PÚBLICOS de geografia
+ *     (GET /shipping/regions|sectors — só leitura, sem login, só id/nome/código;
+ *     o visitante também escolhe o destino. Falhas aparecem como mensagem, nunca
+ *     como lista vazia silenciosa). NUNCA rua/número/bairro/referência/destinatário/
  *     documento — isso continua exclusivamente no Checkout (D16-H1/H1.2).
  *
  * Resultado vai para DeliveryDestinationContext — nunca cria endereço, nunca
@@ -21,6 +23,8 @@ import { useAuth } from '../context/AuthContext';
 import { usePreferences } from '../context/PreferencesContext';
 import { useDeliveryDestination } from '../context/DeliveryDestinationContext';
 import { BuyerService } from '../services/buyerService';
+import { ShippingApi } from '../api/clients/ShippingApi';
+import { geographyLoadMessage } from '../utils/deliveryGeography';
 
 interface DeliveryDestinationModalProps {
   isOpen: boolean;
@@ -45,6 +49,10 @@ export const DeliveryDestinationModal: React.FC<DeliveryDestinationModalProps> =
   const [regions, setRegions] = useState<Array<{ id: string; name: string; code: string }>>([]);
   const [sectors, setSectors] = useState<Array<{ id: string; name: string; code: string; regionId: string }>>([]);
   const [isLoadingSectors, setIsLoadingSectors] = useState(false);
+  const [isLoadingRegions, setIsLoadingRegions] = useState(false);
+  const [regionsError, setRegionsError] = useState<string | null>(null);
+  const [sectorsError, setSectorsError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [regionId, setRegionId] = useState<string | null>(destination?.mode === 'sector' ? destination.shippingRegionId : null);
   const [sectorId, setSectorId] = useState<string | null>(destination?.mode === 'sector' ? destination.shippingSectorId : null);
 
@@ -61,26 +69,57 @@ export const DeliveryDestinationModal: React.FC<DeliveryDestinationModalProps> =
 
   useEffect(() => {
     if (!isOpen || mode !== 'sector') return;
-    BuyerService.getShippingRegions(selectedCountry)
+    let cancelled = false;
+    setIsLoadingRegions(true);
+    setRegionsError(null);
+    ShippingApi.getRegions(selectedCountry)
       .then((res) => {
-        if (res.success && Array.isArray(res.data)) setRegions(res.data);
+        if (cancelled) return;
+        if (res.success && Array.isArray(res.data)) {
+          setRegions(res.data);
+          setRegionsError(res.data.length === 0 ? geographyLoadMessage('regions', 'empty') : null);
+        } else {
+          setRegions([]);
+          setRegionsError(geographyLoadMessage('regions', 'error', (res as any)?.error?.message));
+        }
       })
-      .catch(() => {});
-  }, [isOpen, mode, selectedCountry]);
+      .catch((err: any) => {
+        if (cancelled) return;
+        setRegions([]);
+        setRegionsError(geographyLoadMessage('regions', 'error', err?.response?.data?.error?.message));
+      })
+      .finally(() => { if (!cancelled) setIsLoadingRegions(false); });
+    return () => { cancelled = true; };
+  }, [isOpen, mode, selectedCountry, reloadKey]);
 
   useEffect(() => {
     if (!isOpen || mode !== 'sector' || !regionId) {
       setSectors([]);
+      setSectorsError(null);
       return;
     }
+    let cancelled = false;
     setIsLoadingSectors(true);
-    BuyerService.getShippingSectors(selectedCountry, regionId)
+    setSectorsError(null);
+    ShippingApi.getSectors(selectedCountry, regionId)
       .then((res) => {
-        if (res.success && Array.isArray(res.data)) setSectors(res.data);
+        if (cancelled) return;
+        if (res.success && Array.isArray(res.data)) {
+          setSectors(res.data);
+          setSectorsError(res.data.length === 0 ? geographyLoadMessage('sectors', 'empty') : null);
+        } else {
+          setSectors([]);
+          setSectorsError(geographyLoadMessage('sectors', 'error', (res as any)?.error?.message));
+        }
       })
-      .catch(() => {})
-      .finally(() => setIsLoadingSectors(false));
-  }, [isOpen, mode, selectedCountry, regionId]);
+      .catch((err: any) => {
+        if (cancelled) return;
+        setSectors([]);
+        setSectorsError(geographyLoadMessage('sectors', 'error', err?.response?.data?.error?.message));
+      })
+      .finally(() => { if (!cancelled) setIsLoadingSectors(false); });
+    return () => { cancelled = true; };
+  }, [isOpen, mode, selectedCountry, regionId, reloadKey]);
 
   if (!isOpen) return null;
 
@@ -202,13 +241,14 @@ export const DeliveryDestinationModal: React.FC<DeliveryDestinationModalProps> =
                 <label className="block font-semibold text-gray-700 mb-1 text-xs">Região</label>
                 <select
                   value={regionId || ''}
+                  disabled={isLoadingRegions}
                   onChange={(e) => {
                     setRegionId(e.target.value || null);
                     setSectorId(null);
                   }}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-xs"
                 >
-                  <option value="">Selecione a região</option>
+                  <option value="">{isLoadingRegions ? 'Carregando...' : 'Selecione a região'}</option>
                   {regions.map((r) => (
                     <option key={r.id} value={r.id}>
                       {r.name}
@@ -216,6 +256,12 @@ export const DeliveryDestinationModal: React.FC<DeliveryDestinationModalProps> =
                   ))}
                 </select>
               </div>
+              {regionsError && (
+                <p role="alert" data-testid="destination-regions-error" className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold">
+                  {regionsError}{' '}
+                  <button type="button" onClick={() => setReloadKey((k) => k + 1)} className="underline font-bold">Tentar novamente</button>
+                </p>
+              )}
               <div>
                 <label className="block font-semibold text-gray-700 mb-1 text-xs">Setor</label>
                 <select
@@ -232,6 +278,12 @@ export const DeliveryDestinationModal: React.FC<DeliveryDestinationModalProps> =
                   ))}
                 </select>
               </div>
+              {sectorsError && (
+                <p role="alert" data-testid="destination-sectors-error" className="text-[11px] text-red-700 bg-red-50 border border-red-200 rounded-lg p-2 font-semibold">
+                  {sectorsError}{' '}
+                  <button type="button" onClick={() => setReloadKey((k) => k + 1)} className="underline font-bold">Tentar novamente</button>
+                </p>
+              )}
               <button
                 type="button"
                 disabled={!regionId || !sectorId}

@@ -41,6 +41,7 @@ export async function planSubsidyTransition(db: any, target: TransitionTarget = 
       warnings.push(`O modo legado já não está ativo (padrão atual: ${current.legacyDefaultMode ?? 'não configurado'}); nada a desativar.`);
     }
   }
+  if (Object.keys(current.rules).length > 0) warnings.push(`Existem ${Object.keys(current.rules).length} regra(s) por serviço; a transição não as altera (a reversão também as repõe como estavam).`);
   if (current.enabled !== target.enabled || current.percent !== target.percent) {
     changes.push(`shippingNusaliSubsidy: ${current.enabled ? 'ativo' : 'desativado'} ${current.percent}% → ${target.enabled ? 'ativo' : 'desativado'} ${target.percent}%`);
   }
@@ -60,17 +61,18 @@ export interface TransitionResult {
 export async function applySubsidyTransition(db: any, target: TransitionTarget = DEFAULT_TRANSITION_TARGET, note = 'Transição para subsídio global percentual (script autorizado)'): Promise<TransitionResult> {
   validateShippingSubsidyUpdate({ ...target, confirmImpact: true });
   const plan = await planSubsidyTransition(db, target);
-  const snapshot = { enabled: plan.current.enabled, percent: plan.current.percent, legacyDefaultMode: plan.current.legacyDefaultMode, takenAt: new Date().toISOString() };
+  // o instantâneo inclui as regras por país/serviço: a reversão as repõe exatamente (a transição em si nunca as altera)
+  const snapshot = { enabled: plan.current.enabled, percent: plan.current.percent, legacyDefaultMode: plan.current.legacyDefaultMode, rules: plan.current.rules, takenAt: new Date().toISOString() };
   const effectiveDisable = target.disableLegacyFreeMode && plan.current.legacyDefaultMode === 'MARKETPLACE_FREE_SHIPPING';
   const { after } = await updateShippingSubsidyConfig(db, {
     enabled: target.enabled, percent: target.percent, disableLegacyFreeMode: effectiveDisable,
-    expected: { enabled: plan.current.enabled, percent: plan.current.percent },
+    expected: { enabled: plan.current.enabled, percent: plan.current.percent, rules: plan.current.rules },
   }, { id: null, note });
   return { plan, snapshot, after, ordersBefore: plan.existingOrders, ordersAfter: await countOrders(db) };
 }
 
 /** Reversão exata para o instantâneo guardado por applySubsidyTransition. */
 export async function rollbackSubsidyTransition(db: any, snapshot: ShippingSubsidySnapshot, note = 'Reversão da transição de subsídio de frete'): Promise<{ before: ShippingSubsidyConfig; after: ShippingSubsidyConfig; ordersCount: number }> {
-  const r = await restoreShippingSubsidyConfig(db, { enabled: snapshot.enabled, percent: snapshot.percent, legacyDefaultMode: snapshot.legacyDefaultMode }, { id: null, note });
+  const r = await restoreShippingSubsidyConfig(db, { enabled: snapshot.enabled, percent: snapshot.percent, legacyDefaultMode: snapshot.legacyDefaultMode, rules: snapshot.rules }, { id: null, note });
   return { ...r, ordersCount: await countOrders(db) };
 }

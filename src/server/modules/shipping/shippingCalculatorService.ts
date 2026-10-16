@@ -1,7 +1,8 @@
 import { getDb } from '../../../db/index.js';
 import { storeShippingPolicies, sellers, stores, platformSettings } from '../../../db/schema.js';
 import { eq, asc } from 'drizzle-orm';
-import { applyNusaliSubsidy, validateNusaliPercent } from '../../../utils/shippingSubsidyMath.js';
+import { applyNusaliSubsidy } from '../../../utils/shippingSubsidyMath.js';
+import { parseStoredSubsidy, resolveNusaliPercent, type NusaliSubsidyRulesSetting, type SubsidySource } from '../../../utils/shippingSubsidyRules.js';
 
 // FASE D16-I5 — VOLUMETRIC_DIVISOR_SETTING_KEY/getVolumetricDivisor/
 // computeBillableWeightKg (peso volumétrico) removidos: existiam
@@ -25,22 +26,27 @@ async function getDefaultShippingPolicyMode(executor?: any): Promise<string | nu
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
-// SUBSÍDIO GLOBAL DA NUSALI (percentagem) — platform_settings['shippingNusaliSubsidy'] = { enabled: boolean, percent: 0..100 }.
+// SUBSÍDIO DA NUSALI (percentagem) — platform_settings['shippingNusaliSubsidy'] = { enabled, percent, rules?: { "GW:ECONOMY": {enabled, percent}, "*:STANDARD": ... } }.
+// Precedência (shippingSubsidyRules.resolveNusaliPercent): país+serviço > serviço global > percentagem global. A chave "enabled" controla SÓ o padrão global.
 // Padrão (chave ausente, inválida ou desativada) = 0%: NUNCA 100%. A percentagem incide só sobre o saldo que restaria ao cliente depois da política do
 // vendedor (shippingSubsidyMath.applyNusaliSubsidy), por isso o vendedor jamais paga mais por causa dela. Pensado para coexistir com campanhas futuras
 // (shipping_subsidy_campaigns, também "só o saldo do comprador"): uma campanha poderá substituir esta percentagem na mesma camada.
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 export const NUSALI_SUBSIDY_SETTING_KEY = 'shippingNusaliSubsidy';
+/** Chave do lock consultivo que serializa as gravações do painel com a criação de pedidos (ver orderService). */
+export const NUSALI_SUBSIDY_LOCK_KEY = 'shipping_subsidy_config';
 
-export interface NusaliSubsidySetting { enabled: boolean; percent: number }
-export const NUSALI_SUBSIDY_OFF: NusaliSubsidySetting = { enabled: false, percent: 0 };
+export type NusaliSubsidySetting = NusaliSubsidyRulesSetting;
+export const NUSALI_SUBSIDY_OFF: NusaliSubsidySetting = { enabled: false, percent: 0, rules: {}, invalidRuleKeys: [], rulesCorrupt: false, problems: [] };
 
-/** Interpreta o valor guardado; qualquer coisa inválida vira "desligado, 0%" (falha para o lado seguro: o cliente paga o saldo). */
+/**
+ * Interpreta o valor guardado: formato antigo ({enabled, percent}) continua válido. Nada inválido é aplicado em silêncio: o que estiver corrompido
+ * resolve para 0% (a Nusali não paga o que ninguém aprovou) e fica registado no log do servidor e em `problems` (visível no painel).
+ */
 export function parseNusaliSubsidySetting(raw: unknown): NusaliSubsidySetting {
-  if (!raw || typeof raw !== 'object') return NUSALI_SUBSIDY_OFF;
-  const o = raw as Record<string, unknown>;
-  const pct = validateNusaliPercent(o.percent);
-  return { enabled: o.enabled === true && pct.ok, percent: pct.ok ? pct.value : 0 };
+  const parsed = parseStoredSubsidy(raw);
+  if (parsed.problems.length > 0) console.error('[shippingNusaliSubsidy] configuração com problemas:', parsed.problems.join(' | '));
+  return parsed;
 }
 
 export async function readNusaliSubsidySetting(executor?: any): Promise<NusaliSubsidySetting> {
@@ -177,6 +183,9 @@ export interface ShippingPayerPolicyResult {
   policyMode: string;
   /** percentagem global da Nusali efetivamente aplicada ao saldo do cliente (0 quando não houve subsídio percentual) */
   nusaliSubsidyPercent: number;
+  /** de onde veio a percentagem aplicada (país+serviço, serviço, global) — NONE quando não houve subsídio percentual */
+  nusaliSubsidySource: SubsidySource;
+  nusaliSubsidyRuleKey: string | null;
 }
 
 /**
@@ -191,8 +200,10 @@ export interface ShippingPayerPolicyResult {
  */
 export async function resolveShippingPayerPolicy(
   shippingCost: number,
-  input: { storeId?: string | null; sellerId?: string | null },
-  executor?: any
+  input: { storeId?: string | null; sellerId?: string | null; /** país de DESTINO e serviço escolhido: selecionam a regra do subsídio da Nusali */ countryCode?: string | null; serviceCode?: string | null },
+  executor?: any,
+  /** configuração já lida UMA vez pelo chamador (cotação inteira / transação do pedido): garante que todos os grupos usam a mesma */
+  nusaliSetting?: NusaliSubsidySetting
 ): Promise<ShippingPayerPolicyResult> {
   // FASE D18-B1 — custo inválido nunca vira uma divisão "plausível".
   if (typeof shippingCost !== 'number' || !Number.isFinite(shippingCost) || shippingCost < 0) {
@@ -322,21 +333,27 @@ export async function resolveShippingPayerPolicy(
     shippingPayer = 'buyer';
   }
 
-  // Camada da NUSALI (percentagem global): só sobre o SALDO do cliente depois da política do vendedor. Não se aplica ao modo legado
-  // MARKETPLACE_FREE_SHIPPING (o cliente já paga 0 e a Nusali já assume tudo — somar aqui duplicaria o subsídio).
+  // Camada da NUSALI (percentagem por país+serviço / serviço / global): só sobre o SALDO do cliente depois da política do vendedor. Não se aplica ao modo
+  // legado MARKETPLACE_FREE_SHIPPING (o cliente já paga 0 e a Nusali já assume tudo — somar aqui duplicaria o subsídio).
   let nusaliSubsidyPercent = 0;
+  let nusaliSubsidySource: SubsidySource = 'NONE';
+  let nusaliSubsidyRuleKey: string | null = null;
   if (policyMode !== 'MARKETPLACE_FREE_SHIPPING' && shippingChargedToBuyer > 0) {
-    const setting = await readNusaliSubsidySetting(executor);
-    if (setting.enabled && setting.percent > 0) {
-      const layer = applyNusaliSubsidy(shippingChargedToBuyer, setting.percent);
+    const setting = nusaliSetting ?? await readNusaliSubsidySetting(executor);
+    const resolved = resolveNusaliPercent(setting, { countryCode: input.countryCode, serviceCode: input.serviceCode });
+    nusaliSubsidySource = resolved.source;
+    nusaliSubsidyRuleKey = resolved.ruleKey;
+    if (resolved.percent > 0) {
+      const layer = applyNusaliSubsidy(shippingChargedToBuyer, resolved.percent);
       if (layer.nusaliShare > 0) {
         shippingChargedToBuyer = layer.buyerPays;
         shippingMarketplaceSubsidy = round2(shippingMarketplaceSubsidy + layer.nusaliShare);
-        nusaliSubsidyPercent = setting.percent;
+        nusaliSubsidyPercent = resolved.percent;
         shippingPayer = shippingChargedToBuyer > 0 || shippingSellerSubsidy > 0 ? 'shared' : 'marketplace';
       }
     }
   }
+  if (nusaliSubsidyPercent === 0 && nusaliSubsidySource !== 'INVALID_RULE') { nusaliSubsidySource = 'NONE'; nusaliSubsidyRuleKey = null; }
 
   // FASE D18-B1 — invariante final, independente do ramo acima:
   // comprador + seller + marketplace === custo real (em centavos), nenhuma
@@ -347,7 +364,7 @@ export async function resolveShippingPayerPolicy(
     marketplace: shippingMarketplaceSubsidy,
   });
 
-  return { shippingChargedToBuyer, shippingSellerSubsidy, shippingMarketplaceSubsidy, shippingPayer, policyMode, nusaliSubsidyPercent };
+  return { shippingChargedToBuyer, shippingSellerSubsidy, shippingMarketplaceSubsidy, shippingPayer, policyMode, nusaliSubsidyPercent, nusaliSubsidySource, nusaliSubsidyRuleKey };
 }
 
 export class ShippingCalculatorService {

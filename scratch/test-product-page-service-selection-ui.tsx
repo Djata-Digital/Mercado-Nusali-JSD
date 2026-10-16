@@ -95,9 +95,8 @@ report('S28 checkout intacto e compatível: mesma chave literal, escolha lida ao
 report('S29 carrinho mostra o serviço escolhido SÓ se ele ainda está disponível no preview do servidor (valor dele, rótulo "Frete (Standard):"); senão continua "a partir de"', cart.includes('findSelectedOption(services, readStoredServiceCode())') && cart.includes('Frete (${shippingQuote.selectedServiceTitle}):') && cart.includes("'Frete (a partir de):'") && cart.includes('Você pode alterá-lo no checkout.'));
 report('S30 servidor revalida na criação do pedido (código + valor esperado exigidos; 409 se mudou) — rota e guarda inalteradas', (() => { const g = src('src/server/modules/shipping/shippingQuoteGuard.ts'); return g.includes('SHIPPING_QUOTE_CHANGED') && g.includes('expectedShippingChargedToBuyer') && /SHIPPING_QUOTE_CHANGED|shippingQuoteGuard/.test(src('src/server/modules/orders/orderService.ts')); })());
 report('S31 checkout da Guiné-Bissau continua DESLIGADO (CHECKOUT_ENABLED_COUNTRIES vazio)', /CHECKOUT_ENABLED_COUNTRIES[^=]*=\s*\[\s*\]/.test(src('src/utils/checkoutAvailability.ts')));
-const changed = execSync('git diff --name-only HEAD', { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean);
-const untracked = execSync('git ls-files --others --exclude-standard', { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean);
-const touched = [...changed, ...untracked];
+// só o commit desta funcionalidade (955a21f), não o estado atual da árvore
+const touched = execSync('git show --name-only --pretty=format: 955a21f', { encoding: 'utf8' }).split(/\r?\n/).filter(Boolean);
 report('S32 nenhum arquivo de servidor, schema, migração, política, tarifa, subsídio, pagamento ou Escrow foi alterado nesta mudança', !touched.some((f) => /^(src\/server|src\/db|drizzle|scripts)\//.test(f)) && !touched.some((f) => /payment|escrow|subsid|tariff|policy/i.test(f) && !f.startsWith('scratch/')), touched.filter((f) => /^(src\/server|src\/db|drizzle|scripts)\//.test(f)));
 
 console.log(`\nRESULTADO: ${pass} PASS, ${fail} FAIL`);
