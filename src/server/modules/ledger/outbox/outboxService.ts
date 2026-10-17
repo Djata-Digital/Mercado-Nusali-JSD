@@ -231,6 +231,8 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
 
 export interface OutboxRunSummary {
   status: 'OK' | 'DISABLED';
+  /** presente quando status = DISABLED */
+  disabledReason?: 'OUTBOX_FLAG_OFF' | 'SHADOW_LEDGER_OFF' | 'DATABASE_UNAVAILABLE';
   workerId: string;
   swept: number;
   claimed: number;
@@ -238,7 +240,7 @@ export interface OutboxRunSummary {
   durationMs: number;
 }
 
-const emptyOutcomes = (): Record<EventOutcome, number> => ({ DONE: 0, DONE_REPLAY: 0, SKIPPED: 0, RETRYING: 0, NEEDS_INTERVENTION: 0, DEFERRED: 0, LEASE_LOST: 0 });
+export const emptyOutcomes = (): Record<EventOutcome, number> => ({ DONE: 0, DONE_REPLAY: 0, SKIPPED: 0, RETRYING: 0, NEEDS_INTERVENTION: 0, DEFERRED: 0, LEASE_LOST: 0 });
 export const defaultWorkerId = () => `${os.hostname()}:${process.pid}:${Math.random().toString(36).slice(2, 7)}`;
 
 /** Uma execução do worker: varre esgotados, reclama um lote e processa. `now` e `eventIds` injetáveis (teste / processamento imediato pós-commit). */
@@ -248,10 +250,13 @@ export async function runLedgerOutboxOnce(opts: { workerId?: string; batchSize?:
   const env = opts.env ?? process.env;
   const policy = resolvePolicy(env);
   const summary: OutboxRunSummary = { status: 'OK', workerId, swept: 0, claimed: 0, outcomes: emptyOutcomes(), durationMs: 0 };
+  // PORTÃO DA FLAG — antes de qualquer outra coisa (inclusive de obter o banco): com LEDGER_OUTBOX_ENABLED desligada o worker não consulta nem as tabelas do
+  // outbox (que podem nem existir antes da migração 0039), não varre, não reivindica e não processa. Vale para o endpoint, o runner e qualquer outro chamador.
+  if (!isOutboxEnabled(env)) { summary.status = 'DISABLED'; summary.disabledReason = 'OUTBOX_FLAG_OFF'; return summary; }
   const shadow = FinancialLedgerService.getShadowStatus();
-  if (!shadow.enabled) { summary.status = 'DISABLED'; return summary; }
+  if (!shadow.enabled) { summary.status = 'DISABLED'; summary.disabledReason = 'SHADOW_LEDGER_OFF'; return summary; }
   const db: any = getDb();
-  if (!db) { summary.status = 'DISABLED'; return summary; }
+  if (!db) { summary.status = 'DISABLED'; summary.disabledReason = 'DATABASE_UNAVAILABLE'; return summary; }
   const now = opts.now ?? new Date();
   summary.swept = await sweepExhausted(db, now);
   const events = await claimEvents(db, { workerId, limit: opts.batchSize ?? policy.batchSize, now, leaseSeconds: policy.leaseSeconds, eventIds: opts.eventIds });

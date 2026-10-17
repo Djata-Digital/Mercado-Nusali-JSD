@@ -22,6 +22,7 @@ import { runEscrowAutoReleaseOnce } from '../payments/escrowAutoReleaseService.j
 import { runRefundRecoveryOnce } from '../payments/refundRecoveryService.js';
 import { runPendingPaymentExpirationOnce } from '../orders/pendingPaymentExpirationService.js';
 import { runLedgerShadowJobOnce } from '../ledger/outbox/ledgerOutboxJob.js';
+import { isOutboxEnabled } from '../ledger/outbox/outboxEvents.js';
 import { logger } from '../../infra/logger.js';
 
 export const internalJobsRouter = Router();
@@ -231,6 +232,11 @@ internalJobsRouter.post('/ledger-outbox', internalJobsLimiter, async (req: Reque
       success: false,
       error: { code: 'INVALID_INTERNAL_JOBS_SECRET', message: 'Credencial interna inválida ou ausente.' },
     });
+  }
+
+  // Autenticação já validada acima (a flag NUNCA dispensa o segredo). Flag desligada: resposta inerte, sem tocar no banco, sem reconciliar, sem processar.
+  if (!isOutboxEnabled()) {
+    return res.status(200).json({ success: true, data: { status: 'DISABLED', reason: 'LEDGER_OUTBOX_DISABLED', claimed: 0, swept: 0, reconciliation: null, attentionRequired: false } });
   }
 
   try {

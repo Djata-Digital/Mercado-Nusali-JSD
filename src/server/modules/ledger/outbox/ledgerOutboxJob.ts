@@ -4,7 +4,8 @@
  * Desligado por padrão: sem LEDGER_SHADOW_CUTOFF_AT o worker devolve DISABLED sem tocar no banco.
  */
 import { logger } from '../../../infra/logger.js';
-import { runLedgerOutboxOnce, getOutboxMetrics, type OutboxRunSummary, type OutboxMetrics } from './outboxService.js';
+import { isOutboxEnabled } from './outboxEvents.js';
+import { runLedgerOutboxOnce, getOutboxMetrics, emptyOutcomes, type OutboxRunSummary, type OutboxMetrics } from './outboxService.js';
 import { runLedgerReconciliation, getReconciliationMetrics, type ReconcileSummary } from './reconciliationService.js';
 
 export interface LedgerShadowJobResult {
@@ -16,8 +17,16 @@ export interface LedgerShadowJobResult {
   attentionRequired: boolean;
 }
 
-export async function runLedgerShadowJobOnce(opts: { batchSize?: number; reconcile?: boolean; triggeredBy?: string } = {}): Promise<LedgerShadowJobResult> {
-  const outbox = await runLedgerOutboxOnce({ batchSize: opts.batchSize });
+/** Resultado inerte (flag desligada): nenhuma consulta ao banco, nenhuma reconciliação. */
+function disabledJobResult(): LedgerShadowJobResult {
+  const outbox: OutboxRunSummary = { status: 'DISABLED', disabledReason: 'OUTBOX_FLAG_OFF', workerId: 'n/a', swept: 0, claimed: 0, outcomes: emptyOutcomes(), durationMs: 0 };
+  return { outbox, metrics: null, reconciliation: null, reconciliationMetrics: null, attentionRequired: false };
+}
+
+export async function runLedgerShadowJobOnce(opts: { batchSize?: number; reconcile?: boolean; triggeredBy?: string; env?: Record<string, string | undefined> } = {}): Promise<LedgerShadowJobResult> {
+  // Portão da flag ANTES de tudo: a reconciliação (que lê/grava tabelas da 0039) também só roda com o outbox ligado.
+  if (!isOutboxEnabled(opts.env ?? process.env)) return disabledJobResult();
+  const outbox = await runLedgerOutboxOnce({ batchSize: opts.batchSize, env: opts.env });
   if (outbox.status === 'DISABLED') return { outbox, metrics: null, reconciliation: null, reconciliationMetrics: null, attentionRequired: false };
   const metrics = await getOutboxMetrics();
   const reconciliation = opts.reconcile ? await runLedgerReconciliation({ triggeredBy: opts.triggeredBy ?? 'job' }) : null;

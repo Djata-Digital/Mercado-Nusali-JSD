@@ -10,6 +10,7 @@ Esta pasta guarda os testes que protegem fluxos críticos e **não dependem de `
 | `ledger-idempotency-race.test.ts` | ledger: corrida de idempotência na PRIMEIRA gravação — erro do Postgres embrulhado pelo drizzle (`DrizzleQueryError`/`err.cause`) reconhecido só para a constraint certa; 1 lançamento por pedido sob concorrência; zero falsos erros nos logs; outros erros de banco e outras constraints continuam a ser propagados | **sim** (Postgres descartável) |
 | `test-db-safety.test.ts` | a proteção acima: classificador, recusa de `getDb()`/`pg` para banco real, executor que aborta antes de rodar, guarda que trava o ambiente, auditoria estática | não |
 | `ledger-e2-outbox.test.ts` | ledger sombra E2: outbox transacional (evento gravado na transação do pagamento/liberação, em savepoint), processador idempotente (SKIP LOCKED + lease), retry com backoff, NEEDS_INTERVENTION, reinício de worker, vários workers, webhook duplicado, falha antes/depois do outbox, cutoff, snapshot, reconciliação (ausente / divergente / sem correção silenciosa), reparo manual auditado, métricas e logs, ausência de efeito no dinheiro real (47 verificações) | **sim** (Postgres descartável; aplica a migração 0039 se faltar) |
+| `ledger-outbox-flag-gate.test.ts` | portão da flag `LEDGER_OUTBOX_ENABLED`: com a flag desligada endpoint interno, serviço do worker, job e runner não tocam no banco (nem com as tabelas da 0039 ausentes), não reconciliam e não alteram ledger/dinheiro; autenticação por `INTERNAL_JOBS_SECRET` sempre exigida; flag ligada continua funcionando | **sim** |
 | `ledger-e2-migration-check.cjs` | migração 0039: migrador oficial do drizzle → estrutura → rollback → reaplicação → trava do rollback com dados → gatilhos (precisa de banco no nível anterior à 0039) | **sim** |
 | `seller-variant-stock.test.ts` | estoque por SKU no formulário do vendedor: edição/persistência, reservas, transferências pendentes, alteração concorrente, ordem de locks (sem deadlock), livro de movimentos, atualização conjunta, permissões, produto simples | **sim** (Postgres descartável) |
 
@@ -23,6 +24,7 @@ npm run test:variant-stock     # exige o banco acima (o guarda recusa qualquer o
 npm run test:ledger-e1         # ledger E1 (exige o banco acima)
 npm run test:ledger-race       # corrida de idempotência do ledger (exige o banco acima)
 npm run test:ledger-e2         # outbox + reconciliação do ledger sombra (exige o banco acima)
+npm run test:ledger-outbox-gate # portão da flag do outbox (exige o banco acima, já com a 0039)
 npm run test:ledger-e2-migration  # migração 0039 (banco no nível anterior à 0039)
 npm run test:essential         # todos
 ```
