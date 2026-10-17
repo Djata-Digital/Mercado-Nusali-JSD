@@ -21,6 +21,7 @@ import { createRateLimiter } from '../../infra/rateLimiter.js';
 import { runEscrowAutoReleaseOnce } from '../payments/escrowAutoReleaseService.js';
 import { runRefundRecoveryOnce } from '../payments/refundRecoveryService.js';
 import { runPendingPaymentExpirationOnce } from '../orders/pendingPaymentExpirationService.js';
+import { runLedgerShadowJobOnce } from '../ledger/outbox/ledgerOutboxJob.js';
 import { logger } from '../../infra/logger.js';
 
 export const internalJobsRouter = Router();
@@ -206,6 +207,55 @@ internalJobsRouter.post('/expire-pending-payments', internalJobsLimiter, async (
     return res.status(500).json({
       success: false,
       error: { code: 'PENDING_PAYMENT_EXPIRATION_JOB_ERROR', message: 'Falha ao executar a expiração de pending_payment.' },
+    });
+  }
+});
+
+// LEDGER SOMBRA (E2) — processa o outbox do ledger (e, opcionalmente, reconcilia). MESMO padrão dos endpoints acima: mesmo limiter e mesma autenticação
+// (isInternalJobsSecretValid / INTERNAL_JOBS_SECRET). Não movimenta dinheiro real; sem LEDGER_SHADOW_CUTOFF_AT devolve status DISABLED sem tocar no banco.
+// POST /api/v1/internal/jobs/ledger-outbox   body opcional: { batchSize?: number, reconcile?: boolean }
+internalJobsRouter.post('/ledger-outbox', internalJobsLimiter, async (req: Request, res: Response) => {
+  const secretHeader = req.headers['x-internal-jobs-secret'] as string | undefined;
+
+  if (!process.env.INTERNAL_JOBS_SECRET || !process.env.INTERNAL_JOBS_SECRET.trim()) {
+    logger.error({}, 'INTERNAL_JOBS_SECRET_NOT_CONFIGURED');
+    return res.status(503).json({
+      success: false,
+      error: { code: 'INTERNAL_JOBS_NOT_CONFIGURED', message: 'Endpoint interno não configurado no servidor.' },
+    });
+  }
+
+  if (!isInternalJobsSecretValid(secretHeader)) {
+    logger.warn({}, 'INTERNAL_JOBS_SECRET_INVALID');
+    return res.status(401).json({
+      success: false,
+      error: { code: 'INVALID_INTERNAL_JOBS_SECRET', message: 'Credencial interna inválida ou ausente.' },
+    });
+  }
+
+  try {
+    const rawBatchSize = req.body?.batchSize;
+    const batchSize = typeof rawBatchSize === 'number' && Number.isFinite(rawBatchSize) ? rawBatchSize : undefined;
+    const result = await runLedgerShadowJobOnce({ batchSize, reconcile: req.body?.reconcile === true, triggeredBy: 'internal_endpoint' });
+
+    // Só contagens e identificadores de negócio (sem valores monetários, sem dados de comprador/vendedor).
+    return res.status(200).json({
+      success: true,
+      data: {
+        status: result.outbox.status,
+        claimed: result.outbox.claimed,
+        swept: result.outbox.swept,
+        outcomes: result.outbox.outcomes,
+        metrics: result.metrics,
+        reconciliation: result.reconciliation,
+        attentionRequired: result.attentionRequired,
+      },
+    });
+  } catch (err: any) {
+    logger.error({ error: err?.message }, 'LEDGER_OUTBOX_JOB_ERROR');
+    return res.status(500).json({
+      success: false,
+      error: { code: 'LEDGER_OUTBOX_JOB_ERROR', message: 'Falha ao executar o worker do outbox do ledger.' },
     });
   }
 });

@@ -8,6 +8,7 @@ import { AsaasPaymentProvider } from './providers/asaasPaymentProvider.js';
 import { OrangeMoneyPaymentProvider } from './providers/orangeMoneyPaymentProvider.js';
 import { TeleTakuPaymentProvider } from './providers/teleTakuPaymentProvider.js';
 import { FinancialLedgerService } from '../ledger/financialLedgerService.js';
+import { stageLedgerEventsInTx, flushLedgerStage, type LedgerStage } from '../ledger/outbox/ledgerShadowHooks.js';
 import { assertNoBlockingChargebackForPayment } from './chargebackService.js';
 
 /**
@@ -1009,8 +1010,11 @@ export class PaymentService {
       // 2. Idempotency Check: Return early if already paid
       if (ord.paymentStatus === 'paid') {
         logger.info({ orderId }, 'Payment already confirmed for order (idempotent call)');
+        // E2: reentrega idempotente também garante o evento do outbox (ON CONFLICT DO NOTHING) — cura o caso "caiu antes de gravar o outbox".
+        const _ledgerStage = await stageLedgerEventsInTx(tx, [{ eventType: 'PAYMENT_RECEIVED', order: ord as any, occurredAt: ord.updatedAt ?? new Date(), source: options?.provider || 'idempotent_replay' }]);
         return {
           success: true,
+          _ledgerStage,
           message: 'Pagamento já confirmado anteriormente.',
           data: {
             orderId: ord.id,
@@ -1106,8 +1110,12 @@ export class PaymentService {
 
       logger.info({ orderId: ord.id, provider }, 'Order payment confirmed atomically and escrow held');
 
+      // E2: o evento do ledger sombra é gravado na MESMA transação que confirma o pagamento (savepoint; falha dele nunca derruba a confirmação).
+      const _ledgerStage = await stageLedgerEventsInTx(tx, [{ eventType: 'PAYMENT_RECEIVED', order: ord as any, paymentId, occurredAt: new Date(), source: provider }]);
+
       return {
         success: true,
+        _ledgerStage,
         message: 'Pagamento confirmado e escrow ativo com sucesso!',
         data: {
           orderId: ord.id,
@@ -1125,20 +1133,24 @@ export class PaymentService {
     // FinancialLedgerService é idempotente e reconhece pedidos anteriores ao
     // cutoff (LEGACY_ORDER) e snapshots ausentes (MISSING_SNAPSHOT) sem lançar.
     // ------------------------------------------------------------------------
-    try {
-      const shadow = await FinancialLedgerService.recordPaymentReceived({
-        orderId,
-        performedBy: options?.performedBy ?? null,
-        source: options?.provider || 'DEV_SIMULATOR',
-      });
-      if (shadow.skipped) {
-        logger.info({ orderId, reason: shadow.reason, detail: shadow.detail }, '[ShadowLedger] recordPaymentReceived pulado (esperado para pedidos legados/sem snapshot)');
-      } else {
-        logger.info({ orderId, transactionId: shadow.transactionId }, '[ShadowLedger] recordPaymentReceived postado');
+    const _ledgerStage = (result as any)?._ledgerStage as LedgerStage | undefined;
+    if (result && typeof result === 'object') delete (result as any)._ledgerStage;
+    await flushLedgerStage(_ledgerStage, async () => {
+      try {
+        const shadow = await FinancialLedgerService.recordPaymentReceived({
+          orderId,
+          performedBy: options?.performedBy ?? null,
+          source: options?.provider || 'DEV_SIMULATOR',
+        });
+        if (shadow.skipped) {
+          logger.info({ orderId, reason: shadow.reason, detail: shadow.detail }, '[ShadowLedger] recordPaymentReceived pulado (esperado para pedidos legados/sem snapshot)');
+        } else {
+          logger.info({ orderId, transactionId: shadow.transactionId }, '[ShadowLedger] recordPaymentReceived postado');
+        }
+      } catch (shadowErr: any) {
+        logger.error({ orderId, error: shadowErr?.message }, '[ShadowLedger] recordPaymentReceived falhou — fluxo real não afetado');
       }
-    } catch (shadowErr: any) {
-      logger.error({ orderId, error: shadowErr?.message }, '[ShadowLedger] recordPaymentReceived falhou — fluxo real não afetado');
-    }
+    });
 
     // ------------------------------------------------------------------------
     // FULFILLMENT PÓS-PAGAMENTO (Fase 1 operacional — etiqueta bloqueada):
@@ -1277,7 +1289,10 @@ export class PaymentService {
       // um estado terminal.
       if (payment.settlementRole === 'primary' && payment.status === 'paid') {
         logger.info({ purchaseGroupId, paymentId: payment.id }, 'Purchase-group payment already confirmed as primary (idempotent call)');
-        return { success: true, message: 'Pagamento já confirmado como primary anteriormente.', settlementRole: 'primary', alreadyProcessed: true };
+        // E2: a reentrega (webhook duplicado) garante os eventos do outbox dos filhos já pagos (idempotente) — cura "caiu antes de gravar o outbox".
+        const paidChildren = await tx.select().from(orders).where(and(eq(orders.purchaseGroupId, group.id), eq(orders.paymentStatus, 'paid')));
+        const _ledgerStage = await stageLedgerEventsInTx(tx, paidChildren.map((c) => ({ eventType: 'PAYMENT_RECEIVED' as const, order: c as any, paymentId: payment.id, purchaseGroupId: group.id, occurredAt: payment.paidAt ?? c.updatedAt ?? new Date(), source: 'idempotent_replay' })));
+        return { success: true, message: 'Pagamento já confirmado como primary anteriormente.', settlementRole: 'primary', alreadyProcessed: true, _ledgerStage };
       }
       if (payment.settlementRole === 'surplus' && payment.status === 'paid') {
         logger.info({ purchaseGroupId, paymentId: payment.id }, 'Purchase-group payment already resolved as surplus (idempotent call)');
@@ -1515,7 +1530,10 @@ export class PaymentService {
 
       logger.info({ purchaseGroupId, paymentId: payment.id, childCount: children.length, allocatedSum }, 'PURCHASE_GROUP_PAYMENT_CONFIRMED — allocations e escrow/HOLD criados para todos os child orders');
 
-      return { success: true, message: 'Pagamento de purchase_group confirmado com sucesso — escrow ativo para todos os pedidos.', settlementRole: 'primary', alreadyProcessed: false, childCount: children.length };
+      // E2: um evento PAYMENT_RECEIVED por pedido filho, na MESMA transação que cria alocações e Escrow (savepoint por evento; isolamento por vendedor).
+      const _ledgerStage = await stageLedgerEventsInTx(tx, [...children].sort((a, b) => a.id.localeCompare(b.id)).map((c) => ({ eventType: 'PAYMENT_RECEIVED' as const, order: c as any, paymentId: payment.id, purchaseGroupId: group.id, occurredAt: new Date(), source: options.provider })));
+
+      return { success: true, message: 'Pagamento de purchase_group confirmado com sucesso — escrow ativo para todos os pedidos.', settlementRole: 'primary', alreadyProcessed: false, childCount: children.length, _ledgerStage };
     });
 
     // ------------------------------------------------------------------------
@@ -1526,8 +1544,11 @@ export class PaymentService {
     // (`payment_received:{orderId}`) garante um único lançamento por pedido.
     // surplus nunca financia pedido algum e portanto nunca entra aqui.
     // ------------------------------------------------------------------------
+    const _groupStage = (result as any)?._ledgerStage as LedgerStage | undefined;
+    if (result && typeof result === 'object') delete (result as any)._ledgerStage;
     if ((result as any)?.settlementRole === 'primary') {
-      await PaymentService.recordGroupPaymentReceivedShadow(purchaseGroupId);
+      // outbox desligado => lançamento direto da E1; ligado => processamento imediato do que esta transação enfileirou (o worker recupera o resto)
+      await flushLedgerStage(_groupStage, () => PaymentService.recordGroupPaymentReceivedShadow(purchaseGroupId));
     }
 
     return result;
@@ -1978,8 +1999,13 @@ export class PaymentService {
       // Idempotency: Return early if escrow is already released
       if (ord.escrowStatus === 'released') {
         logger.info({ orderId }, 'Escrow already released for order (idempotent call)');
+        const _ledgerStage = await stageLedgerEventsInTx(tx, [
+          { eventType: 'PAYMENT_RECEIVED', order: ord as any, occurredAt: ord.updatedAt ?? new Date(), source: 'release_idempotent_replay' },
+          { eventType: 'ORDER_DELIVERY_CONFIRMED', order: ord as any, occurredAt: ord.updatedAt ?? new Date(), source: 'release_idempotent_replay' },
+        ]);
         return {
           success: true,
+          _ledgerStage,
           message: 'Garantia Escrow já liberada anteriormente.',
           alreadyReleased: true,
           data: {
@@ -2329,6 +2355,12 @@ export class PaymentService {
 
       logger.info({ orderId: ord.id }, 'Escrow released successfully for order');
 
+      // E2: PAYMENT_RECEIVED (garantia idempotente) + ORDER_DELIVERY_CONFIRMED gravados na MESMA transação que libera o Escrow e credita a carteira do vendedor.
+      const _ledgerStage = await stageLedgerEventsInTx(tx, [
+        { eventType: 'PAYMENT_RECEIVED', order: ord as any, paymentId: fundingPayment.id, occurredAt: esc.createdAt ?? new Date(), source: 'release_ensure' },
+        { eventType: 'ORDER_DELIVERY_CONFIRMED', order: ord as any, paymentId: fundingPayment.id, occurredAt: new Date(), source: 'escrow_release' },
+      ]);
+
       return {
         success: true,
         message: 'Garantia Escrow liberada com sucesso!',
@@ -2341,6 +2373,7 @@ export class PaymentService {
         // Uso interno só para o diagnóstico de comparação com o ledger shadow logo abaixo
         // (Fase 6, item 9) — não faz parte do contrato público da função.
         _releasedAmount: releaseAmount,
+        _ledgerStage,
       };
     };
 
@@ -2363,46 +2396,52 @@ export class PaymentService {
     // um dos dois caminhos, nunca um comportamento esperado. Só loga um
     // diagnóstico; nunca bloqueia nem reverte o fluxo real, que já commitou.
     // ------------------------------------------------------------------------
-    try {
-      // E1 — garante (idempotente) que o PAYMENT_RECEIVED do pedido existe ANTES da entrega: sem ele BUYER_ESCROW ficaria negativo. Normalmente já foi
-      // postado na confirmação do pagamento; aqui só completa se aquele passo falhou. Chave `payment_received:{orderId}` ⇒ nunca duplica.
-      await FinancialLedgerService.recordPaymentReceived({ orderId, source: 'payment_service_release_ensure' }).catch((e: any) => {
-        logger.error({ orderId, error: e?.message }, '[ShadowLedger] recordPaymentReceived (garantia antes da entrega) falhou — fluxo real não afetado');
-      });
-      const shadow = await FinancialLedgerService.recordDeliveryConfirmed({
-        orderId,
-        performedBy: options?.performedBy ?? null,
-        source: 'payment_service',
-      });
-      if (shadow.skipped) {
-        logger.info({ orderId, reason: shadow.reason, detail: shadow.detail }, '[ShadowLedger] recordDeliveryConfirmed pulado (esperado para pedidos legados/sem snapshot)');
-      } else {
-        logger.info({ orderId, transactionId: shadow.transactionId }, '[ShadowLedger] recordDeliveryConfirmed postado');
+    const _releaseStage = (result as any)?._ledgerStage as LedgerStage | undefined;
+    if (result && typeof result === 'object') delete (result as any)._ledgerStage;
+    // outbox desligado => lançamento direto (E1/5A, intacto); ligado => processa já o que a transação enfileirou (o worker recupera o resto).
+    // Com `executor` externo a transação ainda não commitou: só o worker (depois do commit) processa.
+    await flushLedgerStage(_releaseStage, async () => {
+      try {
+        // E1 — garante (idempotente) que o PAYMENT_RECEIVED do pedido existe ANTES da entrega: sem ele BUYER_ESCROW ficaria negativo. Normalmente já foi
+        // postado na confirmação do pagamento; aqui só completa se aquele passo falhou. Chave `payment_received:{orderId}` ⇒ nunca duplica.
+        await FinancialLedgerService.recordPaymentReceived({ orderId, source: 'payment_service_release_ensure' }).catch((e: any) => {
+          logger.error({ orderId, error: e?.message }, '[ShadowLedger] recordPaymentReceived (garantia antes da entrega) falhou — fluxo real não afetado');
+        });
+        const shadow = await FinancialLedgerService.recordDeliveryConfirmed({
+          orderId,
+          performedBy: options?.performedBy ?? null,
+          source: 'payment_service',
+        });
+        if (shadow.skipped) {
+          logger.info({ orderId, reason: shadow.reason, detail: shadow.detail }, '[ShadowLedger] recordDeliveryConfirmed pulado (esperado para pedidos legados/sem snapshot)');
+        } else {
+          logger.info({ orderId, transactionId: shadow.transactionId }, '[ShadowLedger] recordDeliveryConfirmed postado');
 
-        const releasedAmount = (result as any)?._releasedAmount;
-        if (shadow.transactionId && typeof releasedAmount === 'number') {
-          const db = getDb();
-          if (db) {
-            const sellerPayableRows = await db
-              .select({ amount: ledgerEntries.amount })
-              .from(ledgerEntries)
-              .innerJoin(ledgerAccounts, eq(ledgerEntries.accountId, ledgerAccounts.id))
-              .where(and(eq(ledgerEntries.transactionId, shadow.transactionId), eq(ledgerAccounts.code, 'SELLER_PAYABLE')));
-            const shadowAmount = sellerPayableRows.reduce((sum, r) => sum + Number(r.amount), 0);
-            if (Math.abs(shadowAmount - releasedAmount) > 0.005) {
-              logger.warn(
-                { orderId, releasedAmount, shadowAmount, transactionId: shadow.transactionId },
-                '[ShadowLedger] MISMATCH: valor liberado no fluxo real diverge do SELLER_PAYABLE do ledger shadow — investigar (não deveria acontecer, os dois leem sellerNetAmount)'
-              );
-            } else {
-              logger.info({ orderId, releasedAmount, shadowAmount }, '[ShadowLedger] valor liberado bate com SELLER_PAYABLE do ledger shadow');
+          const releasedAmount = (result as any)?._releasedAmount;
+          if (shadow.transactionId && typeof releasedAmount === 'number') {
+            const db = getDb();
+            if (db) {
+              const sellerPayableRows = await db
+                .select({ amount: ledgerEntries.amount })
+                .from(ledgerEntries)
+                .innerJoin(ledgerAccounts, eq(ledgerEntries.accountId, ledgerAccounts.id))
+                .where(and(eq(ledgerEntries.transactionId, shadow.transactionId), eq(ledgerAccounts.code, 'SELLER_PAYABLE')));
+              const shadowAmount = sellerPayableRows.reduce((sum, r) => sum + Number(r.amount), 0);
+              if (Math.abs(shadowAmount - releasedAmount) > 0.005) {
+                logger.warn(
+                  { orderId, releasedAmount, shadowAmount, transactionId: shadow.transactionId },
+                  '[ShadowLedger] MISMATCH: valor liberado no fluxo real diverge do SELLER_PAYABLE do ledger shadow — investigar (não deveria acontecer, os dois leem sellerNetAmount)'
+                );
+              } else {
+                logger.info({ orderId, releasedAmount, shadowAmount }, '[ShadowLedger] valor liberado bate com SELLER_PAYABLE do ledger shadow');
+              }
             }
           }
         }
+      } catch (shadowErr: any) {
+        logger.error({ orderId, error: shadowErr?.message }, '[ShadowLedger] recordDeliveryConfirmed falhou — fluxo real não afetado');
       }
-    } catch (shadowErr: any) {
-      logger.error({ orderId, error: shadowErr?.message }, '[ShadowLedger] recordDeliveryConfirmed falhou — fluxo real não afetado');
-    }
+    }, !executor);
 
     if (result && typeof result === 'object' && '_releasedAmount' in result) {
       delete (result as any)._releasedAmount;

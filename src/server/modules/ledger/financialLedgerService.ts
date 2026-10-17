@@ -122,7 +122,17 @@ interface PostTransactionInput {
   entries: DraftEntry[];
 }
 
+/**
+ * Estado do ledger sombra (somente leitura): ligado/desligado e o cutoff em vigor. O outbox (E2) usa isto para respeitar EXATAMENTE a mesma regra de
+ * elegibilidade do ledger — nunca duplica a leitura da variável de ambiente. Aceita `override` só para testes unitários.
+ */
+export interface ShadowLedgerStatus { enabled: boolean; cutoff: Date | null }
+
 export class FinancialLedgerService {
+  static getShadowStatus(): ShadowLedgerStatus {
+    return { enabled: LEDGER_SHADOW_CUTOFF_AT !== null, cutoff: LEDGER_SHADOW_CUTOFF_AT };
+  }
+
   /**
    * Núcleo comum de postagem — usado pelos dois eventos desta fase. Não é exportado
    * fora do módulo porque toda transação precisa nascer de um evento de negócio

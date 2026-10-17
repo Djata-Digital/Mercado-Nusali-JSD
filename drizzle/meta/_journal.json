@@ -274,6 +274,13 @@
       "when": 1792078942635,
       "tag": "0038_shipping_lead_times",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1792178748452,
+      "tag": "0039_ledger_outbox",
+      "breakpoints": true
     }
   ]
 }

@@ -2536,3 +2536,99 @@ export const ledgerEntries = pgTable('ledger_entries', {
   ledger_entries_order_idx: index('ledger_entries_order_idx').on(table.orderId),
   ledger_entries_seller_idx: index('ledger_entries_seller_idx').on(table.sellerId, table.currency),
 }));
+
+
+// ============================================================================
+// LEDGER SOMBRA — E2: OUTBOX TRANSACIONAL + RECONCILIAÇÃO (migração 0039)
+// ============================================================================
+// Cada evento financeiro elegível ao ledger sombra (pagamento recebido / entrega confirmada) é gravado AQUI na mesma transação que confirma o evento no
+// fluxo real; um processador idempotente o transforma depois em ledger_transactions. A chave de idempotência é a MESMA do ledger (payment_received:{orderId} /
+// order_release:{orderId}), logo o evento é único por pedido e o lançamento também (UNIQUE em ambos). Nenhum saldo real é lido ou escrito por esta tabela.
+export const ledgerOutboxEvents = pgTable('ledger_outbox_events', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  eventType: varchar('event_type', { length: 50 }).notNull(), // PAYMENT_RECEIVED | ORDER_DELIVERY_CONFIRMED
+  idempotencyKey: varchar('idempotency_key', { length: 255 }).notNull(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  purchaseGroupId: varchar('purchase_group_id', { length: 255 }),
+  paymentId: varchar('payment_id', { length: 255 }),
+  // PENDING (nunca tentado) | PROCESSING (com lease) | RETRYING (falha recuperável, aguarda next_attempt_at) | DONE | SKIPPED (política: ex. pedido legado)
+  // | NEEDS_INTERVENTION (inválido ou tentativas esgotadas — exige ação humana) | DISMISSED (descartado manualmente, auditado)
+  status: varchar('status', { length: 30 }).notNull().default('PENDING'),
+  attempts: integer('attempts').notNull().default(0),
+  maxAttempts: integer('max_attempts').notNull().default(8),
+  nextAttemptAt: timestamp('next_attempt_at').defaultNow().notNull(),
+  lockedBy: varchar('locked_by', { length: 100 }),
+  lockedUntil: timestamp('locked_until'),
+  lastAttemptAt: timestamp('last_attempt_at'),
+  lastErrorCode: varchar('last_error_code', { length: 100 }),
+  lastError: text('last_error'),
+  // Snapshot financeiro do pedido NO MOMENTO do enfileiramento + hash: o processador recusa (NEEDS_INTERVENTION) se o pedido divergir — nunca recalcula.
+  snapshotJson: jsonb('snapshot_json').notNull(),
+  snapshotHash: varchar('snapshot_hash', { length: 64 }).notNull(),
+  occurredAt: timestamp('occurred_at').notNull(),
+  cutoffAt: timestamp('cutoff_at'), // LEDGER_SHADOW_CUTOFF_AT em vigor ao enfileirar (auditoria)
+  source: varchar('source', { length: 100 }),
+  correlationId: varchar('correlation_id', { length: 255 }),
+  ledgerTransactionId: varchar('ledger_transaction_id', { length: 255 }),
+  processedAt: timestamp('processed_at'),
+  resolvedBy: varchar('resolved_by', { length: 255 }),
+  resolutionNote: text('resolution_note'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  ledger_outbox_events_idempotency_uq: uniqueIndex('ledger_outbox_events_idempotency_uq').on(table.idempotencyKey),
+  ledger_outbox_events_claim_idx: index('ledger_outbox_events_claim_idx').on(table.status, table.nextAttemptAt),
+  ledger_outbox_events_order_idx: index('ledger_outbox_events_order_idx').on(table.orderId),
+  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED')`),
+  ledger_outbox_events_status_check: check('ledger_outbox_events_status_check', sql`${table.status} IN ('PENDING','PROCESSING','RETRYING','DONE','SKIPPED','NEEDS_INTERVENTION','DISMISSED')`),
+  ledger_outbox_events_attempts_check: check('ledger_outbox_events_attempts_check', sql`${table.attempts} >= 0 AND ${table.maxAttempts} >= 1`),
+  ledger_outbox_events_hash_check: check('ledger_outbox_events_hash_check', sql`char_length(${table.snapshotHash}) = 64`),
+}));
+
+// Execuções da reconciliação (somente leitura sobre o ledger) e as divergências que ela encontrou. Divergências nunca são "corrigidas em silêncio": ficam
+// OPEN até desaparecerem (RESOLVED, com o run que as viu resolvidas) ou serem reconhecidas por um humano (ACKNOWLEDGED, com nota).
+export const ledgerReconciliationRuns = pgTable('ledger_reconciliation_runs', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  status: varchar('status', { length: 20 }).notNull().default('RUNNING'), // RUNNING | COMPLETED | FAILED
+  triggeredBy: varchar('triggered_by', { length: 255 }),
+  cutoffAt: timestamp('cutoff_at'),
+  scannedOrders: integer('scanned_orders').notNull().default(0),
+  openFindings: integer('open_findings').notNull().default(0),
+  summaryJson: jsonb('summary_json'),
+  errorMessage: text('error_message'),
+  startedAt: timestamp('started_at').defaultNow().notNull(),
+  finishedAt: timestamp('finished_at'),
+}, (table) => ({
+  ledger_reconciliation_runs_status_check: check('ledger_reconciliation_runs_status_check', sql`${table.status} IN ('RUNNING','COMPLETED','FAILED')`),
+  ledger_reconciliation_runs_started_idx: index('ledger_reconciliation_runs_started_idx').on(table.startedAt),
+}));
+
+export const ledgerReconciliationFindings = pgTable('ledger_reconciliation_findings', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  fingerprint: varchar('fingerprint', { length: 255 }).notNull(), // tipo:pedido[:detalhe] — deduplica a mesma divergência entre execuções
+  findingType: varchar('finding_type', { length: 60 }).notNull(),
+  severity: varchar('severity', { length: 20 }).notNull(), // INFO | WARNING | CRITICAL
+  orderId: varchar('order_id', { length: 255 }),
+  eventId: varchar('event_id', { length: 255 }),
+  ledgerTransactionId: varchar('ledger_transaction_id', { length: 255 }),
+  expectedJson: jsonb('expected_json'),
+  actualJson: jsonb('actual_json'),
+  detail: text('detail'),
+  status: varchar('status', { length: 20 }).notNull().default('OPEN'), // OPEN | ACKNOWLEDGED | RESOLVED
+  seenCount: integer('seen_count').notNull().default(1),
+  firstSeenRunId: varchar('first_seen_run_id', { length: 255 }),
+  lastSeenRunId: varchar('last_seen_run_id', { length: 255 }),
+  firstSeenAt: timestamp('first_seen_at').defaultNow().notNull(),
+  lastSeenAt: timestamp('last_seen_at').defaultNow().notNull(),
+  resolvedAt: timestamp('resolved_at'),
+  resolvedByRunId: varchar('resolved_by_run_id', { length: 255 }),
+  acknowledgedBy: varchar('acknowledged_by', { length: 255 }),
+  acknowledgeNote: text('acknowledge_note'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  ledger_reconciliation_findings_open_uq: uniqueIndex('ledger_reconciliation_findings_open_uq').on(table.fingerprint).where(sql`${table.status} <> 'RESOLVED'`),
+  ledger_reconciliation_findings_status_idx: index('ledger_reconciliation_findings_status_idx').on(table.status, table.severity),
+  ledger_reconciliation_findings_order_idx: index('ledger_reconciliation_findings_order_idx').on(table.orderId),
+  ledger_reconciliation_findings_severity_check: check('ledger_reconciliation_findings_severity_check', sql`${table.severity} IN ('INFO','WARNING','CRITICAL')`),
+  ledger_reconciliation_findings_status_check: check('ledger_reconciliation_findings_status_check', sql`${table.status} IN ('OPEN','ACKNOWLEDGED','RESOLVED')`),
+}));

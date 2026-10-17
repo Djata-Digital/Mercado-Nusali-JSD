@@ -17,6 +17,8 @@
     "admin:create-global": "tsx scripts/create-global-admin.ts",
     "jobs:escrow-auto-release": "tsx scripts/run-escrow-auto-release.ts",
     "jobs:expire-pending-payments": "tsx scripts/run-pending-payment-expiration.ts",
+    "jobs:ledger-outbox": "tsx scripts/run-ledger-outbox.ts",
+    "ledger:outbox-admin": "tsx scripts/ledger-outbox-admin.ts",
     "orders:backfill-inventory": "tsx scripts/backfill-order-item-inventory.ts",
     "asaas:test-connection": "tsx scripts/test-asaas-connection.ts",
     "asaas:test-pix": "tsx scripts/test-asaas-pix.ts",
@@ -24,11 +26,13 @@
     "asaas:test-e2e-public": "tsx scripts/test-asaas-e2e-public.ts",
     "test:redis": "tsx scripts/test-redis-optimization.ts",
     "test:logistics-db": "tsx scratch/diag-db-errors.ts",
-    "test:essential": "tsx tests/mobile-compact-listing.test.ts && tsx tests/test-db-safety.test.ts && node scripts/with-test-env.cjs tsx tests/seller-variant-stock.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e1-coupon-and-group-payment.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-idempotency-race.test.ts",
+    "test:essential": "tsx tests/mobile-compact-listing.test.ts && tsx tests/test-db-safety.test.ts && node scripts/with-test-env.cjs tsx tests/seller-variant-stock.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e1-coupon-and-group-payment.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-idempotency-race.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e2-outbox.test.ts",
     "test:mobile": "tsx tests/mobile-compact-listing.test.ts",
     "test:variant-stock": "node scripts/with-test-env.cjs tsx tests/seller-variant-stock.test.ts",
     "test:ledger-e1": "node scripts/with-test-env.cjs tsx tests/ledger-e1-coupon-and-group-payment.test.ts",
     "test:ledger-race": "node scripts/with-test-env.cjs tsx tests/ledger-idempotency-race.test.ts",
+    "test:ledger-e2": "node scripts/with-test-env.cjs tsx tests/ledger-e2-outbox.test.ts",
+    "test:ledger-e2-migration": "node scripts/with-test-env.cjs node tests/ledger-e2-migration-check.cjs",
     "test:db-safety": "tsx tests/test-db-safety.test.ts"
   },
   "dependencies": {

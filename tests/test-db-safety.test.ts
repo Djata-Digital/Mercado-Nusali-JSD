@@ -142,7 +142,7 @@ const dbScripts = Object.entries<string>(pkg.scripts).filter(([k, v]) => /^test:
 report('H  todo script npm `test:*` que usa banco roda pelo executor seguro (with-test-env.cjs)', dbScripts.length >= 3 && dbScripts.every(([, v]) => v.split('&&').filter((x) => /tsx tests\//.test(x)).every((x) => /with-test-env\.cjs/.test(x))), dbScripts);
 const testFiles = fs.readdirSync(path.join(root, 'tests')).filter((f) => /\.test\.ts$/.test(f));
 const usesDb = testFiles.filter((f) => /getDb\(|new pg\.Pool|new Pool\(|setupCheckoutKit/.test(src('tests/' + f)));
-const unguarded = usesDb.filter((f) => !/support\/(ledgerTestDbGuard|ledgerE1Env)/.test(src('tests/' + f)));
+const unguarded = usesDb.filter((f) => !/support\/(ledgerTestDbGuard|ledgerE1Env|ledgerE2Env)/.test(src('tests/' + f)));
 report('H  todo teste versionado em tests/ que toca banco importa o guarda/ambiente travado', unguarded.length === 0, unguarded);
 report('H  a lista de nomes protegidos contém o banco padrão e as cópias de restauração de produção', ['postgres', 'p8d_restore', 'phase1_restore'].every((n) => src('src/db/testDatabaseSafety.ts').includes(`'${n}'`)));
 
