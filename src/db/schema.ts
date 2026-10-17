@@ -2456,11 +2456,11 @@ export const ledgerAccounts = pgTable('ledger_accounts', {
     'ledger_accounts_owner_id_platform_check',
     sql`(${table.ownerType} = 'PLATFORM' AND ${table.ownerId} IS NULL) OR (${table.ownerType} <> 'PLATFORM' AND ${table.ownerId} IS NOT NULL)`
   ),
-  // Catálogo fechado — os 13 códigos de accounts.ts (ACCOUNT_DEFINITIONS). Um typo
+  // Catálogo fechado — os 14 códigos de accounts.ts (ACCOUNT_DEFINITIONS). Um typo
   // num code novo passa a ser rejeitado pelo banco, não aceito como conta nova.
   ledger_accounts_code_check: check(
     'ledger_accounts_code_check',
-    sql`${table.code} IN ('PAYMENT_CLEARING','BUYER_ESCROW','SELLER_PAYABLE','SELLER_AVAILABLE','SELLER_PAYOUT_CLEARING','NUSALI_COMMISSION_REVENUE','SHIPPING_PAYABLE','SHIPPING_SUBSIDY_NUSALI','TAX_PAYABLE','REFUND_PAYABLE','CHARGEBACK_RECEIVABLE','PAYMENT_PROCESSOR_FEES','NUSALI_PROMOTION_EXPENSE')`
+    sql`${table.code} IN ('PAYMENT_CLEARING','BUYER_ESCROW','SELLER_PAYABLE','SELLER_AVAILABLE','SELLER_PAYOUT_CLEARING','NUSALI_COMMISSION_REVENUE','SHIPPING_PAYABLE','SHIPPING_SUBSIDY_NUSALI','TAX_PAYABLE','REFUND_PAYABLE','CHARGEBACK_RECEIVABLE','PAYMENT_PROCESSOR_FEES','NUSALI_PROMOTION_EXPENSE','REFUND_ABSORBED_SHIPPING')`
   ),
 }));
 
@@ -2500,7 +2500,7 @@ export const ledgerTransactions = pgTable('ledger_transactions', {
   // Catálogo fechado — só os eventos implementados NESTA fase (financialLedgerService.ts).
   // Eventos futuros (PAYOUT_*, REFUND_*, CHARGEBACK_*, DISPUTE_*, ADJUSTMENT, REVERSAL, ...)
   // entram numa migration aditiva quando o código que os usa for implementado.
-  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED')`),
+  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED')`),
   ledger_transactions_order_idx: index('ledger_transactions_order_idx').on(table.orderId),
   ledger_transactions_type_status_idx: index('ledger_transactions_type_status_idx').on(table.type, table.status),
 }));
@@ -2579,7 +2579,7 @@ export const ledgerOutboxEvents = pgTable('ledger_outbox_events', {
   ledger_outbox_events_idempotency_uq: uniqueIndex('ledger_outbox_events_idempotency_uq').on(table.idempotencyKey),
   ledger_outbox_events_claim_idx: index('ledger_outbox_events_claim_idx').on(table.status, table.nextAttemptAt),
   ledger_outbox_events_order_idx: index('ledger_outbox_events_order_idx').on(table.orderId),
-  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED')`),
+  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED')`),
   ledger_outbox_events_status_check: check('ledger_outbox_events_status_check', sql`${table.status} IN ('PENDING','PROCESSING','RETRYING','DONE','SKIPPED','NEEDS_INTERVENTION','DISMISSED')`),
   ledger_outbox_events_attempts_check: check('ledger_outbox_events_attempts_check', sql`${table.attempts} >= 0 AND ${table.maxAttempts} >= 1`),
   ledger_outbox_events_hash_check: check('ledger_outbox_events_hash_check', sql`char_length(${table.snapshotHash}) = 64`),

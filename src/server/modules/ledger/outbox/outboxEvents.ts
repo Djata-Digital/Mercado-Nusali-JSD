@@ -6,14 +6,16 @@ import crypto from 'crypto';
 import { findPgError } from '../pgErrors.js';
 import type { LedgerResult } from '../types.js';
 
-export type OutboxEventType = 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED';
-export const OUTBOX_EVENT_TYPES: readonly OutboxEventType[] = ['PAYMENT_RECEIVED', 'ORDER_DELIVERY_CONFIRMED'];
+export type OutboxEventType = 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED';
+export const OUTBOX_EVENT_TYPES: readonly OutboxEventType[] = ['PAYMENT_RECEIVED', 'ORDER_DELIVERY_CONFIRMED', 'REFUND_PROCESSED'];
 
 export type OutboxStatus = 'PENDING' | 'PROCESSING' | 'RETRYING' | 'DONE' | 'SKIPPED' | 'NEEDS_INTERVENTION' | 'DISMISSED';
 
 /** Chaves = as MESMAS do ledger (ledger_transactions.idempotency_key): um evento e um lançamento por pedido e tipo. Determinísticas: nunca derivam de um id recém-criado. */
 export const paymentReceivedKey = (orderId: string) => `payment_received:${orderId}`;
 export const deliveryConfirmedKey = (orderId: string) => `order_release:${orderId}`;
+/** E3 — um evento (e um lançamento) por REEMBOLSO, nunca por pedido: pedido pode ter mais de um reembolso parcial. */
+export const refundProcessedKey = (refundId: string) => `refund_processed:${refundId}`;
 export const keyFor = (type: OutboxEventType, orderId: string) => (type === 'PAYMENT_RECEIVED' ? paymentReceivedKey(orderId) : deliveryConfirmedKey(orderId));
 
 export const DEFAULT_POLICY = {
@@ -84,6 +86,21 @@ export function buildOrderSnapshot(order: OrderRowForSnapshot, type: OutboxEvent
     sellerNetAmount: asStr(order.sellerNetAmount), commissionRateSnapshot: asStr(order.commissionRateSnapshot), discountAmount: asStr(order.discountAmount),
     shippingChargedToBuyer: asStr(order.shippingChargedToBuyer), shippingSellerSubsidy: asStr(order.shippingSellerSubsidy),
     shippingMarketplaceSubsidy: asStr(order.shippingMarketplaceSubsidy), customsDuty: asStr(order.customsDuty),
+  };
+}
+
+export interface RefundRowForSnapshot { id: string; orderId: string | null; paymentId: string; amount: string | number; currency: string; sellerDebitAmount: string | number | null; status: string }
+export type RefundReleaseStage = 'BEFORE_RELEASE' | 'AFTER_RELEASE';
+
+/**
+ * Snapshot de um evento REFUND_PROCESSED: os campos financeiros do pedido (os mesmos da entrega) + o reembolso concluído + o estágio (antes/depois da liberação),
+ * que é um FATO do momento do reembolso e por isso vem do próprio evento (o Escrow muda depois). Cópia literal dos valores gravados; nada recalculado.
+ */
+export function buildRefundSnapshot(order: OrderRowForSnapshot, refund: RefundRowForSnapshot, stage: RefundReleaseStage): Record<string, string | null> {
+  return {
+    ...buildOrderSnapshot(order, 'ORDER_DELIVERY_CONFIRMED'),
+    refundId: refund.id, refundPaymentId: refund.paymentId, refundAmount: asStr(refund.amount), refundCurrency: refund.currency,
+    refundSellerDebitAmount: asStr(refund.sellerDebitAmount), releaseStage: stage,
   };
 }
 

@@ -8,7 +8,10 @@ export type LedgerSkipReason =
   | 'INVALID_SNAPSHOT'
   | 'ORDER_NOT_FOUND'
   | 'DATABASE_UNAVAILABLE'
-  | 'SHADOW_LEDGER_DISABLED';
+  | 'SHADOW_LEDGER_DISABLED'
+  | 'REFUND_NOT_FOUND'
+  | 'REFUND_NOT_PROCESSED'
+  | 'REFUND_NOT_ORDER_LEVEL';
 
 export interface LedgerResult {
   posted: boolean;

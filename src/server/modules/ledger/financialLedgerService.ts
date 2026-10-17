@@ -21,12 +21,15 @@ import {
   ledgerTransactions,
   ledgerEntries,
   orders,
+  refunds,
+  escrowAccounts,
 } from '../../../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { netBalanceByCurrency, isZeroMicros } from './decimal.js';
 import { ACCOUNT_DEFINITIONS, PLATFORM_POOLED_ACCOUNTS, ledgerAccountId, type LedgerAccountCode, type LedgerOwnerType } from './accounts.js';
 import { buildDeliveryConfirmedEntries } from './deliveryConfirmedEntries.js';
+import { buildRefundProcessedEntries, type ReleaseStage } from './refundProcessedEntries.js';
 import { isUniqueViolationOf } from './pgErrors.js';
 import type { LedgerSkipReason, LedgerResult } from './types.js';
 
@@ -417,6 +420,92 @@ export class FinancialLedgerService {
       requestId: input.requestId ?? null,
       metadata: { shadowPhase: '5A', commissionRateSnapshot: order.commissionRateSnapshot, commissionBase: order.commissionBase, sellerCouponDiscount: order.discountAmount ?? null },
       entries: built.entries as unknown as DraftEntry[],
+    });
+  }
+
+  // ==========================================================================
+  // REFUND_PROCESSED (E3) — reembolso EFETIVAMENTE concluído (refunds.status = 'processed')
+  // ==========================================================================
+  /**
+   * Estágio do reembolso em relação à liberação do Escrow, derivado do fato gravado (escrow_accounts.released_at). Um reembolso nunca ocorre depois de um
+   * release E antes dele ao mesmo tempo: o release é bloqueado por escrow 'refunded' e o reembolso pós-release mantém released_at.
+   */
+  static async deriveReleaseStage(orderId: string): Promise<ReleaseStage | null> {
+    const db = getDb();
+    if (!db) return null;
+    const [es] = await db.select({ releasedAt: escrowAccounts.releasedAt }).from(escrowAccounts).where(eq(escrowAccounts.orderId, orderId)).limit(1);
+    if (!es) return null;
+    return es.releasedAt ? 'AFTER_RELEASE' : 'BEFORE_RELEASE';
+  }
+
+  /**
+   * Lança o reembolso de um pedido no ledger sombra. Só reembolso 'processed' (nunca pendente/reservado/falhado). Garante antes o PAYMENT_RECEIVED e, no
+   * estágio pós-liberação, o ORDER_DELIVERY_CONFIRMED (idempotentes). Chave: refund_processed:{refundId}. Respeita o cutoff pelo pedido. Surplus (sem pedido) não entra.
+   */
+  static async recordRefundProcessed(input: {
+    refundId: string;
+    releaseStage?: ReleaseStage;
+    performedBy?: string | null;
+    source?: string | null;
+    correlationId?: string | null;
+    requestId?: string | null;
+    occurredAt?: Date;
+  }): Promise<LedgerResult> {
+    const db = getDb();
+    if (!db) return { posted: false, skipped: true, reason: 'DATABASE_UNAVAILABLE' };
+
+    if (LEDGER_SHADOW_CUTOFF_AT === null) {
+      return { posted: false, skipped: true, reason: 'SHADOW_LEDGER_DISABLED', detail: 'LEDGER_SHADOW_CUTOFF_AT não configurada — shadow ledger está OFF.' };
+    }
+
+    const [refund] = await db.select().from(refunds).where(eq(refunds.id, input.refundId)).limit(1);
+    if (!refund) return { posted: false, skipped: true, reason: 'REFUND_NOT_FOUND', detail: `reembolso ${input.refundId} não existe` };
+    if (refund.status !== 'processed') return { posted: false, skipped: true, reason: 'REFUND_NOT_PROCESSED', detail: `reembolso ${refund.id} está "${refund.status}" — só reembolso concluído é lançado` };
+    if (!refund.orderId) return { posted: false, skipped: true, reason: 'REFUND_NOT_ORDER_LEVEL', detail: 'reembolso de pagamento excedente (sem pedido) não tem lançamento a estornar' };
+
+    const [order] = await db.select().from(orders).where(eq(orders.id, refund.orderId)).limit(1);
+    if (!order) return { posted: false, skipped: true, reason: 'ORDER_NOT_FOUND' };
+    if (order.createdAt < LEDGER_SHADOW_CUTOFF_AT) {
+      return { posted: false, skipped: true, reason: 'LEGACY_ORDER', detail: `order.createdAt (${order.createdAt.toISOString()}) < cutoff` };
+    }
+
+    const stage = input.releaseStage ?? (await this.deriveReleaseStage(order.id));
+    if (!stage) return { posted: false, skipped: true, reason: 'MISSING_SNAPSHOT', detail: 'Escrow do pedido não encontrado: estágio do reembolso indeterminado.' };
+
+    const built = buildRefundProcessedEntries(order as any, refund as any, stage);
+    if (built.status === 'SKIPPED') return { posted: false, skipped: true, reason: built.reason, detail: built.detail };
+
+    const occurredAt = input.occurredAt ?? refund.createdAt ?? new Date();
+    const base = { orderId: order.id, occurredAt, source: input.source ?? 'refund_service', correlationId: input.correlationId ?? null, requestId: input.requestId ?? null };
+    // pré-requisitos idempotentes: o dinheiro entrou (PAYMENT_RECEIVED) e, se já tinha sido liberado, a liberação também foi contabilizada
+    const pre = await this.recordPaymentReceived(base);
+    if (!pre.posted) return pre;
+    if (stage === 'AFTER_RELEASE') {
+      const rel = await this.recordDeliveryConfirmed(base);
+      if (!rel.posted) return rel;
+    }
+
+    return this.postTransaction({
+      type: 'REFUND_PROCESSED',
+      idempotencyKey: `refund_processed:${refund.id}`,
+      currency: order.currency,
+      occurredAt,
+      orderId: order.id,
+      paymentId: refund.paymentId,
+      refundId: refund.id,
+      buyerId: order.buyerId,
+      sellerId: order.sellerId ?? null,
+      storeId: order.storeId ?? null,
+      countryCode: order.countryCode ?? null,
+      performedBy: input.performedBy ?? refund.approvedBy ?? null,
+      source: input.source ?? 'refund_service',
+      reason: stage === 'BEFORE_RELEASE'
+        ? 'Reembolso concluído antes da liberação — custódia (escrow) devolvida ao comprador.'
+        : 'Reembolso concluído após a liberação — vendedor devolve a parte dele, comissão estornada, restante absorvido pela Nusali.',
+      correlationId: input.correlationId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: { shadowPhase: 'E3', releaseStage: stage, refundAmount: refund.amount, sellerDebitAmount: refund.sellerDebitAmount ?? null, parts: built.parts, refundIdempotencyKey: refund.idempotencyKey ?? null },
+      entries: built.entries,
     });
   }
 }

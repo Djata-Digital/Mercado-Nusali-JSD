@@ -22,6 +22,9 @@ import { PaymentProvider, RefundGatewayOutcome } from './paymentProvider.js';
 import { AsaasPaymentProvider } from './providers/asaasPaymentProvider.js';
 import { AsaasRefund, findRefundByCorrelation, ASAAS_AMOUNT_TOLERANCE } from './types/asaasRefund.js';
 import { logger } from '../../infra/logger.js';
+import { FinancialLedgerService } from '../ledger/financialLedgerService.js';
+import { stageLedgerEventsInTx, flushLedgerStage, type LedgerStage } from '../ledger/outbox/ledgerShadowHooks.js';
+import type { RefundReleaseStage } from '../ledger/outbox/outboxEvents.js';
 
 export class RefundValidationError extends Error {
   code: string;
@@ -80,7 +83,7 @@ export interface OrderRefundFinancialEffectsInput {
 export async function applyOrderRefundFinancialEffects(
   tx: any,
   input: OrderRefundFinancialEffectsInput
-): Promise<{ sellerDebitAmount: number | null; currency: string }> {
+): Promise<{ sellerDebitAmount: number | null; currency: string; releaseStage: RefundReleaseStage }> {
   const { order, payment, groupAllocation, amount, reason, performedBy, refundId, walletTxIdempotencyKey } = input;
 
   // Lock na conta de escrow ANTES de qualquer decisão — impede que um release
@@ -107,6 +110,8 @@ export async function applyOrderRefundFinancialEffects(
 
   const isFullRefund = Math.abs(amount - Number(order.totalAmount)) < 0.005;
   let sellerDebitAmount: number | null = null;
+  // E3 — estágio do reembolso em relação à liberação do Escrow, lido ANTES de os efeitos mudarem o estado do Escrow
+  const releaseStage: RefundReleaseStage = escrow.status === 'released' ? 'AFTER_RELEASE' : 'BEFORE_RELEASE';
 
   if (escrow.status === 'held' || escrow.status === 'eligible') {
     // Seller nunca recebeu — nada a debitar. Só reverte o escrow e o pedido.
@@ -242,7 +247,60 @@ export async function applyOrderRefundFinancialEffects(
     await tx.update(purchaseGroups).set({ status: newGroupStatus, updatedAt: new Date() }).where(eq(purchaseGroups.id, order.purchaseGroupId!));
   }
 
-  return { sellerDebitAmount, currency };
+  return { sellerDebitAmount, currency, releaseStage };
+}
+
+// ============================================================================
+// E3 — REEMBOLSO NO LEDGER SOMBRA (outbox). Só reembolso CONCLUÍDO (status 'processed') chega aqui; reservado/pendente/falhado nunca.
+// O evento é gravado na MESMA transação que conclui o reembolso (savepoint: nunca derruba o dinheiro real) e processado depois do commit.
+// ============================================================================
+const refundLedgerStages = new WeakMap<object, LedgerStage>();
+
+/** Quem chamou processRefund com uma transação EXTERNA (ex.: resolveDispute) recolhe o estágio aqui e o descarrega DEPOIS do commit. */
+export function takeRefundLedgerStage(result: unknown): LedgerStage | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const st = refundLedgerStages.get(result as object);
+  refundLedgerStages.delete(result as object);
+  return st;
+}
+
+async function stageRefundLedgerEvent(
+  tx: any,
+  order: typeof orders.$inferSelect,
+  refund: { id: string; paymentId: string; amount: string | number; currency: string; sellerDebitAmount: string | number | null },
+  releaseStage: RefundReleaseStage,
+  occurredAt: Date,
+): Promise<LedgerStage> {
+  return stageLedgerEventsInTx(tx, [{
+    eventType: 'REFUND_PROCESSED', order: order as any, paymentId: refund.paymentId, purchaseGroupId: order.purchaseGroupId ?? null,
+    refund: { id: refund.id, paymentId: refund.paymentId, amount: refund.amount, currency: refund.currency, sellerDebitAmount: refund.sellerDebitAmount, releaseStage },
+    occurredAt, source: 'refund_service',
+  }]);
+}
+
+/** Reembolso JÁ concluído (replay idempotente / webhook repetido): recria o evento se ele se perdeu — a chave única garante que nunca duplica. */
+async function stageAlreadyProcessedRefund(tx: any, refund: typeof refunds.$inferSelect): Promise<LedgerStage | undefined> {
+  if (refund.status !== 'processed' || !refund.orderId) return undefined;
+  const [order] = await tx.select().from(orders).where(eq(orders.id, refund.orderId)).limit(1);
+  const [escrow] = await tx.select({ releasedAt: escrowAccounts.releasedAt }).from(escrowAccounts).where(eq(escrowAccounts.orderId, refund.orderId)).limit(1);
+  if (!order || !escrow) return undefined;
+  return stageRefundLedgerEvent(tx, order, refund as any, escrow.releasedAt ? 'AFTER_RELEASE' : 'BEFORE_RELEASE', refund.providerConfirmedAt ?? refund.createdAt ?? new Date());
+}
+
+/** Pós-commit: tentativa imediata (outbox) ou, com o outbox desligado, o lançamento direto best-effort. Nunca lança. visible=false: transação externa ainda não commitada. */
+export async function flushRefundLedgerStage(stage: LedgerStage | undefined, refundId: string, visible = true): Promise<void> {
+  if (!stage) return;
+  const direct = async () => {
+    if (!visible) return;
+    try {
+      const r = await FinancialLedgerService.recordRefundProcessed({ refundId, source: 'refund_service' });
+      if (!r.posted) logger.warn({ refundId, reason: r.reason, detail: r.detail }, '[ShadowLedger] recordRefundProcessed ignorado — fluxo real não afetado');
+    } catch (err: any) {
+      logger.error({ refundId, error: err?.message }, '[ShadowLedger] recordRefundProcessed falhou — fluxo real não afetado; repetível (idempotente)');
+    }
+  };
+  try { await flushLedgerStage(stage, direct, visible); }
+  catch (err: any) { logger.error({ refundId, error: err?.message }, '[ShadowLedger] flush do reembolso falhou — fluxo real não afetado'); }
 }
 
 /**
@@ -296,6 +354,7 @@ export interface ProcessRefundInput {
  *    fica só como diagnóstico no ledger shadow (item 14 do pedido).
  */
 export async function processRefund(input: ProcessRefundInput, executor?: any) {
+  let ledgerStage: LedgerStage | undefined;
   const runInTx = async (tx: any) => {
     // Fase C5.2-C — LOCK ORDER para child order de purchase_group: mesma
     // convenção já estabelecida na C4.1/C5.1 (group lock SEMPRE primeiro,
@@ -333,6 +392,7 @@ export async function processRefund(input: ProcessRefundInput, executor?: any) {
     const existing = await tx.select().from(refunds).where(eq(refunds.idempotencyKey, idempotencyKey)).limit(1);
     if (existing.length > 0) {
       const r = existing[0];
+      ledgerStage = await stageAlreadyProcessedRefund(tx, r);
       return {
         id: r.id, orderId: r.orderId, amount: Number(r.amount), currency: r.currency,
         status: r.status, sellerDebitAmount: r.sellerDebitAmount !== null ? Number(r.sellerDebitAmount) : null,
@@ -414,7 +474,7 @@ export async function processRefund(input: ProcessRefundInput, executor?: any) {
     // (legacy) ainda faz sozinho é o INSERT da refund row logo abaixo — o
     // novo fluxo D.4/D.5 usa exatamente o mesmo helper, mas faz UPDATE numa
     // row já existente (nunca um segundo INSERT).
-    const { sellerDebitAmount, currency } = await applyOrderRefundFinancialEffects(tx, {
+    const { sellerDebitAmount, currency, releaseStage } = await applyOrderRefundFinancialEffects(tx, {
       order, payment, groupAllocation,
       amount: input.amount, reason: input.reason, performedBy: input.performedBy,
       refundId, walletTxIdempotencyKey: idempotencyKey,
@@ -435,16 +495,28 @@ export async function processRefund(input: ProcessRefundInput, executor?: any) {
       createdAt: new Date(),
     });
 
+    // E3 — evento do ledger sombra na MESMA transação que conclui o reembolso (savepoint; nunca derruba o dinheiro real)
+    ledgerStage = await stageRefundLedgerEvent(tx, order, {
+      id: refundId, paymentId: payment.id, amount: input.amount.toFixed(2), currency, sellerDebitAmount: sellerDebitAmount !== null ? sellerDebitAmount.toFixed(2) : null,
+    }, releaseStage, new Date());
+
     return {
       id: refundId, orderId: order.id, amount: input.amount, currency,
       status: 'processed', sellerDebitAmount, alreadyProcessed: false,
     };
   };
 
-  if (executor) return runInTx(executor);
+  if (executor) {
+    // Transação EXTERNA ainda não commitada: o estágio fica para quem a commita (resolveDispute descarrega; sem isso o worker recupera do outbox).
+    const res = await runInTx(executor);
+    if (ledgerStage && res && typeof res === 'object') refundLedgerStages.set(res as object, ledgerStage);
+    return res;
+  }
   const db = getDb();
   if (!db) throw new Error('Banco de dados indisponível.');
-  return db.transaction(runInTx);
+  const res = await db.transaction(runInTx);
+  await flushRefundLedgerStage(ledgerStage, res.id);
+  return res;
 }
 
 export interface ProcessSurplusRefundInput {
@@ -1367,7 +1439,8 @@ export async function finalizeReservedOrderRefund(refundId: string, evidence: As
   const db = getDb();
   if (!db) throw new Error('Banco de dados indisponível.');
 
-  return db.transaction(async (tx: any) => {
+  let ledgerStage: LedgerStage | undefined;
+  const outcome = await db.transaction(async (tx: any) => {
     // Peek (sem lock) só para saber orderId/purchaseGroupId — decide QUAIS
     // locks pegar, nunca decide nada financeiro.
     const [refundPeek] = await tx.select({ orderId: refunds.orderId }).from(refunds).where(eq(refunds.id, refundId)).limit(1);
@@ -1388,7 +1461,8 @@ export async function finalizeReservedOrderRefund(refundId: string, evidence: As
       throw new RefundValidationError('REFUND_NOT_FOUND', `Refund "${refundId}" não encontrado.`, 404);
     }
     if (refund.status === 'processed') {
-      // Idempotente — outra chamada (ou esta mesma, num retry) já finalizou.
+      // Idempotente — outra chamada (ou esta mesma, num retry) já finalizou. E3: recria o evento do ledger se ele se perdeu (chave única => nunca duplica).
+      ledgerStage = await stageAlreadyProcessedRefund(tx, refund);
       return { refundId, outcome: 'ALREADY_TERMINAL_PROCESSED', localStatus: 'processed', providerStatus: refund.providerStatus } as ReconcileReservedRefundResult;
     }
     if (refund.status === 'failed') {
@@ -1416,7 +1490,7 @@ export async function finalizeReservedOrderRefund(refundId: string, evidence: As
 
     // Efeitos econômicos — MESMO helper do engine C5.2-C/legacy, nunca uma
     // segunda implementação divergente (seções 17-20 do pedido).
-    const { sellerDebitAmount } = await applyOrderRefundFinancialEffects(tx, {
+    const { sellerDebitAmount, releaseStage } = await applyOrderRefundFinancialEffects(tx, {
       order, payment: fundingPayment, groupAllocation: allocation,
       amount: Number(refund.amount), reason: refund.reason, performedBy: refund.approvedBy,
       refundId: refund.id, walletTxIdempotencyKey: refund.idempotencyKey || refund.id,
@@ -1434,8 +1508,16 @@ export async function finalizeReservedOrderRefund(refundId: string, evidence: As
       lastError: null,
     }).where(eq(refunds.id, refundId));
 
+    // E3 — evento do ledger sombra na MESMA transação que conclui o reembolso (só aqui, com o provedor em DONE; nunca na reserva/pendência)
+    ledgerStage = await stageRefundLedgerEvent(tx, order, {
+      id: refund.id, paymentId: refund.paymentId, amount: refund.amount, currency: refund.currency,
+      sellerDebitAmount: sellerDebitAmount !== null ? sellerDebitAmount.toFixed(2) : null,
+    }, releaseStage, refund.providerConfirmedAt ?? new Date());
+
     return { refundId, outcome: 'FINALIZED', localStatus: 'processed', providerStatus: 'DONE' } as ReconcileReservedRefundResult;
   });
+  await flushRefundLedgerStage(ledgerStage, refundId);
+  return outcome;
 }
 
 /**
@@ -1732,6 +1814,10 @@ export async function resolveDispute(
   // reconciliável depois.
   const refundId: string | null = result.newlyReservedRefundId ?? null;
   delete result.newlyReservedRefundId;
+
+  // E3 — reembolso legacy concluído dentro da transação da disputa: agora que ela commitou, descarrega o evento do ledger sombra (best-effort; o worker recupera).
+  const legacyStage = takeRefundLedgerStage(result.refund);
+  if (legacyStage && result.refund?.id) await flushRefundLedgerStage(legacyStage, result.refund.id, !executor);
 
   if (refundId) {
     try {

@@ -1,6 +1,13 @@
 // Verificação da migração 0039 em banco DESCARTÁVEL (rodar pelo executor seguro; o banco deve estar no nível ANTERIOR à 0039, ex.: cópia do phase3_tmpl ou restauração do dump de produção): migrador oficial do drizzle → estrutura → rollback → reaplicação → trava do rollback com dados.
 const path = require('path'); const fs = require('fs');
 const root = path.resolve(__dirname, '..');
+// Esta verificação cobre a 0039 isoladamente: o migrador oficial roda sobre uma CÓPIA da pasta de migrações limitada até a 0039 (as posteriores têm verificação própria).
+const os = require('os');
+const migDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mig-upto-0039-'));
+fs.mkdirSync(path.join(migDir, 'meta'));
+{ const j = JSON.parse(fs.readFileSync(path.join(root, 'drizzle/meta/_journal.json'), 'utf8')); j.entries = j.entries.filter((e) => e.idx <= 39);
+  fs.writeFileSync(path.join(migDir, 'meta/_journal.json'), JSON.stringify(j));
+  for (const e of j.entries) fs.copyFileSync(path.join(root, 'drizzle', e.tag + '.sql'), path.join(migDir, e.tag + '.sql')); }
 const pg = require(path.join(root, 'node_modules/pg'));
 const { drizzle } = require(path.join(root, 'node_modules/drizzle-orm/node-postgres'));
 const { migrate } = require(path.join(root, 'node_modules/drizzle-orm/node-postgres/migrator'));
@@ -16,7 +23,7 @@ let bad = 0; const chk = (l, ok, d) => { if (!ok) bad++; console.log(`${ok ? 'OK
   }
   const before = (await q(`select count(*)::int n from drizzle.__drizzle_migrations`))[0].n;
   chk('antes: tabelas novas ausentes', (await tables()).length === 0);
-  await migrate(drizzle(pool), { migrationsFolder: path.join(root, 'drizzle') });
+  await migrate(drizzle(pool), { migrationsFolder: migDir });
   const after = (await q(`select count(*)::int n from drizzle.__drizzle_migrations`))[0].n;
   chk(`migrador oficial aplicou a(s) migração(ões) pendente(s) (${before} -> ${after}; última = 0039)`, after === 40, { before, after });
   chk('3 tabelas criadas', (await tables()).length === 3, await tables());
@@ -28,7 +35,7 @@ let bad = 0; const chk = (l, ok, d) => { if (!ok) bad++; console.log(`${ok ? 'OK
   const c = await pool.connect(); try { await c.query('BEGIN'); await c.query(down); await c.query('COMMIT'); } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
   chk('rollback remove tabelas, funções e o registro da migração', (await tables()).length === 0 && (await trigs()).length === 0 && (await q(`select count(*)::int n from drizzle.__drizzle_migrations`))[0].n === before && (await q(`select count(*)::int n from pg_proc where proname like 'nusali_outbox_%'`))[0].n === 0);
   chk('rollback NÃO tocou no ledger (tabelas e triggers do ledger intactos)', (await q(`select count(*)::int n from pg_trigger where tgname like 'nusali_ledger_trg_%'`))[0].n === 8);
-  await migrate(drizzle(pool), { migrationsFolder: path.join(root, 'drizzle') });
+  await migrate(drizzle(pool), { migrationsFolder: migDir });
   chk('reaplicação após o rollback funciona', (await tables()).length === 3 && (await q(`select count(*)::int n from drizzle.__drizzle_migrations`))[0].n === after);
   // trava do rollback com dados
   const u = (await q(`select id from users limit 1`))[0];

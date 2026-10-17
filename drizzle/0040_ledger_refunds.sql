@@ -1,0 +1,6 @@
+ALTER TABLE "ledger_accounts" DROP CONSTRAINT "ledger_accounts_code_check";--> statement-breakpoint
+ALTER TABLE "ledger_outbox_events" DROP CONSTRAINT "ledger_outbox_events_type_check";--> statement-breakpoint
+ALTER TABLE "ledger_transactions" DROP CONSTRAINT "ledger_transactions_type_check";--> statement-breakpoint
+ALTER TABLE "ledger_accounts" ADD CONSTRAINT "ledger_accounts_code_check" CHECK ("ledger_accounts"."code" IN ('PAYMENT_CLEARING','BUYER_ESCROW','SELLER_PAYABLE','SELLER_AVAILABLE','SELLER_PAYOUT_CLEARING','NUSALI_COMMISSION_REVENUE','SHIPPING_PAYABLE','SHIPPING_SUBSIDY_NUSALI','TAX_PAYABLE','REFUND_PAYABLE','CHARGEBACK_RECEIVABLE','PAYMENT_PROCESSOR_FEES','NUSALI_PROMOTION_EXPENSE','REFUND_ABSORBED_SHIPPING'));--> statement-breakpoint
+ALTER TABLE "ledger_outbox_events" ADD CONSTRAINT "ledger_outbox_events_type_check" CHECK ("ledger_outbox_events"."event_type" IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED'));--> statement-breakpoint
+ALTER TABLE "ledger_transactions" ADD CONSTRAINT "ledger_transactions_type_check" CHECK ("ledger_transactions"."type" IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED'));

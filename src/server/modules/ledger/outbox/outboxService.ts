@@ -15,17 +15,21 @@
 import os from 'os';
 import { eq, sql } from 'drizzle-orm';
 import { getDb } from '../../../../db/index.js';
-import { ledgerOutboxEvents, orders, users, auditLogs } from '../../../../db/schema.js';
+import { ledgerOutboxEvents, orders, refunds, users, auditLogs } from '../../../../db/schema.js';
 import { logger } from '../../../infra/logger.js';
 import { FinancialLedgerService, type ShadowLedgerStatus } from '../financialLedgerService.js';
 import {
-  buildOrderSnapshot, hashSnapshot, diffSnapshots, keyFor, classifyProcessingError, mapLedgerResult, computeBackoffSeconds, resolvePolicy, isOutboxEnabled, isOutboxStrict,
-  type OutboxEventType, type OrderRowForSnapshot, type OutboxPolicy,
+  buildOrderSnapshot, buildRefundSnapshot, hashSnapshot, diffSnapshots, keyFor, refundProcessedKey, classifyProcessingError, mapLedgerResult, computeBackoffSeconds, resolvePolicy,
+  isOutboxEnabled, isOutboxStrict, type OutboxEventType, type OrderRowForSnapshot, type OutboxPolicy, type RefundReleaseStage,
 } from './outboxEvents.js';
+
+/** E3 — dados do reembolso CONCLUÍDO (obrigatório para eventType REFUND_PROCESSED). releaseStage é o fato "antes/depois da liberação" no momento do reembolso. */
+export interface EnqueueRefundInput { id: string; paymentId: string; amount: string | number; currency: string; sellerDebitAmount: string | number | null; releaseStage: RefundReleaseStage }
 
 export interface EnqueueInput {
   eventType: OutboxEventType;
   order: OrderRowForSnapshot;
+  refund?: EnqueueRefundInput;
   paymentId?: string | null;
   purchaseGroupId?: string | null;
   /** hora do fato financeiro (confirmação do pagamento / liberação) — vira occurredAt do lançamento */
@@ -57,14 +61,22 @@ export async function enqueueLedgerEvent(
   const created = input.order.createdAt instanceof Date ? input.order.createdAt : new Date(input.order.createdAt);
   if (created < shadow.cutoff) return { status: 'NOT_ELIGIBLE', reason: 'LEGACY_ORDER' };
 
-  const snapshot = buildOrderSnapshot(input.order, input.eventType);
-  const key = keyFor(input.eventType, input.order.id);
+  let snapshot: Record<string, string | null>;
+  let key: string;
+  if (input.eventType === 'REFUND_PROCESSED') {
+    if (!input.refund) return { status: 'FAILED', reason: 'REFUND_PROCESSED exige os dados do reembolso' };
+    snapshot = buildRefundSnapshot(input.order, { ...input.refund, orderId: input.order.id, status: 'processed' }, input.refund.releaseStage);
+    key = refundProcessedKey(input.refund.id);
+  } else {
+    snapshot = buildOrderSnapshot(input.order, input.eventType);
+    key = keyFor(input.eventType, input.order.id);
+  }
   const policy = resolvePolicy(env);
   try {
     const rows: Array<{ id: string }> = await executor.transaction(async (sp: any) =>
       sp.insert(ledgerOutboxEvents).values({
         id: newId(), eventType: input.eventType, idempotencyKey: key, orderId: input.order.id,
-        purchaseGroupId: input.purchaseGroupId ?? null, paymentId: input.paymentId ?? null,
+        purchaseGroupId: input.purchaseGroupId ?? null, paymentId: input.paymentId ?? input.refund?.paymentId ?? null,
         status: 'PENDING', attempts: 0, maxAttempts: policy.maxAttempts, nextAttemptAt: new Date(),
         snapshotJson: snapshot, snapshotHash: hashSnapshot(snapshot), occurredAt: input.occurredAt, cutoffAt: shadow.cutoff,
         source: input.source, createdAt: new Date(), updatedAt: new Date(),
@@ -184,7 +196,24 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
       log('error', 'pedido não encontrado => intervenção');
       return fin({ kind: 'NEEDS_INTERVENTION', code: 'ORDER_NOT_FOUND', detail: `pedido ${ev.orderId} não existe` }, 'NEEDS_INTERVENTION');
     }
-    const current = buildOrderSnapshot(order as OrderRowForSnapshot, ev.eventType);
+    // REFUND_PROCESSED: além do pedido, o reembolso tem de existir, estar CONCLUÍDO e ser, campo a campo, o que foi enfileirado (o estágio vem do próprio evento)
+    let refundId: string | null = null;
+    let releaseStage: RefundReleaseStage | null = null;
+    let current: Record<string, string | null>;
+    if (ev.eventType === 'REFUND_PROCESSED') {
+      refundId = typeof ev.snapshotJson.refundId === 'string' ? ev.snapshotJson.refundId : null;
+      releaseStage = ev.snapshotJson.releaseStage === 'BEFORE_RELEASE' || ev.snapshotJson.releaseStage === 'AFTER_RELEASE' ? (ev.snapshotJson.releaseStage as RefundReleaseStage) : null;
+      if (!refundId || !releaseStage || ev.idempotencyKey !== refundProcessedKey(refundId)) {
+        log('error', 'evento de reembolso com snapshot/chave inválidos => intervenção');
+        return fin({ kind: 'NEEDS_INTERVENTION', code: 'INVALID_EVENT_SNAPSHOT', detail: 'refundId/releaseStage ausentes ou chave incoerente' }, 'NEEDS_INTERVENTION');
+      }
+      const [refund] = await db.select().from(refunds).where(eq(refunds.id, refundId)).limit(1);
+      if (!refund) return fin({ kind: 'NEEDS_INTERVENTION', code: 'REFUND_NOT_FOUND', detail: `reembolso ${refundId} não existe` }, 'NEEDS_INTERVENTION');
+      if (refund.status !== 'processed') return fin({ kind: 'NEEDS_INTERVENTION', code: 'REFUND_NOT_PROCESSED', detail: `reembolso ${refundId} está "${refund.status}"` }, 'NEEDS_INTERVENTION');
+      current = buildRefundSnapshot(order as OrderRowForSnapshot, refund as any, releaseStage);
+    } else {
+      current = buildOrderSnapshot(order as OrderRowForSnapshot, ev.eventType);
+    }
     if (hashSnapshot(current) !== ev.snapshotHash) {
       const fields = diffSnapshots(current, ev.snapshotJson);
       log('error', 'DIVERGÊNCIA: o pedido mudou depois do enfileiramento => intervenção (nada foi lançado)', { fields });
@@ -192,6 +221,17 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
     }
     // 2) lançamento (idempotente por chave). A entrega garante antes o PAYMENT_RECEIVED do pedido (BUYER_ESCROW nunca negativo).
     const base = { orderId: ev.orderId, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id };
+    if (ev.eventType === 'REFUND_PROCESSED') {
+      // recordRefundProcessed garante PAYMENT_RECEIVED (e ORDER_DELIVERY_CONFIRMED no estágio pós-liberação) antes do próprio lançamento
+      const r = mapLedgerResult(await FinancialLedgerService.recordRefundProcessed({ refundId: refundId!, releaseStage: releaseStage!, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id }));
+      if (r.action === 'DONE') {
+        log('info', r.replay ? 'reembolso já lançado (replay idempotente) => DONE' : 'reembolso lançado => DONE', { ledgerTransactionId: r.transactionId, refundId });
+        return fin({ kind: 'DONE', transactionId: r.transactionId }, r.replay ? 'DONE_REPLAY' : 'DONE');
+      }
+      if (r.action === 'SKIPPED') { log('info', 'ignorado por política', { reason: r.code }); return fin({ kind: 'SKIPPED', code: r.code, detail: r.detail }, 'SKIPPED'); }
+      if (r.action === 'DEFER') return fin({ kind: 'DEFER', code: r.code }, 'DEFERRED');
+      return await failFrom(r);
+    }
     if (ev.eventType === 'ORDER_DELIVERY_CONFIRMED') {
       const pre = mapLedgerResult(await FinancialLedgerService.recordPaymentReceived(base));
       if (pre.action === 'DEFER') return fin({ kind: 'DEFER', code: pre.code }, 'DEFERRED');
