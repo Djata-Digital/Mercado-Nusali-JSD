@@ -15,21 +15,25 @@
 import os from 'os';
 import { eq, sql } from 'drizzle-orm';
 import { getDb } from '../../../../db/index.js';
-import { ledgerOutboxEvents, orders, refunds, users, auditLogs } from '../../../../db/schema.js';
+import { ledgerOutboxEvents, orders, refunds, shippingCostReversals, users, auditLogs } from '../../../../db/schema.js';
 import { logger } from '../../../infra/logger.js';
 import { FinancialLedgerService, type ShadowLedgerStatus } from '../financialLedgerService.js';
 import {
-  buildOrderSnapshot, buildRefundSnapshot, hashSnapshot, diffSnapshots, keyFor, refundProcessedKey, classifyProcessingError, mapLedgerResult, computeBackoffSeconds, resolvePolicy,
+  buildOrderSnapshot, buildRefundSnapshot, buildReversalSnapshot, hashSnapshot, diffSnapshots, keyFor, refundProcessedKey, shippingCostReversedKey, classifyProcessingError, mapLedgerResult, computeBackoffSeconds, resolvePolicy,
   isOutboxEnabled, isOutboxStrict, type OutboxEventType, type OrderRowForSnapshot, type OutboxPolicy, type RefundReleaseStage,
 } from './outboxEvents.js';
 
 /** E3 — dados do reembolso CONCLUÍDO (obrigatório para eventType REFUND_PROCESSED). releaseStage é o fato "antes/depois da liberação" no momento do reembolso. */
 export interface EnqueueRefundInput { id: string; paymentId: string; amount: string | number; currency: string; sellerDebitAmount: string | number | null; releaseStage: RefundReleaseStage }
 
+/** E4 — reversão de custo de frete já REGISTRADA (obrigatório para eventType SHIPPING_COST_REVERSED). */
+export interface EnqueueReversalInput { id: string; refundId: string; amount: string | number; currency: string; subsidyPart: string | number; absorbedPart: string | number }
+
 export interface EnqueueInput {
   eventType: OutboxEventType;
   order: OrderRowForSnapshot;
   refund?: EnqueueRefundInput;
+  reversal?: EnqueueReversalInput;
   paymentId?: string | null;
   purchaseGroupId?: string | null;
   /** hora do fato financeiro (confirmação do pagamento / liberação) — vira occurredAt do lançamento */
@@ -67,6 +71,10 @@ export async function enqueueLedgerEvent(
     if (!input.refund) return { status: 'FAILED', reason: 'REFUND_PROCESSED exige os dados do reembolso' };
     snapshot = buildRefundSnapshot(input.order, { ...input.refund, orderId: input.order.id, status: 'processed' }, input.refund.releaseStage);
     key = refundProcessedKey(input.refund.id);
+  } else if (input.eventType === 'SHIPPING_COST_REVERSED') {
+    if (!input.reversal) return { status: 'FAILED', reason: 'SHIPPING_COST_REVERSED exige os dados da reversão' };
+    snapshot = buildReversalSnapshot(input.order, { ...input.reversal, orderId: input.order.id });
+    key = shippingCostReversedKey(input.reversal.id);
   } else {
     snapshot = buildOrderSnapshot(input.order, input.eventType);
     key = keyFor(input.eventType, input.order.id);
@@ -199,8 +207,19 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
     // REFUND_PROCESSED: além do pedido, o reembolso tem de existir, estar CONCLUÍDO e ser, campo a campo, o que foi enfileirado (o estágio vem do próprio evento)
     let refundId: string | null = null;
     let releaseStage: RefundReleaseStage | null = null;
+    let reversalId: string | null = null;
     let current: Record<string, string | null>;
-    if (ev.eventType === 'REFUND_PROCESSED') {
+    if (ev.eventType === 'SHIPPING_COST_REVERSED') {
+      // E4: a reversão registrada tem de existir e ser, campo a campo, a enfileirada (valor e divisão subsídio/absorvido)
+      reversalId = typeof ev.snapshotJson.reversalId === 'string' ? ev.snapshotJson.reversalId : null;
+      if (!reversalId || ev.idempotencyKey !== shippingCostReversedKey(reversalId)) {
+        log('error', 'evento de reversão com snapshot/chave inválidos => intervenção');
+        return fin({ kind: 'NEEDS_INTERVENTION', code: 'INVALID_EVENT_SNAPSHOT', detail: 'reversalId ausente ou chave incoerente' }, 'NEEDS_INTERVENTION');
+      }
+      const [rev] = await db.select().from(shippingCostReversals).where(eq(shippingCostReversals.id, reversalId)).limit(1);
+      if (!rev) return fin({ kind: 'NEEDS_INTERVENTION', code: 'SHIPPING_REVERSAL_NOT_FOUND', detail: `reversão ${reversalId} não existe` }, 'NEEDS_INTERVENTION');
+      current = buildReversalSnapshot(order as OrderRowForSnapshot, rev as any);
+    } else if (ev.eventType === 'REFUND_PROCESSED') {
       refundId = typeof ev.snapshotJson.refundId === 'string' ? ev.snapshotJson.refundId : null;
       releaseStage = ev.snapshotJson.releaseStage === 'BEFORE_RELEASE' || ev.snapshotJson.releaseStage === 'AFTER_RELEASE' ? (ev.snapshotJson.releaseStage as RefundReleaseStage) : null;
       if (!refundId || !releaseStage || ev.idempotencyKey !== refundProcessedKey(refundId)) {
@@ -221,6 +240,17 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
     }
     // 2) lançamento (idempotente por chave). A entrega garante antes o PAYMENT_RECEIVED do pedido (BUYER_ESCROW nunca negativo).
     const base = { orderId: ev.orderId, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id };
+    if (ev.eventType === 'SHIPPING_COST_REVERSED') {
+      // recordShippingCostReversed garante PR → DC → REFUND_PROCESSED antes do próprio lançamento
+      const r = mapLedgerResult(await FinancialLedgerService.recordShippingCostReversed({ reversalId: reversalId!, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id }));
+      if (r.action === 'DONE') {
+        log('info', r.replay ? 'reversão já lançada (replay idempotente) => DONE' : 'reversão lançada => DONE', { ledgerTransactionId: r.transactionId, reversalId });
+        return fin({ kind: 'DONE', transactionId: r.transactionId }, r.replay ? 'DONE_REPLAY' : 'DONE');
+      }
+      if (r.action === 'SKIPPED') { log('info', 'ignorado por política', { reason: r.code }); return fin({ kind: 'SKIPPED', code: r.code, detail: r.detail }, 'SKIPPED'); }
+      if (r.action === 'DEFER') return fin({ kind: 'DEFER', code: r.code }, 'DEFERRED');
+      return await failFrom(r);
+    }
     if (ev.eventType === 'REFUND_PROCESSED') {
       // recordRefundProcessed garante PAYMENT_RECEIVED (e ORDER_DELIVERY_CONFIRMED no estágio pós-liberação) antes do próprio lançamento
       const r = mapLedgerResult(await FinancialLedgerService.recordRefundProcessed({ refundId: refundId!, releaseStage: releaseStage!, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id }));

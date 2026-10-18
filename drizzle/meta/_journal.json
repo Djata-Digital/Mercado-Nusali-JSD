@@ -288,6 +288,13 @@
       "when": 1792203160732,
       "tag": "0040_ledger_refunds",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1792281124201,
+      "tag": "0041_ledger_shipping_reversal",
+      "breakpoints": true
     }
   ]
 }

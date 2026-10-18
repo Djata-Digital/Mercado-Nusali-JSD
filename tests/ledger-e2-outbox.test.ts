@@ -51,6 +51,13 @@ async function main() {
   if (!(await q(`select to_regclass('public.ledger_outbox_events') t`))[0].t) {
     for (const stmt of fs.readFileSync(path.join(root, 'drizzle/0039_ledger_outbox.sql'), 'utf8').split('--> statement-breakpoint')) if (stmt.trim()) await pool.query(stmt);
   }
+  // migrações posteriores (0040 reembolsos, 0041 reversão de frete): a reconciliação consulta suas tabelas; aplicadas aqui se ainda não existirem
+  if (!(await q(`select 1 from pg_constraint where conname='ledger_transactions_type_check' and pg_get_constraintdef(oid) like '%REFUND_PROCESSED%'`)).length) {
+    for (const stmt of fs.readFileSync(path.join(root, 'drizzle/0040_ledger_refunds.sql'), 'utf8').split('--> statement-breakpoint')) if (stmt.trim()) await pool.query(stmt);
+  }
+  if (!(await q(`select to_regclass('public.shipping_cost_reversals') t`))[0].t) {
+    for (const stmt of fs.readFileSync(path.join(root, 'drizzle/0041_ledger_shipping_reversal.sql'), 'utf8').split('--> statement-breakpoint')) if (stmt.trim()) await pool.query(stmt);
+  }
   const kit = await setupCheckoutKit(db, 'e2');
   await kit.setFlag('multiSellerCheckoutEnabled', true); await kit.setFlag('defaultShippingPolicyMode', 'CUSTOMER_PAYS');
   await kit.setFlag('shippingNusaliSubsidy', { enabled: false, percent: 0, rules: { 'GW:STANDARD': { enabled: true, percent: 50 } } });

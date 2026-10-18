@@ -1,6 +1,13 @@
 // Verificação da migração 0040 (reembolsos no ledger) em banco DESCARTÁVEL (rodar pelo executor seguro; o banco deve estar no nível ANTERIOR à 0039, ex.: cópia do phase3_tmpl ou restauração do dump de produção; o migrador oficial aplica 0039 e 0040, ou só a 0040 se a 0039 já estiver aplicada): migrador oficial do drizzle → CHECKs ampliados → rollback → reaplicação → trava do rollback com dados.
 const path = require('path'); const fs = require('fs');
 const root = path.resolve(__dirname, '..');
+// Esta verificação cobre a 0040 isoladamente: o migrador oficial roda sobre uma CÓPIA da pasta de migrações limitada até a 0040 (as posteriores têm verificação própria).
+const os = require('os');
+const migDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mig-upto-0040-'));
+fs.mkdirSync(path.join(migDir, 'meta'));
+{ const j = JSON.parse(fs.readFileSync(path.join(root, 'drizzle/meta/_journal.json'), 'utf8')); j.entries = j.entries.filter((e) => e.idx <= 40);
+  fs.writeFileSync(path.join(migDir, 'meta/_journal.json'), JSON.stringify(j));
+  for (const e of j.entries) fs.copyFileSync(path.join(root, 'drizzle', e.tag + '.sql'), path.join(migDir, e.tag + '.sql')); }
 const pg = require(path.join(root, 'node_modules/pg'));
 const { drizzle } = require(path.join(root, 'node_modules/drizzle-orm/node-postgres'));
 const { migrate } = require(path.join(root, 'node_modules/drizzle-orm/node-postgres/migrator'));
@@ -15,7 +22,7 @@ let bad = 0; const chk = (l, ok, d) => { if (!ok) bad++; console.log(`${ok ? 'OK
     await q(`insert into drizzle.__drizzle_migrations (hash, created_at) values ('test-fixture-0038-already-applied', 1792078942635)`);
   }
   const before = await mig();
-  await migrate(drizzle(pool), { migrationsFolder: path.join(root, 'drizzle') });
+  await migrate(drizzle(pool), { migrationsFolder: migDir });
   const after = await mig();
   chk(`migrador oficial aplicou as migrações pendentes (${before} -> ${after}); a última é a 0040`, after > before && (await q(`select count(*)::int n from drizzle.__drizzle_migrations where created_at = 1792203160732`))[0].n === 1, { before, after });
   chk('CHECK de tipos do ledger aceita REFUND_PROCESSED (e continua com os dois tipos anteriores)', /REFUND_PROCESSED/.test(await def('ledger_transactions_type_check')) && /ORDER_DELIVERY_CONFIRMED/.test(await def('ledger_transactions_type_check')) && /PAYMENT_RECEIVED/.test(await def('ledger_transactions_type_check')));
@@ -33,7 +40,7 @@ let bad = 0; const chk = (l, ok, d) => { if (!ok) bad++; console.log(`${ok ? 'OK
   const e0 = await runDown();
   chk('rollback 0040 sem dados: restaura os 3 CHECKs originais e remove o registro da migração', e0 === null && !/REFUND_PROCESSED/.test(await def('ledger_transactions_type_check')) && !/REFUND_ABSORBED_SHIPPING/.test(await def('ledger_accounts_code_check')) && !/REFUND_PROCESSED/.test(await def('ledger_outbox_events_type_check')) && (await mig()) === after - 1, e0);
   chk('rollback NÃO tocou nas tabelas do ledger nem nos triggers', (await q(`select count(*)::int n from pg_trigger where tgname like 'nusali_ledger_trg_%'`))[0].n === 8);
-  await migrate(drizzle(pool), { migrationsFolder: path.join(root, 'drizzle') });
+  await migrate(drizzle(pool), { migrationsFolder: migDir });
   chk('reaplicação após o rollback funciona', (await mig()) === after && /REFUND_PROCESSED/.test(await def('ledger_transactions_type_check')));
 
   // com dados que dependem dos novos valores: o rollback é BLOQUEADO e nada muda

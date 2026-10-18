@@ -23,6 +23,7 @@ import {
   orders,
   refunds,
   escrowAccounts,
+  shippingCostReversals,
 } from '../../../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -30,6 +31,7 @@ import { netBalanceByCurrency, isZeroMicros } from './decimal.js';
 import { ACCOUNT_DEFINITIONS, PLATFORM_POOLED_ACCOUNTS, ledgerAccountId, type LedgerAccountCode, type LedgerOwnerType } from './accounts.js';
 import { buildDeliveryConfirmedEntries } from './deliveryConfirmedEntries.js';
 import { buildRefundProcessedEntries, type ReleaseStage } from './refundProcessedEntries.js';
+import { buildShippingCostReversalEntries } from './shippingReversalEntries.js';
 import { isUniqueViolationOf } from './pgErrors.js';
 import type { LedgerSkipReason, LedgerResult } from './types.js';
 
@@ -505,6 +507,70 @@ export class FinancialLedgerService {
       correlationId: input.correlationId ?? null,
       requestId: input.requestId ?? null,
       metadata: { shadowPhase: 'E3', releaseStage: stage, refundAmount: refund.amount, sellerDebitAmount: refund.sellerDebitAmount ?? null, parts: built.parts, refundIdempotencyKey: refund.idempotencyKey ?? null },
+      entries: built.entries,
+    });
+  }
+
+  // ==========================================================================
+  // SHIPPING_COST_REVERSED (E4) — parcela do custo de frete EFETIVAMENTE devolvida à Nusali, de um pedido reembolsado DEPOIS da liberação
+  // ==========================================================================
+  /**
+   * Lança a reversão registrada em shipping_cost_reversals. Só para pedido reembolsado após a liberação (a entrega já reconheceu o subsídio); garante antes
+   * PAYMENT_RECEIVED → ORDER_DELIVERY_CONFIRMED → REFUND_PROCESSED. Chave: shipping_cost_reversed:{reversalId}. Os valores (total e divisão subsídio/absorvido) são os
+   * gravados no registro imutável; nada é recalculado.
+   */
+  static async recordShippingCostReversed(input: {
+    reversalId: string;
+    performedBy?: string | null;
+    source?: string | null;
+    correlationId?: string | null;
+    requestId?: string | null;
+    occurredAt?: Date;
+  }): Promise<LedgerResult> {
+    const db = getDb();
+    if (!db) return { posted: false, skipped: true, reason: 'DATABASE_UNAVAILABLE' };
+
+    if (LEDGER_SHADOW_CUTOFF_AT === null) {
+      return { posted: false, skipped: true, reason: 'SHADOW_LEDGER_DISABLED', detail: 'LEDGER_SHADOW_CUTOFF_AT não configurada — shadow ledger está OFF.' };
+    }
+
+    const [rev] = await db.select().from(shippingCostReversals).where(eq(shippingCostReversals.id, input.reversalId)).limit(1);
+    if (!rev) return { posted: false, skipped: true, reason: 'SHIPPING_REVERSAL_NOT_FOUND', detail: `reversão ${input.reversalId} não existe` };
+    const [order] = await db.select().from(orders).where(eq(orders.id, rev.orderId)).limit(1);
+    if (!order) return { posted: false, skipped: true, reason: 'ORDER_NOT_FOUND' };
+    if (order.createdAt < LEDGER_SHADOW_CUTOFF_AT) {
+      return { posted: false, skipped: true, reason: 'LEGACY_ORDER', detail: `order.createdAt (${order.createdAt.toISOString()}) < cutoff` };
+    }
+    const stage = await this.deriveReleaseStage(order.id);
+    if (stage !== 'AFTER_RELEASE') {
+      return { posted: false, skipped: true, reason: 'SHIPPING_REVERSAL_NOT_ELIGIBLE', detail: 'a reversão de frete só vale para pedido reembolsado depois da liberação (antes dela o subsídio nunca foi reconhecido)' };
+    }
+
+    const built = buildShippingCostReversalEntries(order as any, rev as any);
+    if (built.status === 'SKIPPED') return { posted: false, skipped: true, reason: built.reason, detail: built.detail };
+
+    const occurredAt = input.occurredAt ?? rev.createdAt ?? new Date();
+    // pré-requisitos idempotentes: o reembolso pós-liberação (que por sua vez garante PR e DC) tem de estar lançado antes
+    const pre = await this.recordRefundProcessed({ refundId: rev.refundId, releaseStage: 'AFTER_RELEASE', occurredAt, source: input.source ?? 'shipping_reversal_service', correlationId: input.correlationId ?? null });
+    if (!pre.posted) return pre;
+
+    return this.postTransaction({
+      type: 'SHIPPING_COST_REVERSED',
+      idempotencyKey: `shipping_cost_reversed:${rev.id}`,
+      currency: order.currency,
+      occurredAt,
+      orderId: order.id,
+      refundId: rev.refundId,
+      buyerId: order.buyerId,
+      sellerId: order.sellerId ?? null,
+      storeId: order.storeId ?? null,
+      countryCode: order.countryCode ?? null,
+      performedBy: input.performedBy ?? rev.performedBy ?? null,
+      source: input.source ?? 'shipping_reversal_service',
+      reason: 'Custo de frete efetivamente devolvido à Nusali — reverte a parcela do subsídio e do frete absorvido (com evidência registrada).',
+      correlationId: input.correlationId ?? null,
+      requestId: input.requestId ?? null,
+      metadata: { shadowPhase: 'E4', evidenceRef: rev.evidenceRef, reversalReason: rev.reason, amount: rev.amount, subsidyPart: rev.subsidyPart, absorbedPart: rev.absorbedPart },
       entries: built.entries,
     });
   }

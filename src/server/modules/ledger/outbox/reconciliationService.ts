@@ -11,6 +11,7 @@ import { logger } from '../../../infra/logger.js';
 import { FinancialLedgerService } from '../financialLedgerService.js';
 import { buildDeliveryConfirmedEntries } from '../deliveryConfirmedEntries.js';
 import { buildRefundProcessedEntries, type ReleaseStage } from '../refundProcessedEntries.js';
+import { buildShippingCostReversalEntries, shippingCostCapacity } from '../shippingReversalEntries.js';
 import { toMicros } from '../decimal.js';
 import { resolvePolicy } from './outboxEvents.js';
 import { enqueueLedgerEvent, parseUtc, OutboxAdminError } from './outboxService.js';
@@ -32,9 +33,14 @@ export interface OrderView {
 export interface RefundLedgerView {
   id: string; amount: string; currency: string; sellerDebitAmount: string | null; processedAt: Date; tx: TxView | null; event: EventView | null; entries: EntryView[];
 }
+/** E4 — reversão de custo de frete REGISTRADA (shipping_cost_reversals) e o que o ledger/outbox têm dela. */
+export interface ReversalLedgerView {
+  id: string; amount: string; currency: string; subsidyPart: string; absorbedPart: string; createdAt: Date; tx: TxView | null; event: EventView | null; entries: EntryView[];
+}
 export interface OrderLedgerView {
   order: OrderView; prTx: TxView | null; dcTx: TxView | null; prEvent: EventView | null; dcEvent: EventView | null; prEntries: EntryView[]; dcEntries: EntryView[];
   refunds?: RefundLedgerView[];
+  reversals?: ReversalLedgerView[];
 }
 
 const agg = (entries: EntryView[]): Record<string, bigint> => {
@@ -52,7 +58,7 @@ export function evaluateOrder(v: OrderLedgerView, now: Date, staleMinutes: numbe
   const o = v.order;
   const total = toMicros(o.totalAmount);
 
-  const eventCheck = (kind: 'PAYMENT' | 'DELIVERY' | 'REFUND', tx: TxView | null, ev: EventView | null, since: Date, scope?: string, key?: string) => {
+  const eventCheck = (kind: 'PAYMENT' | 'DELIVERY' | 'REFUND' | 'SHIPPING_REVERSAL', tx: TxView | null, ev: EventView | null, since: Date, scope?: string, key?: string) => {
     const add = (x: Finding) => f.push(scope ? { ...x, scope } : x);
     if (tx) {
       if (tx.status !== 'POSTED') add({ type: `${kind}_LEDGER_NOT_POSTED`, severity: 'CRITICAL', detail: `transação ${tx.id} está ${tx.status}`, ledgerTransactionId: tx.id, eventId: ev?.id });
@@ -115,6 +121,27 @@ export function evaluateOrder(v: OrderLedgerView, now: Date, staleMinutes: numbe
         const exp = agg(built.entries.map((e) => ({ code: e.accountCode, direction: e.direction, amount: e.amount })));
         const got = agg(r.entries);
         if (!sameAgg(exp, got)) f.push({ type: 'REFUND_AMOUNT_MISMATCH', severity: 'CRITICAL', detail: `lançamento do reembolso ${r.id} difere do reembolso concluído e do snapshot do pedido (estágio ${stage})`, expected: show(exp), actual: show(got), ledgerTransactionId: r.tx.id, scope: r.id });
+      }
+    }
+  }
+
+  // --- reversões de custo de frete REGISTRADAS (E4). Sem registro nada é esperado: o subsídio e o frete absorvido permanecem custo da Nusali.
+  const reversalsView = v.reversals ?? [];
+  if (reversalsView.length) {
+    const cap = shippingCostCapacity(o.snapshot as any);
+    const sum = reversalsView.reduce((acc, r) => acc + toMicros(r.amount), 0n);
+    if (sum > cap.cost) f.push({ type: 'SHIPPING_REVERSAL_EXCEEDS_COST', severity: 'CRITICAL', detail: `reversões somam ${sum} micros, acima do custo de frete do pedido (${cap.cost})`, expected: cap.cost.toString(), actual: sum.toString() });
+    if (!(o.escrowStatus === 'refunded' && o.escrowReleasedAt != null)) f.push({ type: 'SHIPPING_REVERSAL_INVALID_CONTEXT', severity: 'CRITICAL', detail: `existe reversão de frete, mas o pedido não foi reembolsado depois da liberação (Escrow "${o.escrowStatus}")` });
+  }
+  for (const r of reversalsView) {
+    eventCheck('SHIPPING_REVERSAL', r.tx, r.event, r.createdAt, r.id, `shipping_cost_reversed:${r.id}`);
+    if (r.tx && r.tx.status === 'POSTED') {
+      const built = buildShippingCostReversalEntries(o.snapshot as any, { id: r.id, amount: r.amount, currency: r.currency, subsidyPart: r.subsidyPart, absorbedPart: r.absorbedPart });
+      if (built.status !== 'OK') f.push({ type: 'SHIPPING_REVERSAL_INVALID_SNAPSHOT', severity: 'CRITICAL', detail: `reversão ${r.id}: não gera lançamento válido (${built.detail ?? ''}) mas existe lançamento`, ledgerTransactionId: r.tx.id, scope: r.id });
+      else {
+        const exp = agg(built.entries.map((e) => ({ code: e.accountCode, direction: e.direction, amount: e.amount })));
+        const got = agg(r.entries);
+        if (!sameAgg(exp, got)) f.push({ type: 'SHIPPING_REVERSAL_AMOUNT_MISMATCH', severity: 'CRITICAL', detail: `lançamento da reversão ${r.id} difere do registro imutável da reversão`, expected: show(exp), actual: show(got), ledgerTransactionId: r.tx.id, scope: r.id });
       }
     }
   }
@@ -189,15 +216,27 @@ export async function runLedgerReconciliation(opts: { maxOrders?: number; pageSi
       const entryRows = rowsOf(await db.execute(sql`
         SELECT t.idempotency_key AS k, a.code, e.direction, e.amount::text AS amount, t.order_id, t.refund_id
           FROM ledger_entries e JOIN ledger_transactions t ON t.id = e.transaction_id JOIN ledger_accounts a ON a.id = e.account_id
-         WHERE t.order_id IN (${sql.join(ids.map((i: string) => sql`${i}`), sql`, `)}) AND t.type IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED')`));
-      const byOrder = new Map<string, { pr: EntryView[]; dc: EntryView[]; rf: Map<string, EntryView[]> }>();
+         WHERE t.order_id IN (${sql.join(ids.map((i: string) => sql`${i}`), sql`, `)}) AND t.type IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED')`));
+      const byOrder = new Map<string, { pr: EntryView[]; dc: EntryView[]; rf: Map<string, EntryView[]>; sr: Map<string, EntryView[]> }>();
       for (const e of entryRows) {
-        const slot = byOrder.get(e.order_id) ?? { pr: [], dc: [], rf: new Map<string, EntryView[]>() }; byOrder.set(e.order_id, slot);
+        const slot = byOrder.get(e.order_id) ?? { pr: [], dc: [], rf: new Map<string, EntryView[]>(), sr: new Map<string, EntryView[]>() }; byOrder.set(e.order_id, slot);
         const view: EntryView = { code: e.code, direction: e.direction, amount: e.amount };
         if (String(e.k).startsWith('payment_received:')) slot.pr.push(view);
         else if (String(e.k).startsWith('refund_processed:')) { const rid = e.refund_id ?? String(e.k).slice('refund_processed:'.length); slot.rf.set(rid, [...(slot.rf.get(rid) ?? []), view]); }
+        else if (String(e.k).startsWith('shipping_cost_reversed:')) { const sid = String(e.k).slice('shipping_cost_reversed:'.length); slot.sr.set(sid, [...(slot.sr.get(sid) ?? []), view]); }
         else slot.dc.push(view);
       }
+      const reversalRows = rowsOf(await db.execute(sql`
+        SELECT x.id, x.order_id, x.amount::text AS amount, x.currency, x.subsidy_part::text AS subsidy_part, x.absorbed_part::text AS absorbed_part, x.created_at,
+               xt.id AS xt_id, xt.status AS xt_status,
+               xe.id AS xe_id, xe.status AS xe_status, xe.created_at AS xe_created, xe.ledger_transaction_id AS xe_tx, xe.last_error_code AS xe_err
+          FROM shipping_cost_reversals x
+          LEFT JOIN ledger_transactions xt ON xt.idempotency_key = 'shipping_cost_reversed:' || x.id
+          LEFT JOIN ledger_outbox_events xe ON xe.idempotency_key = 'shipping_cost_reversed:' || x.id
+         WHERE x.order_id IN (${sql.join(ids.map((i: string) => sql`${i}`), sql`, `)})
+         ORDER BY x.id`));
+      const reversalsByOrder = new Map<string, any[]>();
+      for (const xr of reversalRows) reversalsByOrder.set(xr.order_id, [...(reversalsByOrder.get(xr.order_id) ?? []), xr]);
       const refundRows = rowsOf(await db.execute(sql`
         SELECT r.id, r.order_id, r.amount::text AS amount, r.currency, r.seller_debit_amount::text AS sdebit, r.created_at, r.provider_confirmed_at,
                rt.id AS rt_id, rt.status AS rt_status,
@@ -229,6 +268,10 @@ export async function runLedgerReconciliation(opts: { maxOrders?: number; pageSi
           refunds: (refundsByOrder.get(r.id) ?? []).map((rr): RefundLedgerView => ({
             id: rr.id, amount: String(rr.amount), currency: rr.currency, sellerDebitAmount: rr.sdebit ?? null, processedAt: parseUtc(rr.provider_confirmed_at ?? rr.created_at),
             tx: rr.rt_id ? { id: rr.rt_id, status: rr.rt_status } : null, event: ev(rr.re_id, rr.re_status, rr.re_created, rr.re_tx, rr.re_err), entries: byOrder.get(r.id)?.rf.get(rr.id) ?? [],
+          })),
+          reversals: (reversalsByOrder.get(r.id) ?? []).map((xr): ReversalLedgerView => ({
+            id: xr.id, amount: String(xr.amount), currency: xr.currency, subsidyPart: String(xr.subsidy_part), absorbedPart: String(xr.absorbed_part), createdAt: parseUtc(xr.created_at),
+            tx: xr.xt_id ? { id: xr.xt_id, status: xr.xt_status } : null, event: ev(xr.xe_id, xr.xe_status, xr.xe_created, xr.xe_tx, xr.xe_err), entries: byOrder.get(r.id)?.sr.get(xr.id) ?? [],
           })),
         };
         for (const f of evaluateOrder(view, now, policy.staleMinutes)) current.set(`${f.type}:${r.id}${f.scope ? `:${f.scope}` : ''}`, { f, orderId: r.id });
@@ -288,7 +331,7 @@ export async function acknowledgeFinding(input: { findingId: string; actorUserId
   });
 }
 
-export interface RepairCandidate { orderId: string; eventType: 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED'; occurredAt: Date; refundId?: string }
+export interface RepairCandidate { orderId: string; eventType: 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED' | 'SHIPPING_COST_REVERSED'; occurredAt: Date; refundId?: string; reversalId?: string }
 export interface RepairResult { dryRun: boolean; candidates: RepairCandidate[]; enqueued: number; existing: number; failed: number }
 
 /**
@@ -330,22 +373,38 @@ export async function repairMissingEvents(input: { actorUserId: string; dryRun?:
      WHERE r.status = 'processed' AND o.created_at >= ${shadow.cutoff.toISOString()}::timestamp AND o.payment_status = 'paid' AND rt.id IS NULL AND re.id IS NULL
      ORDER BY r.id LIMIT ${limit}`));
   for (const r of refundRows) candidates.push({ orderId: r.order_id, eventType: 'REFUND_PROCESSED', refundId: r.refund_id, occurredAt: parseUtc(r.provider_confirmed_at ?? r.created_at) });
+  // E4 — reversões de frete REGISTRADAS, em escopo, sem lançamento e sem evento (hora = a do registro imutável)
+  const reversalRows = rowsOf(await db.execute(sql`
+    SELECT x.id AS reversal_id, x.order_id, x.created_at
+      FROM shipping_cost_reversals x
+      JOIN orders o ON o.id = x.order_id
+      LEFT JOIN ledger_transactions xt ON xt.idempotency_key = 'shipping_cost_reversed:' || x.id
+      LEFT JOIN ledger_outbox_events xe ON xe.idempotency_key = 'shipping_cost_reversed:' || x.id
+     WHERE o.created_at >= ${shadow.cutoff.toISOString()}::timestamp AND o.payment_status = 'paid' AND xt.id IS NULL AND xe.id IS NULL
+     ORDER BY x.id LIMIT ${limit}`));
+  for (const x of reversalRows) candidates.push({ orderId: x.order_id, eventType: 'SHIPPING_COST_REVERSED', reversalId: x.reversal_id, occurredAt: parseUtc(x.created_at) });
   const result: RepairResult = { dryRun, candidates, enqueued: 0, existing: 0, failed: 0 };
   if (dryRun || candidates.length === 0) return result;
-  const { orders, refunds, escrowAccounts } = await import('../../../../db/schema.js');
+  const { orders, refunds, escrowAccounts, shippingCostReversals } = await import('../../../../db/schema.js');
   for (const c of candidates) {
     const [order] = await db.select().from(orders).where(eq(orders.id, c.orderId)).limit(1);
     let refund: any;
+    let reversal: any;
+    if (c.eventType === 'SHIPPING_COST_REVERSED') {
+      const [rv] = await db.select().from(shippingCostReversals).where(eq(shippingCostReversals.id, c.reversalId!)).limit(1);
+      if (!rv) { result.failed++; continue; }
+      reversal = { id: rv.id, refundId: rv.refundId, amount: rv.amount, currency: rv.currency, subsidyPart: rv.subsidyPart, absorbedPart: rv.absorbedPart };
+    }
     if (c.eventType === 'REFUND_PROCESSED') {
       const [rf] = await db.select().from(refunds).where(eq(refunds.id, c.refundId!)).limit(1);
       const [es] = await db.select({ releasedAt: escrowAccounts.releasedAt }).from(escrowAccounts).where(eq(escrowAccounts.orderId, c.orderId)).limit(1);
       if (!rf || !es) { result.failed++; continue; }
       refund = { id: rf.id, paymentId: rf.paymentId, amount: rf.amount, currency: rf.currency, sellerDebitAmount: rf.sellerDebitAmount, releaseStage: es.releasedAt ? 'AFTER_RELEASE' : 'BEFORE_RELEASE' };
     }
-    const res = await enqueueLedgerEvent(db, { eventType: c.eventType, order, refund, occurredAt: c.occurredAt, source: 'reconciliation_repair' });
+    const res = await enqueueLedgerEvent(db, { eventType: c.eventType, order, refund, reversal, occurredAt: c.occurredAt, source: 'reconciliation_repair' });
     if (res.status === 'ENQUEUED') result.enqueued++; else if (res.status === 'EXISTS') result.existing++; else result.failed++;
   }
-  await db.insert(auditLogs).values({ id: newId('aud'), actorUserId: input.actorUserId, action: 'ledger.outbox.repair_missing_events', resource: 'ledger_outbox_event', resourceId: null, detailsJson: { enqueued: result.enqueued, existing: result.existing, failed: result.failed, orderIds: candidates.map((c) => `${c.eventType}:${c.refundId ?? c.orderId}`).slice(0, 200) }, createdAt: new Date() });
+  await db.insert(auditLogs).values({ id: newId('aud'), actorUserId: input.actorUserId, action: 'ledger.outbox.repair_missing_events', resource: 'ledger_outbox_event', resourceId: null, detailsJson: { enqueued: result.enqueued, existing: result.existing, failed: result.failed, orderIds: candidates.map((c) => `${c.eventType}:${c.reversalId ?? c.refundId ?? c.orderId}`).slice(0, 200) }, createdAt: new Date() });
   return result;
 }
 

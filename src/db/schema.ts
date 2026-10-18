@@ -2500,7 +2500,7 @@ export const ledgerTransactions = pgTable('ledger_transactions', {
   // Catálogo fechado — só os eventos implementados NESTA fase (financialLedgerService.ts).
   // Eventos futuros (PAYOUT_*, REFUND_*, CHARGEBACK_*, DISPUTE_*, ADJUSTMENT, REVERSAL, ...)
   // entram numa migration aditiva quando o código que os usa for implementado.
-  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED')`),
+  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED')`),
   ledger_transactions_order_idx: index('ledger_transactions_order_idx').on(table.orderId),
   ledger_transactions_type_status_idx: index('ledger_transactions_type_status_idx').on(table.type, table.status),
 }));
@@ -2579,7 +2579,7 @@ export const ledgerOutboxEvents = pgTable('ledger_outbox_events', {
   ledger_outbox_events_idempotency_uq: uniqueIndex('ledger_outbox_events_idempotency_uq').on(table.idempotencyKey),
   ledger_outbox_events_claim_idx: index('ledger_outbox_events_claim_idx').on(table.status, table.nextAttemptAt),
   ledger_outbox_events_order_idx: index('ledger_outbox_events_order_idx').on(table.orderId),
-  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED')`),
+  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED')`),
   ledger_outbox_events_status_check: check('ledger_outbox_events_status_check', sql`${table.status} IN ('PENDING','PROCESSING','RETRYING','DONE','SKIPPED','NEEDS_INTERVENTION','DISMISSED')`),
   ledger_outbox_events_attempts_check: check('ledger_outbox_events_attempts_check', sql`${table.attempts} >= 0 AND ${table.maxAttempts} >= 1`),
   ledger_outbox_events_hash_check: check('ledger_outbox_events_hash_check', sql`char_length(${table.snapshotHash}) = 64`),
@@ -2631,4 +2631,29 @@ export const ledgerReconciliationFindings = pgTable('ledger_reconciliation_findi
   ledger_reconciliation_findings_order_idx: index('ledger_reconciliation_findings_order_idx').on(table.orderId),
   ledger_reconciliation_findings_severity_check: check('ledger_reconciliation_findings_severity_check', sql`${table.severity} IN ('INFO','WARNING','CRITICAL')`),
   ledger_reconciliation_findings_status_check: check('ledger_reconciliation_findings_status_check', sql`${table.status} IN ('OPEN','ACKNOWLEDGED','RESOLVED')`),
+}));
+
+// =============================================================================================================================================================
+// E4 — REVERSÃO DO CUSTO DE FRETE (ledger sombra). Registra a parcela do custo de frete de um pedido reembolsado DEPOIS da liberação que foi EFETIVAMENTE devolvida
+// à Nusali (com a referência da evidência). Por omissão não existe linha nenhuma: o subsídio e o frete absorvido continuam sendo custo da Nusali. Esta tabela NÃO
+// move dinheiro real (carteiras, Escrow, pagamentos): só alimenta o ledger sombra via outbox. Imutável (sem UPDATE/DELETE). subsidy_part/absorbed_part são a divisão
+// do valor entre a reversão do subsídio da Nusali e do frete absorvido, calculada UMA vez ao registrar (alocação cumulativa exata) e nunca recalculada.
+// =============================================================================================================================================================
+export const shippingCostReversals = pgTable('shipping_cost_reversals', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  refundId: varchar('refund_id', { length: 255 }).notNull().references(() => refunds.id, { onDelete: 'restrict' }),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull(),
+  subsidyPart: numeric('subsidy_part', { precision: 12, scale: 2 }).notNull(),
+  absorbedPart: numeric('absorbed_part', { precision: 12, scale: 2 }).notNull(),
+  evidenceRef: text('evidence_ref').notNull(),
+  reason: text('reason').notNull(),
+  performedBy: varchar('performed_by', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  idempotencyKey: varchar('idempotency_key', { length: 255 }).notNull(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  shipping_cost_reversals_idempotency_uq: uniqueIndex('shipping_cost_reversals_idempotency_uq').on(table.idempotencyKey),
+  shipping_cost_reversals_order_idx: index('shipping_cost_reversals_order_idx').on(table.orderId),
+  shipping_cost_reversals_amount_check: check('shipping_cost_reversals_amount_check', sql`${table.amount} > 0 AND ${table.subsidyPart} >= 0 AND ${table.absorbedPart} >= 0 AND ${table.subsidyPart} + ${table.absorbedPart} = ${table.amount}`),
 }));

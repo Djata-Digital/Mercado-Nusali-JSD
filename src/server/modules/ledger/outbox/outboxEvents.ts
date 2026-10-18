@@ -6,8 +6,8 @@ import crypto from 'crypto';
 import { findPgError } from '../pgErrors.js';
 import type { LedgerResult } from '../types.js';
 
-export type OutboxEventType = 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED';
-export const OUTBOX_EVENT_TYPES: readonly OutboxEventType[] = ['PAYMENT_RECEIVED', 'ORDER_DELIVERY_CONFIRMED', 'REFUND_PROCESSED'];
+export type OutboxEventType = 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED' | 'SHIPPING_COST_REVERSED';
+export const OUTBOX_EVENT_TYPES: readonly OutboxEventType[] = ['PAYMENT_RECEIVED', 'ORDER_DELIVERY_CONFIRMED', 'REFUND_PROCESSED', 'SHIPPING_COST_REVERSED'];
 
 export type OutboxStatus = 'PENDING' | 'PROCESSING' | 'RETRYING' | 'DONE' | 'SKIPPED' | 'NEEDS_INTERVENTION' | 'DISMISSED';
 
@@ -16,6 +16,8 @@ export const paymentReceivedKey = (orderId: string) => `payment_received:${order
 export const deliveryConfirmedKey = (orderId: string) => `order_release:${orderId}`;
 /** E3 — um evento (e um lançamento) por REEMBOLSO, nunca por pedido: pedido pode ter mais de um reembolso parcial. */
 export const refundProcessedKey = (refundId: string) => `refund_processed:${refundId}`;
+/** E4 — um evento (e um lançamento) por REVERSÃO de custo de frete registrada. */
+export const shippingCostReversedKey = (reversalId: string) => `shipping_cost_reversed:${reversalId}`;
 export const keyFor = (type: OutboxEventType, orderId: string) => (type === 'PAYMENT_RECEIVED' ? paymentReceivedKey(orderId) : deliveryConfirmedKey(orderId));
 
 export const DEFAULT_POLICY = {
@@ -101,6 +103,17 @@ export function buildRefundSnapshot(order: OrderRowForSnapshot, refund: RefundRo
     ...buildOrderSnapshot(order, 'ORDER_DELIVERY_CONFIRMED'),
     refundId: refund.id, refundPaymentId: refund.paymentId, refundAmount: asStr(refund.amount), refundCurrency: refund.currency,
     refundSellerDebitAmount: asStr(refund.sellerDebitAmount), releaseStage: stage,
+  };
+}
+
+export interface ReversalRowForSnapshot { id: string; orderId: string; refundId: string; amount: string | number; currency: string; subsidyPart: string | number; absorbedPart: string | number }
+
+/** Snapshot de um evento SHIPPING_COST_REVERSED: campos financeiros do pedido + a reversão registrada (valor e divisão já calculados e gravados). Cópia literal; nada recalculado. */
+export function buildReversalSnapshot(order: OrderRowForSnapshot, rev: ReversalRowForSnapshot): Record<string, string | null> {
+  return {
+    ...buildOrderSnapshot(order, 'ORDER_DELIVERY_CONFIRMED'),
+    reversalId: rev.id, reversalRefundId: rev.refundId, reversalAmount: asStr(rev.amount), reversalCurrency: rev.currency,
+    reversalSubsidyPart: asStr(rev.subsidyPart), reversalAbsorbedPart: asStr(rev.absorbedPart),
   };
 }
 

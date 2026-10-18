@@ -11,7 +11,9 @@ export type LedgerSkipReason =
   | 'SHADOW_LEDGER_DISABLED'
   | 'REFUND_NOT_FOUND'
   | 'REFUND_NOT_PROCESSED'
-  | 'REFUND_NOT_ORDER_LEVEL';
+  | 'REFUND_NOT_ORDER_LEVEL'
+  | 'SHIPPING_REVERSAL_NOT_FOUND'
+  | 'SHIPPING_REVERSAL_NOT_ELIGIBLE';
 
 export interface LedgerResult {
   posted: boolean;
