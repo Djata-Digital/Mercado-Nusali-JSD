@@ -43,6 +43,7 @@
     "test:wallet-holds": "node scripts/with-test-env.cjs tsx tests/wallet-holds-e7.test.ts",
     "test:wallet-holds-policy": "node scripts/with-test-env.cjs tsx tests/wallet-holds-e7-policy.test.ts",
     "test:payout-e8": "node scripts/with-test-env.cjs tsx tests/payout-e8.test.ts",
+    "test:e9-staging": "node scripts/with-test-env.cjs tsx tests/e9-integrated-staging.test.ts",
     "test:wallet-holds-migration": "node scripts/with-test-env.cjs node tests/wallet-holds-e7-migration-check.cjs",
     "test:ledger-outbox-gate": "node scripts/with-test-env.cjs tsx tests/ledger-outbox-flag-gate.test.ts",
     "test:ledger-e2-migration": "node scripts/with-test-env.cjs node tests/ledger-e2-migration-check.cjs",
