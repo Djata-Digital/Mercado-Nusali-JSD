@@ -24,6 +24,8 @@ const input = 'w-full border border-gray-300 rounded-lg px-3 py-1.5 text-xs focu
 const btn = 'px-3 py-1.5 rounded-lg text-xs font-bold transition disabled:opacity-50 disabled:cursor-not-allowed';
 const btnPrimary = `${btn} bg-emerald-600 hover:bg-emerald-500 text-white`;
 const btnGhost = `${btn} bg-gray-100 hover:bg-gray-200 text-gray-800`;
+/** Tabelas: espaço entre colunas (sem isso os cabeçalhos e valores ficam colados) e rolagem horizontal no celular. */
+const tbl = 'w-full text-xs [&_th]:pr-3 [&_td]:pr-3 [&_th:last-child]:pr-0 [&_td:last-child]:pr-0 [&_th]:font-bold [&_td]:whitespace-nowrap [&_th]:whitespace-nowrap';
 const btnDanger = `${btn} bg-rose-600 hover:bg-rose-500 text-white`;
 
 const Badge: React.FC<{ cls: string; children: React.ReactNode }> = ({ cls, children }) => <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-black ${cls}`}>{children}</span>;
@@ -61,6 +63,24 @@ const ReasonModal: React.FC<{ title: string; hint: string; min: number; confirmL
         <div className="flex justify-end gap-2">
           <button className={btnGhost} onClick={onCancel} disabled={busy}>Cancelar</button>
           <button className={danger ? btnDanger : btnPrimary} disabled={busy || !minLen(text, min)} onClick={async () => { setBusy(true); setErr(null); try { await onConfirm(text.trim()); } catch (e) { setErr(ledgerErrorMessage(e)); } finally { setBusy(false); } }}>{busy ? 'Enviando…' : confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/** Confirmação explícita (resumo do efeito + botão): ações que gravam no ledger nunca disparam com um clique só. O servidor continua sendo a autoridade. */
+const ConfirmModal: React.FC<{ title: string; lines: string[]; confirmLabel: string; onCancel: () => void; onConfirm: () => Promise<void> }> = ({ title, lines, confirmLabel, onCancel, onConfirm }) => {
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  return (
+    <div className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label={title}>
+      <div className="bg-white rounded-2xl p-5 w-full max-w-md space-y-3 shadow-2xl">
+        <h3 className="font-black text-sm text-gray-900">{title}</h3>
+        <ul className="text-[11px] text-gray-700 space-y-1 list-disc pl-4">{lines.map((l, i) => <li key={i}>{l}</li>)}</ul>
+        {err && <div className="text-[11px] text-rose-700 font-bold" role="alert">{err}</div>}
+        <div className="flex justify-end gap-2">
+          <button className={btnGhost} onClick={onCancel} disabled={busy}>Cancelar</button>
+          <button className={btnPrimary} disabled={busy} onClick={async () => { setBusy(true); setErr(null); try { await onConfirm(); } catch (e) { setErr(ledgerErrorMessage(e)); setBusy(false); } }}>{busy ? 'Enviando…' : confirmLabel}</button>
         </div>
       </div>
     </div>
@@ -112,7 +132,7 @@ const SummaryView: React.FC = () => {
       <div className={`${card} p-4`}>
         <h3 className="font-black text-xs text-gray-800 mb-2">Lançamentos por tipo e estado</h3>
         {data.transactionsByTypeAndStatus.length === 0 ? <Empty>Ainda não há lançamentos.</Empty> : (
-          <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-left text-gray-500"><th className="py-1">Tipo</th><th>Estado</th><th className="text-right">Quantidade</th></tr></thead><tbody>
+          <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Tipo</th><th>Estado</th><th className="text-right">Quantidade</th></tr></thead><tbody>
             {data.transactionsByTypeAndStatus.map((x: any) => (<tr key={`${x.type}-${x.status}`} className="border-t border-gray-100"><td className="py-1">{TX_TYPE_LABEL[x.type] ?? x.type}</td><td>{x.status}</td><td className="text-right font-bold">{x.n}</td></tr>))}
           </tbody></table></div>)}
       </div>
@@ -166,7 +186,7 @@ const TransactionsView: React.FC = () => {
       <ErrorBox message={p.error} onRetry={p.reload} />
       <div className={`${card} p-3`}>
         {p.loading && !p.page ? <Loading /> : !p.page || p.page.items.length === 0 ? <Empty /> : (
-          <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-left text-gray-500"><th className="py-1">Quando</th><th>Tipo</th><th>Estado</th><th>Pedido</th><th>Partidas</th><th>Chave</th></tr></thead><tbody>
+          <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Quando</th><th>Tipo</th><th>Estado</th><th>Pedido</th><th>Partidas</th><th>Chave</th></tr></thead><tbody>
             {p.page.items.map((t: any) => (
               <tr key={t.id} className="border-t border-gray-100 hover:bg-emerald-50 cursor-pointer" onClick={() => open(t.id)}>
                 <td className="py-1.5 whitespace-nowrap">{fmtDate(t.occurred_at)}</td><td>{TX_TYPE_LABEL[t.type] ?? t.type}</td><td>{t.status}</td><td><Mono>{t.order_id}</Mono></td><td>{t.entry_count}</td><td><Mono>{t.idempotency_key}</Mono></td>
@@ -182,9 +202,9 @@ const TransactionsView: React.FC = () => {
             <button className={btnGhost} onClick={() => setDetail(null)} aria-label="Fechar"><X className="w-3.5 h-3.5" /></button>
           </div>
           <p className="text-[11px] text-gray-700">{detail.transaction.reason}</p>
-          <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-left text-gray-500"><th className="py-1">#</th><th>Conta</th><th>Parte</th><th>Direção</th><th className="text-right">Valor</th><th>Dimensões</th></tr></thead><tbody>
+          <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">#</th><th>Conta</th><th>Parte</th><th>Direção</th><th className="text-right">Valor</th><th>Dimensões</th></tr></thead><tbody>
             {detail.entries.map((e: any) => (<tr key={e.id} className="border-t border-gray-100 align-top"><td className="py-1">{e.line_number}</td><td className="font-bold">{e.account_code}</td><td>{e.owner_type}{e.owner_id ? ` ${e.owner_id}` : ''}</td><td className={e.direction === 'DEBIT' ? 'text-rose-700 font-bold' : 'text-emerald-700 font-bold'}>{e.direction === 'DEBIT' ? 'Débito' : 'Crédito'}</td><td className="text-right">{fmtMoney(e.amount, e.currency)}</td><td><Mono>{e.dimensions ? JSON.stringify(e.dimensions) : '—'}</Mono></td></tr>))}
-          </tbody><tfoot><tr className="border-t border-gray-300 font-black"><td colSpan={4} className="py-1">Totais</td><td className="text-right">D {fmtMoney(detail.totals.debit, detail.transaction.currency)} · C {fmtMoney(detail.totals.credit, detail.transaction.currency)}</td><td>{detail.totals.balanced ? <Badge cls="bg-emerald-100 text-emerald-800">Balanceado</Badge> : <Badge cls="bg-rose-100 text-rose-800">DESBALANCEADO</Badge>}</td></tr></tfoot></table></div>
+          </tbody><tfoot><tr className="border-t border-gray-300 font-black"><td colSpan={3} className="py-1">Totais</td><td colSpan={3} className="text-right whitespace-nowrap">D {fmtMoney(detail.totals.debit, detail.transaction.currency)} · C {fmtMoney(detail.totals.credit, detail.transaction.currency)} {detail.totals.balanced ? <Badge cls="bg-emerald-100 text-emerald-800">Balanceado</Badge> : <Badge cls="bg-rose-100 text-rose-800">DESBALANCEADO</Badge>}</td></tr></tfoot></table></div>
           {detail.transaction.metadata_json && <details><summary className="text-[11px] font-bold text-gray-600 cursor-pointer">Metadados</summary><Json value={detail.transaction.metadata_json} /></details>}
           <p className="text-[10px] text-gray-500">Lançamentos são imutáveis: não podem ser editados nem apagados.</p>
         </div>)}
@@ -219,7 +239,7 @@ const OutboxView: React.FC<{ isAdmin: boolean; showToast: (m: string) => void }>
       <ErrorBox message={p.error} onRetry={p.reload} />
       <div className={`${card} p-3`}>
         {p.loading && !p.page ? <Loading /> : !p.page || p.page.items.length === 0 ? <Empty /> : (
-          <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-left text-gray-500"><th className="py-1">Criado</th><th>Tipo</th><th>Estado</th><th>Tentativas</th><th>Pedido</th><th>Erro</th></tr></thead><tbody>
+          <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Criado</th><th>Tipo</th><th>Estado</th><th>Tentativas</th><th>Pedido</th><th>Erro</th></tr></thead><tbody>
             {p.page.items.map((e: any) => (
               <tr key={e.id} className="border-t border-gray-100 hover:bg-emerald-50 cursor-pointer" onClick={() => open(e.id)}>
                 <td className="py-1.5 whitespace-nowrap">{fmtDate(e.created_at)}</td><td>{TX_TYPE_LABEL[e.event_type] ?? e.event_type}</td><td><Badge cls={eventStatusClass(e.status)}>{EVENT_STATUS_LABEL[e.status] ?? e.status}</Badge></td><td>{e.attempts}/{e.max_attempts}</td><td><Mono>{e.order_id}</Mono></td><td className="text-[10px]">{e.last_error_code ?? ''}</td>
@@ -288,7 +308,7 @@ const FindingsView: React.FC<{ isAdmin: boolean; showToast: (m: string) => void 
       <ErrorBox message={p.error} onRetry={p.reload} />
       <div className={`${card} p-3`}>
         {p.loading && !p.page ? <Loading /> : !p.page || p.page.items.length === 0 ? <Empty>Nenhuma divergência com estes filtros.</Empty> : (
-          <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-left text-gray-500"><th className="py-1">Gravidade</th><th>Tipo</th><th>Estado</th><th>Pedido</th><th>Vista</th><th>Última vez</th></tr></thead><tbody>
+          <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Gravidade</th><th>Tipo</th><th>Estado</th><th>Pedido</th><th>Vista</th><th>Última vez</th></tr></thead><tbody>
             {p.page.items.map((x: any) => (
               <tr key={x.id} className="border-t border-gray-100 hover:bg-emerald-50 cursor-pointer" onClick={() => open(x.id)}>
                 <td className="py-1.5"><Badge cls={severityClass(x.severity)}>{SEVERITY_LABEL[x.severity] ?? x.severity}</Badge></td><td className="font-bold">{x.finding_type}</td><td>{FINDING_STATUS_LABEL[x.status] ?? x.status}</td><td><Mono>{x.order_id ?? '—'}</Mono></td><td>{x.seen_count}×</td><td className="whitespace-nowrap">{fmtDate(x.last_seen_at)}</td>
@@ -334,7 +354,8 @@ const ChargebacksView: React.FC<{ isAdmin: boolean; userId?: string; showToast: 
   const open = async (id: string) => { setDErr(null); try { const r = await LedgerAdminApi.chargeback(id); if (!r.success) throw new Error(r.error?.message); setDetail(r.data); setForm(null); } catch (e) { setDErr(ledgerErrorMessage(e)); } };
   const refresh = async () => { if (detail) await open(detail.chargeback.id); p.reload(); };
   const approved = detail?.decisions?.find((d: any) => d.status === 'APPROVED');
-  const approve = async (id: string) => { try { const r = await LedgerAdminApi.approveDecision(id); if (!r.success) throw new Error(r.error?.message); showToast('Decisão aprovada e lançada no ledger sombra.'); await refresh(); } catch (e) { showToast(ledgerErrorMessage(e)); } };
+  const [approveAsk, setApproveAsk] = useState<any>(null);
+  const approve = async (id: string) => { const r = await LedgerAdminApi.approveDecision(id); if (!r.success) throw new Error(r.error?.message); showToast('Decisão aprovada e lançada no ledger sombra.'); setApproveAsk(null); await refresh(); };
   return (
     <div className="space-y-3">
       <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[11px] text-amber-900 flex gap-2"><ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" /><span>A responsabilidade nunca é atribuída automaticamente. Cada caso exige evidências, fundamentação, proposta e aprovação por um Administrador Geral diferente de quem propôs. A responsabilidade do vendedor é limitada ao valor líquido (N) do pedido (cumulativo). Nenhuma carteira é debitada: o valor do vendedor fica como recebível no ledger.</span></div>
@@ -347,7 +368,7 @@ const ChargebacksView: React.FC<{ isAdmin: boolean; userId?: string; showToast: 
       <ErrorBox message={p.error} onRetry={p.reload} />
       <div className={`${card} p-3`}>
         {p.loading && !p.page ? <Loading /> : !p.page || p.page.items.length === 0 ? <Empty /> : (
-          <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-left text-gray-500"><th className="py-1">Atualizado</th><th>Provedor</th><th>Estado</th><th className="text-right">Valor</th><th>Alocações</th><th>Evidências</th><th>Decisão</th></tr></thead><tbody>
+          <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Atualizado</th><th>Provedor</th><th>Estado</th><th className="text-right">Valor</th><th>Alocações</th><th>Evidências</th><th>Decisão</th></tr></thead><tbody>
             {p.page.items.map((c: any) => (
               <tr key={c.id} className="border-t border-gray-100 hover:bg-emerald-50 cursor-pointer" onClick={() => open(c.id)}>
                 <td className="py-1.5 whitespace-nowrap">{fmtDate(c.updated_at)}</td><td><Mono>{c.provider_chargeback_id}</Mono></td><td>{c.local_status}</td><td className="text-right">{fmtMoney(c.value, c.currency)}</td><td>{c.allocations}</td><td>{c.evidence}</td><td>{c.latest_decision_status ? DECISION_STATUS_LABEL[c.latest_decision_status] ?? c.latest_decision_status : '—'}</td>
@@ -364,7 +385,7 @@ const ChargebacksView: React.FC<{ isAdmin: boolean; userId?: string; showToast: 
           </div>
           <section><h4 className="font-black text-xs text-gray-800 mb-1">Alocações por pedido (valor efetivamente debitado)</h4>
             {detail.allocations.length === 0 ? <Empty>Sem alocações: contestação ainda não perdida.</Empty> : (
-              <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-left text-gray-500"><th className="py-1">Pedido</th><th>Estágio</th><th className="text-right">Alocado</th><th className="text-right">Líquido do vendedor (N)</th><th>Lançamento</th></tr></thead><tbody>
+              <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Pedido</th><th>Estágio</th><th className="text-right">Alocado</th><th className="text-right">Líquido do vendedor (N)</th><th>Lançamento</th></tr></thead><tbody>
                 {detail.allocations.map((a: any) => (<tr key={a.id} className="border-t border-gray-100 align-top"><td className="py-1"><Mono>{a.order_id}</Mono></td><td>{STAGE_LABEL[a.release_stage]}{a.overlap_refund && <div><Badge cls="bg-rose-100 text-rose-800">Reembolso concluído: perda dobrada — nada lançado</Badge></div>}</td><td className="text-right">{fmtMoney(a.allocated_value, a.currency)}</td><td className="text-right">{fmtMoney(a.seller_net_amount, a.currency)}</td><td>{a.confirmed_transaction_id ? <Mono>{a.confirmed_transaction_id}</Mono> : '—'}</td></tr>))}
               </tbody></table></div>)}
           </section>
@@ -381,7 +402,7 @@ const ChargebacksView: React.FC<{ isAdmin: boolean; userId?: string; showToast: 
                 <table className="w-full"><tbody>{d.lines.map((l: any) => <tr key={l.id} className="border-t border-gray-100"><td className="py-0.5">{PARTY_LABEL[l.party_type]}{l.party_ref ? ` (${l.party_ref})` : ''}</td><td><Mono>{l.allocation_id}</Mono></td><td>{l.contract_reference ?? ''}</td><td className="text-right font-bold">{fmtMoney(l.amount, detail.chargeback.currency)}</td></tr>)}</tbody></table>
                 {d.status === 'PROPOSED' && isAdmin && (
                   <div className="flex gap-2 pt-1">
-                    <button className={btnPrimary} disabled={d.proposed_by === userId} title={d.proposed_by === userId ? 'Quem propõe não pode aprovar' : ''} onClick={() => approve(d.id)}>Aprovar e lançar</button>
+                    <button className={btnPrimary} disabled={d.proposed_by === userId} title={d.proposed_by === userId ? 'Quem propõe não pode aprovar' : ''} onClick={() => setApproveAsk(d)}>Aprovar e lançar</button>
                     <button className={btnDanger} onClick={() => setReject(d.id)}>Rejeitar</button>
                     {d.proposed_by === userId && <span className="text-[10px] text-gray-500 self-center">Você propôs esta decisão: outro Administrador Geral precisa aprová-la.</span>}
                   </div>)}
@@ -396,6 +417,8 @@ const ChargebacksView: React.FC<{ isAdmin: boolean; userId?: string; showToast: 
               {form === 'settle' && <SettleForm detail={detail} approved={approved} onDone={async () => { setForm(null); showToast('Registrado no ledger sombra.'); await refresh(); }} />}</>) : <p className="text-[10px] text-gray-500">Restrito ao Administrador Geral. A cobrança do vendedor pela carteira não existe: o valor dele permanece como recebível.</p>}
           </section>)}
         </div>)}
+      {approveAsk && <ConfirmModal title="Aprovar e lançar decisão" confirmLabel="Aprovar e lançar" onCancel={() => setApproveAsk(null)} onConfirm={() => approve(approveAsk.id)}
+        lines={[`Decisão v${approveAsk.version}: ${CAUSE_LABEL[approveAsk.cause_code] ?? approveAsk.cause_code}.`, ...approveAsk.lines.map((l: any) => `${PARTY_LABEL[l.party_type]}${l.party_ref ? ` (${l.party_ref})` : ''}: ${fmtMoney(l.amount, detail.chargeback.currency)}`), 'Grava lançamentos no ledger sombra (imutáveis). A parte do vendedor vira recebível: nenhuma carteira é debitada e nenhum dinheiro real é movimentado.']} />}
       {reject && <ReasonModal title="Rejeitar proposta" min={10} danger confirmLabel="Rejeitar" hint="A proposta ficará no histórico como rejeitada. Informe o motivo. Fica auditado." onCancel={() => setReject(null)}
         onConfirm={async (reason) => { const r = await LedgerAdminApi.rejectDecision(reject, reason); if (!r.success) throw new Error(r.error?.message); showToast('Proposta rejeitada.'); setReject(null); await refresh(); }} />}
     </div>
@@ -430,7 +453,7 @@ const DecisionForm: React.FC<{ detail: any; revising: boolean; onDone: () => Pro
   const upd = (i: number, patch: Partial<LineDraft>) => setLines(lines.map((l, k) => (k === i ? { ...l, ...patch } : l)));
   const addLine = (orderId: string) => setLines([...lines, { orderId, partyType: '', partyRef: '', amount: '', contractReference: '' }]);
   const sums = targets.map((a: any) => { const s = lines.filter((l) => l.orderId === a.order_id).reduce((acc, l) => acc + (parseMoney(l.amount) ? Number(parseMoney(l.amount)) : 0), 0); const sellerSum = lines.filter((l) => l.orderId === a.order_id && l.partyType === 'SELLER').reduce((acc, l) => acc + (parseMoney(l.amount) ? Number(parseMoney(l.amount)) : 0), 0); return { a, s, sellerSum, ok: Math.abs(s - Number(a.allocated_value)) < 0.005, capOk: a.seller_net_amount == null || sellerSum <= Number(a.seller_net_amount) + 0.005 }; });
-  const valid = minLen(rationale, 30) && minLen(heard, 10) && evidenceIds.length > 0 && sums.every((x) => x.ok) && lines.every((l) => l.partyType !== '' && parseMoney(l.amount) && (l.partyType !== 'THIRD_PARTY' || (l.partyRef.trim() && minLen(l.contractReference, 5)))) && (!revising || minLen(revReason, 10));
+  const valid = minLen(rationale, 30) && minLen(heard, 10) && evidenceIds.length > 0 && sums.every((x) => x.ok && x.capOk) && lines.every((l) => l.partyType !== '' && parseMoney(l.amount) && (l.partyType !== 'THIRD_PARTY' || (l.partyRef.trim() && minLen(l.contractReference, 5)))) && (!revising || minLen(revReason, 10));
   return (
     <div className="mt-2 border border-gray-200 rounded-xl p-3 space-y-3">
       <div className="grid md:grid-cols-2 gap-2">
@@ -477,7 +500,7 @@ const SettleForm: React.FC<{ detail: any; approved: any; onDone: () => Promise<v
   const thirdLines = approved.lines.filter((l: any) => l.party_type === 'THIRD_PARTY');
   const [alloc, setAlloc] = useState(thirdLines[0]?.allocation_id ?? ''); const [kind, setKind] = useState<'RECOVERY' | 'WRITE_OFF'>('RECOVERY'); const [amount, setAmount] = useState('');
   const [evidenceRef, setEvidenceRef] = useState(''); const [reason, setReason] = useState(''); const [key] = useState(() => newIdempotencyKey('cb-settle'));
-  const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  const [ask, setAsk] = useState(false);
   if (thirdLines.length === 0) return <div className="mt-2 text-[11px] text-gray-600">A decisão aprovada não tem recebível de terceiro: não há o que recuperar ou baixar.</div>;
   const line = thirdLines.find((l: any) => l.allocation_id === alloc) ?? thirdLines[0];
   return (
@@ -489,8 +512,10 @@ const SettleForm: React.FC<{ detail: any; approved: any; onDone: () => Promise<v
       </div>
       <Field label="Referência da evidência (obrigatória)"><input className={input} value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} /></Field>
       <Field label="Motivo (mínimo 10 caracteres)"><input className={input} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
-      <ErrorBox message={err} />
-      <button className={btnPrimary} disabled={busy || !parseMoney(amount) || !minLen(evidenceRef, 5) || !minLen(reason, 10)} onClick={async () => { setBusy(true); setErr(null); try { const r = await LedgerAdminApi.settle(alloc, { kind, partyRef: line.party_ref, amount: parseMoney(amount)!, evidenceRef: evidenceRef.trim(), reason: reason.trim(), idempotencyKey: key }); if (!r.success) throw new Error(r.error?.message); await onDone(); } catch (e) { setErr(ledgerErrorMessage(e)); } finally { setBusy(false); } }}>{busy ? 'Enviando…' : 'Registrar'}</button>
+      <button className={btnPrimary} disabled={!parseMoney(amount) || !minLen(evidenceRef, 5) || !minLen(reason, 10)} onClick={() => setAsk(true)}>Registrar</button>
+      {ask && <ConfirmModal title={kind === 'RECOVERY' ? 'Registrar recuperação' : 'Registrar baixa'} confirmLabel="Confirmar registro" onCancel={() => setAsk(false)}
+        lines={[`Terceiro ${line.party_ref}: ${fmtMoney(parseMoney(amount) ?? 0, detail.chargeback.currency)} (${kind === 'RECOVERY' ? 'recuperação' : 'baixa'}).`, `Evidência: ${evidenceRef.trim()}`, 'Grava lançamento no ledger sombra (imutável). Não movimenta dinheiro real.']}
+        onConfirm={async () => { const r = await LedgerAdminApi.settle(alloc, { kind, partyRef: line.party_ref, amount: parseMoney(amount)!, evidenceRef: evidenceRef.trim(), reason: reason.trim(), idempotencyKey: key }); if (!r.success) throw new Error(r.error?.message); setAsk(false); await onDone(); }} />}
     </div>
   );
 };
@@ -501,7 +526,7 @@ const SettleForm: React.FC<{ detail: any; approved: any; onDone: () => Promise<v
 const ShippingView: React.FC<{ isAdmin: boolean; showToast: (m: string) => void }> = ({ isAdmin, showToast }) => {
   const p = usePaged(LedgerAdminApi.shippingReversals, { orderId: '' });
   const [orderId, setOrderId] = useState(''); const [amount, setAmount] = useState(''); const [evidenceRef, setEvidenceRef] = useState(''); const [reason, setReason] = useState('');
-  const [key, setKey] = useState(() => newIdempotencyKey('ship-rev')); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  const [key, setKey] = useState(() => newIdempotencyKey('ship-rev')); const [ask, setAsk] = useState(false);
   const f = p.filters;
   return (
     <div className="space-y-3">
@@ -513,7 +538,7 @@ const ShippingView: React.FC<{ isAdmin: boolean; showToast: (m: string) => void 
       <ErrorBox message={p.error} onRetry={p.reload} />
       <div className={`${card} p-3`}>
         {p.loading && !p.page ? <Loading /> : !p.page || p.page.items.length === 0 ? <Empty>Nenhuma reversão registrada.</Empty> : (
-          <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="text-left text-gray-500"><th className="py-1">Quando</th><th>Pedido</th><th className="text-right">Valor</th><th className="text-right">Subsídio</th><th className="text-right">Frete absorvido</th><th>Evidência</th></tr></thead><tbody>
+          <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Quando</th><th>Pedido</th><th className="text-right">Valor</th><th className="text-right">Subsídio</th><th className="text-right">Frete absorvido</th><th>Evidência</th></tr></thead><tbody>
             {p.page.items.map((r: any) => (<tr key={r.id} className="border-t border-gray-100 align-top"><td className="py-1.5 whitespace-nowrap">{fmtDate(r.created_at)}</td><td><Mono>{r.order_id}</Mono></td><td className="text-right font-bold">{fmtMoney(r.amount, r.currency)}</td><td className="text-right">{fmtMoney(r.subsidy_part, r.currency)}</td><td className="text-right">{fmtMoney(r.absorbed_part, r.currency)}</td><td>{r.evidence_ref}<div className="text-[10px] text-gray-500">{r.reason}</div></td></tr>))}
           </tbody></table></div>)}
         <Pager page={p.page} onOffset={p.setOffset} />
@@ -524,12 +549,10 @@ const ShippingView: React.FC<{ isAdmin: boolean; showToast: (m: string) => void 
           <div className="grid md:grid-cols-2 gap-2"><Field label="Pedido"><input className={input} value={orderId} onChange={(e) => setOrderId(e.target.value)} /></Field><Field label="Valor efetivamente devolvido"><input className={input} value={amount} onChange={(e) => setAmount(e.target.value)} /></Field></div>
           <Field label="Referência da evidência (obrigatória, mínimo 5 caracteres)"><input className={input} value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} /></Field>
           <Field label="Motivo (mínimo 10 caracteres)"><input className={input} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
-          <ErrorBox message={err} />
-          <button className={btnPrimary} disabled={busy || !orderId.trim() || !parseMoney(amount) || !minLen(evidenceRef, 5) || !minLen(reason, 10)} onClick={async () => {
-            setBusy(true); setErr(null);
-            try { const r = await LedgerAdminApi.recordShippingReversal({ orderId: orderId.trim(), amount: parseMoney(amount)!, evidenceRef: evidenceRef.trim(), reason: reason.trim(), idempotencyKey: key }); if (!r.success) throw new Error(r.error?.message); showToast('Reversão de frete registrada.'); setOrderId(''); setAmount(''); setEvidenceRef(''); setReason(''); setKey(newIdempotencyKey('ship-rev')); p.reload(); }
-            catch (e) { setErr(ledgerErrorMessage(e)); } finally { setBusy(false); }
-          }}>{busy ? 'Enviando…' : 'Registrar reversão'}</button>
+          <button className={btnPrimary} disabled={!orderId.trim() || !parseMoney(amount) || !minLen(evidenceRef, 5) || !minLen(reason, 10)} onClick={() => setAsk(true)}>Registrar reversão</button>
+          {ask && <ConfirmModal title="Registrar reversão de custo de frete" confirmLabel="Confirmar reversão" onCancel={() => setAsk(false)}
+            lines={[`Pedido ${orderId.trim()}: ${fmtMoney(parseMoney(amount) ?? 0)} devolvidos pela transportadora.`, `Evidência: ${evidenceRef.trim()}`, 'Grava lançamento no ledger sombra (imutável) e é idempotente. Não movimenta dinheiro real.']}
+            onConfirm={async () => { const r = await LedgerAdminApi.recordShippingReversal({ orderId: orderId.trim(), amount: parseMoney(amount)!, evidenceRef: evidenceRef.trim(), reason: reason.trim(), idempotencyKey: key }); if (!r.success) throw new Error(r.error?.message); showToast('Reversão de frete registrada.'); setAsk(false); setOrderId(''); setAmount(''); setEvidenceRef(''); setReason(''); setKey(newIdempotencyKey('ship-rev')); p.reload(); }} />}
         </div>) : <p className="text-[11px] text-gray-500">Registrar reversões de frete é restrito ao Administrador Geral.</p>}
     </div>
   );
