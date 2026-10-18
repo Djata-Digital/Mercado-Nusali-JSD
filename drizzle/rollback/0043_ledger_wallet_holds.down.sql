@@ -14,4 +14,4 @@ END $$;
 DROP TABLE "wallet_holds";
 DROP FUNCTION nusali_wallet_hold_guard();
 
-DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1792295139811;
+DELETE FROM drizzle.__drizzle_migrations WHERE created_at = 1792296650413;

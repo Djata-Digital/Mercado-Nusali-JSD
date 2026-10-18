@@ -5,6 +5,7 @@ CREATE TABLE "wallet_holds" (
 	"amount" numeric(15, 2) NOT NULL,
 	"status" varchar(20) DEFAULT 'ACTIVE' NOT NULL,
 	"reason" text NOT NULL,
+	"evidence_ref" text NOT NULL,
 	"reference_type" varchar(60) NOT NULL,
 	"reference_id" varchar(255) NOT NULL,
 	"ledger_transaction_id" varchar(255),
@@ -14,9 +15,12 @@ CREATE TABLE "wallet_holds" (
 	"released_by" varchar(255),
 	"released_at" timestamp,
 	"release_reason" text,
+	"release_evidence_ref" text,
 	CONSTRAINT "wallet_holds_amount_check" CHECK ("wallet_holds"."amount" > 0),
 	CONSTRAINT "wallet_holds_status_check" CHECK ("wallet_holds"."status" IN ('ACTIVE','RELEASED')),
-	CONSTRAINT "wallet_holds_release_check" CHECK (("wallet_holds"."status" = 'ACTIVE' AND "wallet_holds"."released_by" IS NULL AND "wallet_holds"."released_at" IS NULL AND "wallet_holds"."release_reason" IS NULL) OR ("wallet_holds"."status" = 'RELEASED' AND "wallet_holds"."released_by" IS NOT NULL AND "wallet_holds"."released_at" IS NOT NULL AND length(btrim("wallet_holds"."release_reason")) >= 10))
+	CONSTRAINT "wallet_holds_release_check" CHECK (("wallet_holds"."status" = 'ACTIVE' AND "wallet_holds"."released_by" IS NULL AND "wallet_holds"."released_at" IS NULL AND "wallet_holds"."release_reason" IS NULL AND "wallet_holds"."release_evidence_ref" IS NULL) OR ("wallet_holds"."status" = 'RELEASED' AND "wallet_holds"."released_by" IS NOT NULL AND "wallet_holds"."released_at" IS NOT NULL AND COALESCE(length(btrim("wallet_holds"."release_reason")), 0) >= 10 AND COALESCE(length(btrim("wallet_holds"."release_evidence_ref")), 0) >= 5)),
+	CONSTRAINT "wallet_holds_four_eyes_check" CHECK ("wallet_holds"."released_by" IS NULL OR "wallet_holds"."released_by" <> "wallet_holds"."created_by"),
+	CONSTRAINT "wallet_holds_evidence_check" CHECK (COALESCE(length(btrim("wallet_holds"."evidence_ref")), 0) >= 5)
 );
 --> statement-breakpoint
 ALTER TABLE "wallet_holds" ADD CONSTRAINT "wallet_holds_wallet_id_wallets_id_fk" FOREIGN KEY ("wallet_id") REFERENCES "public"."wallets"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
@@ -59,7 +63,7 @@ BEGIN
   END IF;
   IF NEW."status" <> 'RELEASED'
      OR NEW."id" IS DISTINCT FROM OLD."id" OR NEW."wallet_id" IS DISTINCT FROM OLD."wallet_id" OR NEW."currency" IS DISTINCT FROM OLD."currency"
-     OR NEW."amount" IS DISTINCT FROM OLD."amount" OR NEW."reason" IS DISTINCT FROM OLD."reason"
+     OR NEW."amount" IS DISTINCT FROM OLD."amount" OR NEW."reason" IS DISTINCT FROM OLD."reason" OR NEW."evidence_ref" IS DISTINCT FROM OLD."evidence_ref"
      OR NEW."reference_type" IS DISTINCT FROM OLD."reference_type" OR NEW."reference_id" IS DISTINCT FROM OLD."reference_id"
      OR NEW."ledger_transaction_id" IS DISTINCT FROM OLD."ledger_transaction_id" OR NEW."created_by" IS DISTINCT FROM OLD."created_by"
      OR NEW."idempotency_key" IS DISTINCT FROM OLD."idempotency_key" OR NEW."created_at" IS DISTINCT FROM OLD."created_at" THEN

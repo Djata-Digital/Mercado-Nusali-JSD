@@ -6,8 +6,8 @@
  * lógica financeira nova, nenhuma movimentação de dinheiro real, nenhuma cobrança de carteira. As regras de negócio (quatro olhos, teto N do vendedor, evidências, idempotência,
  * auditoria) continuam NOS SERVIÇOS; aqui só há autorização por perfil, validação de entrada e tradução de erros. Cada serviço revalida o papel no banco (defesa em profundidade).
  *
- * Perfis:  leitura / evidência / proposta  → GLOBAL_ADMIN, FINANCE, RISK_ANALYST
- *          aprovar, rejeitar, reparar, recolocar, descartar, reconhecer, recuperação/baixa, reversão de frete → SOMENTE GLOBAL_ADMIN
+ * Perfis:  leitura / evidência / proposta / SOLICITAR retenção de saldo (E7) → GLOBAL_ADMIN, FINANCE, RISK_ANALYST
+ *          aprovar, rejeitar, reparar, recolocar, descartar, reconhecer, recuperação/baixa, reversão de frete, LIBERAR retenção (E7, e nunca o criador) → SOMENTE GLOBAL_ADMIN
  * O papel vem do JWT verificado (requireAuth); nunca de corpo/query.
  */
 import { Router, Response, NextFunction } from 'express';
@@ -22,6 +22,7 @@ import {
   addChargebackEvidence, proposeChargebackDecision, approveChargebackDecision, rejectChargebackDecision, recordChargebackRecovery, ChargebackLedgerError,
 } from '../chargebackLedgerService.js';
 import { recordShippingCostReversal, ShippingReversalError } from '../shippingReversalService.js';
+import { placeChargebackWalletHold, releaseWalletHold, listWalletHoldsForAdmin, assessWalletHold, getWalletBalances, WalletHoldError } from '../../wallet/walletHoldService.js';
 
 export const LEDGER_READ_ROLES = new Set(['GLOBAL_ADMIN', 'FINANCE', 'RISK_ANALYST']);
 export const LEDGER_ADMIN_ROLES = new Set(['GLOBAL_ADMIN']);
@@ -59,6 +60,7 @@ function statusFor(code: string): number {
   return 400;
 }
 function handleError(res: Response, err: any, context: string) {
+  if (err instanceof WalletHoldError) return deny(res, err.status, err.code, err.message);
   if (err instanceof OutboxAdminError || err instanceof ChargebackLedgerError || err instanceof ShippingReversalError) {
     return deny(res, statusFor(err.code), err.code, err.message);
   }
@@ -210,6 +212,29 @@ ledgerAdminRouter.get('/chargebacks/:id', requireLedgerReader, async (req: AuthR
   } catch (err) { return handleError(res, err, 'chargeback-detail'); }
 });
 
+/** E7 — retenções de saldo: lista com idade (para achar as antigas, sem alertas automáticos) e avaliação de cobertura pela obrigação vigente. */
+ledgerAdminRouter.get('/wallet-holds', requireLedgerReader, async (req: AuthRequest, res: Response) => {
+  try {
+    const status = strParam(req.query.status, 20);
+    const older = req.query.olderThanDays === undefined || req.query.olderThanDays === '' ? undefined : Number(req.query.olderThanDays);
+    const data = await listWalletHoldsForAdmin({
+      status: status === 'ACTIVE' || status === 'RELEASED' ? status : undefined, olderThanDays: Number.isFinite(older) ? older : undefined,
+      orderId: strParam(req.query.orderId) ?? undefined, walletId: strParam(req.query.walletId) ?? undefined, allocationId: strParam(req.query.allocationId) ?? undefined,
+      limit: intParam(req.query.limit, 25, 1, 100), offset: intParam(req.query.offset, 0, 0, 1_000_000),
+    });
+    return res.json({ success: true, data });
+  } catch (err) { return handleError(res, err, 'wallet-holds'); }
+});
+ledgerAdminRouter.get('/wallet-holds/:id', requireLedgerReader, async (req: AuthRequest, res: Response) => {
+  try {
+    const db: any = getDb(); if (!db) return deny(res, 503, 'DATABASE_UNAVAILABLE', 'Banco indisponível.');
+    const hold = rowsOf(await db.execute(sql`SELECT id, wallet_id, currency, amount::text AS amount, status, reason, evidence_ref, reference_type, reference_id, ledger_transaction_id, created_by, created_at, released_by, released_at, release_reason, release_evidence_ref, floor(extract(epoch FROM (now() - created_at)) / 86400)::int AS age_days FROM wallet_holds WHERE id = ${req.params.id}`))[0];
+    if (!hold) return deny(res, 404, 'HOLD_NOT_FOUND', 'Retenção não encontrada.');
+    const audit = rowsOf(await db.execute(sql`SELECT action, actor_user_id, details_json, created_at FROM audit_logs WHERE resource = 'wallet_hold' AND resource_id = ${hold.id} ORDER BY created_at`));
+    return res.json({ success: true, data: { hold, assessment: await assessWalletHold(db, hold), balances: await getWalletBalances(hold.wallet_id, db), audit } });
+  } catch (err) { return handleError(res, err, 'wallet-hold-detail'); }
+});
+
 ledgerAdminRouter.get('/shipping-reversals', requireLedgerReader, async (req: AuthRequest, res: Response) => {
   try {
     const db: any = getDb(); if (!db) return deny(res, 503, 'DATABASE_UNAVAILABLE', 'Banco indisponível.');
@@ -280,6 +305,23 @@ ledgerAdminRouter.post('/chargeback-allocations/:id/settlements', writeLimiter, 
     const r = await recordChargebackRecovery({ allocationId: req.params.id, kind: b.kind, partyRef: bodyStr(b.partyRef), amount: typeof b.amount === 'number' || typeof b.amount === 'string' ? b.amount : '', evidenceRef: bodyStr(b.evidenceRef), reason: bodyStr(b.reason), actorUserId: actor(req), idempotencyKey: bodyStr(b.idempotencyKey) });
     return res.status(r.alreadyRecorded ? 200 : 201).json({ success: true, data: r });
   } catch (err) { return handleError(res, err, 'chargeback-settlement'); }
+});
+
+/**
+ * E7 — SOLICITAR retenção do saldo do vendedor por chargeback perdido com decisão de responsabilidade aprovada (D1/D5). Papéis FINANCE/RISK_ANALYST/GLOBAL_ADMIN; o serviço revalida
+ * papel, conflito de interesse, obrigação aprovada, tetos e saldo livre. Não debita nem move dinheiro; nenhuma retenção é criada automaticamente.
+ */
+ledgerAdminRouter.post('/chargeback-allocations/:id/wallet-holds', writeLimiter, requireLedgerReader, async (req: AuthRequest, res: Response) => {
+  try {
+    const b = req.body ?? {};
+    const r = await placeChargebackWalletHold({ allocationId: req.params.id, amount: typeof b.amount === 'number' || typeof b.amount === 'string' ? b.amount : '', reason: bodyStr(b.reason), evidenceRef: bodyStr(b.evidenceRef), actorUserId: actor(req), idempotencyKey: bodyStr(b.idempotencyKey) });
+    return res.status(r.alreadyPlaced ? 200 : 201).json({ success: true, data: r });
+  } catch (err) { return handleError(res, err, 'wallet-hold-place'); }
+});
+/** E7 — LIBERAR retenção (D2): somente GLOBAL_ADMIN e nunca o criador; motivo e evidência obrigatórios. Só devolve o valor ao disponível; não move dinheiro. */
+ledgerAdminRouter.post('/wallet-holds/:id/release', writeLimiter, requireLedgerAdmin, async (req: AuthRequest, res: Response) => {
+  try { return res.json({ success: true, data: await releaseWalletHold({ holdId: req.params.id, actorUserId: actor(req), reason: bodyStr(req.body?.reason), evidenceRef: bodyStr(req.body?.evidenceRef) }) }); }
+  catch (err) { return handleError(res, err, 'wallet-hold-release'); }
 });
 
 ledgerAdminRouter.post('/shipping-reversals', writeLimiter, requireLedgerAdmin, async (req: AuthRequest, res: Response) => {

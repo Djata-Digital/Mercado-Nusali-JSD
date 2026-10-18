@@ -36,6 +36,14 @@ export class LedgerAdminApi {
     return apiClient.post(`${base}/chargeback-allocations/${encodeURIComponent(allocationId)}/settlements`, body);
   }
 
+  // E7 — retenções de saldo (solicitar: FINANCE/RISK_ANALYST/GLOBAL_ADMIN; liberar: só GLOBAL_ADMIN ≠ criador — o servidor decide; nada move dinheiro)
+  static walletHolds(params?: Q): Promise<ApiResponse<Page<any>>> { return apiClient.get(`${base}/wallet-holds`, { params: clean(params) }); }
+  static walletHold(id: string): Promise<ApiResponse<any>> { return apiClient.get(`${base}/wallet-holds/${encodeURIComponent(id)}`); }
+  static placeWalletHold(allocationId: string, body: { amount: string; reason: string; evidenceRef: string; idempotencyKey: string }): Promise<ApiResponse<any>> {
+    return apiClient.post(`${base}/chargeback-allocations/${encodeURIComponent(allocationId)}/wallet-holds`, body);
+  }
+  static releaseWalletHold(id: string, body: { reason: string; evidenceRef: string }): Promise<ApiResponse<any>> { return apiClient.post(`${base}/wallet-holds/${encodeURIComponent(id)}/release`, body); }
+
   static shippingReversals(params?: Q): Promise<ApiResponse<Page<any>>> { return apiClient.get(`${base}/shipping-reversals`, { params: clean(params) }); }
   static recordShippingReversal(body: { orderId: string; amount: string; evidenceRef: string; reason: string; idempotencyKey: string }): Promise<ApiResponse<any>> { return apiClient.post(`${base}/shipping-reversals`, body); }
 }

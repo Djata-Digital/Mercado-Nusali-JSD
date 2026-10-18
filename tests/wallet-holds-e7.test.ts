@@ -15,7 +15,7 @@ import * as schema from '../src/db/schema.js';
 import { users, sellers, wallets, countries, sellerPayouts } from '../src/db/schema.js';
 import { getDb } from '../src/db/index.js';
 import { requestSellerPayout, processPayoutStatusChange, PayoutValidationError } from '../src/server/modules/wallet/payoutService.js';
-import { placeWalletHold, releaseWalletHold, getWalletBalances, listWalletHolds, WalletHoldError } from '../src/server/modules/wallet/walletHoldService.js';
+import { placeWalletHoldCore as placeWalletHold, releaseWalletHold as releaseCore, getWalletBalances, listWalletHolds, WalletHoldError } from '../src/server/modules/wallet/walletHoldService.js';
 import { computeSellerWalletSnapshot } from '../src/server/modules/seller/sellerFinancialsService.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -39,8 +39,9 @@ async function main() {
     await db.insert(wallets).values({ id: walletId, userId, currency, balance, cashbackBalance: '0.00', pendingBalance: '0.00', status: 'active', createdAt: new Date(), updatedAt: new Date() });
     return { userId, sellerId, walletId };
   };
-  const A1 = await mkUser('GLOBAL_ADMIN'), A2 = await mkUser('GLOBAL_ADMIN'), FIN = await mkUser('FINANCE'), SUP = await mkUser('SUPPORT');
-  const hold = (s: any, amount: string | number, ref: string, key?: string, actor = A1, extra: any = {}) => placeWalletHold({ walletId: s.walletId, amount, reason: 'Chargeback perdido em análise (teste)', referenceType: 'CHARGEBACK_ALLOCATION', referenceId: ref, actorUserId: actor, idempotencyKey: key ?? uid('hk'), ...extra });
+  const A1 = await mkUser('GLOBAL_ADMIN'), A2 = await mkUser('GLOBAL_ADMIN'), FIN = await mkUser('FINANCE'), RISK = await mkUser('RISK_ANALYST'), SUP = await mkUser('SUPPORT');
+  const release = (o: any) => releaseCore({ evidenceRef: 'EV-LIB-001', ...o });
+  const hold = (s: any, amount: string | number, ref: string, key?: string, actor = A1, extra: any = {}) => placeWalletHold({ walletId: s.walletId, amount, reason: 'Chargeback perdido em análise (teste)', evidenceRef: 'EV-TESTE-001', referenceType: 'CHARGEBACK_ALLOCATION', referenceId: ref, actorUserId: actor, idempotencyKey: key ?? uid('hk'), ...extra });
   const payout = (s: any, amount: number, key?: string) => requestSellerPayout({ sellerId: s.sellerId, sellerUserId: s.userId, amount, currency: 'XOF', method: 'wallet', idempotencyKey: key ?? uid('pk') });
   const err = async (fn: () => Promise<any>): Promise<any> => { try { await fn(); return null; } catch (e: any) { return e; } };
   const bal = async (s: any) => (await q(`select balance::text b from wallets where id=$1`, [s.walletId]))[0].b;
@@ -108,10 +109,10 @@ async function main() {
 
   // ---------------------------------------------------------------- liberação
   const s7 = await mkSeller('400.00'); const hr = await hold(s7, '250.00', 'REL-1');
-  const eShort = await err(() => releaseWalletHold({ holdId: hr.holdId, actorUserId: A1, reason: 'curto' }));
-  const eNone = await err(() => releaseWalletHold({ holdId: 'nao-existe', actorUserId: A1, reason: 'motivo suficientemente longo' }));
-  const rel = await releaseWalletHold({ holdId: hr.holdId, actorUserId: A2, reason: 'Contestação revertida a favor da loja (teste)' });
-  const rel2 = await releaseWalletHold({ holdId: hr.holdId, actorUserId: A2, reason: 'Contestação revertida a favor da loja (teste)' });
+  const eShort = await err(() => release({ holdId: hr.holdId, actorUserId: A1, reason: 'curto' }));
+  const eNone = await err(() => release({ holdId: 'nao-existe', actorUserId: A1, reason: 'motivo suficientemente longo' }));
+  const rel = await release({ holdId: hr.holdId, actorUserId: A2, reason: 'Contestação revertida a favor da loja (teste)' });
+  const rel2 = await release({ holdId: hr.holdId, actorUserId: A2, reason: 'Contestação revertida a favor da loja (teste)' });
   const row = (await q(`select status, released_by, released_at, release_reason from wallet_holds where id=$1`, [hr.holdId]))[0];
   report('H16 liberação: motivo curto e retenção inexistente recusados; liberar registra quem/quando/motivo; repetir é replay sem efeito; o valor volta a ser disponível', eShort?.code === 'REASON_REQUIRED' && eNone?.code === 'HOLD_NOT_FOUND' && rel.status === 'RELEASED' && rel.alreadyReleased === false && rel2.alreadyReleased === true && row.released_by === A2 && row.released_at && /revertida/.test(row.release_reason) && (await getWalletBalances(s7.walletId)).available === '400.00', { eShort: eShort?.code, rel2, row });
   const p7 = await payout(s7, 400);
@@ -121,16 +122,17 @@ async function main() {
 
   // ---------------------------------------------------------------- permissões e validações do ator
   const s8 = await mkSeller('300.00');
-  const denied = await Promise.all([FIN, SUP, s8.userId, 'inexistente'].map((a) => err(() => hold(s8, '10.00', `PERM-${a}`, undefined, a))));
+  const denied = await Promise.all([SUP, s8.userId, 'inexistente'].map((a) => err(() => hold(s8, '10.00', `PERM-${a}`, undefined, a))));
+  const finHold = await hold(s8, '10.00', 'PERM-FIN', undefined, FIN); const riskHold = await hold(s8, '10.00', 'PERM-RISK', undefined, RISK);
   const hOk = await hold(s8, '10.00', 'PERM-OK');
-  const deniedRel = await Promise.all([FIN, SUP, s8.userId].map((a) => err(() => releaseWalletHold({ holdId: hOk.holdId, actorUserId: a, reason: 'tentativa sem permissão alguma' }))));
+  const deniedRel = await Promise.all([FIN, RISK, SUP, s8.userId, A1].map((a) => err(() => release({ holdId: hOk.holdId, actorUserId: a, reason: 'tentativa sem permissão alguma' }))));
   const self = await mkSeller('300.00'); await db.update(users).set({ role: 'GLOBAL_ADMIN' }).where(eq(users.id, self.userId));
   const eSelf = await err(() => hold(self, '10.00', 'SELF', undefined, self.userId));
-  report('H19 permissões (provisórias: só GLOBAL_ADMIN): FINANCE, SUPPORT, o próprio vendedor e usuário inexistente não criam nem liberam; ninguém cria retenção na própria carteira; nada foi criado/alterado', denied.every((e) => e?.code === 'FORBIDDEN') && deniedRel.every((e) => e?.code === 'FORBIDDEN') && eSelf?.code === 'FORBIDDEN' && (await listWalletHolds({ walletId: s8.walletId })).length === 1 && (await listWalletHolds({ walletId: s8.walletId, status: 'ACTIVE' })).length === 1, { denied: denied.map((e) => e?.code), deniedRel: deniedRel.map((e) => e?.code), eSelf: eSelf?.code });
+  report('H19 permissões D1/D2: FINANCE, RISK_ANALYST e GLOBAL_ADMIN criam; SUPPORT, o próprio vendedor e usuário inexistente não; ninguém cria na própria carteira; só GLOBAL_ADMIN libera e NUNCA o criador (FOUR_EYES) — FINANCE/RISK_ANALYST/SUPPORT/vendedor = FORBIDDEN', denied.every((e) => e?.code === 'FORBIDDEN') && finHold.status === 'ACTIVE' && riskHold.status === 'ACTIVE' && deniedRel.map((e) => e?.code).join(',') === 'FORBIDDEN,FORBIDDEN,FORBIDDEN,FORBIDDEN,FOUR_EYES' && eSelf?.code === 'FORBIDDEN' && (await listWalletHolds({ walletId: s8.walletId, status: 'ACTIVE' })).length === 3, { denied: denied.map((e) => e?.code), deniedRel: deniedRel.map((e) => e?.code), eSelf: eSelf?.code });
   const inactive = await mkUser('GLOBAL_ADMIN'); await db.update(users).set({ isActive: false }).where(eq(users.id, inactive));
   report('H20 administrador desativado não cria retenção', (await err(() => hold(s8, '10.00', 'INACTIVE', undefined, inactive)))?.code === 'FORBIDDEN');
-  const eRef = await Promise.all([err(() => hold(s8, '10.00', 'X', undefined, A1, { referenceType: 'minusculo' })), err(() => hold(s8, '10.00', '', undefined, A1)), err(() => hold(s8, '10.00', 'X', undefined, A1, { reason: 'curto' })), err(() => hold(s8, '10.00', 'X', '   ', A1))]);
-  report('H21 entradas obrigatórias: tipo de referência em MAIÚSCULAS, referência, motivo ≥ 10 e idempotencyKey são exigidos', eRef.map((e) => e?.code).join(',') === 'REFERENCE_TYPE_INVALID,REFERENCE_REQUIRED,REASON_REQUIRED,IDEMPOTENCY_KEY_REQUIRED', eRef.map((e) => e?.code));
+  const eRef = await Promise.all([err(() => hold(s8, '10.00', 'X', undefined, A1, { referenceType: 'minusculo' })), err(() => hold(s8, '10.00', '', undefined, A1)), err(() => hold(s8, '10.00', 'X', undefined, A1, { reason: 'curto' })), err(() => hold(s8, '10.00', 'X', '   ', A1)), err(() => hold(s8, '10.00', 'X', undefined, A1, { evidenceRef: 'ab' }))]);
+  report('H21 entradas obrigatórias: tipo de referência em MAIÚSCULAS, referência, motivo ≥ 10 e idempotencyKey são exigidos', eRef.map((e) => e?.code).join(',') === 'REFERENCE_TYPE_INVALID,REFERENCE_REQUIRED,REASON_REQUIRED,IDEMPOTENCY_KEY_REQUIRED,EVIDENCE_REQUIRED', eRef.map((e) => e?.code));
 
   // ---------------------------------------------------------------- auditoria e rastreabilidade com o ledger sombra
   const aud = await q(`select action, actor_user_id, details_json from audit_logs where resource='wallet_hold' and resource_id=$1 order by created_at`, [hr.holdId]);
@@ -145,14 +147,14 @@ async function main() {
   // ---------------------------------------------------------------- regras no banco (defesa em profundidade)
   const s9 = await mkSeller('100.00'); const hd = await hold(s9, '40.00', 'DB-1');
   const sql1 = async (t: string, p: any[] = []) => { try { await pool.query(t, p); return null; } catch (e: any) { return String(e.message); } };
-  const ins = (amount: string, extra = '') => sql1(`insert into wallet_holds (id, wallet_id, currency, amount, status, reason, reference_type, reference_id, created_by, idempotency_key) values ($1,$2,'XOF',${amount},'ACTIVE','motivo direto no banco','DIRECT',$3,$4,$5)`, [uid('wh'), s9.walletId, uid('ref'), A1, uid('ik')]);
+  const ins = (amount: string, extra = '') => sql1(`insert into wallet_holds (id, wallet_id, currency, amount, status, reason, evidence_ref, reference_type, reference_id, created_by, idempotency_key) values ($1,$2,'XOF',${amount},'ACTIVE','motivo direto no banco','EV-DIRETA','DIRECT',$3,$4,$5)`, [uid('wh'), s9.walletId, uid('ref'), A1, uid('ik')]);
   const dbErrs = {
     negative: await ins('-1'), zero: await ins('0'), overBalance: await ins('60.01'), exactFree: await ins('60.00'),
     update: await sql1(`update wallet_holds set amount='1.00' where id=$1`, [hd.holdId]), del: await sql1(`delete from wallet_holds where id=$1`, [hd.holdId]),
     badRelease: await sql1(`update wallet_holds set status='RELEASED' where id=$1`, [hd.holdId]),
-    curr: await sql1(`insert into wallet_holds (id, wallet_id, currency, amount, status, reason, reference_type, reference_id, created_by, idempotency_key) values ($1,$2,'BRL','1.00','ACTIVE','x','DIRECT',$3,$4,$5)`, [uid('wh'), s9.walletId, uid('ref'), A1, uid('ik')]),
+    curr: await sql1(`insert into wallet_holds (id, wallet_id, currency, amount, status, reason, evidence_ref, reference_type, reference_id, created_by, idempotency_key) values ($1,$2,'BRL','1.00','ACTIVE','x','EV-DIRETA','DIRECT',$3,$4,$5)`, [uid('wh'), s9.walletId, uid('ref'), A1, uid('ik')]),
   };
-  await releaseWalletHold({ holdId: hd.holdId, actorUserId: A1, reason: 'liberando para testar imutabilidade' });
+  await release({ holdId: hd.holdId, actorUserId: A2, reason: 'liberando para testar imutabilidade' });
   const afterRel = { reactivate: await sql1(`update wallet_holds set status='ACTIVE', released_by=null, released_at=null, release_reason=null where id=$1`, [hd.holdId]), del: await sql1(`delete from wallet_holds where id=$1`, [hd.holdId]), edit: await sql1(`update wallet_holds set reason='reescrito' where id=$1`, [hd.holdId]) };
   report('H25 banco: valor ≤ 0 e retido > saldo recusados; exatamente o livre aceito; moeda diferente, edição, DELETE e liberação sem motivo recusados; retenção liberada não reativa, não edita, não apaga', !!dbErrs.negative && !!dbErrs.zero && /excederia o saldo/.test(dbErrs.overBalance ?? '') && dbErrs.exactFree === null && /moeda/.test(dbErrs.curr ?? '') && !!dbErrs.update && /imutáveis|só é permitido liberar/.test(dbErrs.update ?? '') && !!dbErrs.del && !!dbErrs.badRelease && !!afterRel.reactivate && !!afterRel.del && !!afterRel.edit, { dbErrs, afterRel });
 

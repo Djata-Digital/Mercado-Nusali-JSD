@@ -101,7 +101,7 @@ async function requireRole(tx: any, userId: string, allowed: string[], what: str
   return role;
 }
 /** Quem decide não pode ser comprador, vendedor (nem membro da loja) de nenhum pedido do caso. */
-async function assertNoConflictOfInterest(tx: any, actorUserId: string, orderIds: string[]): Promise<void> {
+export async function assertNoConflictOfInterest(tx: any, actorUserId: string, orderIds: string[]): Promise<void> {
   if (orderIds.length === 0) return;
   const os = await tx.select({ buyerId: orders.buyerId, sellerId: orders.sellerId, storeId: orders.storeId }).from(orders).where(inArray(orders.id, orderIds));
   if (os.some((o: any) => o.buyerId === actorUserId)) throw new ChargebackLedgerError('CONFLICT_OF_INTEREST', 'O usuário é o comprador de um pedido do caso — não pode decidir.');

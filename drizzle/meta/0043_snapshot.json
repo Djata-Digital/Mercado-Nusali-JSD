@@ -1,5 +1,5 @@
 {
-  "id": "e55bcf7d-2511-4a88-a61a-b21fc7f561cd",
+  "id": "ce4c4350-c679-49f1-8e17-71d2e817b9b6",
   "prevId": "9c650473-5db5-4193-b093-d76be3f7bc99",
   "version": "7",
   "dialect": "postgresql",
@@ -14965,6 +14965,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "evidence_ref": {
+          "name": "evidence_ref",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "reference_type": {
           "name": "reference_type",
           "type": "varchar(60)",
@@ -15016,6 +15022,12 @@
         },
         "release_reason": {
           "name": "release_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "release_evidence_ref": {
+          "name": "release_evidence_ref",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -15150,7 +15162,15 @@
         },
         "wallet_holds_release_check": {
           "name": "wallet_holds_release_check",
-          "value": "(\"wallet_holds\".\"status\" = 'ACTIVE' AND \"wallet_holds\".\"released_by\" IS NULL AND \"wallet_holds\".\"released_at\" IS NULL AND \"wallet_holds\".\"release_reason\" IS NULL) OR (\"wallet_holds\".\"status\" = 'RELEASED' AND \"wallet_holds\".\"released_by\" IS NOT NULL AND \"wallet_holds\".\"released_at\" IS NOT NULL AND length(btrim(\"wallet_holds\".\"release_reason\")) >= 10)"
+          "value": "(\"wallet_holds\".\"status\" = 'ACTIVE' AND \"wallet_holds\".\"released_by\" IS NULL AND \"wallet_holds\".\"released_at\" IS NULL AND \"wallet_holds\".\"release_reason\" IS NULL AND \"wallet_holds\".\"release_evidence_ref\" IS NULL) OR (\"wallet_holds\".\"status\" = 'RELEASED' AND \"wallet_holds\".\"released_by\" IS NOT NULL AND \"wallet_holds\".\"released_at\" IS NOT NULL AND COALESCE(length(btrim(\"wallet_holds\".\"release_reason\")), 0) >= 10 AND COALESCE(length(btrim(\"wallet_holds\".\"release_evidence_ref\")), 0) >= 5)"
+        },
+        "wallet_holds_four_eyes_check": {
+          "name": "wallet_holds_four_eyes_check",
+          "value": "\"wallet_holds\".\"released_by\" IS NULL OR \"wallet_holds\".\"released_by\" <> \"wallet_holds\".\"created_by\""
+        },
+        "wallet_holds_evidence_check": {
+          "name": "wallet_holds_evidence_check",
+          "value": "COALESCE(length(btrim(\"wallet_holds\".\"evidence_ref\")), 0) >= 5"
         }
       },
       "isRLSEnabled": false

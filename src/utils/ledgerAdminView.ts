@@ -23,6 +23,14 @@ export const PARTY_LABEL: Record<string, string> = { SELLER: 'Vendedor', NUSALI:
 export const STAGE_LABEL: Record<string, string> = { BEFORE_RELEASE: 'Antes da liberação (Escrow absorve)', AFTER_RELEASE: 'Depois da liberação (perda pendente)' };
 export const DECISION_STATUS_LABEL: Record<string, string> = { PROPOSED: 'Proposta', APPROVED: 'Aprovada', SUPERSEDED: 'Substituída', REJECTED: 'Rejeitada' };
 
+export const HOLD_STATE_LABEL: Record<string, string> = {
+  OK: 'Coberta pela obrigação', RELEASED: 'Liberada', CHARGEBACK_NOT_LOST: 'Chargeback deixou de estar perdido', NO_APPROVED_OBLIGATION: 'Sem decisão aprovada vigente',
+  EXCEEDS_APPROVED_OBLIGATION: 'Acima da responsabilidade aprovada vigente', EXCEEDS_ORDER_NET_CAP: 'Acima do líquido (N) do pedido', UNSUPPORTED_REFERENCE: 'Referência não suportada',
+};
+/** estados que exigem atenção do administrador (a retenção NUNCA é alterada sozinha) */
+export const holdStateNeedsAttention = (s?: string) => !!s && !['OK', 'RELEASED'].includes(s);
+export const holdStateClass = (s?: string) => (s === 'OK' ? 'bg-emerald-100 text-emerald-800' : s === 'RELEASED' ? 'bg-gray-200 text-gray-700' : 'bg-rose-100 text-rose-800');
+
 export const severityClass = (s: string) => (s === 'CRITICAL' ? 'bg-rose-100 text-rose-800' : s === 'WARNING' ? 'bg-amber-100 text-amber-800' : 'bg-sky-100 text-sky-800');
 export const eventStatusClass = (s: string) => (s === 'DONE' ? 'bg-emerald-100 text-emerald-800' : s === 'NEEDS_INTERVENTION' ? 'bg-rose-100 text-rose-800' : s === 'RETRYING' || s === 'PROCESSING' ? 'bg-amber-100 text-amber-800' : s === 'DISMISSED' ? 'bg-gray-200 text-gray-700' : 'bg-sky-100 text-sky-800');
 
@@ -67,8 +75,19 @@ const ERROR_TEXT: Record<string, string> = {
   CHARGEBACK_NOT_LOST: 'Só se decide responsabilidade sobre valor efetivamente debitado (chargeback perdido).',
   CONFIRMATION_REQUIRED: 'Confirme explicitamente para aplicar.',
   PROPOSAL_ALREADY_OPEN: 'Já existe uma proposta aberta para este chargeback.',
+  NO_APPROVED_OBLIGATION: 'Não há decisão de responsabilidade APROVADA com valor do vendedor para esta alocação.',
+  HOLD_NOT_ALLOWED: 'Só há retenção para perda depois da liberação, sem sobreposição com reembolso.',
+  EXCEEDS_APPROVED_OBLIGATION: 'A retenção acumulada excederia a responsabilidade aprovada vigente do vendedor.',
+  EXCEEDS_ORDER_NET_CAP: 'A retenção acumulada no pedido excederia o valor líquido (N) do vendedor.',
+  INSUFFICIENT_UNHELD_BALANCE: 'Saldo livre insuficiente: não há retenção parcial automática — informe um valor que caiba no saldo livre.',
+  DUPLICATE_ACTIVE_HOLD: 'Já existe uma retenção ativa para esta alocação. Libere-a (outro Administrador Geral) para criar outra com novo valor.',
   REVISION_AFTER_SETTLEMENT_NOT_SUPPORTED: 'Já há recuperação/baixa registrada: a revisão não é suportada.',
 };
+/** Retenções: o servidor já devolve a mensagem exata (inclusive valores); usa-a antes do texto genérico. */
+export function holdErrorMessage(e: any): string {
+  const msg = e?.response?.data?.error?.message ?? e?.error?.message;
+  return msg ? String(msg) : ledgerErrorMessage(e);
+}
 export function ledgerErrorMessage(e: any): string {
   const code = e?.response?.data?.error?.code ?? e?.error?.code ?? e?.code;
   const msg = e?.response?.data?.error?.message ?? e?.error?.message ?? e?.message;

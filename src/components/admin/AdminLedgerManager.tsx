@@ -4,7 +4,7 @@ import { useAuth } from '../../context/AuthContext';
 import { LedgerAdminApi, type Page } from '../../api/clients/LedgerAdminApi';
 import {
   CAUSE_LABEL, DECISION_STATUS_LABEL, EVENT_STATUS_LABEL, FINDING_STATUS_LABEL, PARTY_LABEL, SEVERITY_LABEL, STAGE_LABEL, TX_TYPES, TX_TYPE_LABEL,
-  canAdminLedger, canReadLedger, eventStatusClass, fmtDate, fmtMoney, ledgerErrorMessage, minLen, newIdempotencyKey, parseMoney, severityClass,
+  HOLD_STATE_LABEL, canAdminLedger, canReadLedger, eventStatusClass, fmtDate, fmtMoney, holdErrorMessage, holdStateClass, holdStateNeedsAttention, ledgerErrorMessage, minLen, newIdempotencyKey, parseMoney, severityClass,
 } from '../../utils/ledgerAdminView';
 
 /**
@@ -13,10 +13,10 @@ import {
  * (quatro olhos, teto N do vendedor, evidências, auditoria, idempotência) e a autorização por perfil são do SERVIDOR. A tela só esconde o que o perfil não pode usar.
  */
 interface Props { showToast: (msg: string) => void }
-type Tab = 'summary' | 'transactions' | 'outbox' | 'findings' | 'chargebacks' | 'shipping';
+type Tab = 'summary' | 'transactions' | 'outbox' | 'findings' | 'chargebacks' | 'holds' | 'shipping';
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'summary', label: 'Resumo' }, { id: 'transactions', label: 'Lançamentos' }, { id: 'outbox', label: 'Eventos (outbox)' },
-  { id: 'findings', label: 'Divergências' }, { id: 'chargebacks', label: 'Chargebacks' }, { id: 'shipping', label: 'Reversão de frete' },
+  { id: 'findings', label: 'Divergências' }, { id: 'chargebacks', label: 'Chargebacks' }, { id: 'holds', label: 'Retenções de saldo' }, { id: 'shipping', label: 'Reversão de frete' },
 ];
 
 const card = 'bg-white rounded-2xl border border-gray-200 shadow-xs';
@@ -411,6 +411,7 @@ const ChargebacksView: React.FC<{ isAdmin: boolean; userId?: string; showToast: 
               <button className={`${btnGhost} mt-2`} onClick={() => setForm(form === 'decision' ? null : 'decision')}>{approved ? 'Propor revisão' : 'Propor decisão'}</button>)}
             {form === 'decision' && <DecisionForm detail={detail} revising={!!approved} onDone={async () => { setForm(null); showToast('Proposta registrada. Aguarda aprovação de outro Administrador Geral.'); await refresh(); }} />}
           </section>
+          {approved && <AllocationHoldsSection detail={detail} approved={approved} showToast={showToast} />}
           {approved && (<section><h4 className="font-black text-xs text-gray-800 mb-1">Recuperação / baixa de terceiro</h4>
             {detail.recoveries.length > 0 && <ul className="text-[11px] space-y-0.5 mb-2">{detail.recoveries.map((r: any) => <li key={r.id}>{fmtDate(r.created_at)} · {r.kind === 'RECOVERY' ? 'Recuperação' : 'Baixa'} · {r.party_ref} · {fmtMoney(r.amount, r.currency)} · {r.evidence_ref}</li>)}</ul>}
             {isAdmin ? (<><button className={btnGhost} onClick={() => setForm(form === 'settle' ? null : 'settle')}>Registrar recuperação ou baixa</button>
@@ -523,6 +524,133 @@ const SettleForm: React.FC<{ detail: any; approved: any; onDone: () => Promise<v
 // =================================================================================================================================================
 // Reversão de custo de frete
 // =================================================================================================================================================
+// =================================================================================================================================================
+// E7 — Retenções de saldo (separam parte do saldo do vendedor; NÃO debitam, NÃO transferem, NÃO lançam no ledger sombra; saque anterior não é alterado)
+// =================================================================================================================================================
+const HOLD_NOTICE = 'Retenção separa parte do saldo do vendedor para que não seja sacada. Não debita a carteira, não transfere valores à Nusali nem a terceiros, não gera lançamento no ledger sombra e não altera saques já solicitados.';
+
+/** Libera uma retenção: motivo + evidência obrigatórios (o servidor exige GLOBAL_ADMIN diferente de quem criou). */
+const ReleaseHoldModal: React.FC<{ onCancel: () => void; onConfirm: (reason: string, evidenceRef: string) => Promise<void> }> = ({ onCancel, onConfirm }) => {
+  const [reason, setReason] = useState(''); const [ev, setEv] = useState(''); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  return (
+    <div className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Liberar retenção">
+      <div className="bg-white rounded-2xl p-5 w-full max-w-md space-y-3 shadow-2xl">
+        <h3 className="font-black text-sm text-gray-900">Liberar retenção de saldo</h3>
+        <p className="text-[11px] text-gray-600">O valor volta a ficar disponível para saque. Nada é movido. Motivo e evidência ficam auditados; quem criou a retenção não pode liberá-la.</p>
+        <Field label="Motivo (mínimo 10 caracteres)"><textarea className={`${input} h-20`} value={reason} onChange={(e) => setReason(e.target.value)} aria-label="Motivo" /></Field>
+        <Field label="Evidência (protocolo/documento, mínimo 5 caracteres)"><input className={input} value={ev} onChange={(e) => setEv(e.target.value)} aria-label="Evidência" /></Field>
+        {err && <div className="text-[11px] text-rose-700 font-bold" role="alert">{err}</div>}
+        <div className="flex justify-end gap-2">
+          <button className={btnGhost} onClick={onCancel} disabled={busy}>Cancelar</button>
+          <button className={btnDanger} disabled={busy || !minLen(reason, 10) || !minLen(ev, 5)} onClick={async () => { setBusy(true); setErr(null); try { await onConfirm(reason.trim(), ev.trim()); } catch (e) { setErr(holdErrorMessage(e)); setBusy(false); } }}>{busy ? 'Enviando…' : 'Liberar retenção'}</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const HoldsView: React.FC<{ isAdmin: boolean; userId?: string; showToast: (m: string) => void }> = ({ isAdmin, userId, showToast }) => {
+  const p = usePaged(LedgerAdminApi.walletHolds, { status: 'ACTIVE', olderThanDays: '', orderId: '' });
+  const [detail, setDetail] = useState<any>(null); const [dErr, setDErr] = useState<string | null>(null); const [rel, setRel] = useState<string | null>(null);
+  const f = p.filters; const set = (k: string, v: string) => p.setFilters({ ...f, [k]: v });
+  const open = async (id: string) => { setDErr(null); try { const r = await LedgerAdminApi.walletHold(id); if (!r.success) throw new Error(r.error?.message); setDetail(r.data); } catch (e) { setDErr(holdErrorMessage(e)); } };
+  return (
+    <div className="space-y-3">
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-[11px] text-amber-900 flex gap-2"><ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" /><span>{HOLD_NOTICE} Não existe expiração automática: use o filtro de idade para achar retenções antigas. A retenção é criada na aba Chargebacks, em uma alocação com decisão de responsabilidade aprovada.</span></div>
+      <div className={`${card} p-4 grid grid-cols-2 md:grid-cols-4 gap-2 items-end`}>
+        <Field label="Estado"><select className={input} value={f.status} onChange={(e) => set('status', e.target.value)}><option value="">Todos</option><option value="ACTIVE">Ativas</option><option value="RELEASED">Liberadas</option></select></Field>
+        <Field label="Mais antigas que (dias)"><input type="number" min="0" className={input} value={f.olderThanDays} onChange={(e) => set('olderThanDays', e.target.value)} /></Field>
+        <Field label="Pedido"><input className={input} value={f.orderId} onChange={(e) => set('orderId', e.target.value)} /></Field>
+        <button className={`${btnPrimary} flex items-center justify-center gap-1`} onClick={p.apply}><Search className="w-3.5 h-3.5" /> Filtrar</button>
+      </div>
+      <ErrorBox message={p.error} onRetry={p.reload} />
+      <div className={`${card} p-3`}>
+        {p.loading && !p.page ? <Loading /> : !p.page || p.page.items.length === 0 ? <Empty>Nenhuma retenção com estes filtros.</Empty> : (
+          <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Criada</th><th>Idade</th><th>Pedido</th><th className="text-right">Valor</th><th>Estado</th><th>Cobertura</th></tr></thead><tbody>
+            {p.page.items.map((h: any) => (
+              <tr key={h.id} className="border-t border-gray-100 hover:bg-emerald-50 cursor-pointer" onClick={() => open(h.id)}>
+                <td className="py-1.5">{fmtDate(h.created_at)}</td><td>{h.assessment.ageDays} d</td><td><Mono>{h.order_id ?? '—'}</Mono></td><td className="text-right font-bold">{fmtMoney(h.amount, h.currency)}</td><td>{h.status === 'ACTIVE' ? 'Ativa' : 'Liberada'}</td>
+                <td><Badge cls={holdStateClass(h.assessment.state)}>{HOLD_STATE_LABEL[h.assessment.state] ?? h.assessment.state}</Badge></td>
+              </tr>))}
+          </tbody></table></div>)}
+        <Pager page={p.page} onOffset={p.setOffset} />
+      </div>
+      <ErrorBox message={dErr} />
+      {detail && (
+        <div className={`${card} p-4 space-y-3`}>
+          <div className="flex items-start justify-between gap-2">
+            <div><h3 className="font-black text-sm text-gray-900">Retenção <Mono>{detail.hold.id}</Mono></h3><div className="text-[11px] text-gray-500">{fmtMoney(detail.hold.amount, detail.hold.currency)} · {detail.hold.status === 'ACTIVE' ? 'Ativa' : 'Liberada'} · criada {fmtDate(detail.hold.created_at)} por <Mono>{detail.hold.created_by}</Mono> · {detail.assessment.ageDays} dia(s)</div></div>
+            <button className={btnGhost} onClick={() => setDetail(null)} aria-label="Fechar"><X className="w-3.5 h-3.5" /></button>
+          </div>
+          {holdStateNeedsAttention(detail.assessment.state) && (
+            <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 text-[11px] text-rose-900" role="alert"><b>{HOLD_STATE_LABEL[detail.assessment.state]}.</b> A obrigação mudou depois da retenção (responsabilidade aprovada vigente: {detail.assessment.approvedObligation ?? '—'}; retido na alocação: {detail.assessment.heldOnAllocation ?? '—'}; líquido N do pedido: {detail.assessment.orderNet ?? '—'}). Nada foi alterado automaticamente: avalie e, se couber, libere a retenção.</div>)}
+          <div className="grid md:grid-cols-3 gap-2 text-xs">
+            <div className="rounded-xl border border-gray-200 p-2"><div className="text-[10px] font-bold text-gray-500 uppercase">Saldo total</div><b>{fmtMoney(detail.balances.total, detail.hold.currency)}</b></div>
+            <div className="rounded-xl border border-gray-200 p-2"><div className="text-[10px] font-bold text-gray-500 uppercase">Retido</div><b>{fmtMoney(detail.balances.held, detail.hold.currency)}</b></div>
+            <div className="rounded-xl border border-gray-200 p-2"><div className="text-[10px] font-bold text-gray-500 uppercase">Disponível para saque</div><b>{fmtMoney(detail.balances.available, detail.hold.currency)}</b></div>
+          </div>
+          <div className="text-[11px] space-y-1">
+            <div><b>Motivo:</b> {detail.hold.reason}</div><div><b>Evidência:</b> {detail.hold.evidence_ref}</div>
+            <div><b>Referência:</b> {detail.hold.reference_type} <Mono>{detail.hold.reference_id}</Mono>{detail.hold.ledger_transaction_id && <> · lançamento do chargeback <Mono>{detail.hold.ledger_transaction_id}</Mono> (só referência)</>}</div>
+            {detail.hold.status === 'RELEASED' && <div><b>Liberada</b> por <Mono>{detail.hold.released_by}</Mono> em {fmtDate(detail.hold.released_at)} — {detail.hold.release_reason} (evidência: {detail.hold.release_evidence_ref})</div>}
+          </div>
+          {detail.audit.length > 0 && <div><div className="text-[11px] font-bold text-gray-600 mb-1">Auditoria</div><ul className="text-[11px] space-y-1">{detail.audit.map((a: any, i: number) => <li key={i}>{fmtDate(a.created_at)} · {a.action} · <Mono>{a.actor_user_id}</Mono></li>)}</ul></div>}
+          {detail.hold.status === 'ACTIVE' && (isAdmin
+            ? <div className="flex items-center gap-2"><button className={btnDanger} disabled={detail.hold.created_by === userId} title={detail.hold.created_by === userId ? 'Quem criou não pode liberar' : ''} onClick={() => setRel(detail.hold.id)}>Liberar retenção</button>{detail.hold.created_by === userId && <span className="text-[10px] text-gray-500">Você criou esta retenção: outro Administrador Geral precisa liberá-la.</span>}</div>
+            : <p className="text-[10px] text-gray-500">Liberar retenções é restrito ao Administrador Geral (diferente de quem criou).</p>)}
+        </div>)}
+      {rel && <ReleaseHoldModal onCancel={() => setRel(null)} onConfirm={async (reason, evidenceRef) => { const r = await LedgerAdminApi.releaseWalletHold(rel, { reason, evidenceRef }); if (!r.success) throw new Error(r.error?.message); showToast('Retenção liberada.'); setRel(null); setDetail(null); p.reload(); }} />}
+    </div>
+  );
+};
+
+/** Dentro do detalhe do chargeback: retenções da alocação e solicitação de nova retenção (só com decisão APROVADA com valor do vendedor). */
+const AllocationHoldsSection: React.FC<{ detail: any; approved: any; showToast: (m: string) => void }> = ({ detail, approved, showToast }) => {
+  const targets = detail.allocations.filter((a: any) => a.release_stage === 'AFTER_RELEASE' && !a.overlap_refund && approved.lines.some((l: any) => l.party_type === 'SELLER' && l.allocation_id === a.id));
+  const [open, setOpen] = useState<string | null>(null); const [tick, setTick] = useState(0);
+  if (detail.chargeback.local_status !== 'lost' || targets.length === 0) return null;
+  return (
+    <section><h4 className="font-black text-xs text-gray-800 mb-1">Retenção de saldo do vendedor</h4>
+      <p className="text-[10px] text-gray-500 mb-2">{HOLD_NOTICE} Só por solicitação explícita; limitada à responsabilidade aprovada do vendedor, ao líquido (N) do pedido e ao saldo livre (sem retenção parcial automática).</p>
+      {targets.map((a: any) => {
+        const sellerAmt = approved.lines.filter((l: any) => l.party_type === 'SELLER' && l.allocation_id === a.id).reduce((acc: number, l: any) => acc + Number(l.amount), 0);
+        return (
+          <div key={a.id} className="border border-gray-200 rounded-xl p-3 mb-2 space-y-2">
+            <div className="text-[11px]">Pedido <Mono>{a.order_id}</Mono> — responsabilidade aprovada do vendedor <b>{fmtMoney(sellerAmt, detail.chargeback.currency)}</b> (líquido N {a.seller_net_amount != null ? fmtMoney(a.seller_net_amount, detail.chargeback.currency) : '—'})</div>
+            <AllocationHoldList key={tick} allocationId={a.id} currency={detail.chargeback.currency} />
+            <button className={btnGhost} onClick={() => setOpen(open === a.id ? null : a.id)}>Reter saldo do vendedor</button>
+            {open === a.id && <HoldRequestForm allocationId={a.id} maxAmount={sellerAmt} currency={detail.chargeback.currency} onDone={() => { setOpen(null); setTick((t) => t + 1); showToast('Retenção registrada. O valor não pode mais ser sacado.'); }} />}
+          </div>);
+      })}
+    </section>
+  );
+};
+const AllocationHoldList: React.FC<{ allocationId: string; currency: string }> = ({ allocationId, currency }) => {
+  const [items, setItems] = useState<any[] | null>(null); const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { let on = true; LedgerAdminApi.walletHolds({ allocationId, limit: 20 }).then((r) => { if (on) { if (r.success && r.data) setItems(r.data.items); else setErr('Não foi possível carregar as retenções.'); } }).catch((e) => on && setErr(holdErrorMessage(e))); return () => { on = false; }; }, [allocationId]);
+  if (err) return <ErrorBox message={err} />;
+  if (!items) return <div className="text-[11px] text-gray-500">Carregando retenções…</div>;
+  if (items.length === 0) return <div className="text-[11px] text-gray-500">Nenhuma retenção para esta alocação.</div>;
+  return (<ul className="text-[11px] space-y-1">{items.map((h) => (<li key={h.id} className="flex flex-wrap items-center gap-2"><b>{fmtMoney(h.amount, currency)}</b><span>{h.status === 'ACTIVE' ? 'Ativa' : 'Liberada'}</span><Badge cls={holdStateClass(h.assessment.state)}>{HOLD_STATE_LABEL[h.assessment.state] ?? h.assessment.state}</Badge><span className="text-gray-500">{fmtDate(h.created_at)}</span><Mono>{h.id}</Mono></li>))}</ul>);
+};
+const HoldRequestForm: React.FC<{ allocationId: string; maxAmount: number; currency: string; onDone: () => void }> = ({ allocationId, maxAmount, currency, onDone }) => {
+  const [amount, setAmount] = useState(''); const [reason, setReason] = useState(''); const [ev, setEv] = useState(''); const [key] = useState(() => newIdempotencyKey('wallet-hold')); const [ask, setAsk] = useState(false);
+  const amt = parseMoney(amount);
+  const tooHigh = !!amt && Number(amt) > maxAmount + 0.005;
+  return (
+    <div className="border border-gray-200 rounded-xl p-3 space-y-2">
+      <Field label={`Valor a reter (até ${fmtMoney(maxAmount, currency)})`}><input className={input} value={amount} onChange={(e) => setAmount(e.target.value)} aria-label="Valor a reter" /></Field>
+      {tooHigh && <div className="text-[11px] font-bold text-rose-700">Acima da responsabilidade aprovada do vendedor.</div>}
+      <Field label="Motivo (mínimo 10 caracteres)"><input className={input} value={reason} onChange={(e) => setReason(e.target.value)} aria-label="Motivo da retenção" /></Field>
+      <Field label="Evidência da solicitação (decisão, protocolo… mínimo 5 caracteres)"><input className={input} value={ev} onChange={(e) => setEv(e.target.value)} aria-label="Evidência da retenção" /></Field>
+      <button className={btnPrimary} disabled={!amt || tooHigh || !minLen(reason, 10) || !minLen(ev, 5)} onClick={() => setAsk(true)}>Reter</button>
+      {ask && <ConfirmModal title="Reter saldo do vendedor" confirmLabel="Confirmar retenção" onCancel={() => setAsk(false)}
+        lines={[`Reter ${fmtMoney(amt ?? 0, currency)} do saldo livre do vendedor (alocação ${allocationId}).`, `Evidência: ${ev.trim()}`, 'O valor deixa de poder ser sacado até a liberação por outro Administrador Geral. Não debita a carteira, não transfere dinheiro, não gera lançamento no ledger sombra e não altera saques já solicitados.']}
+        onConfirm={async () => { try { const r = await LedgerAdminApi.placeWalletHold(allocationId, { amount: amt!, reason: reason.trim(), evidenceRef: ev.trim(), idempotencyKey: key }); if (!r.success) throw new Error(r.error?.message); setAsk(false); onDone(); } catch (e) { throw new Error(holdErrorMessage(e)); } }} />}
+    </div>
+  );
+};
+
 const ShippingView: React.FC<{ isAdmin: boolean; showToast: (m: string) => void }> = ({ isAdmin, showToast }) => {
   const p = usePaged(LedgerAdminApi.shippingReversals, { orderId: '' });
   const [orderId, setOrderId] = useState(''); const [amount, setAmount] = useState(''); const [evidenceRef, setEvidenceRef] = useState(''); const [reason, setReason] = useState('');
@@ -594,6 +722,7 @@ const LedgerInner: React.FC<{ isAdmin: boolean; userId?: string; showToast: (m: 
       {tab === 'outbox' && <OutboxView isAdmin={isAdmin} showToast={showToast} />}
       {tab === 'findings' && <FindingsView isAdmin={isAdmin} showToast={showToast} />}
       {tab === 'chargebacks' && <ChargebacksView isAdmin={isAdmin} userId={userId} showToast={showToast} />}
+      {tab === 'holds' && <HoldsView isAdmin={isAdmin} userId={userId} showToast={showToast} />}
       {tab === 'shipping' && <ShippingView isAdmin={isAdmin} showToast={showToast} />}
     </div>
   );

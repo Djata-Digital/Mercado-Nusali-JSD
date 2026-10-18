@@ -2772,6 +2772,8 @@ export const walletHolds = pgTable('wallet_holds', {
   amount: numeric('amount', { precision: 15, scale: 2 }).notNull(),
   status: varchar('status', { length: 20 }).notNull().default('ACTIVE'), // ACTIVE, RELEASED
   reason: text('reason').notNull(),
+  // evidência da solicitação (protocolo, documento, decisão…): obrigatória
+  evidenceRef: text('evidence_ref').notNull(),
   // referência do que justifica a retenção (ex.: CHARGEBACK_ALLOCATION/<id>, DISPUTE/<id>, ORDER/<id>): UMA retenção ativa por (carteira, referência)
   referenceType: varchar('reference_type', { length: 60 }).notNull(),
   referenceId: varchar('reference_id', { length: 255 }).notNull(),
@@ -2783,11 +2785,15 @@ export const walletHolds = pgTable('wallet_holds', {
   releasedBy: varchar('released_by', { length: 255 }).references(() => users.id, { onDelete: 'restrict' }),
   releasedAt: timestamp('released_at'),
   releaseReason: text('release_reason'),
+  releaseEvidenceRef: text('release_evidence_ref'),
 }, (table) => ({
   wallet_holds_idempotency_uq: uniqueIndex('wallet_holds_idempotency_uq').on(table.idempotencyKey),
   wallet_holds_active_ref_uq: uniqueIndex('wallet_holds_active_ref_uq').on(table.walletId, table.referenceType, table.referenceId).where(sql`${table.status} = 'ACTIVE'`),
   wallet_holds_wallet_active_idx: index('wallet_holds_wallet_active_idx').on(table.walletId).where(sql`${table.status} = 'ACTIVE'`),
   wallet_holds_amount_check: check('wallet_holds_amount_check', sql`${table.amount} > 0`),
   wallet_holds_status_check: check('wallet_holds_status_check', sql`${table.status} IN ('ACTIVE','RELEASED')`),
-  wallet_holds_release_check: check('wallet_holds_release_check', sql`(${table.status} = 'ACTIVE' AND ${table.releasedBy} IS NULL AND ${table.releasedAt} IS NULL AND ${table.releaseReason} IS NULL) OR (${table.status} = 'RELEASED' AND ${table.releasedBy} IS NOT NULL AND ${table.releasedAt} IS NOT NULL AND length(btrim(${table.releaseReason})) >= 10)`),
+  wallet_holds_release_check: check('wallet_holds_release_check', sql`(${table.status} = 'ACTIVE' AND ${table.releasedBy} IS NULL AND ${table.releasedAt} IS NULL AND ${table.releaseReason} IS NULL AND ${table.releaseEvidenceRef} IS NULL) OR (${table.status} = 'RELEASED' AND ${table.releasedBy} IS NOT NULL AND ${table.releasedAt} IS NOT NULL AND COALESCE(length(btrim(${table.releaseReason})), 0) >= 10 AND COALESCE(length(btrim(${table.releaseEvidenceRef})), 0) >= 5)`),
+  // quatro olhos também no banco: quem libera nunca é quem criou
+  wallet_holds_four_eyes_check: check('wallet_holds_four_eyes_check', sql`${table.releasedBy} IS NULL OR ${table.releasedBy} <> ${table.createdBy}`),
+  wallet_holds_evidence_check: check('wallet_holds_evidence_check', sql`COALESCE(length(btrim(${table.evidenceRef})), 0) >= 5`),
 }));

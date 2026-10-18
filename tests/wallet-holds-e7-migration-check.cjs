@@ -22,10 +22,10 @@ let bad = 0; const chk = (l, ok, d) => { if (!ok) bad++; console.log(`${ok ? 'OK
   await migrate(drizzle(pool), { migrationsFolder: path.join(root, 'drizzle') });
   const after = await mig();
   chk(`migrador oficial aplicou as migrações pendentes (${before} -> ${after}); a última é a 0043`, after > before && (await q(`select count(*)::int n from drizzle.__drizzle_migrations where created_at = ${when}`))[0].n === 1);
-  chk('tabela criada com as 15 colunas', (await has()) && (await q(`select count(*)::int n from information_schema.columns where table_name='wallet_holds'`))[0].n === 15);
+  chk('tabela criada com as 17 colunas (inclui evidência da retenção e da liberação)', (await has()) && (await q(`select count(*)::int n from information_schema.columns where table_name='wallet_holds'`))[0].n === 17);
   const idx = (await q(`select indexname, indexdef from pg_indexes where tablename='wallet_holds'`));
   chk('índices: idempotência única, UMA retenção ativa por (carteira, referência) e índice de ativas por carteira', ['wallet_holds_idempotency_uq', 'wallet_holds_active_ref_uq', 'wallet_holds_wallet_active_idx'].every((n) => idx.some((i) => i.indexname === n)) && /WHERE/.test(idx.find((i) => i.indexname === 'wallet_holds_active_ref_uq')?.indexdef ?? ''), idx.map((i) => i.indexname));
-  chk('CHECKs: valor > 0, estados ACTIVE/RELEASED e coerência da liberação', (await q(`select count(*)::int n from pg_constraint where conname in ('wallet_holds_amount_check','wallet_holds_status_check','wallet_holds_release_check')`))[0].n === 3);
+  chk('CHECKs: valor > 0, estados ACTIVE/RELEASED, coerência da liberação (motivo + evidência), quatro olhos e evidência da criação', (await q(`select count(*)::int n from pg_constraint where conname in ('wallet_holds_amount_check','wallet_holds_status_check','wallet_holds_release_check','wallet_holds_four_eyes_check','wallet_holds_evidence_check')`))[0].n === 5);
   chk('trigger de guarda habilitado (INSERT/UPDATE/DELETE)', (await q(`select count(*)::int n from pg_trigger where tgname='nusali_wallet_hold_trg_guard' and tgenabled='O'`))[0].n === 1);
   chk('triggers do ledger (8), do outbox e do frete/chargebacks intactos', (await q(`select count(*)::int n from pg_trigger where tgname like 'nusali_ledger_trg_%'`))[0].n === 8);
 
@@ -39,17 +39,20 @@ let bad = 0; const chk = (l, ok, d) => { if (!ok) bad++; console.log(`${ok ? 'OK
   chk('reaplicação após o rollback funciona', (await has()) && (await mig()) === after);
 
   // com dados: o rollback é BLOQUEADO e nada muda; regras do banco
-  await q(`insert into users (id,email,password_hash,full_name,role,country_code,created_at,updated_at) values ('usr_mig_e7a','e7a@t.test','x','A','GLOBAL_ADMIN','GW',now(),now()), ('usr_mig_e7s','e7s@t.test','x','S','SELLER','GW',now(),now())`);
+  await q(`insert into users (id,email,password_hash,full_name,role,country_code,created_at,updated_at) values ('usr_mig_e7a','e7a@t.test','x','A','GLOBAL_ADMIN','GW',now(),now()), ('usr_mig_e7s','e7s@t.test','x','S','SELLER','GW',now(),now()), ('usr_mig_e7b','e7b@t.test','x','B','GLOBAL_ADMIN','GW',now(),now())`);
   await q(`insert into wallets (id,user_id,balance,currency,status) values ('wlt_mig_e7','usr_mig_e7s','100.00','XOF','active')`);
-  const ins = (id, amount, cur = 'XOF', ref = id) => q(`insert into wallet_holds (id,wallet_id,currency,amount,status,reason,reference_type,reference_id,created_by,idempotency_key) values ($1,'wlt_mig_e7',$2,$3,'ACTIVE','motivo de teste direto','DIRECT',$4,'usr_mig_e7a',$1)`, [id, cur, amount, ref]);
+  const ins = (id, amount, cur = 'XOF', ref = id) => q(`insert into wallet_holds (id,wallet_id,currency,amount,status,reason,evidence_ref,reference_type,reference_id,created_by,idempotency_key) values ($1,'wlt_mig_e7',$2,$3,'ACTIVE','motivo de teste direto','EV-DIRETA','DIRECT',$4,'usr_mig_e7a',$1)`, [id, cur, amount, ref]);
   const code = async (fn) => { try { await fn(); return null; } catch (e) { return (e.code || '') + '|' + e.message; } };
   await ins('wh_ok', '60.00');
   chk('retenção válida aceita', (await q(`select count(*)::int n from wallet_holds`))[0].n === 1);
   chk('valor ≤ 0 recusado (CHECK); retido > saldo recusado (trigger); moeda diferente recusada', (await code(() => ins('wh_neg', '-1.00'))) ?.startsWith('23514') && /excederia o saldo/.test(String(await code(() => ins('wh_over', '40.01')))) && /moeda/.test(String(await code(() => ins('wh_cur', '1.00', 'BRL')))));
+  chk('retenção sem evidência (ou com evidência curta) recusada', (await code(() => q(`insert into wallet_holds (id,wallet_id,currency,amount,status,reason,evidence_ref,reference_type,reference_id,created_by,idempotency_key) values ('wh_noev','wlt_mig_e7','XOF','1.00','ACTIVE','motivo de teste direto','ab','DIRECT','wh_noev','usr_mig_e7a','wh_noev')`)))?.startsWith('23514'));
   chk('referência ativa duplicada recusada (índice único parcial)', (await code(() => ins('wh_dup', '10.00', 'XOF', 'wh_ok')))?.startsWith('23505'));
   chk('edição de valor e DELETE recusados (imutável)', /só é permitido liberar/.test(String(await code(() => q(`update wallet_holds set amount='1.00' where id='wh_ok'`)))) && /sem DELETE/.test(String(await code(() => q(`delete from wallet_holds where id='wh_ok'`)))));
-  chk('liberação sem motivo (≥10) recusada pelo CHECK; com motivo aceita; depois imutável', (await code(() => q(`update wallet_holds set status='RELEASED', released_by='usr_mig_e7a', released_at=now(), release_reason='curto' where id='wh_ok'`))) ?.startsWith('23514')
-    && (await code(() => q(`update wallet_holds set status='RELEASED', released_by='usr_mig_e7a', released_at=now(), release_reason='liberada na verificação' where id='wh_ok'`))) === null
+  chk('liberação: motivo curto, sem evidência e pelo PRÓPRIO criador recusadas; por outro usuário com motivo+evidência aceita; depois imutável', (await code(() => q(`update wallet_holds set status='RELEASED', released_by='usr_mig_e7b', released_at=now(), release_reason='curto', release_evidence_ref='EVID-LIB-1' where id='wh_ok'`)))?.startsWith('23514')
+    && (await code(() => q(`update wallet_holds set status='RELEASED', released_by='usr_mig_e7b', released_at=now(), release_reason='liberada na verificação' where id='wh_ok'`)))?.startsWith('23514')
+    && (await code(() => q(`update wallet_holds set status='RELEASED', released_by='usr_mig_e7a', released_at=now(), release_reason='liberada pelo próprio criador', release_evidence_ref='EVID-LIB-1' where id='wh_ok'`)))?.startsWith('23514')
+    && (await code(() => q(`update wallet_holds set status='RELEASED', released_by='usr_mig_e7b', released_at=now(), release_reason='liberada na verificação', release_evidence_ref='EVID-LIB-1' where id='wh_ok'`))) === null
     && /imutável/.test(String(await code(() => q(`update wallet_holds set reason='reescrita' where id='wh_ok'`)))));
   chk('a tabela referencia carteira e usuários com ON DELETE RESTRICT (nada some em cascata)', (await q(`select count(*)::int n from pg_constraint where conrelid='wallet_holds'::regclass and contype='f' and confdeltype='r'`))[0].n === 4);
   const e1 = await runDown();
