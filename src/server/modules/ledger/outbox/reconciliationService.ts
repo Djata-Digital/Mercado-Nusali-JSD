@@ -15,7 +15,8 @@ import { buildShippingCostReversalEntries, shippingCostCapacity } from '../shipp
 import { buildChargebackConfirmedEntries, buildChargebackAllocatedEntries, buildChargebackRecoveryEntries, type DecisionLineIn } from '../chargebackEntries.js';
 import { toMicros } from '../decimal.js';
 import { resolvePolicy } from './outboxEvents.js';
-import { enqueueLedgerEvent, parseUtc, OutboxAdminError } from './outboxService.js';
+import { enqueueLedgerEvent, enqueuePayoutLedgerEvent, parseUtc, OutboxAdminError } from './outboxService.js';
+import { evaluatePayout, type PayoutLedgerView, type PayoutStageView, type PEntry } from '../payoutLedger.js';
 
 export type FindingSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
 export interface Finding {
@@ -387,6 +388,39 @@ export async function runLedgerReconciliation(opts: { maxOrders?: number; pageSi
       else if (toMicros(c.alloc_sum) !== toMicros(c.value)) current.set(`CHARGEBACK_VALUE_MISMATCH:${c.id}`, { f: { type: 'CHARGEBACK_VALUE_MISMATCH', severity: 'CRITICAL', detail: `valor atual do provedor (${c.value}) difere do alocado (${c.alloc_sum}) — alocações são imutáveis; revisão humana`, scope: c.id }, orderId: null });
     }
 
+    // E8b — saques criados em/depois do cutoff (sem backfill de saques anteriores): solicitação sempre; conclusão/falha só quando o saque está nesse estado
+    const payoutRows = rowsOf(await db.execute(sql`
+      SELECT p.id, p.seller_id, p.amount::text AS amount, p.currency, p.status, p.created_at, p.processed_at,
+             rq.id AS rq_id, rq.status AS rq_status, rqe.id AS rqe_id, rqe.status AS rqe_status, rqe.created_at AS rqe_created, rqe.ledger_transaction_id AS rqe_tx, rqe.last_error_code AS rqe_err,
+             cp.id AS cp_id, cp.status AS cp_status, cpe.id AS cpe_id, cpe.status AS cpe_status, cpe.created_at AS cpe_created, cpe.ledger_transaction_id AS cpe_tx, cpe.last_error_code AS cpe_err,
+             fl.id AS fl_id, fl.status AS fl_status, fle.id AS fle_id, fle.status AS fle_status, fle.created_at AS fle_created, fle.ledger_transaction_id AS fle_tx, fle.last_error_code AS fle_err
+        FROM seller_payouts p
+        LEFT JOIN ledger_transactions rq ON rq.idempotency_key = 'payout_requested:' || p.id LEFT JOIN ledger_outbox_events rqe ON rqe.idempotency_key = 'payout_requested:' || p.id
+        LEFT JOIN ledger_transactions cp ON cp.idempotency_key = 'payout_completed:' || p.id LEFT JOIN ledger_outbox_events cpe ON cpe.idempotency_key = 'payout_completed:' || p.id
+        LEFT JOIN ledger_transactions fl ON fl.idempotency_key = 'payout_failed:' || p.id LEFT JOIN ledger_outbox_events fle ON fle.idempotency_key = 'payout_failed:' || p.id
+       WHERE p.created_at >= ${shadow.cutoff.toISOString()}::timestamp ORDER BY p.id LIMIT ${maxOrders}`));
+    if (payoutRows.length > 0) {
+      const pEntryRows = rowsOf(await db.execute(sql`
+        SELECT t.idempotency_key AS k, t.payout_id, a.code, e.direction, e.amount::text AS amount
+          FROM ledger_entries e JOIN ledger_transactions t ON t.id = e.transaction_id JOIN ledger_accounts a ON a.id = e.account_id
+         WHERE t.payout_id IN (${sql.join(payoutRows.map((r: any) => sql`${r.id}`), sql`, `)}) AND t.type IN ('PAYOUT_REQUESTED','PAYOUT_COMPLETED','PAYOUT_FAILED')`));
+      const entriesBy = new Map<string, PEntry[]>();
+      for (const e of pEntryRows) { const k = String(e.k); entriesBy.set(k, [...(entriesBy.get(k) ?? []), { code: e.code, direction: e.direction, amount: e.amount }]); }
+      const pev = (id: any, st: any, created: any, tx: any, err: any) => (id ? { id, status: st, createdAt: parseUtc(created), ledgerTransactionId: tx ?? null, lastErrorCode: err ?? null } : null);
+      for (const r of payoutRows) {
+        const stage = (prefix: string, txId: any, txSt: any, evId: any, evSt: any, evCreated: any, evTx: any, evErr: any): PayoutStageView => ({
+          tx: txId ? { id: txId, status: txSt } : null, event: pev(evId, evSt, evCreated, evTx, evErr), entries: entriesBy.get(`${prefix}:${r.id}`) ?? [],
+        });
+        const view: PayoutLedgerView = {
+          payout: { id: r.id, sellerId: r.seller_id, amount: String(r.amount), currency: r.currency, status: r.status, createdAt: parseUtc(r.created_at), processedAt: r.processed_at ? parseUtc(r.processed_at) : null },
+          requested: stage('payout_requested', r.rq_id, r.rq_status, r.rqe_id, r.rqe_status, r.rqe_created, r.rqe_tx, r.rqe_err),
+          completed: stage('payout_completed', r.cp_id, r.cp_status, r.cpe_id, r.cpe_status, r.cpe_created, r.cpe_tx, r.cpe_err),
+          failed: stage('payout_failed', r.fl_id, r.fl_status, r.fle_id, r.fle_status, r.fle_created, r.fle_tx, r.fle_err),
+        };
+        for (const f of evaluatePayout(view, now, policy.staleMinutes)) current.set(`${f.type}:payout:${r.id}`, { f: f as Finding, orderId: null });
+      }
+    }
+
     // persistência: upsert por fingerprint; o que sumiu (e foi escaneado numa varredura COMPLETA) vira RESOLVED — com histórico
     const open: any[] = rowsOf(await db.execute(sql`SELECT id, fingerprint, status, order_id FROM ledger_reconciliation_findings WHERE status <> 'RESOLVED'`));
     const openByFp = new Map<string, any>(open.map((r) => [r.fingerprint, r]));
@@ -438,7 +472,7 @@ export async function acknowledgeFinding(input: { findingId: string; actorUserId
   });
 }
 
-export interface RepairCandidate { orderId: string; eventType: 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED' | 'SHIPPING_COST_REVERSED' | 'CHARGEBACK_CONFIRMED' | 'CHARGEBACK_ALLOCATED' | 'CHARGEBACK_RECOVERY' | 'CHARGEBACK_WRITE_OFF'; occurredAt: Date; refundId?: string; reversalId?: string; chargebackSubjectId?: string }
+export interface RepairCandidate { orderId?: string; payoutId?: string; eventType: 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED' | 'SHIPPING_COST_REVERSED' | 'CHARGEBACK_CONFIRMED' | 'CHARGEBACK_ALLOCATED' | 'CHARGEBACK_RECOVERY' | 'CHARGEBACK_WRITE_OFF' | 'PAYOUT_REQUESTED' | 'PAYOUT_COMPLETED' | 'PAYOUT_FAILED'; occurredAt: Date; refundId?: string; reversalId?: string; chargebackSubjectId?: string }
 export interface RepairResult { dryRun: boolean; candidates: RepairCandidate[]; enqueued: number; existing: number; failed: number }
 
 /**
@@ -509,11 +543,35 @@ export async function repairMissingEvents(input: { actorUserId: string; dryRun?:
       LEFT JOIN ledger_outbox_events e ON e.idempotency_key = (CASE WHEN r.kind = 'RECOVERY' THEN 'chargeback_recovery:' ELSE 'chargeback_write_off:' END) || r.id
      WHERE o.created_at >= ${shadow.cutoff.toISOString()}::timestamp AND t.id IS NULL AND e.id IS NULL ORDER BY r.id LIMIT ${limit}`));
   for (const x of cbRec) candidates.push({ orderId: x.order_id, eventType: x.kind === 'RECOVERY' ? 'CHARGEBACK_RECOVERY' : 'CHARGEBACK_WRITE_OFF', chargebackSubjectId: x.id, occurredAt: parseUtc(x.created_at) });
+  // E8b — saques em escopo (criados em/depois do cutoff) sem lançamento e sem evento: solicitação; conclusão (se concluído); falha (se falho). Hora = a do fato gravado no saque.
+  const payoutRepair = rowsOf(await db.execute(sql`
+    SELECT p.id, p.status, p.created_at, p.processed_at,
+           (rq.id IS NULL AND rqe.id IS NULL) AS miss_rq, (p.status = 'completed' AND cp.id IS NULL AND cpe.id IS NULL) AS miss_cp, (p.status = 'failed' AND fl.id IS NULL AND fle.id IS NULL) AS miss_fl
+      FROM seller_payouts p
+      LEFT JOIN ledger_transactions rq ON rq.idempotency_key = 'payout_requested:' || p.id LEFT JOIN ledger_outbox_events rqe ON rqe.idempotency_key = 'payout_requested:' || p.id
+      LEFT JOIN ledger_transactions cp ON cp.idempotency_key = 'payout_completed:' || p.id LEFT JOIN ledger_outbox_events cpe ON cpe.idempotency_key = 'payout_completed:' || p.id
+      LEFT JOIN ledger_transactions fl ON fl.idempotency_key = 'payout_failed:' || p.id LEFT JOIN ledger_outbox_events fle ON fle.idempotency_key = 'payout_failed:' || p.id
+     WHERE p.created_at >= ${shadow.cutoff.toISOString()}::timestamp
+       AND ((rq.id IS NULL AND rqe.id IS NULL) OR (p.status = 'completed' AND cp.id IS NULL AND cpe.id IS NULL) OR (p.status = 'failed' AND fl.id IS NULL AND fle.id IS NULL))
+     ORDER BY p.id LIMIT ${limit}`));
+  for (const x of payoutRepair) {
+    if (x.miss_rq) candidates.push({ payoutId: x.id, eventType: 'PAYOUT_REQUESTED', occurredAt: parseUtc(x.created_at) });
+    if (x.miss_cp) candidates.push({ payoutId: x.id, eventType: 'PAYOUT_COMPLETED', occurredAt: parseUtc(x.processed_at ?? x.created_at) });
+    if (x.miss_fl) candidates.push({ payoutId: x.id, eventType: 'PAYOUT_FAILED', occurredAt: parseUtc(x.created_at) });
+  }
   const result: RepairResult = { dryRun, candidates, enqueued: 0, existing: 0, failed: 0 };
   if (dryRun || candidates.length === 0) return result;
   const { orders, refunds, escrowAccounts, shippingCostReversals } = await import('../../../../db/schema.js');
   for (const c of candidates) {
-    const [order] = await db.select().from(orders).where(eq(orders.id, c.orderId)).limit(1);
+    if (c.payoutId) {
+      const { sellerPayouts } = await import('../../../../db/schema.js');
+      const [pr] = await db.select().from(sellerPayouts).where(eq(sellerPayouts.id, c.payoutId)).limit(1);
+      if (!pr) { result.failed++; continue; }
+      const rr = await enqueuePayoutLedgerEvent(db, { eventType: c.eventType as any, payout: { id: pr.id, sellerId: pr.sellerId, amount: String(pr.amount), currency: pr.currency, method: pr.method, createdAt: pr.createdAt, processedAt: pr.processedAt, transactionRef: pr.transactionRef }, occurredAt: c.occurredAt, source: 'reconciliation_repair' });
+      if (rr.status === 'ENQUEUED') result.enqueued++; else if (rr.status === 'EXISTS') result.existing++; else result.failed++;
+      continue;
+    }
+    const [order] = await db.select().from(orders).where(eq(orders.id, c.orderId!)).limit(1);
     let refund: any;
     let reversal: any;
     if (c.eventType === 'SHIPPING_COST_REVERSED') {

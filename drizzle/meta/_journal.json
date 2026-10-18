@@ -309,6 +309,13 @@
       "when": 1792296650413,
       "tag": "0043_ledger_wallet_holds",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1792359802041,
+      "tag": "0044_ledger_payout_events",
+      "breakpoints": true
     }
   ]
 }

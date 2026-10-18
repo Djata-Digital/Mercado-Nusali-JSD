@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ArrowUpRight,
   Smartphone,
@@ -18,7 +18,13 @@ interface SellerPayoutsProps {
   selectedCurrency?: CurrencyCode;
 }
 
+/** Valor de saque aceito pelo servidor: no máximo 2 casas decimais (o servidor recusa mais que isso). */
+export const hasAtMostTwoDecimals = (v: number) => Number.isFinite(v) && Math.abs(v * 100 - Math.round(v * 100)) < 1e-6;
+/** Chave de idempotência de UMA solicitação de saque (o servidor exige): mantida em reenvios e renovada só depois do sucesso. */
+const newPayoutKey = () => `payout-${typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`;
+
 export const SellerPayouts: React.FC<SellerPayoutsProps> = ({ showToast }) => {
+  const payoutKeyRef = useRef<string>(newPayoutKey());
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [selectedCurrency, setSelectedCurrency] = useState<CurrencyCode>('XOF');
   const [amount, setAmount] = useState<number>(0);
@@ -161,9 +167,11 @@ export const SellerPayouts: React.FC<SellerPayoutsProps> = ({ showToast }) => {
         method: selectedMethod,
         bankAccountId: selectedMethod !== 'wallet' ? selectedBankAccountId : undefined,
         currency: selectedCurrency,
+        idempotencyKey: payoutKeyRef.current,
       });
 
       if (res.success && res.data) {
+        payoutKeyRef.current = newPayoutKey();
         setCompletedTx({
           ...res.data,
           grossAmount: amount,
@@ -253,9 +261,11 @@ export const SellerPayouts: React.FC<SellerPayoutsProps> = ({ showToast }) => {
                 value={amount}
                 onChange={(e) => setAmount(Number(e.target.value))}
                 min={1000}
+                step="0.01"
                 max={availableBalance}
                 className="w-full p-3 border border-gray-300 rounded-xl font-black text-lg text-gray-900 focus:ring-2 focus:ring-emerald-500"
               />
+              {!hasAtMostTwoDecimals(amount) && <p className="text-[11px] font-bold text-rose-600" role="alert">O valor do saque deve ter no máximo 2 casas decimais.</p>}
               <p className="text-[10px] text-gray-400">
                 Valor máximo disponível: {selectedCurrency} {availableBalance.toLocaleString()}
               </p>
@@ -263,7 +273,7 @@ export const SellerPayouts: React.FC<SellerPayoutsProps> = ({ showToast }) => {
 
             <button
               onClick={() => setStep(2)}
-              disabled={amount <= 0 || amount > availableBalance}
+              disabled={amount <= 0 || amount > availableBalance || !hasAtMostTwoDecimals(amount)}
               className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold py-3 rounded-xl transition text-xs shadow-md disabled:opacity-50"
             >
               Avançar para Método de Recebimento

@@ -1,5 +1,5 @@
 /**
- * E9 — VALIDAÇÃO FINAL INTEGRADA (staging LOCAL isolado). Um único banco com o ESQUEMA de produção (restaurado do backup, só esquema, + 0043) e dados FICTÍCIOS; serviços reais, apiRouter
+ * E9 — VALIDAÇÃO FINAL INTEGRADA (staging LOCAL isolado). Um único banco com o ESQUEMA de produção (restaurado do backup, só esquema, + 0043 e 0044) e dados FICTÍCIOS; serviços reais, apiRouter
  * real, nenhum provedor de pagamento (confirmações por serviço). Encadeia: pedido individual e grupo multi-vendedor, cupom financiado pelo vendedor, liberação de Escrow, reembolso antes/depois
  * da liberação, reversão de frete, chargeback + decisão + teto N, retenção/liberação, saques (solicitação, aprovação, falha, devolução), outbox/worker/falha/recuperação/reconciliação,
  * integridade das partidas, consistência ledger × carteiras e permissões. Nunca produção.
@@ -45,6 +45,7 @@ async function main() {
   if (!(await q(`select to_regclass('public.shipping_cost_reversals') t`))[0].t) await apply('0041_ledger_shipping_reversal.sql');
   if (!(await q(`select to_regclass('public.chargeback_allocations') t`))[0].t) await apply('0042_ledger_chargebacks.sql');
   if (!(await q(`select to_regclass('public.wallet_holds') t`))[0].t) await apply('0043_ledger_wallet_holds.sql');
+  if (!(await q(`select 1 from pg_constraint where conname='ledger_outbox_events_subject_check'`)).length) await apply('0044_ledger_payout_events.sql');
 
   const kit = await setupCheckoutKit(db, 'e6');
   await kit.setFlag('multiSellerCheckoutEnabled', true); await kit.setFlag('defaultShippingPolicyMode', 'CUSTOMER_PAYS');
@@ -248,12 +249,19 @@ async function main() {
   const walletInteg = await q(`select w.id, w.balance::numeric b, coalesce((select sum(amount) from wallet_transactions t where t.wallet_id=w.id),0)::numeric s from wallets w where exists (select 1 from wallet_transactions t where t.wallet_id=w.id)`);
   report('F12a partidas dobradas: nenhum lançamento POSTED desbalanceado e Σ débitos − Σ créditos do ledger = 0', unbalanced === 0 && Number(totalNet) === 0, { unbalanced, totalNet });
   report('F12b carteiras: saldo = Σ das transações da carteira (inclui saques e estornos de falha); nenhuma carteira negativa', walletInteg.every((r: any) => Math.abs(Number(r.b) - Number(r.s)) < 0.005) && negative === 0, { negative, bad: walletInteg.filter((r: any) => Math.abs(Number(r.b) - Number(r.s)) >= 0.005) });
+  await drain();
   const idents: any[] = [];
   for (const s of [sA, sB, sC]) {
-    const w = await walletOf(s.user_id); const payouts = Number((await q(`select coalesce(sum(amount),0)::numeric s from seller_payouts where seller_id=$1 and status <> 'failed'`, [s.seller_id]))[0].s);
-    idents.push({ seller: s.seller_id, ledgerPayable: await sumPayable(s.seller_id), wallet: Number(w.b), payoutsNotFailed: payouts });
+    const w = await walletOf(s.user_id);
+    const pend = Number((await q(`select coalesce(sum(amount),0)::numeric s from seller_payouts where seller_id=$1 and status in ('pending','processing')`, [s.seller_id]))[0].s);
+    const clearing = Number((await q(`select coalesce(sum(case when e.direction='CREDIT' then e.amount else -e.amount end),0)::numeric s from ledger_entries e join ledger_accounts a on a.id=e.account_id where a.code='SELLER_PAYOUT_CLEARING' and e.seller_id=$1`, [s.seller_id]))[0].s);
+    idents.push({ seller: s.seller_id, ledgerPayable: await sumPayable(s.seller_id), wallet: Number(w.b), clearing, pendingPayouts: pend });
   }
-  report('F12c ledger × dinheiro real: para cada vendedor, SELLER_PAYABLE do ledger sombra = saldo da carteira + saques não falhados (a diferença são exatamente os saques, que o ledger sombra ainda não registra)', idents.every((i) => Math.abs(i.ledgerPayable - (i.wallet + i.payoutsNotFailed)) < 0.005), idents);
+  report('F12c ledger × dinheiro real: com os saques no ledger, para cada vendedor SELLER_PAYABLE = saldo da carteira (EXATO) e SELLER_PAYOUT_CLEARING = Σ saques pendentes/em processamento', idents.every((i) => Math.abs(i.ledgerPayable - i.wallet) < 0.005 && Math.abs(i.clearing - i.pendingPayouts) < 0.005), idents);
+  const paidOut = Number((await q(`select coalesce(sum(p.amount),0)::numeric s from seller_payouts p where p.status='completed'`))[0].s);
+  const completedCredit = Number((await q(`select coalesce(sum(e.amount),0)::numeric s from ledger_entries e join ledger_transactions t on t.id=e.transaction_id join ledger_accounts a on a.id=e.account_id where t.type='PAYOUT_COMPLETED' and a.code='PAYMENT_CLEARING' and e.direction='CREDIT'`))[0].s);
+  const payoutTypes = async (id: string) => (await q(`select type from ledger_transactions where payout_id=$1 order by type`, [id])).map((r: any) => r.type).join();
+  report('F12d saques no ledger: concluído = REQUESTED+COMPLETED; falho = REQUESTED+FAILED; pendente = só REQUESTED; Σ crédito de PAYMENT_CLEARING nas conclusões = Σ saques concluídos; nenhum evento de saque pendente', (await payoutTypes(reqB.id)) === 'PAYOUT_COMPLETED,PAYOUT_REQUESTED' && (await payoutTypes(reqB2.id)) === 'PAYOUT_FAILED,PAYOUT_REQUESTED' && (await payoutTypes(payFull.id)) === 'PAYOUT_REQUESTED' && Math.abs(paidOut - completedCredit) < 0.005 && (await q(`select count(*)::int n from ledger_outbox_events where payout_id is not null and status <> 'DONE'`))[0].n === 0, { paidOut, completedCredit });
 
   // ---------------------------------------------------------------- F13: permissões e proteção contra operações não autorizadas
   const money = await moneyHash();

@@ -189,7 +189,7 @@ const TransactionsView: React.FC = () => {
           <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Quando</th><th>Tipo</th><th>Estado</th><th>Pedido</th><th>Partidas</th><th>Chave</th></tr></thead><tbody>
             {p.page.items.map((t: any) => (
               <tr key={t.id} className="border-t border-gray-100 hover:bg-emerald-50 cursor-pointer" onClick={() => open(t.id)}>
-                <td className="py-1.5 whitespace-nowrap">{fmtDate(t.occurred_at)}</td><td>{TX_TYPE_LABEL[t.type] ?? t.type}</td><td>{t.status}</td><td><Mono>{t.order_id}</Mono></td><td>{t.entry_count}</td><td><Mono>{t.idempotency_key}</Mono></td>
+                <td className="py-1.5 whitespace-nowrap">{fmtDate(t.occurred_at)}</td><td>{TX_TYPE_LABEL[t.type] ?? t.type}</td><td>{t.status}</td><td><Mono>{t.order_id ?? t.payout_id ?? '—'}</Mono></td><td>{t.entry_count}</td><td><Mono>{t.idempotency_key}</Mono></td>
               </tr>))}
           </tbody></table></div>)}
         <Pager page={p.page} onOffset={p.setOffset} />
@@ -242,7 +242,7 @@ const OutboxView: React.FC<{ isAdmin: boolean; showToast: (m: string) => void }>
           <div className="overflow-x-auto"><table className={tbl}><thead><tr className="text-left text-gray-500"><th className="py-1">Criado</th><th>Tipo</th><th>Estado</th><th>Tentativas</th><th>Pedido</th><th>Erro</th></tr></thead><tbody>
             {p.page.items.map((e: any) => (
               <tr key={e.id} className="border-t border-gray-100 hover:bg-emerald-50 cursor-pointer" onClick={() => open(e.id)}>
-                <td className="py-1.5 whitespace-nowrap">{fmtDate(e.created_at)}</td><td>{TX_TYPE_LABEL[e.event_type] ?? e.event_type}</td><td><Badge cls={eventStatusClass(e.status)}>{EVENT_STATUS_LABEL[e.status] ?? e.status}</Badge></td><td>{e.attempts}/{e.max_attempts}</td><td><Mono>{e.order_id}</Mono></td><td className="text-[10px]">{e.last_error_code ?? ''}</td>
+                <td className="py-1.5 whitespace-nowrap">{fmtDate(e.created_at)}</td><td>{TX_TYPE_LABEL[e.event_type] ?? e.event_type}</td><td><Badge cls={eventStatusClass(e.status)}>{EVENT_STATUS_LABEL[e.status] ?? e.status}</Badge></td><td>{e.attempts}/{e.max_attempts}</td><td><Mono>{e.order_id ?? e.payout_id ?? '—'}</Mono></td><td className="text-[10px]">{e.last_error_code ?? ''}</td>
               </tr>))}
           </tbody></table></div>)}
         <Pager page={p.page} onOffset={p.setOffset} />
@@ -277,7 +277,7 @@ const OutboxView: React.FC<{ isAdmin: boolean; showToast: (m: string) => void }>
             {repair && repair.dryRun && repair.candidates.length > 0 && <button className={btnPrimary} disabled={repairBusy || !confirmApply} onClick={() => runRepair(true)}>Aplicar reparo</button>}
           </div>
           {repair && (<div className="text-[11px] text-gray-700">{repair.dryRun ? `Simulação: ${repair.candidates.length} candidato(s).` : `Aplicado: ${repair.enqueued} criado(s), ${repair.existing} já existiam, ${repair.failed} falha(s).`}
-            {repair.candidates.length > 0 && <ul className="mt-1 space-y-0.5">{repair.candidates.slice(0, 50).map((c: any, i: number) => <li key={i}><Mono>{c.eventType}</Mono> · <Mono>{c.chargebackSubjectId ?? c.reversalId ?? c.refundId ?? c.orderId}</Mono></li>)}</ul>}</div>)}
+            {repair.candidates.length > 0 && <ul className="mt-1 space-y-0.5">{repair.candidates.slice(0, 50).map((c: any, i: number) => <li key={i}><Mono>{c.eventType}</Mono> · <Mono>{c.chargebackSubjectId ?? c.reversalId ?? c.refundId ?? c.payoutId ?? c.orderId}</Mono></li>)}</ul>}</div>)}
         </div>)}
       {modal && (
         <ReasonModal title={modal.kind === 'requeue' ? 'Recolocar evento na fila' : 'Descartar evento'} min={10} danger={modal.kind === 'dismiss'} confirmLabel={modal.kind === 'requeue' ? 'Recolocar' : 'Descartar'}

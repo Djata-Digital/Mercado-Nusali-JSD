@@ -185,6 +185,7 @@ export const SellerService = {
     accountDetail?: string;
     bankAccountId?: string;
     currency?: string;
+    idempotencyKey?: string;
   }): Promise<ApiResponse<any>> {
     return SellerApi.requestPayout(data);
   },

@@ -10,6 +10,31 @@ import { sellers, wallets, walletTransactions, sellerPayouts, sellerBankAccounts
 import { eq, and } from 'drizzle-orm';
 import { sumActiveHoldsMicros } from './walletHoldService.js';
 import { toMicros, formatMicros } from '../ledger/decimal.js';
+import { FinancialLedgerService } from '../ledger/financialLedgerService.js';
+import { stagePayoutEventInTx, flushLedgerStage, type LedgerStage } from '../ledger/outbox/ledgerShadowHooks.js';
+import type { PayoutEventType } from '../ledger/payoutLedger.js';
+import { logger } from '../../infra/logger.js';
+
+/**
+ * E8b — pós-commit: processa o evento do saque pelo outbox (ou, com o outbox desligado, lançamento direto). NUNCA lança: o ledger sombra jamais derruba a movimentação real;
+ * se falhar, o evento fica no outbox (worker) e a reconciliação enxerga a lacuna.
+ */
+async function flushPayoutLedger(stage: LedgerStage | undefined, type: PayoutEventType, payoutId: string): Promise<void> {
+  if (!stage) return;
+  try {
+    await flushLedgerStage(stage, async () => {
+      try {
+        const fn = type === 'PAYOUT_REQUESTED' ? FinancialLedgerService.recordPayoutRequested : type === 'PAYOUT_COMPLETED' ? FinancialLedgerService.recordPayoutCompleted : FinancialLedgerService.recordPayoutFailed;
+        const r = await fn.call(FinancialLedgerService, { payoutId, source: 'payout_service' });
+        if (!r.posted) logger.warn({ payoutId, type, reason: r.reason, detail: r.detail }, '[ShadowLedger] lançamento do saque ignorado — fluxo real não afetado');
+      } catch (err: any) {
+        logger.error({ payoutId, type, error: err?.message }, '[ShadowLedger] lançamento do saque falhou — fluxo real não afetado; repetível (idempotente)');
+      }
+    }, true);
+  } catch (err: any) {
+    logger.error({ payoutId, type, error: err?.message }, '[ShadowLedger] flush do evento de saque falhou — o worker recuperará');
+  }
+}
 
 export class PayoutValidationError extends Error {
   code: string;
@@ -46,7 +71,9 @@ export interface RequestSellerPayoutInput {
  *    inventada aqui.
  */
 export async function requestSellerPayout(input: RequestSellerPayoutInput, executor?: any) {
+  let stage: LedgerStage | undefined;
   const runInTx = async (tx: any) => {
+    stage = undefined; // uma tentativa desfeita (corrida de idempotência) nunca deixa eventos "fantasma" para o pós-commit
     const clientIdempotencyKey = typeof input.idempotencyKey === 'string' ? input.idempotencyKey.trim() : '';
     if (!clientIdempotencyKey) {
       throw new PayoutValidationError('IDEMPOTENCY_KEY_REQUIRED', 'Informe idempotencyKey — necessária para que um reenvio da mesma solicitação não reserve saldo duas vezes.');
@@ -170,6 +197,7 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
       .where(eq(wallets.id, sellerWallet.id));
 
     const payoutId = `payout_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const requestedAt = new Date();
     await tx.insert(sellerPayouts).values({
       id: payoutId,
       sellerId: input.sellerId,
@@ -179,7 +207,7 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
       bankAccountId: validatedBankAccountId,
       status: 'pending',
       idempotencyKey: clientIdempotencyKey,
-      createdAt: new Date(),
+      createdAt: requestedAt,
     });
 
     await tx.insert(walletTransactions).values({
@@ -202,6 +230,9 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
       detailsJson: { sellerId: input.sellerId, walletId: sellerWallet.id, amount: amountStr, currency: requestedCurrency, method: canonicalMethod, totalBefore: formatMicros(totalMicros, 2), heldAtRequest: formatMicros(heldMicros, 2) }, createdAt: new Date(),
     });
 
+    // E8b: a solicitação (saldo já reservado acima, na MESMA transação) vira evento do outbox — idempotente, em savepoint; nunca derruba a reserva real
+    stage = await stagePayoutEventInTx(tx, { eventType: 'PAYOUT_REQUESTED', payout: { id: payoutId, sellerId: input.sellerId, amount: amountStr, currency: requestedCurrency, method: canonicalMethod, createdAt: requestedAt }, occurredAt: requestedAt, source: 'payout_service' });
+
     return {
       id: payoutId, amount: input.amount, currency: requestedCurrency, method: canonicalMethod,
       bankAccountId: validatedBankAccountId, status: 'pending', newAvailableBalance: Number(formatMicros(toMicros(newBalance.toFixed(2)) - heldMicros, 2)),
@@ -211,13 +242,16 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
   if (executor) return runInTx(executor);
   const db = getDb();
   if (!db) throw new Error('Banco de dados indisponível.');
+  let result: any;
   try {
-    return await db.transaction(runInTx);
+    result = await db.transaction(runInTx);
   } catch (err: any) {
     const code = err?.code ?? err?.cause?.code; const constraint = String(err?.constraint ?? err?.cause?.constraint ?? '');
-    if (code === '23505' && constraint.includes('seller_payouts_idempotency_uq')) return db.transaction(runInTx); // a transação perdedora foi desfeita (sem débito); agora vê o saque e devolve o replay
-    throw err;
+    if (code === '23505' && constraint.includes('seller_payouts_idempotency_uq')) result = await db.transaction(runInTx); // a transação perdedora foi desfeita (sem débito); agora vê o saque e devolve o replay
+    else throw err;
   }
+  if (!result?.alreadyRequested) await flushPayoutLedger(stage, 'PAYOUT_REQUESTED', result.id);
+  return result;
 }
 
 export type PayoutStatus = 'pending' | 'processing' | 'completed' | 'failed';
@@ -237,7 +271,9 @@ export async function processPayoutStatusChange(
   options: { transactionRef?: string; isProduction?: boolean; actorUserId?: string | null } = {},
   executor?: any
 ) {
+  let staged: { stage: LedgerStage | undefined; type: PayoutEventType } | undefined;
   const runInTx = async (tx: any) => {
+    staged = undefined;
     // E8: trava a linha do saque — duas transições concorrentes (ex.: completed × failed) são serializadas e a segunda relê o estado já gravado
     const payoutRows = await tx.select().from(sellerPayouts).where(eq(sellerPayouts.id, payoutId)).for('update').limit(1);
     if (payoutRows.length === 0) throw new Error('Solicitação de saque não encontrada.');
@@ -273,8 +309,11 @@ export async function processPayoutStatusChange(
         }
       }
 
-      await tx.update(sellerPayouts).set({ status: 'completed', processedAt: new Date(), transactionRef: ref }).where(eq(sellerPayouts.id, p.id));
+      const processedAt = new Date();
+      await tx.update(sellerPayouts).set({ status: 'completed', processedAt, transactionRef: ref }).where(eq(sellerPayouts.id, p.id));
       await audit(currentStatus, 'completed', { transactionRef: ref });
+      // E8b: a CONCLUSÃO só vira evento na MESMA transação que grava o estado concluído (o ledger nunca registra conclusão antes do fato)
+      staged = { type: 'PAYOUT_COMPLETED', stage: await stagePayoutEventInTx(tx, { eventType: 'PAYOUT_COMPLETED', payout: { id: p.id, sellerId: p.sellerId, amount: String(p.amount), currency: p.currency, method: p.method, createdAt: p.createdAt, processedAt, transactionRef: ref }, occurredAt: processedAt, source: 'payout_service' }) };
 
       const wtxRows = await tx.select().from(walletTransactions).where(eq(walletTransactions.referenceId, p.id)).limit(1);
       if (wtxRows.length > 0) {
@@ -296,6 +335,8 @@ export async function processPayoutStatusChange(
 
       await tx.update(sellerPayouts).set({ status: 'failed' }).where(eq(sellerPayouts.id, p.id));
       await audit(currentStatus, 'failed', { refundAlreadyDone: existingRefundWtx.length > 0 });
+      // E8b: a FALHA (e a devolução do saldo, abaixo, na mesma transação) vira evento que reverte a solicitação no ledger
+      staged = { type: 'PAYOUT_FAILED', stage: await stagePayoutEventInTx(tx, { eventType: 'PAYOUT_FAILED', payout: { id: p.id, sellerId: p.sellerId, amount: String(p.amount), currency: p.currency, method: p.method, createdAt: p.createdAt }, occurredAt: new Date(), source: 'payout_service' }) };
 
       if (existingRefundWtx.length > 0) {
         return { success: true, message: `Saque #${p.id} marcado como falho. Reembolso já efetuado anteriormente.`, alreadyRefunded: true };
@@ -357,5 +398,8 @@ export async function processPayoutStatusChange(
   if (executor) return runInTx(executor);
   const db = getDb();
   if (!db) throw new Error('Banco de dados indisponível.');
-  return db.transaction(runInTx);
+  const result = await db.transaction(runInTx);
+  const sg = staged as { stage: LedgerStage | undefined; type: PayoutEventType } | undefined;
+  if (sg) await flushPayoutLedger(sg.stage, sg.type, payoutId);
+  return result;
 }

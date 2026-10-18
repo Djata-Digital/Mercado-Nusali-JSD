@@ -10,7 +10,7 @@
  * (salvo o modo estrito, opt-in).
  */
 import { isOutboxEnabled } from './outboxEvents.js';
-import { enqueueLedgerEvent, processEventsNow, type EnqueueInput } from './outboxService.js';
+import { enqueueLedgerEvent, enqueuePayoutLedgerEvent, processEventsNow, type EnqueueInput, type EnqueuePayoutInput } from './outboxService.js';
 
 export interface LedgerStage {
   mode: 'DISABLED' | 'OUTBOX';
@@ -30,6 +30,16 @@ export async function stageLedgerEventsInTx(tx: any, items: EnqueueInput[]): Pro
     else if (r.status === 'FAILED') stage.directFallback = true;
     // DISABLED / NOT_ELIGIBLE (ledger desligado ou pedido anterior ao cutoff): nada a fazer — o ledger também ignoraria
   }
+  return stage;
+}
+
+/** E8b — evento de SAQUE dentro da transação do saque (mesma disciplina de stageLedgerEventsInTx). */
+export async function stagePayoutEventInTx(tx: any, item: EnqueuePayoutInput): Promise<LedgerStage> {
+  if (!isOutboxEnabled()) return { ...NO_STAGE };
+  const stage: LedgerStage = { mode: 'OUTBOX', eventIds: [], directFallback: false };
+  const r = await enqueuePayoutLedgerEvent(tx, item);
+  if (r.status === 'ENQUEUED' || r.status === 'EXISTS') stage.eventIds.push(r.eventId);
+  else if (r.status === 'FAILED') stage.directFallback = true;
   return stage;
 }
 

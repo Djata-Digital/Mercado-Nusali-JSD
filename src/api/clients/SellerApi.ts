@@ -237,6 +237,8 @@ export class SellerApi {
     accountDetail?: string;
     bankAccountId?: string;
     currency?: string;
+    /** obrigatória no servidor: um reenvio da MESMA solicitação nunca reserva o saldo duas vezes */
+    idempotencyKey?: string;
   }): Promise<ApiResponse<any>> {
     return apiClient.post('/seller/payouts/request', data);
   }

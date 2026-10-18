@@ -99,11 +99,11 @@ ledgerAdminRouter.get('/transactions', requireLedgerReader, async (req: AuthRequ
     const from = dateParam(req.query.from); const to = dateParam(req.query.to);
     const where = sql`WHERE true
       ${orderId ? sql`AND t.order_id = ${orderId}` : sql``} ${type ? sql`AND t.type = ${type}` : sql``} ${status ? sql`AND t.status = ${status}` : sql``}
-      ${id ? sql`AND (t.id = ${id} OR t.idempotency_key = ${id} OR t.refund_id = ${id})` : sql``}
+      ${id ? sql`AND (t.id = ${id} OR t.idempotency_key = ${id} OR t.refund_id = ${id} OR t.payout_id = ${id})` : sql``}
       ${from ? sql`AND t.occurred_at >= ${from}::timestamp` : sql``} ${to ? sql`AND t.occurred_at <= ${to}::timestamp` : sql``}`;
     const total = rowsOf(await db.execute(sql`SELECT count(*)::int AS n FROM ledger_transactions t ${where}`))[0]?.n ?? 0;
     const items = rowsOf(await db.execute(sql`
-      SELECT t.id, t.type, t.status, t.currency, t.order_id, t.payment_id, t.refund_id, t.seller_id, t.idempotency_key, t.reason, t.source, t.correlation_id, t.occurred_at, t.created_at,
+      SELECT t.id, t.type, t.status, t.currency, t.order_id, t.payout_id, t.payment_id, t.refund_id, t.seller_id, t.idempotency_key, t.reason, t.source, t.correlation_id, t.occurred_at, t.created_at,
              (SELECT count(*)::int FROM ledger_entries e WHERE e.transaction_id = t.id) AS entry_count
         FROM ledger_transactions t ${where} ORDER BY t.occurred_at DESC, t.id DESC LIMIT ${limit} OFFSET ${offset}`));
     return res.json({ success: true, data: { items, total, limit, offset } });
@@ -128,10 +128,10 @@ ledgerAdminRouter.get('/outbox', requireLedgerReader, async (req: AuthRequest, r
     const db: any = getDb(); if (!db) return deny(res, 503, 'DATABASE_UNAVAILABLE', 'Banco indisponível.');
     const limit = intParam(req.query.limit, 25, 1, 100); const offset = intParam(req.query.offset, 0, 0, 1_000_000);
     const status = strParam(req.query.status, 30); const type = strParam(req.query.type, 40); const orderId = strParam(req.query.orderId); const id = strParam(req.query.id);
-    const where = sql`WHERE true ${status ? sql`AND status = ${status}` : sql``} ${type ? sql`AND event_type = ${type}` : sql``} ${orderId ? sql`AND order_id = ${orderId}` : sql``} ${id ? sql`AND (id = ${id} OR idempotency_key = ${id})` : sql``}`;
+    const where = sql`WHERE true ${status ? sql`AND status = ${status}` : sql``} ${type ? sql`AND event_type = ${type}` : sql``} ${orderId ? sql`AND order_id = ${orderId}` : sql``} ${id ? sql`AND (id = ${id} OR idempotency_key = ${id} OR payout_id = ${id})` : sql``}`;
     const total = rowsOf(await db.execute(sql`SELECT count(*)::int AS n FROM ledger_outbox_events ${where}`))[0]?.n ?? 0;
     const items = rowsOf(await db.execute(sql`
-      SELECT id, event_type, idempotency_key, order_id, status, attempts, max_attempts, next_attempt_at, last_attempt_at, last_error_code, left(coalesce(last_error, ''), 300) AS last_error, ledger_transaction_id, source, occurred_at, created_at, processed_at
+      SELECT id, event_type, idempotency_key, order_id, payout_id, status, attempts, max_attempts, next_attempt_at, last_attempt_at, last_error_code, left(coalesce(last_error, ''), 300) AS last_error, ledger_transaction_id, source, occurred_at, created_at, processed_at
         FROM ledger_outbox_events ${where} ORDER BY created_at DESC, id DESC LIMIT ${limit} OFFSET ${offset}`));
     return res.json({ success: true, data: { items, total, limit, offset } });
   } catch (err) { return handleError(res, err, 'outbox'); }
@@ -140,7 +140,7 @@ ledgerAdminRouter.get('/outbox', requireLedgerReader, async (req: AuthRequest, r
 ledgerAdminRouter.get('/outbox/:id', requireLedgerReader, async (req: AuthRequest, res: Response) => {
   try {
     const db: any = getDb(); if (!db) return deny(res, 503, 'DATABASE_UNAVAILABLE', 'Banco indisponível.');
-    const ev = rowsOf(await db.execute(sql`SELECT id, event_type, idempotency_key, order_id, payment_id, purchase_group_id, status, attempts, max_attempts, next_attempt_at, last_attempt_at, last_error_code, last_error, ledger_transaction_id, source, snapshot_json, snapshot_hash, cutoff_at, occurred_at, created_at, processed_at, resolved_by, resolution_note FROM ledger_outbox_events WHERE id = ${req.params.id}`))[0];
+    const ev = rowsOf(await db.execute(sql`SELECT id, event_type, idempotency_key, order_id, payout_id, payment_id, purchase_group_id, status, attempts, max_attempts, next_attempt_at, last_attempt_at, last_error_code, last_error, ledger_transaction_id, source, snapshot_json, snapshot_hash, cutoff_at, occurred_at, created_at, processed_at, resolved_by, resolution_note FROM ledger_outbox_events WHERE id = ${req.params.id}`))[0];
     if (!ev) return deny(res, 404, 'OUTBOX_EVENT_NOT_FOUND', 'Evento não encontrado.');
     const audit = rowsOf(await db.execute(sql`SELECT action, actor_user_id, details_json, created_at FROM audit_logs WHERE resource = 'ledger_outbox_event' AND resource_id = ${ev.id} ORDER BY created_at DESC LIMIT 20`));
     return res.json({ success: true, data: { event: ev, audit } });

@@ -16,7 +16,9 @@ export type LedgerSkipReason =
   | 'SHIPPING_REVERSAL_NOT_ELIGIBLE'
   | 'CHARGEBACK_NOT_FOUND'
   | 'CHARGEBACK_REFUND_OVERLAP'
-  | 'CHARGEBACK_NOT_ELIGIBLE';
+  | 'CHARGEBACK_NOT_ELIGIBLE'
+  | 'PAYOUT_NOT_FOUND'
+  | 'PAYOUT_STATE_MISMATCH';
 
 export interface LedgerResult {
   posted: boolean;

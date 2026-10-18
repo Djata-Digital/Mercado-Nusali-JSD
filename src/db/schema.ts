@@ -2500,7 +2500,7 @@ export const ledgerTransactions = pgTable('ledger_transactions', {
   // Catálogo fechado — só os eventos implementados NESTA fase (financialLedgerService.ts).
   // Eventos futuros (PAYOUT_*, REFUND_*, CHARGEBACK_*, DISPUTE_*, ADJUSTMENT, REVERSAL, ...)
   // entram numa migration aditiva quando o código que os usa for implementado.
-  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED','CHARGEBACK_CONFIRMED','CHARGEBACK_ALLOCATED','CHARGEBACK_RECOVERY','CHARGEBACK_WRITE_OFF')`),
+  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED','CHARGEBACK_CONFIRMED','CHARGEBACK_ALLOCATED','CHARGEBACK_RECOVERY','CHARGEBACK_WRITE_OFF','PAYOUT_REQUESTED','PAYOUT_COMPLETED','PAYOUT_FAILED')`),
   ledger_transactions_order_idx: index('ledger_transactions_order_idx').on(table.orderId),
   ledger_transactions_type_status_idx: index('ledger_transactions_type_status_idx').on(table.type, table.status),
 }));
@@ -2548,7 +2548,9 @@ export const ledgerOutboxEvents = pgTable('ledger_outbox_events', {
   id: varchar('id', { length: 255 }).primaryKey(),
   eventType: varchar('event_type', { length: 50 }).notNull(), // PAYMENT_RECEIVED | ORDER_DELIVERY_CONFIRMED
   idempotencyKey: varchar('idempotency_key', { length: 255 }).notNull(),
-  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  // E8b: eventos de pedido têm order_id; eventos de SAQUE (PAYOUT_*) não têm pedido — o assunto é payout_id (CHECK: ao menos um dos dois)
+  orderId: varchar('order_id', { length: 255 }).references(() => orders.id, { onDelete: 'restrict' }),
+  payoutId: varchar('payout_id', { length: 255 }).references(() => sellerPayouts.id, { onDelete: 'restrict' }),
   purchaseGroupId: varchar('purchase_group_id', { length: 255 }),
   paymentId: varchar('payment_id', { length: 255 }),
   // PENDING (nunca tentado) | PROCESSING (com lease) | RETRYING (falha recuperável, aguarda next_attempt_at) | DONE | SKIPPED (política: ex. pedido legado)
@@ -2579,7 +2581,9 @@ export const ledgerOutboxEvents = pgTable('ledger_outbox_events', {
   ledger_outbox_events_idempotency_uq: uniqueIndex('ledger_outbox_events_idempotency_uq').on(table.idempotencyKey),
   ledger_outbox_events_claim_idx: index('ledger_outbox_events_claim_idx').on(table.status, table.nextAttemptAt),
   ledger_outbox_events_order_idx: index('ledger_outbox_events_order_idx').on(table.orderId),
-  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED','CHARGEBACK_CONFIRMED','CHARGEBACK_ALLOCATED','CHARGEBACK_RECOVERY','CHARGEBACK_WRITE_OFF')`),
+  ledger_outbox_events_payout_idx: index('ledger_outbox_events_payout_idx').on(table.payoutId),
+  ledger_outbox_events_subject_check: check('ledger_outbox_events_subject_check', sql`${table.orderId} IS NOT NULL OR ${table.payoutId} IS NOT NULL`),
+  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED','CHARGEBACK_CONFIRMED','CHARGEBACK_ALLOCATED','CHARGEBACK_RECOVERY','CHARGEBACK_WRITE_OFF','PAYOUT_REQUESTED','PAYOUT_COMPLETED','PAYOUT_FAILED')`),
   ledger_outbox_events_status_check: check('ledger_outbox_events_status_check', sql`${table.status} IN ('PENDING','PROCESSING','RETRYING','DONE','SKIPPED','NEEDS_INTERVENTION','DISMISSED')`),
   ledger_outbox_events_attempts_check: check('ledger_outbox_events_attempts_check', sql`${table.attempts} >= 0 AND ${table.maxAttempts} >= 1`),
   ledger_outbox_events_hash_check: check('ledger_outbox_events_hash_check', sql`char_length(${table.snapshotHash}) = 64`),

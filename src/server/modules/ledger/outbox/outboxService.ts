@@ -15,9 +15,10 @@
 import os from 'os';
 import { eq, sql } from 'drizzle-orm';
 import { getDb } from '../../../../db/index.js';
-import { ledgerOutboxEvents, orders, refunds, shippingCostReversals, users, auditLogs } from '../../../../db/schema.js';
+import { ledgerOutboxEvents, orders, refunds, shippingCostReversals, users, auditLogs, sellerPayouts } from '../../../../db/schema.js';
 import { logger } from '../../../infra/logger.js';
 import { FinancialLedgerService, type ShadowLedgerStatus } from '../financialLedgerService.js';
+import { isPayoutEvent, payoutKey, buildPayoutSnapshot, hashPayoutSnapshot, type PayoutEventType, type PayoutRowForSnapshot } from '../payoutLedger.js';
 import { isChargebackEvent, chargebackEventKey, loadChargebackSubject, buildChargebackEventSnapshot } from './chargebackSubjects.js';
 import {
   buildOrderSnapshot, buildRefundSnapshot, buildReversalSnapshot, hashSnapshot, diffSnapshots, keyFor, refundProcessedKey, shippingCostReversedKey, classifyProcessingError, mapLedgerResult, computeBackoffSeconds, resolvePolicy,
@@ -109,11 +110,42 @@ export async function enqueueLedgerEvent(
   }
 }
 
+/** E8b — evento de SAQUE (solicitação / conclusão / falha): o assunto é o saque (payout_id), não um pedido. Mesma disciplina: idempotente, em SAVEPOINT, respeita o cutoff, nunca derruba o dinheiro real. */
+export interface EnqueuePayoutInput { eventType: PayoutEventType; payout: PayoutRowForSnapshot; occurredAt: Date; source: string }
+export async function enqueuePayoutLedgerEvent(
+  executor: any, input: EnqueuePayoutInput, shadow: ShadowLedgerStatus = FinancialLedgerService.getShadowStatus(), env: Record<string, string | undefined> = process.env
+): Promise<EnqueueResult> {
+  if (!isOutboxEnabled(env)) return { status: 'DISABLED', reason: 'LEDGER_OUTBOX_ENABLED não é "true"' };
+  if (!shadow.enabled || !shadow.cutoff) return { status: 'NOT_ELIGIBLE', reason: 'SHADOW_LEDGER_DISABLED' };
+  const created = input.payout.createdAt instanceof Date ? input.payout.createdAt : new Date(input.payout.createdAt);
+  if (created < shadow.cutoff) return { status: 'NOT_ELIGIBLE', reason: 'LEGACY_ORDER' }; // sem backfill de saques anteriores ao cutoff
+  const snapshot = buildPayoutSnapshot(input.payout, input.eventType);
+  const key = payoutKey(input.eventType, input.payout.id);
+  const policy = resolvePolicy(env);
+  try {
+    const rows: Array<{ id: string }> = await executor.transaction(async (sp: any) =>
+      sp.insert(ledgerOutboxEvents).values({
+        id: newId(), eventType: input.eventType, idempotencyKey: key, orderId: null, payoutId: input.payout.id,
+        status: 'PENDING', attempts: 0, maxAttempts: policy.maxAttempts, nextAttemptAt: new Date(),
+        snapshotJson: snapshot, snapshotHash: hashPayoutSnapshot(snapshot), occurredAt: input.occurredAt, cutoffAt: shadow.cutoff,
+        source: input.source, createdAt: new Date(), updatedAt: new Date(),
+      }).onConflictDoNothing({ target: ledgerOutboxEvents.idempotencyKey }).returning({ id: ledgerOutboxEvents.id })
+    );
+    if (rows.length > 0) return { status: 'ENQUEUED', eventId: rows[0].id };
+    const [existing] = await executor.select({ id: ledgerOutboxEvents.id }).from(ledgerOutboxEvents).where(eq(ledgerOutboxEvents.idempotencyKey, key)).limit(1);
+    return existing ? { status: 'EXISTS', eventId: existing.id } : { status: 'FAILED', reason: 'conflito sem evento existente' };
+  } catch (err: any) {
+    logger.error({ payoutId: input.payout.id, eventType: input.eventType, error: err?.message, pgCode: err?.cause?.code ?? err?.code }, '[LedgerOutbox] falha ao gravar o evento de saque no outbox');
+    if (isOutboxStrict(env)) throw err;
+    return { status: 'FAILED', reason: String(err?.message ?? err).slice(0, 300) };
+  }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // Processamento
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 export interface ClaimedEvent {
-  id: string; eventType: OutboxEventType; idempotencyKey: string; orderId: string; attempts: number; maxAttempts: number;
+  id: string; eventType: OutboxEventType; idempotencyKey: string; orderId: string | null; payoutId: string | null; attempts: number; maxAttempts: number;
   snapshotJson: Record<string, unknown>; snapshotHash: string; occurredAt: Date; source: string | null;
 }
 
@@ -125,7 +157,7 @@ export const parseUtc = (v: unknown): Date => {
 };
 
 const mapClaimed = (r: any): ClaimedEvent => ({
-  id: r.id, eventType: r.event_type, idempotencyKey: r.idempotency_key, orderId: r.order_id, attempts: r.attempts, maxAttempts: r.max_attempts,
+  id: r.id, eventType: r.event_type, idempotencyKey: r.idempotency_key, orderId: r.order_id ?? null, payoutId: r.payout_id ?? null, attempts: r.attempts, maxAttempts: r.max_attempts,
   snapshotJson: r.snapshot_json, snapshotHash: r.snapshot_hash, occurredAt: parseUtc(r.occurred_at), source: r.source,
 });
 
@@ -166,7 +198,7 @@ export async function claimEvents(db: any, opts: { workerId: string; limit: numb
        SET status = 'PROCESSING', locked_by = ${opts.workerId}, locked_until = ${iso(until)}::timestamp,
            attempts = e.attempts + 1, last_attempt_at = ${iso(opts.now)}::timestamp, updated_at = ${iso(opts.now)}::timestamp
       FROM picked WHERE e.id = picked.id
-    RETURNING e.id, e.event_type, e.idempotency_key, e.order_id, e.attempts, e.max_attempts, e.snapshot_json, e.snapshot_hash, e.occurred_at, e.source`);
+    RETURNING e.id, e.event_type, e.idempotency_key, e.order_id, e.payout_id, e.attempts, e.max_attempts, e.snapshot_json, e.snapshot_hash, e.occurred_at, e.source`);
   return rowsOf(res).map(mapClaimed);
 }
 
@@ -207,11 +239,37 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
     (logger as any)[level]({ outboxEventId: ev.id, orderId: ev.orderId, eventType: ev.eventType, attempt: ev.attempts, maxAttempts: ev.maxAttempts, workerId, ...extra }, `[LedgerOutbox] ${msg}`);
   const fin = async (f: Finalize, outcome: EventOutcome): Promise<EventOutcome> => ((await finalize(db, ev, workerId, f, now)) ? outcome : 'LEASE_LOST');
   try {
+    // E8b — evento de SAQUE: o saque tem de existir e ser, campo a campo, o enfileirado; o ledger só lança o ESTADO que o saque realmente tem (ver postPayoutEvent)
+    if (isPayoutEvent(ev.eventType)) {
+      const payoutId = typeof ev.snapshotJson.payoutId === 'string' ? ev.snapshotJson.payoutId : null;
+      if (!payoutId || ev.idempotencyKey !== payoutKey(ev.eventType, payoutId) || ev.payoutId !== payoutId) {
+        log('error', 'evento de saque com snapshot/chave inválidos => intervenção');
+        return fin({ kind: 'NEEDS_INTERVENTION', code: 'INVALID_EVENT_SNAPSHOT', detail: 'payoutId ausente ou chave incoerente' }, 'NEEDS_INTERVENTION');
+      }
+      const [payout] = await db.select().from(sellerPayouts).where(eq(sellerPayouts.id, payoutId)).limit(1);
+      if (!payout) return fin({ kind: 'NEEDS_INTERVENTION', code: 'PAYOUT_NOT_FOUND', detail: `saque ${payoutId} não existe` }, 'NEEDS_INTERVENTION');
+      if (hashPayoutSnapshot(buildPayoutSnapshot(payout as any, ev.eventType)) !== ev.snapshotHash) {
+        const fields = diffSnapshots(buildPayoutSnapshot(payout as any, ev.eventType), ev.snapshotJson);
+        log('error', 'DIVERGÊNCIA: o saque mudou depois do enfileiramento => intervenção (nada foi lançado)', { fields });
+        return fin({ kind: 'NEEDS_INTERVENTION', code: 'SNAPSHOT_DIVERGED', detail: `campos divergentes: ${fields.join(', ')}` }, 'NEEDS_INTERVENTION');
+      }
+      const common = { payoutId, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id };
+      const r = mapLedgerResult(ev.eventType === 'PAYOUT_REQUESTED' ? await FinancialLedgerService.recordPayoutRequested(common)
+        : ev.eventType === 'PAYOUT_COMPLETED' ? await FinancialLedgerService.recordPayoutCompleted(common) : await FinancialLedgerService.recordPayoutFailed(common));
+      if (r.action === 'DONE') {
+        log('info', r.replay ? 'saque já lançado (replay idempotente) => DONE' : 'saque lançado => DONE', { ledgerTransactionId: r.transactionId, payoutId });
+        return fin({ kind: 'DONE', transactionId: r.transactionId }, r.replay ? 'DONE_REPLAY' : 'DONE');
+      }
+      if (r.action === 'SKIPPED') { log('info', 'ignorado por política', { reason: r.code }); return fin({ kind: 'SKIPPED', code: r.code, detail: r.detail }, 'SKIPPED'); }
+      if (r.action === 'DEFER') return fin({ kind: 'DEFER', code: r.code }, 'DEFERRED');
+      return await failFrom(r);
+    }
+    const evOrderId = ev.orderId as string;
     // 1) snapshot: o pedido tem de ser, campo a campo, o que foi enfileirado
-    const [order] = await db.select().from(orders).where(eq(orders.id, ev.orderId)).limit(1);
+    const [order] = await db.select().from(orders).where(eq(orders.id, evOrderId)).limit(1);
     if (!order) {
       log('error', 'pedido não encontrado => intervenção');
-      return fin({ kind: 'NEEDS_INTERVENTION', code: 'ORDER_NOT_FOUND', detail: `pedido ${ev.orderId} não existe` }, 'NEEDS_INTERVENTION');
+      return fin({ kind: 'NEEDS_INTERVENTION', code: 'ORDER_NOT_FOUND', detail: `pedido ${evOrderId} não existe` }, 'NEEDS_INTERVENTION');
     }
     // REFUND_PROCESSED: além do pedido, o reembolso tem de existir, estar CONCLUÍDO e ser, campo a campo, o que foi enfileirado (o estágio vem do próprio evento)
     let refundId: string | null = null;
@@ -224,7 +282,7 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
       const prefix = chargebackEventKey(ev.eventType, '');
       cbSubjectId = ev.idempotencyKey.startsWith(prefix) ? ev.idempotencyKey.slice(prefix.length) : null;
       const subject = cbSubjectId ? await loadChargebackSubject(db, ev.eventType, cbSubjectId) : null;
-      if (!subject || subject.orderId !== ev.orderId) {
+      if (!subject || subject.orderId !== evOrderId) {
         log('error', 'assunto do chargeback ausente/incoerente => intervenção');
         return fin({ kind: 'NEEDS_INTERVENTION', code: 'CHARGEBACK_SUBJECT_NOT_FOUND', detail: `assunto ${cbSubjectId ?? '?'} não encontrado para o pedido do evento` }, 'NEEDS_INTERVENTION');
       }
@@ -259,7 +317,7 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
       return fin({ kind: 'NEEDS_INTERVENTION', code: 'SNAPSHOT_DIVERGED', detail: `campos divergentes: ${fields.join(', ')}` }, 'NEEDS_INTERVENTION');
     }
     // 2) lançamento (idempotente por chave). A entrega garante antes o PAYMENT_RECEIVED do pedido (BUYER_ESCROW nunca negativo).
-    const base = { orderId: ev.orderId, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id };
+    const base = { orderId: evOrderId, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id };
     if (isChargebackEvent(ev.eventType)) {
       const id = cbSubjectId!; const common = { occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id };
       const call = ev.eventType === 'CHARGEBACK_CONFIRMED' ? FinancialLedgerService.recordChargebackConfirmed({ allocationId: id, ...common })

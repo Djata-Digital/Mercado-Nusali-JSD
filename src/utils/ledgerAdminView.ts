@@ -9,6 +9,7 @@ export const canAdminLedger = (role?: string | null) => LEDGER_ADMIN_ROLES.inclu
 export const TX_TYPE_LABEL: Record<string, string> = {
   PAYMENT_RECEIVED: 'Pagamento recebido', ORDER_DELIVERY_CONFIRMED: 'Entrega confirmada (liberação)', REFUND_PROCESSED: 'Reembolso concluído', SHIPPING_COST_REVERSED: 'Reversão de custo de frete',
   CHARGEBACK_CONFIRMED: 'Chargeback confirmado', CHARGEBACK_ALLOCATED: 'Chargeback — responsabilidade alocada', CHARGEBACK_RECOVERY: 'Chargeback — recuperação', CHARGEBACK_WRITE_OFF: 'Chargeback — baixa',
+  PAYOUT_REQUESTED: 'Saque solicitado', PAYOUT_COMPLETED: 'Saque concluído', PAYOUT_FAILED: 'Saque falho (devolvido ao saldo)',
 };
 export const TX_TYPES = Object.keys(TX_TYPE_LABEL);
 export const EVENT_STATUS_LABEL: Record<string, string> = {

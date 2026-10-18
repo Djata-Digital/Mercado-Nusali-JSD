@@ -29,6 +29,7 @@ import {
   chargebackDecisions,
   chargebackDecisionLines,
   chargebackRecoveries,
+  sellerPayouts,
 } from '../../../db/schema.js';
 import { and, eq } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
@@ -38,6 +39,7 @@ import { buildDeliveryConfirmedEntries } from './deliveryConfirmedEntries.js';
 import { buildRefundProcessedEntries, type ReleaseStage } from './refundProcessedEntries.js';
 import { buildShippingCostReversalEntries } from './shippingReversalEntries.js';
 import { buildChargebackConfirmedEntries, buildChargebackAllocatedEntries, buildChargebackRecoveryEntries } from './chargebackEntries.js';
+import { buildPayoutEntries, payoutKey, type PayoutEventType } from './payoutLedger.js';
 import { isUniqueViolationOf } from './pgErrors.js';
 import type { LedgerSkipReason, LedgerResult } from './types.js';
 
@@ -684,4 +686,47 @@ export class FinancialLedgerService {
       entries: built.entries,
     });
   }
+
+  // ==========================================================================
+  // SAQUES (E8b): PAYOUT_REQUESTED / PAYOUT_COMPLETED / PAYOUT_FAILED — ver payoutLedger.ts (contas e lançamentos)
+  // ==========================================================================
+  /**
+   * Lançamento de um evento de saque. Regras: (1) só com o ledger sombra ligado e saque criado em/depois do cutoff; (2) CONCLUSÃO só se o saque ESTÁ concluído e FALHA só se ESTÁ falho
+   * (nunca se registra um estado antes do fato real; estado divergente => PAYOUT_STATE_MISMATCH => intervenção); (3) conclusão/falha exigem a solicitação lançada antes (pré-requisito
+   * idempotente, como o reembolso exige o pagamento); (4) conclusão e falha são mutuamente exclusivas. Nenhum saldo real é lido ou escrito.
+   */
+  private static async postPayoutEvent(type: PayoutEventType, input: { payoutId: string; performedBy?: string | null; source?: string | null; correlationId?: string | null; requestId?: string | null; occurredAt?: Date }): Promise<LedgerResult> {
+    const db = getDb();
+    if (!db) return { posted: false, skipped: true, reason: 'DATABASE_UNAVAILABLE' };
+    if (LEDGER_SHADOW_CUTOFF_AT === null) return { posted: false, skipped: true, reason: 'SHADOW_LEDGER_DISABLED', detail: 'LEDGER_SHADOW_CUTOFF_AT não configurada — shadow ledger está OFF.' };
+    const [p] = await db.select().from(sellerPayouts).where(eq(sellerPayouts.id, input.payoutId)).limit(1);
+    if (!p) return { posted: false, skipped: true, reason: 'PAYOUT_NOT_FOUND', detail: `saque ${input.payoutId} não existe` };
+    if (p.createdAt < LEDGER_SHADOW_CUTOFF_AT) return { posted: false, skipped: true, reason: 'LEGACY_ORDER', detail: `saque criado em ${p.createdAt.toISOString()} < cutoff (sem backfill de saques anteriores)` };
+    if (type === 'PAYOUT_COMPLETED' && p.status !== 'completed') return { posted: false, skipped: true, reason: 'PAYOUT_STATE_MISMATCH', detail: `o saque está "${p.status}": a conclusão só é lançada com o saque concluído` };
+    if (type === 'PAYOUT_FAILED' && p.status !== 'failed') return { posted: false, skipped: true, reason: 'PAYOUT_STATE_MISMATCH', detail: `o saque está "${p.status}": a falha só é lançada com o saque falho` };
+    if (type !== 'PAYOUT_REQUESTED') {
+      const other: PayoutEventType = type === 'PAYOUT_COMPLETED' ? 'PAYOUT_FAILED' : 'PAYOUT_COMPLETED';
+      const [conflict] = await db.select({ id: ledgerTransactions.id }).from(ledgerTransactions).where(eq(ledgerTransactions.idempotencyKey, payoutKey(other, p.id))).limit(1);
+      if (conflict) return { posted: false, skipped: true, reason: 'PAYOUT_STATE_MISMATCH', detail: `o saque já tem o lançamento ${other}: conclusão e falha são exclusivas` };
+      const pre = await this.postPayoutEvent('PAYOUT_REQUESTED', input);
+      if (!pre.posted) return pre;
+    }
+    const built = buildPayoutEntries({ id: p.id, sellerId: p.sellerId, amount: String(p.amount), currency: p.currency }, type);
+    if (built.status === 'SKIPPED') return { posted: false, skipped: true, reason: built.reason, detail: built.detail };
+    const occurredAt = input.occurredAt ?? (type === 'PAYOUT_COMPLETED' ? p.processedAt : p.createdAt) ?? new Date();
+    const reasonText: Record<PayoutEventType, string> = {
+      PAYOUT_REQUESTED: 'Saque solicitado: o saldo do vendedor foi reservado (em trânsito).',
+      PAYOUT_COMPLETED: 'Saque concluído: o dinheiro saiu para o vendedor (referência da transação registrada).',
+      PAYOUT_FAILED: 'Saque falho: o valor voltou ao saldo do vendedor (reverte a solicitação).',
+    };
+    return this.postTransaction({
+      type, idempotencyKey: payoutKey(type, p.id), currency: p.currency, occurredAt, payoutId: p.id, sellerId: p.sellerId, performedBy: input.performedBy ?? null,
+      source: input.source ?? 'payout_service', reason: reasonText[type], correlationId: input.correlationId ?? null, requestId: input.requestId ?? null,
+      metadata: { shadowPhase: 'E8b', method: p.method, transactionRef: p.transactionRef ?? null, amount: String(p.amount) },
+      entries: built.entries,
+    });
+  }
+  static recordPayoutRequested(input: { payoutId: string; performedBy?: string | null; source?: string | null; correlationId?: string | null; requestId?: string | null; occurredAt?: Date }): Promise<LedgerResult> { return this.postPayoutEvent('PAYOUT_REQUESTED', input); }
+  static recordPayoutCompleted(input: { payoutId: string; performedBy?: string | null; source?: string | null; correlationId?: string | null; requestId?: string | null; occurredAt?: Date }): Promise<LedgerResult> { return this.postPayoutEvent('PAYOUT_COMPLETED', input); }
+  static recordPayoutFailed(input: { payoutId: string; performedBy?: string | null; source?: string | null; correlationId?: string | null; requestId?: string | null; occurredAt?: Date }): Promise<LedgerResult> { return this.postPayoutEvent('PAYOUT_FAILED', input); }
 }
