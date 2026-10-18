@@ -2602,6 +2602,7 @@ adminRouter.post('/payouts/:id/status', requireFinanceApproval, async (req: Auth
 
     const result = await processPayoutStatusChange(id, status, {
       transactionRef,
+      actorUserId: req.user?.id ?? null,
       isProduction: process.env.NODE_ENV === 'production',
     });
 

@@ -6,7 +6,7 @@
  * Postgres Docker).
  */
 import { getDb } from '../../../db/index.js';
-import { sellers, wallets, walletTransactions, sellerPayouts, sellerBankAccounts, countries } from '../../../db/schema.js';
+import { sellers, wallets, walletTransactions, sellerPayouts, sellerBankAccounts, countries, auditLogs } from '../../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { sumActiveHoldsMicros } from './walletHoldService.js';
 import { toMicros, formatMicros } from '../ledger/decimal.js';
@@ -57,6 +57,10 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
     const existingPayout = await tx.select().from(sellerPayouts).where(eq(sellerPayouts.idempotencyKey, clientIdempotencyKey)).limit(1);
     if (existingPayout.length > 0) {
       const p = existingPayout[0];
+      // E8: a chave de idempotência é global na tabela; um saque de OUTRO vendedor nunca é devolvido (vazaria valor/método/estado) — conflito genérico, sem dados.
+      if (p.sellerId !== input.sellerId) {
+        throw new PayoutValidationError('IDEMPOTENCY_KEY_CONFLICT', 'Esta chave de idempotência já foi usada por outra solicitação. Gere uma nova chave.', 409);
+      }
       return {
         id: p.id, amount: Number(p.amount), currency: p.currency, method: p.method,
         bankAccountId: p.bankAccountId, status: p.status, alreadyRequested: true,
@@ -82,8 +86,12 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
       throw new PayoutValidationError('BANK_ACCOUNT_REQUIRED', 'Uma conta bancária/de recebimento cadastrada é obrigatória para este método de saque.');
     }
 
-    if (!input.amount || input.amount <= 0) {
+    if (!input.amount || !Number.isFinite(input.amount) || input.amount <= 0 || Math.round(input.amount * 100) < 1) {
       throw new PayoutValidationError('INVALID_AMOUNT', 'Informe um valor válido para saque.');
+    }
+    // E8: no máximo 2 casas decimais — antes um valor como 10.005 debitava a carteira por um valor e registrava o saque por outro (arredondamento)
+    if (Math.abs(input.amount * 100 - Math.round(input.amount * 100)) > 1e-6) {
+      throw new PayoutValidationError('INVALID_AMOUNT', 'O valor do saque deve ter no máximo 2 casas decimais.');
     }
 
     // Uma wallet por (userId, currency) — busca exatamente a wallet da moeda
@@ -154,7 +162,8 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
       throw new PayoutValidationError('INSUFFICIENT_AVAILABLE_BALANCE', 'Saldo disponível insuficiente para solicitar o saque.', 409);
     }
 
-    const newBalance = totalBalance - input.amount;
+    const amountStr = formatMicros(requestedMicros, 2);
+    const newBalance = Number(formatMicros(totalMicros - requestedMicros, 2));
     await tx
       .update(wallets)
       .set({ balance: String(newBalance.toFixed(2)), updatedAt: new Date() })
@@ -164,7 +173,7 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
     await tx.insert(sellerPayouts).values({
       id: payoutId,
       sellerId: input.sellerId,
-      amount: String(input.amount.toFixed(2)),
+      amount: amountStr,
       currency: requestedCurrency,
       method: canonicalMethod,
       bankAccountId: validatedBankAccountId,
@@ -177,7 +186,7 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
       id: `wtx_payout_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       walletId: sellerWallet.id,
       type: 'payout',
-      amount: String((-input.amount).toFixed(2)),
+      amount: `-${amountStr}`,
       currency: requestedCurrency,
       title: `Solicitação de Saque (${canonicalMethod.toUpperCase()})`,
       referenceId: payoutId,
@@ -186,6 +195,11 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
       balanceAfter: String(newBalance.toFixed(2)),
       idempotencyKey: `payout_request:${payoutId}`,
       createdAt: new Date(),
+    });
+
+    await tx.insert(auditLogs).values({
+      id: `aud_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, actorUserId: input.sellerUserId, action: 'payout.request', resource: 'seller_payout', resourceId: payoutId,
+      detailsJson: { sellerId: input.sellerId, walletId: sellerWallet.id, amount: amountStr, currency: requestedCurrency, method: canonicalMethod, totalBefore: formatMicros(totalMicros, 2), heldAtRequest: formatMicros(heldMicros, 2) }, createdAt: new Date(),
     });
 
     return {
@@ -197,7 +211,13 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
   if (executor) return runInTx(executor);
   const db = getDb();
   if (!db) throw new Error('Banco de dados indisponível.');
-  return db.transaction(runInTx);
+  try {
+    return await db.transaction(runInTx);
+  } catch (err: any) {
+    const code = err?.code ?? err?.cause?.code; const constraint = String(err?.constraint ?? err?.cause?.constraint ?? '');
+    if (code === '23505' && constraint.includes('seller_payouts_idempotency_uq')) return db.transaction(runInTx); // a transação perdedora foi desfeita (sem débito); agora vê o saque e devolve o replay
+    throw err;
+  }
 }
 
 export type PayoutStatus = 'pending' | 'processing' | 'completed' | 'failed';
@@ -214,14 +234,19 @@ export type PayoutStatus = 'pending' | 'processing' | 'completed' | 'failed';
 export async function processPayoutStatusChange(
   payoutId: string,
   status: PayoutStatus,
-  options: { transactionRef?: string; isProduction?: boolean } = {},
+  options: { transactionRef?: string; isProduction?: boolean; actorUserId?: string | null } = {},
   executor?: any
 ) {
   const runInTx = async (tx: any) => {
-    const payoutRows = await tx.select().from(sellerPayouts).where(eq(sellerPayouts.id, payoutId)).limit(1);
+    // E8: trava a linha do saque — duas transições concorrentes (ex.: completed × failed) são serializadas e a segunda relê o estado já gravado
+    const payoutRows = await tx.select().from(sellerPayouts).where(eq(sellerPayouts.id, payoutId)).for('update').limit(1);
     if (payoutRows.length === 0) throw new Error('Solicitação de saque não encontrada.');
     const p = payoutRows[0];
     const currentStatus = p.status as PayoutStatus;
+    const audit = (from: string, to: string, extra: Record<string, unknown> = {}) => tx.insert(auditLogs).values({
+      id: `aud_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, actorUserId: options.actorUserId ?? null, action: 'payout.status_change', resource: 'seller_payout', resourceId: p.id,
+      detailsJson: { from, to, amount: String(p.amount), currency: p.currency, sellerId: p.sellerId, ...extra }, createdAt: new Date(),
+    });
 
     if (currentStatus === status) {
       return { success: true, message: `Saque já se encontra no status "${status}".`, alreadyInState: true, status: currentStatus };
@@ -249,6 +274,7 @@ export async function processPayoutStatusChange(
       }
 
       await tx.update(sellerPayouts).set({ status: 'completed', processedAt: new Date(), transactionRef: ref }).where(eq(sellerPayouts.id, p.id));
+      await audit(currentStatus, 'completed', { transactionRef: ref });
 
       const wtxRows = await tx.select().from(walletTransactions).where(eq(walletTransactions.referenceId, p.id)).limit(1);
       if (wtxRows.length > 0) {
@@ -260,6 +286,7 @@ export async function processPayoutStatusChange(
 
     if (status === 'processing') {
       await tx.update(sellerPayouts).set({ status: 'processing' }).where(eq(sellerPayouts.id, p.id));
+      await audit(currentStatus, 'processing');
       return { success: true, message: `Saque #${p.id} alterado para em processamento.` };
     }
 
@@ -268,6 +295,7 @@ export async function processPayoutStatusChange(
       const existingRefundWtx = await tx.select().from(walletTransactions).where(eq(walletTransactions.idempotencyKey, refundIdempotencyKey)).limit(1);
 
       await tx.update(sellerPayouts).set({ status: 'failed' }).where(eq(sellerPayouts.id, p.id));
+      await audit(currentStatus, 'failed', { refundAlreadyDone: existingRefundWtx.length > 0 });
 
       if (existingRefundWtx.length > 0) {
         return { success: true, message: `Saque #${p.id} marcado como falho. Reembolso já efetuado anteriormente.`, alreadyRefunded: true };
@@ -275,7 +303,10 @@ export async function processPayoutStatusChange(
 
       const selRows = await tx.select().from(sellers).where(eq(sellers.id, p.sellerId)).limit(1);
       if (selRows.length === 0) {
-        return { success: true, message: `Saque #${p.id} marcado como falho, mas vendedor não encontrado — reembolso não realizado.` };
+        // E8: nunca marcar FALHO sem devolver o saldo (antes: sucesso silencioso com o dinheiro preso). Aborta a transação: nada muda e o erro é visível.
+        const err: any = new Error(`PAYOUT_REFUND_SELLER_NOT_FOUND: vendedor ${p.sellerId} não encontrado — o estorno do saque ${p.id} não pode ser feito; nada foi alterado.`);
+        err.code = 'PAYOUT_REFUND_SELLER_NOT_FOUND';
+        throw err;
       }
       const sellerUserId = selRows[0].userId;
 
