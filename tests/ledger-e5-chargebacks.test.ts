@@ -371,6 +371,63 @@ async function main() {
   const sumAll = (await q(`select coalesce(sum(case when direction='DEBIT' then amount else -amount end),0)::numeric as s from ledger_entries`))[0].s;
   report('M3 a soma de TODAS as linhas do ledger (débitos − créditos) continua zero', Number(sumAll) === 0, sumAll);
 
+  // ================================================================================================================================================
+  // N) POLÍTICA APROVADA: responsabilidade do vendedor limitada ao valor LÍQUIDO (N) do pedido, CUMULATIVA (revisões e outras decisões do mesmo pedido)
+  // ================================================================================================================================================
+  const lostOrder = async (shopX: any, ids: Array<[string, number]>) => {
+    const pl = await place([shopX]); const oid = pl.orderIds[0]; const py = await pay(pl); await release(oid, pl.buyer.buyerId);
+    const net = c((await orderRow(oid)).seller_net_amount); const total = c((await orderRow(oid)).total_amount);
+    const cbs: any[] = []; for (const [pid, v] of ids) { await webhook(py, pid, 'DISPUTE_LOST', v); cbs.push(await cbRow(pid)); }
+    return { oid, net, total, cbs, buyer: pl.buyer.buyerId };
+  };
+  const N1 = await lostOrder(shopA, [['cbk-n1', 5500]]);
+  const N3 = await lostOrder(shopB, [['cbk-n3a', 3000], ['cbk-n3b', 2500]]);
+  const N4 = await lostOrder(shopC, [['cbk-n4a', 2500], ['cbk-n4b', 3000]]);
+  const N5 = await lostOrder(shopD, [['cbk-n5', 5500]]);
+  const mN0 = await moneyHash();
+  const eN = await evid(N1.cbs[0].id);
+  const capCheck = {
+    acimaDoLiquido: await errCode(() => propose(N1.cbs[0].id, [eN], [{ orderId: N1.oid, partyType: 'SELLER', amount: '4501' }, { orderId: N1.oid, partyType: 'NUSALI', amount: '999' }])),
+    tudoNoVendedor: await errCode(() => propose(N1.cbs[0].id, [eN], [{ orderId: N1.oid, partyType: 'SELLER', amount: '5500' }])),
+    excedenteSemDecisao: await errCode(() => propose(N1.cbs[0].id, [eN], [{ orderId: N1.oid, partyType: 'SELLER', amount: '4500' }])),
+  };
+  report('N1 teto N: o líquido do pedido é ' + N1.net / 100 + '; SELLER acima de N é recusado (SELLER_CAP_EXCEEDED); atribuir TUDO ao vendedor também; e SELLER = N sem cobrir o excedente é recusado (LINES_SUM_MISMATCH) — o excedente NÃO vai sozinho para a Nusali', N1.net === 450000 && capCheck.acimaDoLiquido === 'SELLER_CAP_EXCEEDED' && capCheck.tudoNoVendedor === 'SELLER_CAP_EXCEEDED' && capCheck.excedenteSemDecisao === 'LINES_SUM_MISMATCH' && (await q('select count(*)::int n from chargeback_decisions where chargeback_id=$1', [N1.cbs[0].id]))[0].n === 0, capCheck);
+  const n1p = await propose(N1.cbs[0].id, [eN], [{ orderId: N1.oid, partyType: 'SELLER', amount: '4500' }, { orderId: N1.oid, partyType: 'NUSALI', amount: '1000' }]);
+  await approveChargebackDecision({ decisionId: n1p.decisionId, actorUserId: admin });
+  const rN1 = await recv(N1.oid);
+  report('N2 exatamente N é permitido (limite não é proibição) e continua sendo decisão explícita: SELLER 4500 + Nusali 1000 (explícito), proposta por FINANCE e aprovada por GLOBAL_ADMIN; recebível do vendedor = 4500 (carteira real intacta)', rN1.SELLER === 450000 && (rN1.PENDING ?? 0) === 0 && (await bal(N1.oid)).CHARGEBACK_LOSS === -100000, rN1);
+  const rv1 = await errCode(() => propose(N1.cbs[0].id, [eN], [{ orderId: N1.oid, partyType: 'SELLER', amount: '4501' }, { orderId: N1.oid, partyType: 'NUSALI', amount: '999' }], { revisionReason: 'revisão tentando ultrapassar o líquido' }));
+  const rv2 = await propose(N1.cbs[0].id, [eN], [{ orderId: N1.oid, partyType: 'SELLER', amount: '4500' }, { orderId: N1.oid, partyType: 'THIRD_PARTY', partyRef: 'transp-y', contractReference: 'Contrato Transp Y cl. 3', amount: '1000' }], { revisionReason: 'Transportadora reconheceu a falha na entrega.' });
+  report('N3 REVISÃO: a versão nova SUBSTITUI a anterior (não se soma): SELLER 4501 é recusado; SELLER 4500 (igual ao anterior) com o resto para terceiro é aceito como proposta v2', rv1 === 'SELLER_CAP_EXCEEDED' && rv2.version === 2 && rv2.supersedes === n1p.decisionId, { rv1, rv2 });
+  await approveChargebackDecision({ decisionId: rv2.decisionId, actorUserId: admin2 });
+  const rN1b = await recv(N1.oid);
+  report('N3b aprovada a v2: o vendedor continua com 4500 (nunca acima de N), a Nusali sai com 0 e o terceiro fica com 1000 — só o delta foi lançado', rN1b.SELLER === 450000 && rN1b.THIRD_PARTY === 100000 && !(await bal(N1.oid)).CHARGEBACK_LOSS, rN1b);
+
+  // dois chargebacks do MESMO pedido: o teto vale para a SOMA atribuída ao vendedor
+  const eN3 = await evid(N3.cbs[0].id); const eN3b = await evid(N3.cbs[1].id);
+  const p3a = await propose(N3.cbs[0].id, [eN3], [{ orderId: N3.oid, partyType: 'SELLER', amount: '2100' }, { orderId: N3.oid, partyType: 'NUSALI', amount: '900' }]);
+  await approveChargebackDecision({ decisionId: p3a.decisionId, actorUserId: admin });
+  const over3 = await errCode(() => propose(N3.cbs[1].id, [eN3b], [{ orderId: N3.oid, partyType: 'SELLER', amount: '2500' }]));
+  const p3b = await propose(N3.cbs[1].id, [eN3b], [{ orderId: N3.oid, partyType: 'SELLER', amount: '2400' }, { orderId: N3.oid, partyType: 'NUSALI', amount: '100' }]);
+  await approveChargebackDecision({ decisionId: p3b.decisionId, actorUserId: admin });
+  const revOver = await errCode(() => propose(N3.cbs[0].id, [eN3], [{ orderId: N3.oid, partyType: 'SELLER', amount: '2101' }, { orderId: N3.oid, partyType: 'NUSALI', amount: '899' }], { revisionReason: 'tentando passar do líquido pela soma' }));
+  report('N4 teto CUMULATIVO por pedido (líquido ' + N3.net / 100 + '): 2º chargeback com SELLER 2500 (2100 já atribuídos → 4600) é recusado; SELLER 2400 + Nusali 100 chega a exatamente 4500 e é aceito; revisar o 1º para 2101 (2101 + 2400 = 4501) é recusado', N3.net === 450000 && over3 === 'SELLER_CAP_EXCEEDED' && revOver === 'SELLER_CAP_EXCEEDED' && p3b.version === 1, { over3, revOver });
+
+  // corrida entre duas aprovações de chargebacks do mesmo pedido que, somadas, passam do teto
+  const eN4a = await evid(N4.cbs[0].id); const eN4b = await evid(N4.cbs[1].id);
+  const p4a = await propose(N4.cbs[0].id, [eN4a], [{ orderId: N4.oid, partyType: 'SELLER', amount: '2500' }]);
+  const p4b = await propose(N4.cbs[1].id, [eN4b], [{ orderId: N4.oid, partyType: 'SELLER', amount: '3000' }]);
+  const race = await Promise.all([approveChargebackDecision({ decisionId: p4a.decisionId, actorUserId: admin }), approveChargebackDecision({ decisionId: p4b.decisionId, actorUserId: admin2 })].map((pr) => pr.then(() => 'ok').catch((e: any) => e.code ?? e.message)));
+  const st4 = (await q(`select status from chargeback_decisions where id = any($1) order by id`, [[p4a.decisionId, p4b.decisionId]])).map((r: any) => r.status).sort().join();
+  report('N5 duas aprovações simultâneas (cada uma cabe sozinha, juntas passam de N): exatamente 1 é aprovada e a outra é recusada (SELLER_CAP_EXCEEDED) e fica PROPOSED — o teto é reconferido sob lock na aprovação', race.filter((r) => r === 'ok').length === 1 && race.filter((r) => r === 'SELLER_CAP_EXCEEDED').length === 1 && st4 === 'APPROVED,PROPOSED', { race, st4 });
+  report('N6 dinheiro REAL intacto por todo o bloco do teto: propostas, aprovações, revisões e a corrida não alteram carteiras, Escrow, pagamentos, pedidos nem reembolsos (hash idêntico)', JSON.stringify(mN0) === JSON.stringify(await moneyHash()));
+  // sem valor líquido no snapshot não há teto => nenhuma responsabilidade do vendedor; Nusali-only continua possível por decisão explícita
+  const eN5 = await evid(N5.cbs[0].id);
+  await q('update orders set seller_net_amount = NULL where id=$1', [N5.oid]);
+  const noNet = await errCode(() => propose(N5.cbs[0].id, [eN5], [{ orderId: N5.oid, partyType: 'SELLER', amount: '1000' }, { orderId: N5.oid, partyType: 'NUSALI', amount: '4500' }]));
+  const nusOnly = await propose(N5.cbs[0].id, [eN5], [{ orderId: N5.oid, partyType: 'NUSALI', amount: '5500' }]).then(() => 'ok').catch((e: any) => e.code);
+  report('N7 pedido SEM valor líquido no snapshot: linha do vendedor é recusada (SELLER_NET_AMOUNT_MISSING); uma proposta só com a Nusali (decisão explícita) é aceita', noNet === 'SELLER_NET_AMOUNT_MISSING' && nusOnly === 'ok', { noNet, nusOnly });
+
   await pool.end();
   console.log(`\n${passed}/${total} testes passaram.`);
   process.exit(passed === total ? 0 : 1);

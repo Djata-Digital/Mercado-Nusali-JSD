@@ -7,7 +7,8 @@
  *     NUNCA automática (nem para o vendedor, nem para a Nusali);
  *  4) RECUPERAÇÃO externa / BAIXA de reclamação de terceiro, com evidência.
  * Nada aqui move dinheiro real: carteiras, Escrow, pagamentos, reembolsos, comissões, frete e subsídios são intocados. O valor alocado ao vendedor fica como RECEBÍVEL no ledger
- * sombra; a cobrança pela carteira real não existe nesta etapa. Política indefinida (ex.: teto de responsabilidade do vendedor) NÃO é aplicada: nada é inventado.
+ * sombra; a cobrança pela carteira real não existe nesta etapa. Política aprovada: a responsabilidade do vendedor é LIMITADA ao valor líquido (N) do pedido (cumulativo, ver
+ * assertSellerCap) — o teto não é responsabilidade automática, e o excedente nunca vai para a Nusali sem decisão explícita. Qualquer outra política indefinida NÃO é aplicada.
  */
 import crypto from 'crypto';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -116,6 +117,32 @@ async function assertNoConflictOfInterest(tx: any, actorUserId: string, orderIds
   }
 }
 const lockChargeback = (tx: any, chargebackId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'cb:' + chargebackId}))`);
+const lockOrderForCap = (tx: any, orderId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${'cbord:' + orderId}))`);
+const rowsOfRes = (res: any): any[] => (Array.isArray(res) ? res : res?.rows ?? []);
+
+/**
+ * POLÍTICA APROVADA — teto da responsabilidade do VENDEDOR por chargeback = valor LÍQUIDO (N = orders.sellerNetAmount, snapshot do pedido), CUMULATIVO por pedido:
+ * soma das linhas SELLER da decisão que está sendo proposta/aprovada + o que já está atribuído ao vendedor desse pedido por decisões APROVADAS vigentes de OUTROS
+ * chargebacks do mesmo pedido. Numa revisão, as linhas da versão anterior do MESMO chargeback são substituídas (não se somam). O teto NÃO é responsabilidade automática
+ * (cada caso exige evidências, proposta e aprovação) e o excedente NUNCA vai para a Nusali sozinho: continua exigindo linha explícita (NUSALI ou terceiro) na decisão.
+ */
+async function assertSellerCap(tx: any, chargebackId: string, sellerByAllocation: Map<string, bigint>): Promise<void> {
+  for (const [allocationId, sellerSum] of sellerByAllocation) {
+    if (sellerSum <= 0n) continue;
+    const [alloc] = await tx.select().from(chargebackAllocations).where(eq(chargebackAllocations.id, allocationId)).limit(1);
+    const [order] = await tx.select({ id: orders.id, net: orders.sellerNetAmount }).from(orders).where(eq(orders.id, alloc.orderId)).limit(1);
+    if (!order || order.net === null || order.net === undefined) throw new ChargebackLedgerError('SELLER_NET_AMOUNT_MISSING', `Pedido ${alloc.orderId} sem valor líquido do vendedor no snapshot: não há teto para atribuir responsabilidade ao vendedor.`);
+    const net = toMicros(String(order.net));
+    const other = rowsOfRes(await tx.execute(sql`
+      SELECT coalesce(sum(l.amount), 0)::text AS s FROM chargeback_decision_lines l
+        JOIN chargeback_decisions d ON d.id = l.decision_id JOIN chargeback_allocations a ON a.id = l.allocation_id
+       WHERE l.party_type = 'SELLER' AND d.status = 'APPROVED' AND d.chargeback_id <> ${chargebackId} AND a.order_id = ${order.id}`))[0]?.s ?? '0';
+    const already = toMicros(String(other));
+    if (already + sellerSum > net) {
+      throw new ChargebackLedgerError('SELLER_CAP_EXCEEDED', `Pedido ${order.id}: a responsabilidade do vendedor (${fromMicros(sellerSum)}, mais ${fromMicros(already)} já atribuídos por outras decisões) excede o valor líquido do pedido (${fromMicros(net)}). O excedente só pode ser atribuído por decisão EXPLÍCITA (Nusali ou terceiro), nunca automaticamente.`);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // evidência (append-only)
@@ -202,6 +229,10 @@ export async function proposeChargebackDecision(input: ProposeDecisionInput): Pr
     for (const a of decidable) {
       if ((sumByAlloc.get(a.id) ?? 0n) !== toMicros(a.allocatedValue)) throw new ChargebackLedgerError('LINES_SUM_MISMATCH', `Pedido ${a.orderId}: as linhas somam ${fromMicros(sumByAlloc.get(a.id) ?? 0n)} e o valor alocado é ${a.allocatedValue}.`);
     }
+    // teto do vendedor (N), cumulativo por pedido — checado já na proposta (e de novo, sob lock, na aprovação)
+    const sellerByAlloc = new Map<string, bigint>();
+    for (const pl of prepared) if (pl.partyType === 'SELLER') sellerByAlloc.set(pl.allocationId, (sellerByAlloc.get(pl.allocationId) ?? 0n) + toMicros(pl.amount));
+    await assertSellerCap(tx, cb.id, sellerByAlloc);
 
     // versão / revisão
     const [approved] = await tx.select().from(chargebackDecisions).where(and(eq(chargebackDecisions.chargebackId, cb.id), eq(chargebackDecisions.status, 'APPROVED'))).limit(1);
@@ -256,6 +287,11 @@ export async function approveChargebackDecision(input: { decisionId: string; act
     const allocs = await tx.select().from(chargebackAllocations).where(eq(chargebackAllocations.chargebackId, d.chargebackId));
     await assertNoConflictOfInterest(tx, input.actorUserId, allocs.map((a: any) => a.orderId));
     const lines = await tx.select().from(chargebackDecisionLines).where(eq(chargebackDecisionLines.decisionId, d.id));
+    // teto cumulativo do vendedor: serializa por pedido (ordem estável) e reconfere contra o que OUTRAS decisões aprovadas já atribuíram desde a proposta
+    for (const oid of [...new Set<string>(allocs.map((a: any) => a.orderId))].sort()) await lockOrderForCap(tx, oid);
+    const sellerByAllocApprove = new Map<string, bigint>();
+    for (const l of lines) if (l.partyType === 'SELLER') sellerByAllocApprove.set(l.allocationId, (sellerByAllocApprove.get(l.allocationId) ?? 0n) + toMicros(l.amount));
+    await assertSellerCap(tx, d.chargebackId, sellerByAllocApprove);
     if (d.supersedesDecisionId) {
       const settled = await tx.select({ id: chargebackRecoveries.id }).from(chargebackRecoveries).where(inArray(chargebackRecoveries.allocationId, allocs.map((a: any) => a.id))).limit(1);
       if (settled.length > 0) throw new ChargebackLedgerError('REVISION_AFTER_SETTLEMENT_NOT_SUPPORTED', 'Já há recuperação/baixa registrada: a revisão não é suportada.');
