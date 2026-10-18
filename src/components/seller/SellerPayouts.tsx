@@ -115,7 +115,8 @@ export const SellerPayouts: React.FC<SellerPayoutsProps> = ({ showToast }) => {
   const fetchWalletAndPayouts = async () => {
     try {
       const [walletRes, payoutsRes, bankAccsRes] = await Promise.all([
-        SellerService.getWallet(),
+        // a carteira é SEMPRE pedida pela moeda selecionada (sem moeda o servidor devolve a lista por moeda e o disponível ficava 0)
+        SellerService.getWallet(selectedCurrency),
         SellerService.getPayouts(),
         SellerService.getBankAccounts(),
       ]);
@@ -139,7 +140,8 @@ export const SellerPayouts: React.FC<SellerPayoutsProps> = ({ showToast }) => {
 
   useEffect(() => {
     fetchWalletAndPayouts();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCurrency]);
 
   const availableBalance = walletData?.available || 0;
 

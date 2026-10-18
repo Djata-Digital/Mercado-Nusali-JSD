@@ -15,5 +15,7 @@ report('F2 o formulário envia a idempotencyKey em cada solicitação (o servido
 report('F3 a chave só é renovada depois do SUCESSO (falha/erro de rede mantém a chave: o reenvio nunca reserva o saldo duas vezes)', /if \(res\.success && res\.data\) \{\n\s+payoutKeyRef\.current = newPayoutKey\(\);/.test(form) && form.split('payoutKeyRef.current = newPayoutKey()').length === 2);
 report('F4 o campo de valor aceita centavos (step 0,01) e o botão "Avançar" fica desabilitado com mais de 2 casas, com mensagem clara', form.includes('step="0.01"') && form.includes('!hasAtMostTwoDecimals(amount)') && form.includes('no máximo 2 casas decimais'));
 report('F5 o contrato da API do cliente aceita idempotencyKey (campo opcional tipado) e o endpoint continua o mesmo', /idempotencyKey\?: string;\n\s+\}\): Promise<ApiResponse<any>> \{\n\s+return apiClient\.post\('\/seller\/payouts\/request', data\);/.test(api));
+report('F6 o saldo disponível vem da carteira da MOEDA selecionada (getWallet(selectedCurrency)); sem moeda o servidor devolve a lista por moeda e o disponível ficava sempre 0 (botão nunca habilitava) — achado na validação em navegador', form.includes('SellerService.getWallet(selectedCurrency)') && !/SellerService\.getWallet\(\)/.test(form));
+report('F7 trocar a moeda recarrega o saldo (o efeito depende de selectedCurrency)', /fetchWalletAndPayouts\(\);\n\s+\/\/ eslint-disable-next-line react-hooks\/exhaustive-deps\n\s+\}, \[selectedCurrency\]\);/.test(form));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
