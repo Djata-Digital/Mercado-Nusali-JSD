@@ -3,6 +3,7 @@ import { wallets, walletTransactions, escrowAccounts, escrowTransactions, seller
 import { eq, desc, sql } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { PaymentService } from '../payments/paymentService.js';
+import { sumActiveHoldsMicros, computeBalances } from './walletHoldService.js';
 
 /** True when `err` is a Postgres unique-violation (23505) on the given constraint name. */
 function isUniqueViolation(err: any, constraintName?: string): boolean {
@@ -50,8 +51,12 @@ export class WalletService {
       .where(eq(walletTransactions.walletId, wallet.id))
       .orderBy(desc(walletTransactions.createdAt));
 
+    // E7 (aditivo): `balance` continua sendo o saldo total; retido (wallet_holds) e disponível para saque vêm em campos novos
+    const holdBalances = computeBalances(wallet.balance, await sumActiveHoldsMicros(db, wallet.id));
     return {
       ...wallet,
+      heldBalance: Number(holdBalances.held),
+      availableBalance: Number(holdBalances.available),
       balance: Number(wallet.balance),
       cashbackBalance: Number(wallet.cashbackBalance),
       pendingBalance: Number(wallet.pendingBalance),

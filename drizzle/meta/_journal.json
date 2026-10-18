@@ -302,6 +302,13 @@
       "when": 1792285692400,
       "tag": "0042_ledger_chargebacks",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1792295139811,
+      "tag": "0043_ledger_wallet_holds",
+      "breakpoints": true
     }
   ]
 }

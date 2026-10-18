@@ -8,6 +8,8 @@
 import { getDb } from '../../../db/index.js';
 import { sellers, wallets, walletTransactions, sellerPayouts, sellerBankAccounts, countries } from '../../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
+import { sumActiveHoldsMicros } from './walletHoldService.js';
+import { toMicros, formatMicros } from '../ledger/decimal.js';
 
 export class PayoutValidationError extends Error {
   code: string;
@@ -139,12 +141,20 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
       validatedBankAccountId = bAcc.id;
     }
 
-    const availableBalance = Number(sellerWallet.balance || 0);
-    if (input.amount > availableBalance) {
+    // E7 — o saque só pode usar o DISPONÍVEL = saldo da carteira − retenções ativas (wallet_holds). A carteira já está travada (FOR UPDATE acima), a MESMA trava que a
+    // criação/liberação de retenções usa: saque × retenção do mesmo vendedor são serializados. Retenção NÃO muda wallets.balance; o saque debita só o valor pedido.
+    const totalBalance = Number(sellerWallet.balance || 0);
+    const heldMicros = await sumActiveHoldsMicros(tx, sellerWallet.id);
+    const totalMicros = toMicros(String(sellerWallet.balance ?? '0'));
+    const requestedMicros = toMicros(Number(input.amount).toFixed(2));
+    if (requestedMicros > totalMicros - heldMicros) {
+      if (heldMicros > 0n && requestedMicros <= totalMicros) {
+        throw new PayoutValidationError('BALANCE_ON_HOLD', `Parte do saldo está retida por obrigação financeira em análise. Disponível para saque: ${formatMicros(totalMicros - heldMicros, 2)} ${requestedCurrency}.`, 409);
+      }
       throw new PayoutValidationError('INSUFFICIENT_AVAILABLE_BALANCE', 'Saldo disponível insuficiente para solicitar o saque.', 409);
     }
 
-    const newBalance = availableBalance - input.amount;
+    const newBalance = totalBalance - input.amount;
     await tx
       .update(wallets)
       .set({ balance: String(newBalance.toFixed(2)), updatedAt: new Date() })
@@ -180,7 +190,7 @@ export async function requestSellerPayout(input: RequestSellerPayoutInput, execu
 
     return {
       id: payoutId, amount: input.amount, currency: requestedCurrency, method: canonicalMethod,
-      bankAccountId: validatedBankAccountId, status: 'pending', newAvailableBalance: newBalance,
+      bankAccountId: validatedBankAccountId, status: 'pending', newAvailableBalance: Number(formatMicros(toMicros(newBalance.toFixed(2)) - heldMicros, 2)),
     };
   };
 

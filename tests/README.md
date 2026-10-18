@@ -19,6 +19,8 @@ Esta pasta guarda os testes que protegem fluxos críticos e **não dependem de `
 | `ledger-e5-migration-check.cjs` | migração 0042: migrador oficial do drizzle → 5 tabelas + CHECKs + triggers → rollback → reaplicação → trava do rollback com dados (precisa de banco no nível anterior à 0039) | **sim** |
 | `ledger-e6-admin-api.test.ts` | E6 (API administrativa do ledger): permissões por operação (leitura FINANCE/RISK_ANALYST/GLOBAL_ADMIN; ações sensíveis só GLOBAL_ADMIN; papel só do JWT), consultas (resumo, lançamentos com partidas, outbox, divergências, chargebacks) com filtros e entradas hostis, ausência de rotas que editem/apaguem, reparo manual (simulação / confirm / concorrência), recolocar/descartar/reconhecer, evidência/proposta/aprovação de chargeback (quatro olhos, teto N, sem débito de carteira), reversão de frete (evidência, idempotência), auditoria com o ator autenticado, sem segredos e dinheiro real intacto | **sim** |
 | `ledger-e6-admin-ui.test.ts` | E6 (tela): perfis, validações e mensagens puras; cliente de API só GET/POST para /admin/ledger; ações restritas só para GLOBAL_ADMIN, quatro olhos, reparo com simulação+confirmação, motivos mínimos, nenhuma parte pré-selecionada, sem segredos e sem editar/apagar lançamentos; rotas existem no servidor | não |
+| `wallet-holds-e7.test.ts` | E7 (retenções de saldo): saldo total/retido/disponível; saque nunca usa valor retido (retenção parcial não bloqueia o resto); retenção só do saldo livre, sem negativo, sem duplicidade ativa, idempotente (inclui 8 pedidos paralelos); concorrência retenção×retenção, retenção×saque e saques×retenção; liberação auditada/idempotente; permissões provisórias (só GLOBAL_ADMIN); regras no banco (CHECK, trigger, imutabilidade); rastreabilidade com o ledger sombra (só referência); dinheiro real intacto; reembolso que reduz o saldo abaixo do retido | **sim** (banco já com 0043) |
+| `wallet-holds-e7-migration-check.cjs` | migração 0043: migrador oficial → tabela + CHECKs + índices + trigger → rollback → reaplicação → rollback bloqueado com dados (precisa de banco no nível anterior à 0039) | **sim** |
 | `ledger-e2-migration-check.cjs` | migração 0039: migrador oficial do drizzle → estrutura → rollback → reaplicação → trava do rollback com dados → gatilhos (precisa de banco no nível anterior à 0039) | **sim** |
 | `seller-variant-stock.test.ts` | estoque por SKU no formulário do vendedor: edição/persistência, reservas, transferências pendentes, alteração concorrente, ordem de locks (sem deadlock), livro de movimentos, atualização conjunta, permissões, produto simples | **sim** (Postgres descartável) |
 
@@ -41,6 +43,8 @@ npm run test:ledger-e5           # chargebacks no ledger sombra (exige o banco a
 npm run test:ledger-e5-migration  # migração 0042 (banco no nível anterior à 0039)
 npm run test:ledger-e6           # API administrativa do ledger (exige o banco acima, já com 0039..0042)
 npm run test:e6-ui               # tela do ledger (sem banco)
+npm run test:wallet-holds       # retenções de saldo E7 (exige o banco acima, já com 0043)
+npm run test:wallet-holds-migration  # migração 0043 (banco no nível anterior à 0039)
 npm run test:ledger-e2-migration  # migração 0039 (banco no nível anterior à 0039)
 npm run test:essential         # todos
 ```

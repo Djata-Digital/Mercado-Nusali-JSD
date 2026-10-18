@@ -68,6 +68,8 @@ import { orderItems, orders, escrowAccounts, wallets, walletTransactions, shipme
 import { eq, and, desc, inArray, ne } from 'drizzle-orm';
 import { SOLD_ORDER_STATUSES_EXCLUDED } from '../catalog/catalogService.js';
 import { logger } from '../../infra/logger.js';
+import { sumActiveHoldsMicros } from '../wallet/walletHoldService.js';
+import { toMicros, formatMicros } from '../ledger/decimal.js';
 
 export { SOLD_ORDER_STATUSES_EXCLUDED as SELLER_REVENUE_EXCLUDED_STATUSES };
 
@@ -280,7 +282,12 @@ export async function getSellerOrderRows(sellerId: string, executor?: any): Prom
 
 export interface SellerWalletSnapshot {
   currency: string;
+  /** disponível para saque = total − onHold (E7) */
   available: number;
+  /** saldo total da carteira (wallets.balance) */
+  total: number;
+  /** parte do saldo retida por obrigação financeira (wallet_holds ACTIVE) — não sacável, não é Escrow */
+  onHold: number;
   retained: number;
   pendingRelease: number;
   totalEarned: number;
@@ -357,9 +364,15 @@ export async function computeSellerWalletSnapshot(db: any, seller: { id: string;
     .filter((t: any) => (t.type === 'escrow_release' || t.type === 'deposit') && t.status === 'completed')
     .reduce((sum: number, t: any) => sum + Math.abs(Number(t.amount || 0)), 0);
 
+  // E7: saldo total, retido por obrigação (wallet_holds) e disponível para saque — o painel do vendedor já exibe `available`, que agora desconta as retenções
+  const totalMicros = toMicros(String(w?.balance ?? '0'));
+  const heldMicros = w ? await sumActiveHoldsMicros(db, w.id) : 0n;
+
   return {
     currency: cur,
-    available: Number(w?.balance || 0),
+    available: Number(formatMicros(totalMicros - heldMicros, 2)),
+    total: Number(formatMicros(totalMicros, 2)),
+    onHold: Number(formatMicros(heldMicros, 2)),
     retained: retainedSum,
     pendingRelease,
     totalEarned: totalEarnedSum,

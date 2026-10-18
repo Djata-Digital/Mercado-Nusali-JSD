@@ -2758,3 +2758,36 @@ export const chargebackRecoveries = pgTable('chargeback_recoveries', {
   chargeback_recoveries_allocation_idx: index('chargeback_recoveries_allocation_idx').on(table.allocationId),
   chargeback_recoveries_kind_check: check('chargeback_recoveries_kind_check', sql`${table.kind} IN ('RECOVERY','WRITE_OFF') AND ${table.amount} > 0`),
 }));
+
+// =============================================================================================================================================================
+// E7 — RETENÇÕES DE SALDO (wallet_holds). Uma retenção SEPARA parte do saldo da carteira para que não possa ser sacada: saldo total (wallets.balance) − retido (Σ retenções
+// ACTIVE) = disponível para saque. NÃO move dinheiro: não debita a carteira, não transfere a Nusali nem a terceiros, não consome a retenção e não altera Escrow, pagamentos,
+// reembolsos nem o ledger sombra (que continua apenas observando; a ligação é só uma referência opcional). Criada/liberada por pessoa identificada, com motivo e auditoria
+// (audit_logs); nunca editada nem apagada — só ACTIVE → RELEASED. Sem retenção automática: nada aqui cria retenções sozinho.
+// =============================================================================================================================================================
+export const walletHolds = pgTable('wallet_holds', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  walletId: varchar('wallet_id', { length: 255 }).notNull().references(() => wallets.id, { onDelete: 'restrict' }),
+  currency: varchar('currency', { length: 10 }).notNull(),
+  amount: numeric('amount', { precision: 15, scale: 2 }).notNull(),
+  status: varchar('status', { length: 20 }).notNull().default('ACTIVE'), // ACTIVE, RELEASED
+  reason: text('reason').notNull(),
+  // referência do que justifica a retenção (ex.: CHARGEBACK_ALLOCATION/<id>, DISPUTE/<id>, ORDER/<id>): UMA retenção ativa por (carteira, referência)
+  referenceType: varchar('reference_type', { length: 60 }).notNull(),
+  referenceId: varchar('reference_id', { length: 255 }).notNull(),
+  // rastreabilidade opcional com o ledger sombra (nunca fonte de saldo): lançamento relacionado, se houver
+  ledgerTransactionId: varchar('ledger_transaction_id', { length: 255 }).references(() => ledgerTransactions.id, { onDelete: 'restrict' }),
+  createdBy: varchar('created_by', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  idempotencyKey: varchar('idempotency_key', { length: 255 }).notNull(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+  releasedBy: varchar('released_by', { length: 255 }).references(() => users.id, { onDelete: 'restrict' }),
+  releasedAt: timestamp('released_at'),
+  releaseReason: text('release_reason'),
+}, (table) => ({
+  wallet_holds_idempotency_uq: uniqueIndex('wallet_holds_idempotency_uq').on(table.idempotencyKey),
+  wallet_holds_active_ref_uq: uniqueIndex('wallet_holds_active_ref_uq').on(table.walletId, table.referenceType, table.referenceId).where(sql`${table.status} = 'ACTIVE'`),
+  wallet_holds_wallet_active_idx: index('wallet_holds_wallet_active_idx').on(table.walletId).where(sql`${table.status} = 'ACTIVE'`),
+  wallet_holds_amount_check: check('wallet_holds_amount_check', sql`${table.amount} > 0`),
+  wallet_holds_status_check: check('wallet_holds_status_check', sql`${table.status} IN ('ACTIVE','RELEASED')`),
+  wallet_holds_release_check: check('wallet_holds_release_check', sql`(${table.status} = 'ACTIVE' AND ${table.releasedBy} IS NULL AND ${table.releasedAt} IS NULL AND ${table.releaseReason} IS NULL) OR (${table.status} = 'RELEASED' AND ${table.releasedBy} IS NOT NULL AND ${table.releasedAt} IS NOT NULL AND length(btrim(${table.releaseReason})) >= 10)`),
+}));

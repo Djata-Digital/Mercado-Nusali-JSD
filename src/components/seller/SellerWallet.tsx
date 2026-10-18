@@ -125,6 +125,9 @@ export const SellerWallet: React.FC<SellerWalletProps> = ({ showToast, selectedC
             {selectedCurrency} {balances.available.toLocaleString()}
           </p>
           <p className="text-[10px] text-emerald-200">Pronto para saque imediato via Orange/PIX</p>
+          {Number(balances.onHold) > 0 && (
+            <p className="text-[10px] text-amber-200" data-testid="wallet-on-hold">Retido por obrigação financeira em análise: {selectedCurrency} {Number(balances.onHold).toLocaleString()} (saldo total {selectedCurrency} {Number(balances.total).toLocaleString()})</p>
+          )}
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-gray-200 shadow-xs space-y-2">
