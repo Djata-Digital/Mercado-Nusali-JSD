@@ -21,6 +21,8 @@
 import { paymentChargebacks, payments } from '../../../db/schema.js';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
+import { stageChargebackLoss, flushChargebackStage, postChargebackConfirmationsDirect } from '../ledger/chargebackLedgerService.js';
+import type { LedgerStage } from '../ledger/outbox/ledgerShadowHooks.js';
 import {
   AsaasChargeback,
   ASAAS_AMOUNT_TOLERANCE,
@@ -255,7 +257,20 @@ export async function observeChargeback(
   // lock primeiro, o release espera e encontrará a row já commitada (CASO
   // B: bloqueio efetivo). Nenhuma das duas ordens produz estado
   // intermediário inconsistente — só ordem determinística.
-  return db.transaction(async (tx: any) => {
+  // E5 — quando (e SÓ quando) o chargeback está PERDIDO, o valor efetivamente debitado pelo provedor é alocado por pedido e vira evento do outbox NA MESMA transação
+  // (savepoint: uma falha aqui nunca derruba a observação). Contestação aberta / revertida / em revisão manual não gera nada.
+  let cbStage: LedgerStage | undefined;
+  let lostChargebackId: string | null = null;
+  const stageLoss = async (tx: any, chargebackId: string) => {
+    lostChargebackId = chargebackId;
+    try {
+      cbStage = await tx.transaction(async (sp: any) => stageChargebackLoss(sp, { id: chargebackId, value: value.toFixed(2), currency: localPayment.currency }, localPayment));
+    } catch (err: any) {
+      logger.error({ ...context, chargebackId, error: err?.message }, '[Chargeback] falha ao alocar o chargeback perdido no ledger sombra — observação preservada; reconciliação/reparo recuperam');
+    }
+  };
+
+  const observed = await db.transaction(async (tx: any) => {
     await acquirePaymentChargebackAuthorityLock(tx, localPayment.id);
 
     const existingRows = await tx
@@ -292,6 +307,7 @@ export async function observeChargeback(
         { ...context, chargebackRowId: existing.id, providerChargebackId: sanitized.id, previousLocalStatus: existing.localStatus, localStatus: nextLocalStatus, providerStatus: sanitized.status },
         'CHARGEBACK_OBSERVED_UPDATED'
       );
+      if (nextLocalStatus === 'lost') await stageLoss(tx, existing.id);
       return { outcome: 'OBSERVED', created: false, chargebackRowId: existing.id, localStatus: nextLocalStatus, providerStatus: sanitized.status } as const;
     }
 
@@ -325,6 +341,7 @@ export async function observeChargeback(
         { ...context, chargebackRowId: newId, providerChargebackId: sanitized.id, localStatus: candidate, providerStatus: sanitized.status },
         'CHARGEBACK_OBSERVED_CREATED'
       );
+      if (candidate === 'lost') await stageLoss(tx, newId);
       return { outcome: 'OBSERVED', created: true, chargebackRowId: newId, localStatus: candidate, providerStatus: sanitized.status } as const;
     } catch (insertErr: any) {
       // Corrida real (seção 29 do pedido): duas entregas de eventos
@@ -368,9 +385,15 @@ export async function observeChargeback(
         { ...context, chargebackRowId: existing.id, providerChargebackId: sanitized.id, previousLocalStatus: existing.localStatus, localStatus: nextLocalStatus, providerStatus: sanitized.status, race: true },
         'CHARGEBACK_OBSERVED_UPDATED_AFTER_RACE'
       );
+      if (nextLocalStatus === 'lost') await stageLoss(tx, existing.id);
       return { outcome: 'OBSERVED', created: false, chargebackRowId: existing.id, localStatus: nextLocalStatus, providerStatus: sanitized.status } as const;
     }
   });
+  if (cbStage && lostChargebackId) {
+    const cid: string = lostChargebackId;
+    await flushChargebackStage(cbStage, () => postChargebackConfirmationsDirect(cid));
+  }
+  return observed;
 }
 
 /** Helper puro (seção 6 do pedido) — extrai `payment.chargeback` do payload

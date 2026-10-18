@@ -18,6 +18,7 @@ import { getDb } from '../../../../db/index.js';
 import { ledgerOutboxEvents, orders, refunds, shippingCostReversals, users, auditLogs } from '../../../../db/schema.js';
 import { logger } from '../../../infra/logger.js';
 import { FinancialLedgerService, type ShadowLedgerStatus } from '../financialLedgerService.js';
+import { isChargebackEvent, chargebackEventKey, loadChargebackSubject, buildChargebackEventSnapshot } from './chargebackSubjects.js';
 import {
   buildOrderSnapshot, buildRefundSnapshot, buildReversalSnapshot, hashSnapshot, diffSnapshots, keyFor, refundProcessedKey, shippingCostReversedKey, classifyProcessingError, mapLedgerResult, computeBackoffSeconds, resolvePolicy,
   isOutboxEnabled, isOutboxStrict, type OutboxEventType, type OrderRowForSnapshot, type OutboxPolicy, type RefundReleaseStage,
@@ -34,6 +35,8 @@ export interface EnqueueInput {
   order: OrderRowForSnapshot;
   refund?: EnqueueRefundInput;
   reversal?: EnqueueReversalInput;
+  /** E5 — id do assunto do evento de chargeback (alocação | `${decisão}:${alocação}` | recuperação), já gravado na transação do chamador */
+  chargebackSubjectId?: string;
   paymentId?: string | null;
   purchaseGroupId?: string | null;
   /** hora do fato financeiro (confirmação do pagamento / liberação) — vira occurredAt do lançamento */
@@ -71,6 +74,12 @@ export async function enqueueLedgerEvent(
     if (!input.refund) return { status: 'FAILED', reason: 'REFUND_PROCESSED exige os dados do reembolso' };
     snapshot = buildRefundSnapshot(input.order, { ...input.refund, orderId: input.order.id, status: 'processed' }, input.refund.releaseStage);
     key = refundProcessedKey(input.refund.id);
+  } else if (isChargebackEvent(input.eventType)) {
+    if (!input.chargebackSubjectId) return { status: 'FAILED', reason: `${input.eventType} exige chargebackSubjectId` };
+    const subject = await loadChargebackSubject(executor, input.eventType, input.chargebackSubjectId);
+    if (!subject || subject.orderId !== input.order.id) return { status: 'FAILED', reason: 'assunto do chargeback não encontrado ou de outro pedido' };
+    snapshot = buildChargebackEventSnapshot(input.order, subject);
+    key = chargebackEventKey(input.eventType, input.chargebackSubjectId);
   } else if (input.eventType === 'SHIPPING_COST_REVERSED') {
     if (!input.reversal) return { status: 'FAILED', reason: 'SHIPPING_COST_REVERSED exige os dados da reversão' };
     snapshot = buildReversalSnapshot(input.order, { ...input.reversal, orderId: input.order.id });
@@ -209,7 +218,18 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
     let releaseStage: RefundReleaseStage | null = null;
     let reversalId: string | null = null;
     let current: Record<string, string | null>;
-    if (ev.eventType === 'SHIPPING_COST_REVERSED') {
+    let cbSubjectId: string | null = null;
+    if (isChargebackEvent(ev.eventType)) {
+      // E5: o assunto (alocação / decisão aprovada por alocação / recuperação) tem de existir e ser, campo a campo, o enfileirado
+      const prefix = chargebackEventKey(ev.eventType, '');
+      cbSubjectId = ev.idempotencyKey.startsWith(prefix) ? ev.idempotencyKey.slice(prefix.length) : null;
+      const subject = cbSubjectId ? await loadChargebackSubject(db, ev.eventType, cbSubjectId) : null;
+      if (!subject || subject.orderId !== ev.orderId) {
+        log('error', 'assunto do chargeback ausente/incoerente => intervenção');
+        return fin({ kind: 'NEEDS_INTERVENTION', code: 'CHARGEBACK_SUBJECT_NOT_FOUND', detail: `assunto ${cbSubjectId ?? '?'} não encontrado para o pedido do evento` }, 'NEEDS_INTERVENTION');
+      }
+      current = buildChargebackEventSnapshot(order as OrderRowForSnapshot, subject);
+    } else if (ev.eventType === 'SHIPPING_COST_REVERSED') {
       // E4: a reversão registrada tem de existir e ser, campo a campo, a enfileirada (valor e divisão subsídio/absorvido)
       reversalId = typeof ev.snapshotJson.reversalId === 'string' ? ev.snapshotJson.reversalId : null;
       if (!reversalId || ev.idempotencyKey !== shippingCostReversedKey(reversalId)) {
@@ -240,6 +260,20 @@ export async function processClaimedEvent(db: any, ev: ClaimedEvent, workerId: s
     }
     // 2) lançamento (idempotente por chave). A entrega garante antes o PAYMENT_RECEIVED do pedido (BUYER_ESCROW nunca negativo).
     const base = { orderId: ev.orderId, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id };
+    if (isChargebackEvent(ev.eventType)) {
+      const id = cbSubjectId!; const common = { occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id };
+      const call = ev.eventType === 'CHARGEBACK_CONFIRMED' ? FinancialLedgerService.recordChargebackConfirmed({ allocationId: id, ...common })
+        : ev.eventType === 'CHARGEBACK_ALLOCATED' ? FinancialLedgerService.recordChargebackAllocated({ decisionId: id.split(':')[0], allocationId: id.split(':')[1], ...common })
+          : FinancialLedgerService.recordChargebackRecovery({ recoveryId: id, ...common });
+      const r = mapLedgerResult(await call);
+      if (r.action === 'DONE') {
+        log('info', r.replay ? 'chargeback já lançado (replay idempotente) => DONE' : 'chargeback lançado => DONE', { ledgerTransactionId: r.transactionId, subject: id });
+        return fin({ kind: 'DONE', transactionId: r.transactionId }, r.replay ? 'DONE_REPLAY' : 'DONE');
+      }
+      if (r.action === 'SKIPPED') { log('info', 'ignorado por política', { reason: r.code }); return fin({ kind: 'SKIPPED', code: r.code, detail: r.detail }, 'SKIPPED'); }
+      if (r.action === 'DEFER') return fin({ kind: 'DEFER', code: r.code }, 'DEFERRED');
+      return await failFrom(r);
+    }
     if (ev.eventType === 'SHIPPING_COST_REVERSED') {
       // recordShippingCostReversed garante PR → DC → REFUND_PROCESSED antes do próprio lançamento
       const r = mapLedgerResult(await FinancialLedgerService.recordShippingCostReversed({ reversalId: reversalId!, occurredAt: ev.occurredAt, source: 'ledger_outbox', correlationId: ev.id }));

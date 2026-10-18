@@ -48,6 +48,9 @@ async function main() {
   if (!(await q(`select to_regclass('public.shipping_cost_reversals') t`))[0].t) {
     for (const stmt of fs.readFileSync(path.join(root, 'drizzle/0041_ledger_shipping_reversal.sql'), 'utf8').split('--> statement-breakpoint')) if (stmt.trim()) await pool.query(stmt);
   }
+  if (!(await q(`select to_regclass('public.chargeback_allocations') t`))[0].t) {
+    for (const stmt of fs.readFileSync(path.join(root, 'drizzle/0042_ledger_chargebacks.sql'), 'utf8').split('--> statement-breakpoint')) if (stmt.trim()) await pool.query(stmt);
+  }
   const hideTables = async () => { for (const t of OUTBOX_TABLES) await pool.query(`alter table ${t} rename to ${t}_hidden`); };
   const showTables = async () => { for (const t of OUTBOX_TABLES) await pool.query(`alter table ${t}_hidden rename to ${t}`); };
   const tablesPresent = async () => (await q(`select count(*)::int n from pg_tables where schemaname='public' and tablename = any($1)`, [OUTBOX_TABLES]))[0].n;

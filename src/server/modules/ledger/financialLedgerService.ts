@@ -24,14 +24,20 @@ import {
   refunds,
   escrowAccounts,
   shippingCostReversals,
+  paymentChargebacks,
+  chargebackAllocations,
+  chargebackDecisions,
+  chargebackDecisionLines,
+  chargebackRecoveries,
 } from '../../../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { logger } from '../../infra/logger.js';
 import { netBalanceByCurrency, isZeroMicros } from './decimal.js';
 import { ACCOUNT_DEFINITIONS, PLATFORM_POOLED_ACCOUNTS, ledgerAccountId, type LedgerAccountCode, type LedgerOwnerType } from './accounts.js';
 import { buildDeliveryConfirmedEntries } from './deliveryConfirmedEntries.js';
 import { buildRefundProcessedEntries, type ReleaseStage } from './refundProcessedEntries.js';
 import { buildShippingCostReversalEntries } from './shippingReversalEntries.js';
+import { buildChargebackConfirmedEntries, buildChargebackAllocatedEntries, buildChargebackRecoveryEntries } from './chargebackEntries.js';
 import { isUniqueViolationOf } from './pgErrors.js';
 import type { LedgerSkipReason, LedgerResult } from './types.js';
 
@@ -471,6 +477,10 @@ export class FinancialLedgerService {
       return { posted: false, skipped: true, reason: 'LEGACY_ORDER', detail: `order.createdAt (${order.createdAt.toISOString()}) < cutoff` };
     }
 
+    // E5 — perda dobrada: o pedido tem chargeback PERDIDO alocado (o mesmo dinheiro já saiu) => não lança o reembolso por cima; exige revisão humana
+    const cbAlloc = await db.select({ id: chargebackAllocations.id }).from(chargebackAllocations).where(and(eq(chargebackAllocations.orderId, order.id), eq(chargebackAllocations.overlapRefund, false))).limit(1);
+    if (cbAlloc.length > 0) return { posted: false, skipped: true, reason: 'CHARGEBACK_REFUND_OVERLAP', detail: 'o pedido tem chargeback perdido alocado: lançar o reembolso também contabilizaria a mesma saída de caixa duas vezes' };
+
     const stage = input.releaseStage ?? (await this.deriveReleaseStage(order.id));
     if (!stage) return { posted: false, skipped: true, reason: 'MISSING_SNAPSHOT', detail: 'Escrow do pedido não encontrado: estágio do reembolso indeterminado.' };
 
@@ -571,6 +581,106 @@ export class FinancialLedgerService {
       correlationId: input.correlationId ?? null,
       requestId: input.requestId ?? null,
       metadata: { shadowPhase: 'E4', evidenceRef: rev.evidenceRef, reversalReason: rev.reason, amount: rev.amount, subsidyPart: rev.subsidyPart, absorbedPart: rev.absorbedPart },
+      entries: built.entries,
+    });
+  }
+
+  // ==========================================================================
+  // CHARGEBACKS (E5)
+  // ==========================================================================
+  /** Estágio da perda em relação à liberação do Escrow é um FATO gravado na alocação (nunca recalculado). */
+  private static async chargebackContext(allocationId: string) {
+    const db = getDb()!;
+    const [alloc] = await db.select().from(chargebackAllocations).where(eq(chargebackAllocations.id, allocationId)).limit(1);
+    if (!alloc) return null;
+    const [order] = await db.select().from(orders).where(eq(orders.id, alloc.orderId)).limit(1);
+    return order ? { alloc, order } : null;
+  }
+
+  /** Valor EFETIVAMENTE debitado pelo provedor (chargeback perdido) para UM pedido. Contestação aberta nunca chega aqui. Garante PR (e DC se já liberado). */
+  static async recordChargebackConfirmed(input: { allocationId: string; source?: string | null; correlationId?: string | null; occurredAt?: Date }): Promise<LedgerResult> {
+    const db = getDb();
+    if (!db) return { posted: false, skipped: true, reason: 'DATABASE_UNAVAILABLE' };
+    if (LEDGER_SHADOW_CUTOFF_AT === null) return { posted: false, skipped: true, reason: 'SHADOW_LEDGER_DISABLED', detail: 'LEDGER_SHADOW_CUTOFF_AT não configurada — shadow ledger está OFF.' };
+    const ctx = await this.chargebackContext(input.allocationId);
+    if (!ctx) return { posted: false, skipped: true, reason: 'CHARGEBACK_NOT_FOUND', detail: `alocação ${input.allocationId} não existe` };
+    const { alloc, order } = ctx;
+    if (order.createdAt < LEDGER_SHADOW_CUTOFF_AT) return { posted: false, skipped: true, reason: 'LEGACY_ORDER', detail: `order.createdAt (${order.createdAt.toISOString()}) < cutoff` };
+    const [cb] = await db.select().from(paymentChargebacks).where(eq(paymentChargebacks.id, alloc.chargebackId)).limit(1);
+    if (!cb || cb.localStatus !== 'lost') return { posted: false, skipped: true, reason: 'CHARGEBACK_NOT_ELIGIBLE', detail: `chargeback ${alloc.chargebackId} não está perdido ("${cb?.localStatus ?? 'ausente'}") — só o valor efetivamente debitado é lançado` };
+    // perda dobrada: o MESMO dinheiro já voltou ao comprador por reembolso concluído => nada é lançado, exige revisão humana
+    const refunded = await db.select({ id: refunds.id }).from(refunds).where(and(eq(refunds.orderId, order.id), eq(refunds.status, 'processed'))).limit(1);
+    if (alloc.overlapRefund || refunded.length > 0) return { posted: false, skipped: true, reason: 'CHARGEBACK_REFUND_OVERLAP', detail: 'o pedido já tem reembolso concluído: lançar o chargeback também contabilizaria a mesma saída de caixa duas vezes' };
+    const built = buildChargebackConfirmedEntries(order as any, alloc as any);
+    if (built.status === 'SKIPPED') return { posted: false, skipped: true, reason: built.reason, detail: built.detail };
+    const occurredAt = input.occurredAt ?? alloc.createdAt ?? new Date();
+    const base = { orderId: order.id, occurredAt, source: input.source ?? 'chargeback_service', correlationId: input.correlationId ?? null };
+    const pr = await this.recordPaymentReceived(base); if (!pr.posted) return pr;
+    if (alloc.releaseStage === 'AFTER_RELEASE') { const dc = await this.recordDeliveryConfirmed(base); if (!dc.posted) return dc; }
+    return this.postTransaction({
+      type: 'CHARGEBACK_CONFIRMED', idempotencyKey: `chargeback_confirmed:${alloc.id}`, currency: order.currency, occurredAt, orderId: order.id, paymentId: alloc.paymentId,
+      buyerId: order.buyerId, sellerId: order.sellerId ?? null, storeId: order.storeId ?? null, countryCode: order.countryCode ?? null, source: input.source ?? 'chargeback_service',
+      reason: alloc.releaseStage === 'BEFORE_RELEASE' ? 'Chargeback perdido antes da liberação — custódia (escrow) devolvida ao emissor.' : 'Chargeback perdido depois da liberação — perda PENDENTE de decisão de responsabilidade (não definitiva).',
+      correlationId: input.correlationId ?? null,
+      metadata: { shadowPhase: 'E5', chargebackId: alloc.chargebackId, providerChargebackId: cb.providerChargebackId, releaseStage: alloc.releaseStage, allocatedValue: alloc.allocatedValue },
+      entries: built.entries,
+    });
+  }
+
+  /** Decisão de responsabilidade APROVADA (caso a caso, com evidências) para UMA alocação com perda pendente. Revisão = delta contra a versão anterior. */
+  static async recordChargebackAllocated(input: { decisionId: string; allocationId: string; source?: string | null; correlationId?: string | null; occurredAt?: Date }): Promise<LedgerResult> {
+    const db = getDb();
+    if (!db) return { posted: false, skipped: true, reason: 'DATABASE_UNAVAILABLE' };
+    if (LEDGER_SHADOW_CUTOFF_AT === null) return { posted: false, skipped: true, reason: 'SHADOW_LEDGER_DISABLED', detail: 'LEDGER_SHADOW_CUTOFF_AT não configurada — shadow ledger está OFF.' };
+    const ctx = await this.chargebackContext(input.allocationId);
+    if (!ctx) return { posted: false, skipped: true, reason: 'CHARGEBACK_NOT_FOUND', detail: `alocação ${input.allocationId} não existe` };
+    const { alloc, order } = ctx;
+    if (order.createdAt < LEDGER_SHADOW_CUTOFF_AT) return { posted: false, skipped: true, reason: 'LEGACY_ORDER' };
+    const [dec] = await db.select().from(chargebackDecisions).where(eq(chargebackDecisions.id, input.decisionId)).limit(1);
+    if (!dec || dec.chargebackId !== alloc.chargebackId) return { posted: false, skipped: true, reason: 'CHARGEBACK_NOT_FOUND', detail: `decisão ${input.decisionId} não existe para este chargeback` };
+    if (dec.status !== 'APPROVED' && dec.status !== 'SUPERSEDED') return { posted: false, skipped: true, reason: 'CHARGEBACK_NOT_ELIGIBLE', detail: `decisão ${dec.id} está "${dec.status}" — só decisão APROVADA é lançada` };
+    const occurredAt = input.occurredAt ?? dec.approvedAt ?? new Date();
+    const base = { source: input.source ?? 'chargeback_service', correlationId: input.correlationId ?? null, occurredAt };
+    const conf = await this.recordChargebackConfirmed({ allocationId: alloc.id, ...base }); if (!conf.posted) return conf;
+    const loadLines = async (decisionId: string) => (await db.select().from(chargebackDecisionLines).where(and(eq(chargebackDecisionLines.decisionId, decisionId), eq(chargebackDecisionLines.allocationId, alloc.id)))).map((l: any) => ({ partyType: l.partyType, partyRef: l.partyRef ?? null, amount: l.amount }));
+    const lines = await loadLines(dec.id);
+    let prevLines: any[] | null = null;
+    if (dec.supersedesDecisionId) {
+      const prevPost = await this.recordChargebackAllocated({ decisionId: dec.supersedesDecisionId, allocationId: alloc.id, ...base }); if (!prevPost.posted) return prevPost;
+      prevLines = await loadLines(dec.supersedesDecisionId);
+    }
+    const built = buildChargebackAllocatedEntries(order as any, alloc as any, lines, prevLines);
+    if (built.status === 'SKIPPED') return { posted: false, skipped: true, reason: built.reason, detail: built.detail };
+    return this.postTransaction({
+      type: 'CHARGEBACK_ALLOCATED', idempotencyKey: `chargeback_allocated:${dec.id}:${alloc.id}`, currency: order.currency, occurredAt, orderId: order.id, paymentId: alloc.paymentId,
+      buyerId: order.buyerId, sellerId: order.sellerId ?? null, storeId: order.storeId ?? null, countryCode: order.countryCode ?? null, performedBy: dec.approvedBy ?? null, source: input.source ?? 'chargeback_service',
+      reason: `Decisão de responsabilidade v${dec.version} (${dec.causeCode}) aprovada — perda pendente repartida; evidências e fundamentação na decisão.`, correlationId: input.correlationId ?? null,
+      metadata: { shadowPhase: 'E5', chargebackId: alloc.chargebackId, decisionId: dec.id, version: dec.version, causeCode: dec.causeCode, evidenceHash: dec.evidenceHash, supersedes: dec.supersedesDecisionId ?? null },
+      entries: built.entries,
+    });
+  }
+
+  /** Recuperação externa efetivamente recebida, ou baixa de reclamação rejeitada/prescrita (ambas com evidência), sobre o recebível de terceiro. */
+  static async recordChargebackRecovery(input: { recoveryId: string; source?: string | null; correlationId?: string | null; occurredAt?: Date }): Promise<LedgerResult> {
+    const db = getDb();
+    if (!db) return { posted: false, skipped: true, reason: 'DATABASE_UNAVAILABLE' };
+    if (LEDGER_SHADOW_CUTOFF_AT === null) return { posted: false, skipped: true, reason: 'SHADOW_LEDGER_DISABLED', detail: 'LEDGER_SHADOW_CUTOFF_AT não configurada — shadow ledger está OFF.' };
+    const [rec] = await db.select().from(chargebackRecoveries).where(eq(chargebackRecoveries.id, input.recoveryId)).limit(1);
+    if (!rec) return { posted: false, skipped: true, reason: 'CHARGEBACK_NOT_FOUND', detail: `recuperação ${input.recoveryId} não existe` };
+    const ctx = await this.chargebackContext(rec.allocationId);
+    if (!ctx) return { posted: false, skipped: true, reason: 'CHARGEBACK_NOT_FOUND', detail: 'alocação da recuperação não existe' };
+    const { alloc, order } = ctx;
+    if (order.createdAt < LEDGER_SHADOW_CUTOFF_AT) return { posted: false, skipped: true, reason: 'LEGACY_ORDER' };
+    const occurredAt = input.occurredAt ?? rec.createdAt ?? new Date();
+    const pre = await this.recordChargebackAllocated({ decisionId: rec.decisionId, allocationId: alloc.id, source: input.source ?? 'chargeback_service', correlationId: input.correlationId ?? null, occurredAt }); if (!pre.posted) return pre;
+    const built = buildChargebackRecoveryEntries(order as any, rec as any);
+    if (built.status === 'SKIPPED') return { posted: false, skipped: true, reason: built.reason, detail: built.detail };
+    const isRecovery = rec.kind === 'RECOVERY';
+    return this.postTransaction({
+      type: isRecovery ? 'CHARGEBACK_RECOVERY' : 'CHARGEBACK_WRITE_OFF', idempotencyKey: `${isRecovery ? 'chargeback_recovery' : 'chargeback_write_off'}:${rec.id}`, currency: order.currency, occurredAt, orderId: order.id, paymentId: alloc.paymentId,
+      buyerId: order.buyerId, sellerId: order.sellerId ?? null, storeId: order.storeId ?? null, countryCode: order.countryCode ?? null, performedBy: rec.performedBy ?? null, source: input.source ?? 'chargeback_service',
+      reason: isRecovery ? 'Recuperação externa recebida (com evidência) sobre o recebível de terceiro.' : 'Baixa de reclamação rejeitada/prescrita (com evidência): perda da Nusali.', correlationId: input.correlationId ?? null,
+      metadata: { shadowPhase: 'E5', recoveryId: rec.id, decisionId: rec.decisionId, allocationId: alloc.id, evidenceRef: rec.evidenceRef, reason: rec.reason },
       entries: built.entries,
     });
   }

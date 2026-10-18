@@ -20,7 +20,8 @@ export type LedgerAccountCode =
   | 'CHARGEBACK_RECEIVABLE'
   | 'PAYMENT_PROCESSOR_FEES'
   | 'NUSALI_PROMOTION_EXPENSE'
-  | 'REFUND_ABSORBED_SHIPPING';
+  | 'REFUND_ABSORBED_SHIPPING'
+  | 'CHARGEBACK_LOSS';
 
 export type LedgerOwnerType = 'PLATFORM' | 'SELLER' | 'BUYER';
 
@@ -40,6 +41,8 @@ export const ACCOUNT_DEFINITIONS: Record<LedgerAccountCode, { normalBalance: 'DE
   NUSALI_PROMOTION_EXPENSE: { normalBalance: 'DEBIT', isClearing: false },
   // E3 — parcela de um reembolso PÓS-liberação que a Nusali absorve (o que o comprador recebe de volta além do que o vendedor devolve e da comissão estornada: frete)
   REFUND_ABSORBED_SHIPPING: { normalBalance: 'DEBIT', isClearing: false },
+  // E5 — perda de chargeback assumida pela Nusali (decisão explícita) ou baixa de reclamação rejeitada
+  CHARGEBACK_LOSS: { normalBalance: 'DEBIT', isClearing: false },
 };
 
 /**
@@ -62,6 +65,7 @@ export const PLATFORM_POOLED_ACCOUNTS = new Set<LedgerAccountCode>([
   'NUSALI_PROMOTION_EXPENSE',
   'CHARGEBACK_RECEIVABLE',
   'REFUND_ABSORBED_SHIPPING',
+  'CHARGEBACK_LOSS',
 ]);
 
 export function ledgerAccountId(code: LedgerAccountCode, ownerType: LedgerOwnerType, ownerId: string | null, currency: string): string {

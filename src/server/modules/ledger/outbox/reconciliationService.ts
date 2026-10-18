@@ -12,6 +12,7 @@ import { FinancialLedgerService } from '../financialLedgerService.js';
 import { buildDeliveryConfirmedEntries } from '../deliveryConfirmedEntries.js';
 import { buildRefundProcessedEntries, type ReleaseStage } from '../refundProcessedEntries.js';
 import { buildShippingCostReversalEntries, shippingCostCapacity } from '../shippingReversalEntries.js';
+import { buildChargebackConfirmedEntries, buildChargebackAllocatedEntries, buildChargebackRecoveryEntries, type DecisionLineIn } from '../chargebackEntries.js';
 import { toMicros } from '../decimal.js';
 import { resolvePolicy } from './outboxEvents.js';
 import { enqueueLedgerEvent, parseUtc, OutboxAdminError } from './outboxService.js';
@@ -37,10 +38,18 @@ export interface RefundLedgerView {
 export interface ReversalLedgerView {
   id: string; amount: string; currency: string; subsidyPart: string; absorbedPart: string; createdAt: Date; tx: TxView | null; event: EventView | null; entries: EntryView[];
 }
+/** E5 — alocação de chargeback PERDIDO por pedido (valor efetivamente debitado pelo provedor) e o que o ledger/outbox têm dela, das decisões e das recuperações. */
+export interface ChargebackDecisionView { id: string; version: number; status: string; lines: DecisionLineIn[]; tx: TxView | null; event: EventView | null; entries: EntryView[]; createdAt: Date }
+export interface ChargebackRecoveryView { id: string; kind: 'RECOVERY' | 'WRITE_OFF'; partyRef: string; amount: string; currency: string; tx: TxView | null; event: EventView | null; entries: EntryView[]; createdAt: Date }
+export interface ChargebackAllocView {
+  id: string; chargebackId: string; value: string; currency: string; releaseStage: 'BEFORE_RELEASE' | 'AFTER_RELEASE'; overlapRefund: boolean; createdAt: Date;
+  tx: TxView | null; event: EventView | null; entries: EntryView[]; decisions: ChargebackDecisionView[]; recoveries: ChargebackRecoveryView[];
+}
 export interface OrderLedgerView {
   order: OrderView; prTx: TxView | null; dcTx: TxView | null; prEvent: EventView | null; dcEvent: EventView | null; prEntries: EntryView[]; dcEntries: EntryView[];
   refunds?: RefundLedgerView[];
   reversals?: ReversalLedgerView[];
+  chargebacks?: ChargebackAllocView[];
 }
 
 const agg = (entries: EntryView[]): Record<string, bigint> => {
@@ -58,7 +67,7 @@ export function evaluateOrder(v: OrderLedgerView, now: Date, staleMinutes: numbe
   const o = v.order;
   const total = toMicros(o.totalAmount);
 
-  const eventCheck = (kind: 'PAYMENT' | 'DELIVERY' | 'REFUND' | 'SHIPPING_REVERSAL', tx: TxView | null, ev: EventView | null, since: Date, scope?: string, key?: string) => {
+  const eventCheck = (kind: 'PAYMENT' | 'DELIVERY' | 'REFUND' | 'SHIPPING_REVERSAL' | 'CHARGEBACK' | 'CHARGEBACK_ALLOCATION' | 'CHARGEBACK_RECOVERY', tx: TxView | null, ev: EventView | null, since: Date, scope?: string, key?: string) => {
     const add = (x: Finding) => f.push(scope ? { ...x, scope } : x);
     if (tx) {
       if (tx.status !== 'POSTED') add({ type: `${kind}_LEDGER_NOT_POSTED`, severity: 'CRITICAL', detail: `transação ${tx.id} está ${tx.status}`, ledgerTransactionId: tx.id, eventId: ev?.id });
@@ -146,11 +155,61 @@ export function evaluateOrder(v: OrderLedgerView, now: Date, staleMinutes: numbe
     }
   }
 
+  // --- chargebacks PERDIDOS (E5): contestação aberta nunca aparece aqui (só o valor efetivamente debitado vira alocação)
+  const cbView = v.chargebacks ?? [];
+  const orderForCb = { id: o.id, buyerId: (o.snapshot as any).buyerId, sellerId: (o.snapshot as any).sellerId ?? null, storeId: (o.snapshot as any).storeId ?? null, countryCode: (o.snapshot as any).countryCode ?? null, currency: o.currency, totalAmount: o.totalAmount };
+  for (const a of cbView) {
+    const addF = (x: Finding) => f.push({ ...x, scope: x.scope ?? a.id });
+    if (a.overlapRefund || (refundsView.length > 0 && !a.overlapRefund)) {
+      addF({ type: 'CHARGEBACK_REFUND_OVERLAP', severity: 'CRITICAL', detail: 'o pedido tem reembolso concluído E chargeback perdido alocado: o mesmo dinheiro seria contabilizado duas vezes — nada é lançado em duplicidade; exige revisão humana' });
+    }
+    if (a.overlapRefund) continue;
+    eventCheck('CHARGEBACK', a.tx, a.event, a.createdAt, a.id, `chargeback_confirmed:${a.id}`);
+    if (a.tx && a.tx.status === 'POSTED') {
+      const built = buildChargebackConfirmedEntries(orderForCb, { id: a.id, allocatedValue: a.value, currency: a.currency, releaseStage: a.releaseStage });
+      if (built.status !== 'OK') addF({ type: 'CHARGEBACK_INVALID_SNAPSHOT', severity: 'CRITICAL', detail: `alocação ${a.id}: não gera lançamento válido (${built.detail ?? ''}) mas existe lançamento`, ledgerTransactionId: a.tx.id });
+      else if (!sameAgg(agg(built.entries.map((e) => ({ code: e.accountCode, direction: e.direction, amount: e.amount }))), agg(a.entries))) {
+        addF({ type: 'CHARGEBACK_AMOUNT_MISMATCH', severity: 'CRITICAL', detail: `lançamento do chargeback ${a.id} difere do valor alocado`, ledgerTransactionId: a.tx.id });
+      }
+    }
+    const ordered = [...a.decisions].sort((x, y) => x.version - y.version);
+    const current = [...ordered].reverse().find((d) => d.status === 'APPROVED') ?? null;
+    if (a.releaseStage === 'AFTER_RELEASE' && a.tx?.status === 'POSTED' && !current) {
+      addF({ type: 'CHARGEBACK_LOSS_PENDING_DECISION', severity: 'INFO', detail: `perda de ${a.value} PENDENTE de decisão de responsabilidade (não é perda definitiva; ninguém foi responsabilizado)` });
+    }
+    ordered.forEach((d, i) => {
+      const sc = `${a.id}:${d.id}`;
+      const sumLines = d.lines.reduce((acc, l) => acc + toMicros(l.amount), 0n);
+      if (sumLines !== toMicros(a.value)) addF({ type: 'CHARGEBACK_DECISION_LINES_MISMATCH', severity: 'CRITICAL', detail: `decisão v${d.version}: as linhas somam ${sumLines} micros e o valor alocado é ${a.value}`, scope: sc });
+      eventCheck('CHARGEBACK_ALLOCATION', d.tx, d.event, d.createdAt, sc, `chargeback_allocated:${d.id}:${a.id}`);
+      if (d.tx && d.tx.status === 'POSTED') {
+        const built = buildChargebackAllocatedEntries(orderForCb, { id: a.id, allocatedValue: a.value, currency: a.currency, releaseStage: a.releaseStage }, d.lines, i > 0 ? ordered[i - 1].lines : null);
+        if (built.status !== 'OK') addF({ type: 'CHARGEBACK_ALLOCATION_INVALID', severity: 'CRITICAL', detail: `decisão v${d.version}: não gera lançamento válido (${built.detail ?? ''}) mas existe lançamento`, scope: sc, ledgerTransactionId: d.tx.id });
+        else if (!sameAgg(agg(built.entries.map((e) => ({ code: e.accountCode, direction: e.direction, amount: e.amount }))), agg(d.entries))) {
+          addF({ type: 'CHARGEBACK_ALLOCATION_AMOUNT_MISMATCH', severity: 'CRITICAL', detail: `lançamento da decisão v${d.version} difere da divisão aprovada`, scope: sc, ledgerTransactionId: d.tx.id });
+        }
+      }
+    });
+    for (const r of a.recoveries) {
+      eventCheck('CHARGEBACK_RECOVERY', r.tx, r.event, r.createdAt, r.id, r.kind === 'RECOVERY' ? `chargeback_recovery:${r.id}` : `chargeback_write_off:${r.id}`);
+      if (r.tx && r.tx.status === 'POSTED') {
+        const built = buildChargebackRecoveryEntries(orderForCb, r);
+        if (built.status !== 'OK' || !sameAgg(agg(built.entries.map((e) => ({ code: e.accountCode, direction: e.direction, amount: e.amount }))), agg(r.entries))) {
+          addF({ type: 'CHARGEBACK_RECOVERY_AMOUNT_MISMATCH', severity: 'CRITICAL', detail: `lançamento da ${r.kind === 'RECOVERY' ? 'recuperação' : 'baixa'} ${r.id} difere do registro`, scope: r.id, ledgerTransactionId: r.tx.id });
+        }
+      }
+    }
+    const thirdOwed = current ? current.lines.filter((l) => l.partyType === 'THIRD_PARTY').reduce((acc, l) => acc + toMicros(l.amount), 0n) : 0n;
+    const settled = a.recoveries.reduce((acc, r) => acc + toMicros(r.amount), 0n);
+    if (settled > thirdOwed) addF({ type: 'CHARGEBACK_RECOVERY_EXCEEDS_RECEIVABLE', severity: 'CRITICAL', detail: `recuperações/baixas somam ${settled} micros, acima do recebível de terceiro (${thirdOwed})`, scope: `${a.id}:recov` });
+  }
+
   // --- saldo do BUYER_ESCROW do pedido: retido = total − reembolsos ANTES da liberação; liberado (ou reembolsado depois de liberado) = 0
-  const refundsPosted = refundsView.every((r) => r.tx?.status === 'POSTED'); // reembolso sem lançamento já tem achado próprio; não soma ruído
+  const cbBeforeLive = cbView.filter((a) => !a.overlapRefund && a.releaseStage === 'BEFORE_RELEASE');
+  const refundsPosted = refundsView.every((r) => r.tx?.status === 'POSTED') && cbBeforeLive.every((a) => a.tx?.status === 'POSTED'); // o que falta já tem achado próprio; não soma ruído
   if ((released ? (v.prTx && v.dcTx) : v.prTx) && refundsPosted) {
-    const bal = [...v.prEntries, ...v.dcEntries, ...refundsView.flatMap((r) => r.entries)].filter((e) => e.code === 'BUYER_ESCROW').reduce((s, e) => s + (e.direction === 'CREDIT' ? 1n : -1n) * toMicros(e.amount), 0n);
-    const refundedBefore = released ? 0n : refundsView.reduce((s, r) => s + toMicros(r.amount), 0n);
+    const bal = [...v.prEntries, ...v.dcEntries, ...refundsView.flatMap((r) => r.entries), ...cbBeforeLive.flatMap((a) => a.entries)].filter((e) => e.code === 'BUYER_ESCROW').reduce((s, e) => s + (e.direction === 'CREDIT' ? 1n : -1n) * toMicros(e.amount), 0n);
+    const refundedBefore = released ? 0n : refundsView.reduce((s, r) => s + toMicros(r.amount), 0n) + cbBeforeLive.reduce((s, a) => s + toMicros(a.value), 0n);
     const want = released ? 0n : total - refundedBefore;
     if (bal !== want) {
       f.push({ type: 'ESCROW_BALANCE_MISMATCH', severity: 'CRITICAL', detail: `saldo de BUYER_ESCROW do pedido no ledger = ${bal} micros; esperado ${want} (escrow "${o.escrowStatus}")`, expected: want.toString(), actual: bal.toString() });
@@ -164,6 +223,41 @@ export function evaluateOrder(v: OrderLedgerView, now: Date, staleMinutes: numbe
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+/** Carrega, para os pedidos informados, as alocações de chargeback perdido com lançamentos/eventos/decisões/recuperações (somente leitura). */
+async function loadChargebackViews(db: any, orderIds: string[]): Promise<Map<string, ChargebackAllocView[]>> {
+  const out = new Map<string, ChargebackAllocView[]>();
+  if (orderIds.length === 0) return out;
+  const inList = sql.join(orderIds.map((i) => sql`${i}`), sql`, `);
+  const allocs = rowsOf(await db.execute(sql`SELECT id, chargeback_id, order_id, allocated_value::text AS v, currency, release_stage, overlap_refund, created_at FROM chargeback_allocations WHERE order_id IN (${inList}) ORDER BY id`));
+  if (allocs.length === 0) return out;
+  const txRows = rowsOf(await db.execute(sql`SELECT id, status, idempotency_key AS k FROM ledger_transactions WHERE order_id IN (${inList}) AND type LIKE 'CHARGEBACK_%'`));
+  const evRows = rowsOf(await db.execute(sql`SELECT id, status, idempotency_key AS k, created_at, ledger_transaction_id, last_error_code FROM ledger_outbox_events WHERE order_id IN (${inList}) AND event_type LIKE 'CHARGEBACK_%'`));
+  const enRows = rowsOf(await db.execute(sql`SELECT t.idempotency_key AS k, a.code, e.direction, e.amount::text AS amount FROM ledger_entries e JOIN ledger_transactions t ON t.id = e.transaction_id JOIN ledger_accounts a ON a.id = e.account_id WHERE t.order_id IN (${inList}) AND t.type LIKE 'CHARGEBACK_%'`));
+  const txBy = new Map<string, TxView>(txRows.map((t: any) => [t.k, { id: t.id, status: t.status }]));
+  const evBy = new Map<string, EventView>(evRows.map((e: any) => [e.k, { id: e.id, status: e.status, createdAt: parseUtc(e.created_at), ledgerTransactionId: e.ledger_transaction_id ?? null, lastErrorCode: e.last_error_code ?? null }]));
+  const enBy = new Map<string, EntryView[]>();
+  for (const e of enRows) enBy.set(e.k, [...(enBy.get(e.k) ?? []), { code: e.code, direction: e.direction, amount: e.amount }]);
+  const allocIds = allocs.map((a: any) => a.id);
+  const aList = sql.join(allocIds.map((i: string) => sql`${i}`), sql`, `);
+  const decRows = rowsOf(await db.execute(sql`SELECT d.id, d.chargeback_id, d.version, d.status, d.created_at, l.allocation_id, l.party_type, l.party_ref, l.amount::text AS amount FROM chargeback_decisions d JOIN chargeback_decision_lines l ON l.decision_id = d.id WHERE l.allocation_id IN (${aList}) AND d.status IN ('APPROVED','SUPERSEDED') ORDER BY d.version`));
+  const recRows = rowsOf(await db.execute(sql`SELECT id, allocation_id, kind, party_ref, amount::text AS amount, currency, created_at FROM chargeback_recoveries WHERE allocation_id IN (${aList}) ORDER BY created_at, id`));
+  for (const a of allocs) {
+    const decisions = new Map<string, ChargebackDecisionView>();
+    for (const r of decRows.filter((x: any) => x.allocation_id === a.id)) {
+      const d = decisions.get(r.id) ?? { id: r.id, version: Number(r.version), status: r.status, lines: [], createdAt: parseUtc(r.created_at), tx: txBy.get(`chargeback_allocated:${r.id}:${a.id}`) ?? null, event: evBy.get(`chargeback_allocated:${r.id}:${a.id}`) ?? null, entries: enBy.get(`chargeback_allocated:${r.id}:${a.id}`) ?? [] };
+      d.lines.push({ partyType: r.party_type, partyRef: r.party_ref ?? null, amount: r.amount }); decisions.set(r.id, d);
+    }
+    const recoveries: ChargebackRecoveryView[] = recRows.filter((x: any) => x.allocation_id === a.id).map((r: any) => {
+      const key = r.kind === 'RECOVERY' ? `chargeback_recovery:${r.id}` : `chargeback_write_off:${r.id}`;
+      return { id: r.id, kind: r.kind, partyRef: r.party_ref, amount: r.amount, currency: r.currency, createdAt: parseUtc(r.created_at), tx: txBy.get(key) ?? null, event: evBy.get(key) ?? null, entries: enBy.get(key) ?? [] };
+    });
+    const key = `chargeback_confirmed:${a.id}`;
+    const view: ChargebackAllocView = { id: a.id, chargebackId: a.chargeback_id, value: a.v, currency: a.currency, releaseStage: a.release_stage, overlapRefund: !!a.overlap_refund, createdAt: parseUtc(a.created_at), tx: txBy.get(key) ?? null, event: evBy.get(key) ?? null, entries: enBy.get(key) ?? [], decisions: [...decisions.values()], recoveries };
+    out.set(a.order_id, [...(out.get(a.order_id) ?? []), view]);
+  }
+  return out;
+}
+
 export interface ReconcileSummary {
   status: 'OK' | 'DISABLED';
   runId?: string;
@@ -235,6 +329,7 @@ export async function runLedgerReconciliation(opts: { maxOrders?: number; pageSi
           LEFT JOIN ledger_outbox_events xe ON xe.idempotency_key = 'shipping_cost_reversed:' || x.id
          WHERE x.order_id IN (${sql.join(ids.map((i: string) => sql`${i}`), sql`, `)})
          ORDER BY x.id`));
+      const cbByOrder = await loadChargebackViews(db, ids);
       const reversalsByOrder = new Map<string, any[]>();
       for (const xr of reversalRows) reversalsByOrder.set(xr.order_id, [...(reversalsByOrder.get(xr.order_id) ?? []), xr]);
       const refundRows = rowsOf(await db.execute(sql`
@@ -269,6 +364,7 @@ export async function runLedgerReconciliation(opts: { maxOrders?: number; pageSi
             id: rr.id, amount: String(rr.amount), currency: rr.currency, sellerDebitAmount: rr.sdebit ?? null, processedAt: parseUtc(rr.provider_confirmed_at ?? rr.created_at),
             tx: rr.rt_id ? { id: rr.rt_id, status: rr.rt_status } : null, event: ev(rr.re_id, rr.re_status, rr.re_created, rr.re_tx, rr.re_err), entries: byOrder.get(r.id)?.rf.get(rr.id) ?? [],
           })),
+          chargebacks: cbByOrder.get(r.id) ?? [],
           reversals: (reversalsByOrder.get(r.id) ?? []).map((xr): ReversalLedgerView => ({
             id: xr.id, amount: String(xr.amount), currency: xr.currency, subsidyPart: String(xr.subsidy_part), absorbedPart: String(xr.absorbed_part), createdAt: parseUtc(xr.created_at),
             tx: xr.xt_id ? { id: xr.xt_id, status: xr.xt_status } : null, event: ev(xr.xe_id, xr.xe_status, xr.xe_created, xr.xe_tx, xr.xe_err), entries: byOrder.get(r.id)?.sr.get(xr.id) ?? [],
@@ -278,6 +374,17 @@ export async function runLedgerReconciliation(opts: { maxOrders?: number; pageSi
       }
       cursor = page[page.length - 1].id;
       if (truncated || page.length < pageSize) break;
+    }
+
+    // E5 — por chargeback (fora do escopo de pedido): perdido sem nenhum pedido alocado, ou valor do provedor diferente do alocado
+    const lostRows = rowsOf(await db.execute(sql`
+      SELECT c.id, c.value::text AS value, coalesce(sum(a.allocated_value), 0)::text AS alloc_sum, count(a.id)::int AS n_alloc
+        FROM payment_chargebacks c LEFT JOIN chargeback_allocations a ON a.chargeback_id = c.id
+       WHERE c.local_status = 'lost' AND c.created_at >= ${shadow.cutoff.toISOString()}::timestamp
+       GROUP BY c.id, c.value`));
+    for (const c of lostRows) {
+      if (c.n_alloc === 0) current.set(`CHARGEBACK_LOST_WITHOUT_ALLOCATION:${c.id}`, { f: { type: 'CHARGEBACK_LOST_WITHOUT_ALLOCATION', severity: 'CRITICAL', detail: `chargeback ${c.id} perdido (${c.value}) sem nenhum pedido alocado — o valor debitado pelo provedor não está no ledger`, scope: c.id }, orderId: null });
+      else if (toMicros(c.alloc_sum) !== toMicros(c.value)) current.set(`CHARGEBACK_VALUE_MISMATCH:${c.id}`, { f: { type: 'CHARGEBACK_VALUE_MISMATCH', severity: 'CRITICAL', detail: `valor atual do provedor (${c.value}) difere do alocado (${c.alloc_sum}) — alocações são imutáveis; revisão humana`, scope: c.id }, orderId: null });
     }
 
     // persistência: upsert por fingerprint; o que sumiu (e foi escaneado numa varredura COMPLETA) vira RESOLVED — com histórico
@@ -331,7 +438,7 @@ export async function acknowledgeFinding(input: { findingId: string; actorUserId
   });
 }
 
-export interface RepairCandidate { orderId: string; eventType: 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED' | 'SHIPPING_COST_REVERSED'; occurredAt: Date; refundId?: string; reversalId?: string }
+export interface RepairCandidate { orderId: string; eventType: 'PAYMENT_RECEIVED' | 'ORDER_DELIVERY_CONFIRMED' | 'REFUND_PROCESSED' | 'SHIPPING_COST_REVERSED' | 'CHARGEBACK_CONFIRMED' | 'CHARGEBACK_ALLOCATED' | 'CHARGEBACK_RECOVERY' | 'CHARGEBACK_WRITE_OFF'; occurredAt: Date; refundId?: string; reversalId?: string; chargebackSubjectId?: string }
 export interface RepairResult { dryRun: boolean; candidates: RepairCandidate[]; enqueued: number; existing: number; failed: number }
 
 /**
@@ -383,6 +490,25 @@ export async function repairMissingEvents(input: { actorUserId: string; dryRun?:
      WHERE o.created_at >= ${shadow.cutoff.toISOString()}::timestamp AND o.payment_status = 'paid' AND xt.id IS NULL AND xe.id IS NULL
      ORDER BY x.id LIMIT ${limit}`));
   for (const x of reversalRows) candidates.push({ orderId: x.order_id, eventType: 'SHIPPING_COST_REVERSED', reversalId: x.reversal_id, occurredAt: parseUtc(x.created_at) });
+  // E5 — chargebacks: alocação perdida sem evento/lançamento; decisão aprovada sem evento/lançamento; recuperação/baixa sem evento/lançamento
+  const cbConf = rowsOf(await db.execute(sql`
+    SELECT a.id, a.order_id, a.created_at FROM chargeback_allocations a
+      JOIN orders o ON o.id = a.order_id JOIN payment_chargebacks c ON c.id = a.chargeback_id
+      LEFT JOIN ledger_transactions t ON t.idempotency_key = 'chargeback_confirmed:' || a.id LEFT JOIN ledger_outbox_events e ON e.idempotency_key = 'chargeback_confirmed:' || a.id
+     WHERE c.local_status = 'lost' AND a.overlap_refund = false AND o.created_at >= ${shadow.cutoff.toISOString()}::timestamp AND t.id IS NULL AND e.id IS NULL ORDER BY a.id LIMIT ${limit}`));
+  for (const x of cbConf) candidates.push({ orderId: x.order_id, eventType: 'CHARGEBACK_CONFIRMED', chargebackSubjectId: x.id, occurredAt: parseUtc(x.created_at) });
+  const cbAlloc = rowsOf(await db.execute(sql`
+    SELECT DISTINCT d.id AS decision_id, l.allocation_id, a.order_id, d.approved_at FROM chargeback_decisions d
+      JOIN chargeback_decision_lines l ON l.decision_id = d.id JOIN chargeback_allocations a ON a.id = l.allocation_id JOIN orders o ON o.id = a.order_id
+      LEFT JOIN ledger_transactions t ON t.idempotency_key = 'chargeback_allocated:' || d.id || ':' || l.allocation_id LEFT JOIN ledger_outbox_events e ON e.idempotency_key = 'chargeback_allocated:' || d.id || ':' || l.allocation_id
+     WHERE d.status IN ('APPROVED','SUPERSEDED') AND o.created_at >= ${shadow.cutoff.toISOString()}::timestamp AND t.id IS NULL AND e.id IS NULL ORDER BY d.id, l.allocation_id LIMIT ${limit}`));
+  for (const x of cbAlloc) candidates.push({ orderId: x.order_id, eventType: 'CHARGEBACK_ALLOCATED', chargebackSubjectId: `${x.decision_id}:${x.allocation_id}`, occurredAt: parseUtc(x.approved_at) });
+  const cbRec = rowsOf(await db.execute(sql`
+    SELECT r.id, r.kind, a.order_id, r.created_at FROM chargeback_recoveries r JOIN chargeback_allocations a ON a.id = r.allocation_id JOIN orders o ON o.id = a.order_id
+      LEFT JOIN ledger_transactions t ON t.idempotency_key = (CASE WHEN r.kind = 'RECOVERY' THEN 'chargeback_recovery:' ELSE 'chargeback_write_off:' END) || r.id
+      LEFT JOIN ledger_outbox_events e ON e.idempotency_key = (CASE WHEN r.kind = 'RECOVERY' THEN 'chargeback_recovery:' ELSE 'chargeback_write_off:' END) || r.id
+     WHERE o.created_at >= ${shadow.cutoff.toISOString()}::timestamp AND t.id IS NULL AND e.id IS NULL ORDER BY r.id LIMIT ${limit}`));
+  for (const x of cbRec) candidates.push({ orderId: x.order_id, eventType: x.kind === 'RECOVERY' ? 'CHARGEBACK_RECOVERY' : 'CHARGEBACK_WRITE_OFF', chargebackSubjectId: x.id, occurredAt: parseUtc(x.created_at) });
   const result: RepairResult = { dryRun, candidates, enqueued: 0, existing: 0, failed: 0 };
   if (dryRun || candidates.length === 0) return result;
   const { orders, refunds, escrowAccounts, shippingCostReversals } = await import('../../../../db/schema.js');
@@ -401,10 +527,10 @@ export async function repairMissingEvents(input: { actorUserId: string; dryRun?:
       if (!rf || !es) { result.failed++; continue; }
       refund = { id: rf.id, paymentId: rf.paymentId, amount: rf.amount, currency: rf.currency, sellerDebitAmount: rf.sellerDebitAmount, releaseStage: es.releasedAt ? 'AFTER_RELEASE' : 'BEFORE_RELEASE' };
     }
-    const res = await enqueueLedgerEvent(db, { eventType: c.eventType, order, refund, reversal, occurredAt: c.occurredAt, source: 'reconciliation_repair' });
+    const res = await enqueueLedgerEvent(db, { eventType: c.eventType, order, refund, reversal, chargebackSubjectId: c.chargebackSubjectId, occurredAt: c.occurredAt, source: 'reconciliation_repair' });
     if (res.status === 'ENQUEUED') result.enqueued++; else if (res.status === 'EXISTS') result.existing++; else result.failed++;
   }
-  await db.insert(auditLogs).values({ id: newId('aud'), actorUserId: input.actorUserId, action: 'ledger.outbox.repair_missing_events', resource: 'ledger_outbox_event', resourceId: null, detailsJson: { enqueued: result.enqueued, existing: result.existing, failed: result.failed, orderIds: candidates.map((c) => `${c.eventType}:${c.reversalId ?? c.refundId ?? c.orderId}`).slice(0, 200) }, createdAt: new Date() });
+  await db.insert(auditLogs).values({ id: newId('aud'), actorUserId: input.actorUserId, action: 'ledger.outbox.repair_missing_events', resource: 'ledger_outbox_event', resourceId: null, detailsJson: { enqueued: result.enqueued, existing: result.existing, failed: result.failed, orderIds: candidates.map((c) => `${c.eventType}:${c.chargebackSubjectId ?? c.reversalId ?? c.refundId ?? c.orderId}`).slice(0, 200) }, createdAt: new Date() });
   return result;
 }
 

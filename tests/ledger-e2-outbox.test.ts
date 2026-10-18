@@ -58,6 +58,9 @@ async function main() {
   if (!(await q(`select to_regclass('public.shipping_cost_reversals') t`))[0].t) {
     for (const stmt of fs.readFileSync(path.join(root, 'drizzle/0041_ledger_shipping_reversal.sql'), 'utf8').split('--> statement-breakpoint')) if (stmt.trim()) await pool.query(stmt);
   }
+  if (!(await q(`select to_regclass('public.chargeback_allocations') t`))[0].t) {
+    for (const stmt of fs.readFileSync(path.join(root, 'drizzle/0042_ledger_chargebacks.sql'), 'utf8').split('--> statement-breakpoint')) if (stmt.trim()) await pool.query(stmt);
+  }
   const kit = await setupCheckoutKit(db, 'e2');
   await kit.setFlag('multiSellerCheckoutEnabled', true); await kit.setFlag('defaultShippingPolicyMode', 'CUSTOMER_PAYS');
   await kit.setFlag('shippingNusaliSubsidy', { enabled: false, percent: 0, rules: { 'GW:STANDARD': { enabled: true, percent: 50 } } });

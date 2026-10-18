@@ -26,7 +26,7 @@
     "asaas:test-e2e-public": "tsx scripts/test-asaas-e2e-public.ts",
     "test:redis": "tsx scripts/test-redis-optimization.ts",
     "test:logistics-db": "tsx scratch/diag-db-errors.ts",
-    "test:essential": "tsx tests/mobile-compact-listing.test.ts && tsx tests/test-db-safety.test.ts && node scripts/with-test-env.cjs tsx tests/seller-variant-stock.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e1-coupon-and-group-payment.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-idempotency-race.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e2-outbox.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-outbox-flag-gate.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e3-refunds.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e4-shipping-reversal.test.ts",
+    "test:essential": "tsx tests/mobile-compact-listing.test.ts && tsx tests/test-db-safety.test.ts && node scripts/with-test-env.cjs tsx tests/seller-variant-stock.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e1-coupon-and-group-payment.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-idempotency-race.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e2-outbox.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-outbox-flag-gate.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e3-refunds.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e4-shipping-reversal.test.ts && node scripts/with-test-env.cjs tsx tests/ledger-e5-chargebacks.test.ts",
     "test:mobile": "tsx tests/mobile-compact-listing.test.ts",
     "test:variant-stock": "node scripts/with-test-env.cjs tsx tests/seller-variant-stock.test.ts",
     "test:ledger-e1": "node scripts/with-test-env.cjs tsx tests/ledger-e1-coupon-and-group-payment.test.ts",
@@ -36,6 +36,8 @@
     "test:ledger-e3-migration": "node scripts/with-test-env.cjs node tests/ledger-e3-migration-check.cjs",
     "test:ledger-e4": "node scripts/with-test-env.cjs tsx tests/ledger-e4-shipping-reversal.test.ts",
     "test:ledger-e4-migration": "node scripts/with-test-env.cjs node tests/ledger-e4-migration-check.cjs",
+    "test:ledger-e5": "node scripts/with-test-env.cjs tsx tests/ledger-e5-chargebacks.test.ts",
+    "test:ledger-e5-migration": "node scripts/with-test-env.cjs node tests/ledger-e5-migration-check.cjs",
     "test:ledger-outbox-gate": "node scripts/with-test-env.cjs tsx tests/ledger-outbox-flag-gate.test.ts",
     "test:ledger-e2-migration": "node scripts/with-test-env.cjs node tests/ledger-e2-migration-check.cjs",
     "test:db-safety": "tsx tests/test-db-safety.test.ts"

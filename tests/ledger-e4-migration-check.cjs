@@ -1,6 +1,13 @@
 // Verificação da migração 0041 (reversão do custo de frete) em banco DESCARTÁVEL (rodar pelo executor seguro; o banco deve estar no nível ANTERIOR à 0039, ex.: cópia do phase3_tmpl ou restauração do dump de produção; o migrador oficial aplica as pendentes até a 0041): estrutura → rollback → reaplicação → trava do rollback com dados.
 const path = require('path'); const fs = require('fs');
 const root = path.resolve(__dirname, '..');
+// Esta verificação cobre a 0041 isoladamente: o migrador oficial roda sobre uma CÓPIA da pasta de migrações limitada até a 0041 (as posteriores têm verificação própria).
+const os = require('os');
+const migDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mig-upto-0041-'));
+fs.mkdirSync(path.join(migDir, 'meta'));
+{ const j = JSON.parse(fs.readFileSync(path.join(root, 'drizzle/meta/_journal.json'), 'utf8')); j.entries = j.entries.filter((e) => e.idx <= 41);
+  fs.writeFileSync(path.join(migDir, 'meta/_journal.json'), JSON.stringify(j));
+  for (const e of j.entries) fs.copyFileSync(path.join(root, 'drizzle', e.tag + '.sql'), path.join(migDir, e.tag + '.sql')); }
 const pg = require(path.join(root, 'node_modules/pg'));
 const { drizzle } = require(path.join(root, 'node_modules/drizzle-orm/node-postgres'));
 const { migrate } = require(path.join(root, 'node_modules/drizzle-orm/node-postgres/migrator'));
@@ -19,7 +26,7 @@ let bad = 0; const chk = (l, ok, d) => { if (!ok) bad++; console.log(`${ok ? 'OK
   }
   const before = await mig();
   chk('antes: tabela nova ausente', !(await hasTable()));
-  await migrate(drizzle(pool), { migrationsFolder: path.join(root, 'drizzle') });
+  await migrate(drizzle(pool), { migrationsFolder: migDir });
   const after = await mig();
   chk(`migrador oficial aplicou as migrações pendentes (${before} -> ${after}); a última é a 0041`, after > before && (await q(`select count(*)::int n from drizzle.__drizzle_migrations where created_at = ${when}`))[0].n === 1, { before, after });
   chk('tabela shipping_cost_reversals criada, com o índice único de idempotência e o CHECK de partes (subsídio + absorvido = valor)', (await hasTable()) && (await q(`select indexname from pg_indexes where tablename='shipping_cost_reversals'`)).some((r) => r.indexname === 'shipping_cost_reversals_idempotency_uq') && /subsidy_part/.test(await def('shipping_cost_reversals_amount_check')));
@@ -32,7 +39,7 @@ let bad = 0; const chk = (l, ok, d) => { if (!ok) bad++; console.log(`${ok ? 'OK
   const e0 = await runDown();
   chk('rollback 0041 sem dados: remove a tabela e a função, restaura os 2 CHECKs e remove o registro da migração', e0 === null && !(await hasTable()) && !/SHIPPING_COST_REVERSED/.test(await def('ledger_transactions_type_check')) && !/SHIPPING_COST_REVERSED/.test(await def('ledger_outbox_events_type_check')) && /REFUND_PROCESSED/.test(await def('ledger_transactions_type_check')) && (await mig()) === after - 1 && (await q(`select count(*)::int n from pg_proc where proname='nusali_shipping_reversal_immutable'`))[0].n === 0, e0);
   chk('rollback NÃO tocou nos triggers do ledger nem do outbox', (await q(`select count(*)::int n from pg_trigger where tgname like 'nusali_ledger_trg_%'`))[0].n === 8 && (await q(`select count(*)::int n from pg_trigger where tgname like 'nusali_outbox_trg_%'`))[0].n === 4);
-  await migrate(drizzle(pool), { migrationsFolder: path.join(root, 'drizzle') });
+  await migrate(drizzle(pool), { migrationsFolder: migDir });
   chk('reaplicação após o rollback funciona', (await hasTable()) && (await mig()) === after && /SHIPPING_COST_REVERSED/.test(await def('ledger_transactions_type_check')));
 
   // com dados que dependem do novo tipo: o rollback é BLOQUEADO e nada muda

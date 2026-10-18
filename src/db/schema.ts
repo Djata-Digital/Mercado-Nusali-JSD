@@ -2456,11 +2456,11 @@ export const ledgerAccounts = pgTable('ledger_accounts', {
     'ledger_accounts_owner_id_platform_check',
     sql`(${table.ownerType} = 'PLATFORM' AND ${table.ownerId} IS NULL) OR (${table.ownerType} <> 'PLATFORM' AND ${table.ownerId} IS NOT NULL)`
   ),
-  // Catálogo fechado — os 14 códigos de accounts.ts (ACCOUNT_DEFINITIONS). Um typo
+  // Catálogo fechado — os 15 códigos de accounts.ts (ACCOUNT_DEFINITIONS). Um typo
   // num code novo passa a ser rejeitado pelo banco, não aceito como conta nova.
   ledger_accounts_code_check: check(
     'ledger_accounts_code_check',
-    sql`${table.code} IN ('PAYMENT_CLEARING','BUYER_ESCROW','SELLER_PAYABLE','SELLER_AVAILABLE','SELLER_PAYOUT_CLEARING','NUSALI_COMMISSION_REVENUE','SHIPPING_PAYABLE','SHIPPING_SUBSIDY_NUSALI','TAX_PAYABLE','REFUND_PAYABLE','CHARGEBACK_RECEIVABLE','PAYMENT_PROCESSOR_FEES','NUSALI_PROMOTION_EXPENSE','REFUND_ABSORBED_SHIPPING')`
+    sql`${table.code} IN ('PAYMENT_CLEARING','BUYER_ESCROW','SELLER_PAYABLE','SELLER_AVAILABLE','SELLER_PAYOUT_CLEARING','NUSALI_COMMISSION_REVENUE','SHIPPING_PAYABLE','SHIPPING_SUBSIDY_NUSALI','TAX_PAYABLE','REFUND_PAYABLE','CHARGEBACK_RECEIVABLE','PAYMENT_PROCESSOR_FEES','NUSALI_PROMOTION_EXPENSE','REFUND_ABSORBED_SHIPPING','CHARGEBACK_LOSS')`
   ),
 }));
 
@@ -2500,7 +2500,7 @@ export const ledgerTransactions = pgTable('ledger_transactions', {
   // Catálogo fechado — só os eventos implementados NESTA fase (financialLedgerService.ts).
   // Eventos futuros (PAYOUT_*, REFUND_*, CHARGEBACK_*, DISPUTE_*, ADJUSTMENT, REVERSAL, ...)
   // entram numa migration aditiva quando o código que os usa for implementado.
-  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED')`),
+  ledger_transactions_type_check: check('ledger_transactions_type_check', sql`${table.type} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED','CHARGEBACK_CONFIRMED','CHARGEBACK_ALLOCATED','CHARGEBACK_RECOVERY','CHARGEBACK_WRITE_OFF')`),
   ledger_transactions_order_idx: index('ledger_transactions_order_idx').on(table.orderId),
   ledger_transactions_type_status_idx: index('ledger_transactions_type_status_idx').on(table.type, table.status),
 }));
@@ -2579,7 +2579,7 @@ export const ledgerOutboxEvents = pgTable('ledger_outbox_events', {
   ledger_outbox_events_idempotency_uq: uniqueIndex('ledger_outbox_events_idempotency_uq').on(table.idempotencyKey),
   ledger_outbox_events_claim_idx: index('ledger_outbox_events_claim_idx').on(table.status, table.nextAttemptAt),
   ledger_outbox_events_order_idx: index('ledger_outbox_events_order_idx').on(table.orderId),
-  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED')`),
+  ledger_outbox_events_type_check: check('ledger_outbox_events_type_check', sql`${table.eventType} IN ('PAYMENT_RECEIVED','ORDER_DELIVERY_CONFIRMED','REFUND_PROCESSED','SHIPPING_COST_REVERSED','CHARGEBACK_CONFIRMED','CHARGEBACK_ALLOCATED','CHARGEBACK_RECOVERY','CHARGEBACK_WRITE_OFF')`),
   ledger_outbox_events_status_check: check('ledger_outbox_events_status_check', sql`${table.status} IN ('PENDING','PROCESSING','RETRYING','DONE','SKIPPED','NEEDS_INTERVENTION','DISMISSED')`),
   ledger_outbox_events_attempts_check: check('ledger_outbox_events_attempts_check', sql`${table.attempts} >= 0 AND ${table.maxAttempts} >= 1`),
   ledger_outbox_events_hash_check: check('ledger_outbox_events_hash_check', sql`char_length(${table.snapshotHash}) = 64`),
@@ -2656,4 +2656,105 @@ export const shippingCostReversals = pgTable('shipping_cost_reversals', {
   shipping_cost_reversals_idempotency_uq: uniqueIndex('shipping_cost_reversals_idempotency_uq').on(table.idempotencyKey),
   shipping_cost_reversals_order_idx: index('shipping_cost_reversals_order_idx').on(table.orderId),
   shipping_cost_reversals_amount_check: check('shipping_cost_reversals_amount_check', sql`${table.amount} > 0 AND ${table.subsidyPart} >= 0 AND ${table.absorbedPart} >= 0 AND ${table.subsidyPart} + ${table.absorbedPart} = ${table.amount}`),
+}));
+
+// =============================================================================================================================================================
+// E5 — CHARGEBACKS NO LEDGER SOMBRA. Separa quatro coisas: (1) contestação aberta (payment_chargebacks.active: nenhum lançamento), (2) valor EFETIVAMENTE debitado pelo
+// provedor (chargeback_allocations, criada quando o chargeback vira "lost"; vira o evento CHARGEBACK_CONFIRMED), (3) decisão de RESPONSABILIDADE caso a caso (chargeback_decisions
+// + linhas, com evidências, fundamentação, proponente ≠ aprovador, versionadas e imutáveis) e (4) recuperação / baixa (chargeback_recoveries). Nada aqui move dinheiro real:
+// carteiras, Escrow, pagamentos e reembolsos são intocados; tudo alimenta o ledger sombra via outbox. A responsabilidade NUNCA é atribuída automaticamente.
+// =============================================================================================================================================================
+export const chargebackAllocations = pgTable('chargeback_allocations', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  chargebackId: varchar('chargeback_id', { length: 255 }).notNull().references(() => paymentChargebacks.id, { onDelete: 'restrict' }),
+  orderId: varchar('order_id', { length: 255 }).notNull().references(() => orders.id, { onDelete: 'restrict' }),
+  paymentId: varchar('payment_id', { length: 255 }).notNull().references(() => payments.id, { onDelete: 'restrict' }),
+  allocatedValue: numeric('allocated_value', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull(),
+  orderTotal: numeric('order_total', { precision: 12, scale: 2 }).notNull(),
+  releaseStage: varchar('release_stage', { length: 20 }).notNull(),
+  /** o pedido JÁ tinha reembolso concluído quando o chargeback foi perdido: lançar de novo seria perda dobrada => sem evento, exige revisão humana */
+  overlapRefund: boolean('overlap_refund').notNull().default(false),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  chargeback_allocations_chargeback_order_uq: uniqueIndex('chargeback_allocations_chargeback_order_uq').on(table.chargebackId, table.orderId),
+  chargeback_allocations_order_idx: index('chargeback_allocations_order_idx').on(table.orderId),
+  chargeback_allocations_value_check: check('chargeback_allocations_value_check', sql`${table.allocatedValue} > 0 AND ${table.allocatedValue} <= ${table.orderTotal}`),
+  chargeback_allocations_stage_check: check('chargeback_allocations_stage_check', sql`${table.releaseStage} IN ('BEFORE_RELEASE','AFTER_RELEASE')`),
+}));
+
+export const chargebackEvidence = pgTable('chargeback_evidence', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  chargebackId: varchar('chargeback_id', { length: 255 }).notNull().references(() => paymentChargebacks.id, { onDelete: 'restrict' }),
+  kind: varchar('kind', { length: 50 }).notNull(),
+  description: text('description').notNull(),
+  fileRef: text('file_ref'),
+  sha256: varchar('sha256', { length: 64 }),
+  addedBy: varchar('added_by', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  addedByRole: varchar('added_by_role', { length: 50 }).notNull(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  chargeback_evidence_chargeback_idx: index('chargeback_evidence_chargeback_idx').on(table.chargebackId),
+  chargeback_evidence_sha_check: check('chargeback_evidence_sha_check', sql`${table.sha256} IS NULL OR length(${table.sha256}) = 64`),
+}));
+
+export const chargebackDecisions = pgTable('chargeback_decisions', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  chargebackId: varchar('chargeback_id', { length: 255 }).notNull().references(() => paymentChargebacks.id, { onDelete: 'restrict' }),
+  version: integer('version').notNull(),
+  status: varchar('status', { length: 20 }).notNull(),
+  causeCode: varchar('cause_code', { length: 30 }).notNull(),
+  causeDetail: text('cause_detail'),
+  rationale: text('rationale').notNull(),
+  partiesHeard: text('parties_heard').notNull(),
+  contractBasis: text('contract_basis'),
+  evidenceIdsJson: jsonb('evidence_ids_json').notNull(),
+  evidenceHash: varchar('evidence_hash', { length: 64 }).notNull(),
+  supersedesDecisionId: varchar('supersedes_decision_id', { length: 255 }),
+  revisionReason: text('revision_reason'),
+  proposedBy: varchar('proposed_by', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  approvedBy: varchar('approved_by', { length: 255 }).references(() => users.id, { onDelete: 'restrict' }),
+  approvedAt: timestamp('approved_at'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  chargeback_decisions_version_uq: uniqueIndex('chargeback_decisions_version_uq').on(table.chargebackId, table.version),
+  chargeback_decisions_one_approved_uq: uniqueIndex('chargeback_decisions_one_approved_uq').on(table.chargebackId).where(sql`${table.status} = 'APPROVED'`),
+  chargeback_decisions_status_check: check('chargeback_decisions_status_check', sql`${table.status} IN ('PROPOSED','APPROVED','SUPERSEDED','REJECTED')`),
+  chargeback_decisions_cause_check: check('chargeback_decisions_cause_check', sql`${table.causeCode} IN ('SELLER_FAULT','NUSALI_FAULT','LOGISTICS_FAULT','EXTERNAL_FRAUD','SHARED','INDETERMINATE')`),
+  chargeback_decisions_four_eyes_check: check('chargeback_decisions_four_eyes_check', sql`${table.approvedBy} IS NULL OR ${table.approvedBy} <> ${table.proposedBy}`),
+}));
+
+export const chargebackDecisionLines = pgTable('chargeback_decision_lines', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  decisionId: varchar('decision_id', { length: 255 }).notNull().references(() => chargebackDecisions.id, { onDelete: 'restrict' }),
+  allocationId: varchar('allocation_id', { length: 255 }).notNull().references(() => chargebackAllocations.id, { onDelete: 'restrict' }),
+  partyType: varchar('party_type', { length: 20 }).notNull(),
+  /** SELLER: id do vendedor; THIRD_PARTY: transportadora/terceiro (id ou descrição); NUSALI: vazio */
+  partyRef: varchar('party_ref', { length: 255 }),
+  contractReference: text('contract_reference'),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+}, (table) => ({
+  chargeback_decision_lines_decision_idx: index('chargeback_decision_lines_decision_idx').on(table.decisionId),
+  chargeback_decision_lines_allocation_idx: index('chargeback_decision_lines_allocation_idx').on(table.allocationId),
+  chargeback_decision_lines_amount_check: check('chargeback_decision_lines_amount_check', sql`${table.amount} > 0`),
+  chargeback_decision_lines_party_check: check('chargeback_decision_lines_party_check', sql`${table.partyType} IN ('SELLER','NUSALI','THIRD_PARTY') AND (${table.partyType} = 'NUSALI' OR ${table.partyRef} IS NOT NULL) AND (${table.partyType} <> 'THIRD_PARTY' OR ${table.contractReference} IS NOT NULL)`),
+}));
+
+export const chargebackRecoveries = pgTable('chargeback_recoveries', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  allocationId: varchar('allocation_id', { length: 255 }).notNull().references(() => chargebackAllocations.id, { onDelete: 'restrict' }),
+  decisionId: varchar('decision_id', { length: 255 }).notNull().references(() => chargebackDecisions.id, { onDelete: 'restrict' }),
+  kind: varchar('kind', { length: 20 }).notNull(),
+  partyRef: varchar('party_ref', { length: 255 }).notNull(),
+  amount: numeric('amount', { precision: 12, scale: 2 }).notNull(),
+  currency: varchar('currency', { length: 10 }).notNull(),
+  evidenceRef: text('evidence_ref').notNull(),
+  reason: text('reason').notNull(),
+  performedBy: varchar('performed_by', { length: 255 }).notNull().references(() => users.id, { onDelete: 'restrict' }),
+  idempotencyKey: varchar('idempotency_key', { length: 255 }).notNull(),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+}, (table) => ({
+  chargeback_recoveries_idempotency_uq: uniqueIndex('chargeback_recoveries_idempotency_uq').on(table.idempotencyKey),
+  chargeback_recoveries_allocation_idx: index('chargeback_recoveries_allocation_idx').on(table.allocationId),
+  chargeback_recoveries_kind_check: check('chargeback_recoveries_kind_check', sql`${table.kind} IN ('RECOVERY','WRITE_OFF') AND ${table.amount} > 0`),
 }));

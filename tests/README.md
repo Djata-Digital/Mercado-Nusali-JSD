@@ -15,6 +15,8 @@ Esta pasta guarda os testes que protegem fluxos críticos e **não dependem de `
 | `ledger-e3-migration-check.cjs` | migração 0040: migrador oficial do drizzle → CHECKs ampliados → rollback → reaplicação → trava do rollback com dados (precisa de banco no nível anterior à 0039) | **sim** |
 | `ledger-e4-shipping-reversal.test.ts` | ledger sombra E4: reversão do custo de frete (subsídio da Nusali + frete absorvido) só por registro auditado e com evidência num pedido reembolsado DEPOIS da liberação; antes da liberação nada a reverter; subsídio integral / parcial / ausente; alocação cumulativa exata; teto = custo de frete; idempotência, workers concorrentes, falha/recuperação (evento perdido + reparo), outbox desligado, cutoff, reconciliação e dinheiro real intacto | **sim** |
 | `ledger-e4-migration-check.cjs` | migração 0041: migrador oficial do drizzle → tabela imutável + CHECKs → rollback → reaplicação → trava do rollback com dados (precisa de banco no nível anterior à 0039) | **sim** |
+| `ledger-e5-chargebacks.test.ts` | ledger sombra E5: contestação aberta nunca lança; só o valor efetivamente debitado (lost) vira alocação por pedido + lançamento (antes da liberação: Escrow; depois: perda PENDENTE); responsabilidade só por decisão explícita (evidências, fundamentação, proponente ≠ aprovador, conflito de interesse, versões/revisão por delta, imutável); recuperação/baixa de terceiro; sem duplicidade com REFUND_PROCESSED; idempotência, concorrência, reentrega de webhook, falha/recuperação, reparo, cutoff, outbox desligado, reconciliação e dinheiro real intacto | **sim** |
+| `ledger-e5-migration-check.cjs` | migração 0042: migrador oficial do drizzle → 5 tabelas + CHECKs + triggers → rollback → reaplicação → trava do rollback com dados (precisa de banco no nível anterior à 0039) | **sim** |
 | `ledger-e2-migration-check.cjs` | migração 0039: migrador oficial do drizzle → estrutura → rollback → reaplicação → trava do rollback com dados → gatilhos (precisa de banco no nível anterior à 0039) | **sim** |
 | `seller-variant-stock.test.ts` | estoque por SKU no formulário do vendedor: edição/persistência, reservas, transferências pendentes, alteração concorrente, ordem de locks (sem deadlock), livro de movimentos, atualização conjunta, permissões, produto simples | **sim** (Postgres descartável) |
 
@@ -33,6 +35,8 @@ npm run test:ledger-e3           # reembolsos no ledger sombra (exige o banco ac
 npm run test:ledger-e3-migration  # migração 0040 (banco no nível anterior à 0039)
 npm run test:ledger-e4           # reversão do custo de frete no ledger sombra (exige o banco acima, já com 0039 e 0040)
 npm run test:ledger-e4-migration  # migração 0041 (banco no nível anterior à 0039)
+npm run test:ledger-e5           # chargebacks no ledger sombra (exige o banco acima, já com 0039..0041)
+npm run test:ledger-e5-migration  # migração 0042 (banco no nível anterior à 0039)
 npm run test:ledger-e2-migration  # migração 0039 (banco no nível anterior à 0039)
 npm run test:essential         # todos
 ```
