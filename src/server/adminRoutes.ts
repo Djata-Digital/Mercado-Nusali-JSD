@@ -102,6 +102,7 @@ import {
 import { NUSALI_SUBSIDY_SETTING_KEY } from './modules/shipping/shippingCalculatorService.js';
 
 import { bannersAdminRouter } from './modules/banners/bannersRoutes.js';
+import { ledgerAdminRouter } from './modules/ledger/admin/ledgerAdminRoutes.js';
 
 import {
   AttributeDefinitionError,
@@ -296,6 +297,10 @@ adminRouter.use(requireAuth, requireInternalStaff);
 // ativar/desativar, ordenar, duplicar, upload, excluir). A autorização é decidida aqui, no
 // mount; o router do módulo nunca decide sozinho.
 adminRouter.use('/banners', requireGlobalAdminForBanners, bannersAdminRouter);
+
+// Ledger sombra (E6) — consulta e ações administrativas. A autorização POR OPERAÇÃO (leitura: GLOBAL_ADMIN/FINANCE/RISK_ANALYST; ações sensíveis: só GLOBAL_ADMIN) é aplicada nas rotas do módulo,
+// logo acima de cada serviço existente, que revalida o papel no banco.
+adminRouter.use('/ledger', ledgerAdminRouter);
 
 // GET /admin/products — FASE D16-G1.1 (Admin Global Catalog Isolation).
 // Visão administrativa do catálogo completo, para as roles que a regra de

@@ -4,7 +4,7 @@ import {
   Warehouse, DollarSign, Users, PackageCheck, MapPin, UserCheck, Store, Package,
   Layers, Tag, ShoppingBag, CreditCard, ArrowUpRight, ArrowDownRight, RotateCcw,
   Truck, LifeBuoy, AlertOctagon, ShieldAlert, Megaphone, Bell, BarChart3, History,
-  Settings, Shield, Database, Search, Menu, X, ChevronRight, Check, Route, Percent
+  Settings, Shield, Database, Search, Menu, X, ChevronRight, Check, Route, Percent, Scale
 } from 'lucide-react';
 
 import { AdminCountriesManager } from './admin/AdminCountriesManager';
@@ -35,6 +35,7 @@ import { AdminSupportTickets } from './admin/AdminSupportTickets';
 import { AdminReportsModeration } from './admin/AdminReportsModeration';
 import { AdminRiskCenter } from './admin/AdminRiskCenter';
 import { AdminBannersManager } from './admin/AdminBannersManager';
+import { AdminLedgerManager } from './admin/AdminLedgerManager';
 import { AdminNotificationsManager } from './admin/AdminNotificationsManager';
 import { AdminReportsDashboard } from './admin/AdminReportsDashboard';
 import { AdminAuditLogs } from './admin/AdminAuditLogs';
@@ -99,6 +100,7 @@ export const AdminDashboardView: React.FC = () => {
         { id: 'refunds', label: 'Estornos & Reembolsos', icon: ArrowDownRight },
         { id: 'disputes', label: 'Mediação de Disputas', icon: ShieldAlert },
         { id: 'returns', label: 'Logística Reversa', icon: RotateCcw },
+        { id: 'ledger', label: 'Ledger Sombra', icon: Scale },
       ]
     },
     {
@@ -406,6 +408,7 @@ export const AdminDashboardView: React.FC = () => {
             {activeTab === 'finance' && <AdminFinanceDashboard showToast={showToast} />}
             {activeTab === 'payouts' && <AdminPayoutsManager showToast={showToast} />}
             {activeTab === 'refunds' && <AdminRefundsManager showToast={showToast} />}
+            {activeTab === 'ledger' && <AdminLedgerManager showToast={showToast} />}
             {activeTab === 'disputes' && <AdminDisputesManager showToast={showToast} />}
             {activeTab === 'returns' && <AdminReturnsManager showToast={showToast} />}
             {activeTab === 'logistics' && <AdminLogisticsDashboard showToast={showToast} />}
